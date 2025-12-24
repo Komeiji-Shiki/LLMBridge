@@ -1,0 +1,127 @@
+{
+  "// 配置说明": "此文件展示了三种模型配置模式的完整示例",
+  
+  "// ==================== 模式1: 标准LMArena模式 ====================": "",
+  "claude-sonnet-4": {
+    "session_id": "abc123def456",
+    "mode": "direct_chat",
+    "type": "text"
+  },
+
+  "// ==================== 模式2: Direct API模式（带转换） ====================": "",
+  "deepseek-chat": {
+    "api_type": "direct_api",
+    "api_base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-your-deepseek-key",
+    "model_id": "deepseek-chat",
+    "display_name": "DeepSeek Chat",
+    "pricing": {
+      "input": 0.14,
+      "output": 0.28,
+      "unit": 1000000,
+      "currency": "CNY"
+    },
+    "// 说明": "此模式会将OpenAI格式转换为目标API格式，适合不完全兼容OpenAI的API"
+  },
+
+  "// ==================== 模式3: Direct API模式（完全透传） ====================": "",
+  "gpt-4-turbo": {
+    "api_type": "direct_api",
+    "api_base_url": "https://api.openai.com/v1",
+    "api_key": "sk-your-openai-key",
+    "model_id": "gpt-4-turbo-preview",
+    "display_name": "GPT-4 Turbo (透传)",
+    "passthrough": true,
+    "pricing": {
+      "input": 10,
+      "output": 30,
+      "unit": 1000000,
+      "currency": "USD"
+    },
+    "// 说明": "透传模式：客户端的请求原样转发，服务商的响应原样返回，不做任何格式转换"
+  },
+
+  "deepseek-v3": {
+    "api_type": "direct_api",
+    "api_base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-your-deepseek-key",
+    "model_id": "deepseek-chat",
+    "display_name": "DeepSeek V3 (透传)",
+    "passthrough": true,
+    "pricing": {
+      "input": 0.14,
+      "output": 0.28,
+      "unit": 1000000,
+      "currency": "CNY"
+    }
+  },
+
+  "// ==================== 模式4: 多端点负载均衡（透传） ====================": "",
+  "claude-hybrid": [
+    {
+      "api_type": "direct_api",
+      "api_base_url": "https://api.anthropic.com/v1",
+      "api_key": "sk-ant-key1",
+      "model_id": "claude-3-5-sonnet-20241022",
+      "display_name": "Claude Sonnet 3.5 (端点1)",
+      "passthrough": true,
+      "pricing": {
+        "input": 3,
+        "output": 15,
+        "unit": 1000000,
+        "currency": "USD"
+      }
+    },
+    {
+      "api_type": "direct_api",
+      "api_base_url": "https://api.anthropic.com/v1",
+      "api_key": "sk-ant-key2",
+      "model_id": "claude-3-5-sonnet-20241022",
+      "display_name": "Claude Sonnet 3.5 (端点2)",
+      "passthrough": true,
+      "pricing": {
+        "input": 3,
+        "output": 15,
+        "unit": 1000000,
+        "currency": "USD"
+      }
+    }
+  ],
+
+  "// ==================== 字段说明 ====================": {
+    "session_id": "LMArena会话ID（LMArena模式必需）",
+    "mode": "LMArena操作模式：direct_chat或battle",
+    "battle_target": "Battle模式目标：A或B",
+    "type": "模型类型：text或image",
+    
+    "api_type": "API类型：direct_api表示直接调用第三方API",
+    "api_base_url": "第三方API的基础URL",
+    "api_key": "第三方API的密钥",
+    "model_id": "发送给第三方API的实际模型ID",
+    "display_name": "在统计中显示的模型名称",
+    
+    "passthrough": "是否启用透传模式（true/false）",
+    "// passthrough说明": "启用后，请求和响应将原样转发，不做格式转换。适合OpenAI兼容的API",
+    
+    "pricing": {
+      "input": "输入token单价",
+      "output": "输出token单价",
+      "unit": "计价单位（token数量），如1000000表示每百万token",
+      "currency": "货币单位：CNY、USD等"
+    }
+  },
+
+  "// ==================== 使用建议 ====================": {
+    "透传模式适用场景": [
+      "OpenAI官方API",
+      "完全兼容OpenAI格式的第三方API（如DeepSeek、智谱等）",
+      "需要保持与官方API完全一致的响应格式"
+    ],
+    "转换模式适用场景": [
+      "不完全兼容OpenAI格式的API",
+      "需要特殊格式转换的场景",
+      "需要在中间层做额外处理"
+    ],
+    "性能建议": "透传模式延迟更低，推荐优先使用"
+  }
+}

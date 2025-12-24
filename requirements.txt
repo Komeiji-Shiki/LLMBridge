@@ -1,0 +1,17 @@
+# 核心依赖（必需）
+fastapi
+uvicorn[standard]
+requests
+packaging
+aiohttp
+httpx
+Pillow
+psutil
+watchdog
+
+# Token计数器依赖（可选，用于精确计算token数量）
+# 根据使用的模型选择性安装：
+tiktoken              # GPT/Claude等模型的token计数
+anthropic             # Claude官方tokenizer（最精确）
+google-generativeai   # Gemini官方tokenizer（需要API密钥）
+transformers          # Gemma tokenizer（Gemini的离线替代方案，无需API密钥）

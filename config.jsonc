@@ -1,0 +1,226 @@
+{
+  "version": "1.5.1.kai",
+  "session_id": "019a53cc-fb1f-7af4-b56c-6e534e0e0964",
+  "id_updater_last_mode": "battle",
+  "id_updater_battle_target": "B",
+  "id_updater_auto_save_mode": "model",
+  "enable_auto_retry": true,
+  "retry_timeout_seconds": 60,
+  "empty_response_retry": {
+    "enabled": true,
+    "max_retries": 5,
+    "base_delay_ms": 100,
+    "max_delay_ms": 3000,
+    "show_retry_info_to_client": true
+  },
+  "bypass_enabled": false,
+  "bypass_settings": {
+    "text": true,
+    "search": false,
+    "image": false
+  },
+  "bypass_injection": {
+    "active_preset": "3",
+    "presets": {
+      "1": {
+        "role": "user",
+        "content": "."
+      },
+      "2": {
+        "role": "user",
+        "content": "*"
+      },
+      "3": {
+        "role": "user",
+        "content": "/"
+      },
+      "4": {
+        "role": "assistant",
+        "content": "<think>"
+      },
+      "default": {
+        "role": "user",
+        "content": " "
+      },
+      "thinking": {
+        "role": "user",
+        "content": "assistant：<think>"
+      },
+      "system_prompt": {
+        "role": "system",
+        "content": "请遵循用户的指令。"
+      },
+      "multi_turn_example": [
+        {
+          "role": "user",
+          "content": "你好"
+        },
+        {
+          "role": "assistant",
+          "content": "你好！我是AI助手。"
+        },
+        {
+          "role": "user",
+          "content": "请继续"
+        }
+      ],
+      "thinking_multi": [
+        {
+          "role": "user",
+          "content": "让我们一步步思考"
+        },
+        {
+          "role": "assistant",
+          "content": "<think>好的，我会仔细分析</think>"
+        }
+      ]
+    },
+    "custom": {
+      "role": "system",
+      "content": "<think>"
+    }
+  },
+  "attachment_bypass_settings": {
+    "text": true,
+    "search": false,
+    "image": true
+  },
+  "save_images_locally": true,
+  "local_save_format": {
+    "enabled": false,
+    "format": "png",
+    "jpeg_quality": 100
+  },
+  "image_return_format": {
+    "mode": "base64",
+    "base64_conversion": {
+      "enabled": true,
+      "target_format": "png",
+      "jpeg_quality": 100
+    }
+  },
+  "image_optimization": {
+    "enabled": true,
+    "strip_metadata": true,
+    "convert_to_webp": true,
+    "webp_quality": 70,
+    "progressive_encoding": true,
+    "max_width": 4096,
+    "max_height": 4096,
+    "fallback_format": "jpeg",
+    "jpeg_quality": 70,
+    "optimize_encoding": true
+  },
+  "processed_image_cache": {
+    "enabled": true,
+    "ttl_seconds": 3600,
+    "max_size": 200
+  },
+  "message_role_conversion_mode": "system_merge",
+  "merge_preserve_role_labels": false,
+  "tavern_mode_enabled": true,
+  "file_bed_enabled": false,
+  "file_bed_selection_strategy": "round_robin",
+  "file_bed_endpoints": [
+    {
+      "name": "ImgBB (需要API Key)",
+      "enabled": true,
+      "url": "https://api.imgbb.com/1/upload",
+      "api_key": " ",
+      "api_key_field": "key",
+      "upload_mode": "form",
+      "form_file_field": "image",
+      "response_type": "json",
+      "json_url_key": "data.url"
+    },
+    {
+      "name": "Freeimage.host (需要API Key)",
+      "enabled": true,
+      "url": "https://freeimage.host/api/1/upload",
+      "api_key": " ",
+      "api_key_field": "key",
+      "upload_mode": "form",
+      "form_file_field": "source",
+      "response_type": "json",
+      "json_url_key": "image.url"
+    },
+    {
+      "name": "0x0.st",
+      "enabled": true,
+      "url": "https://0x0.st",
+      "api_key": "",
+      "upload_mode": "form",
+      "form_file_field": "file",
+      "response_type": "text"
+    },
+    {
+      "name": "uguu.se (无需注册)",
+      "enabled": true,
+      "url": "https://uguu.se/upload.php",
+      "upload_mode": "form",
+      "form_file_field": "files[]",
+      "response_type": "json",
+      "json_url_key": "files.0.url"
+    },
+    {
+      "name": "bashupload.com (无需注册)",
+      "enabled": true,
+      "url": "https://bashupload.com/",
+      "api_key": "",
+      "upload_mode": "form",
+      "form_file_field": "file",
+      "response_type": "text"
+    },
+    {
+      "name": "temp.sh (无需注册)",
+      "enabled": true,
+      "url": "https://temp.sh/upload",
+      "api_key": "",
+      "upload_mode": "form",
+      "form_file_field": "file",
+      "response_type": "json",
+      "json_url_key": "url"
+    }
+  ],
+  "use_default_ids_if_mapping_not_found": true,
+  "stream_response_timeout_seconds": 600,
+  "force_stream_flush": true,
+  "debug_stream_timing": true,
+  "max_concurrent_downloads": 3,
+  "download_delay": {
+    "enabled": true,
+    "delay_seconds": 0.5
+  },
+  "download_timeout": {
+    "connect": 10,
+    "sock_read": 20,
+    "total": 30,
+    "max_retries": 3
+  },
+  "performance_monitoring": {
+    "slow_threshold_seconds": 5
+  },
+  "connection_pool": {
+    "total_limit": 200,
+    "per_host_limit": 50,
+    "keepalive_timeout": 30,
+    "dns_cache_ttl": 300
+  },
+  "memory_management": {
+    "gc_threshold_mb": 500,
+    "image_cache_max_size": 500,
+    "image_cache_ttl_seconds": 3600
+  },
+  "debug_show_full_urls": true,
+  "url_display_length": 200,
+  "enable_lmarena_reasoning": true,
+  "reasoning_output_mode": "openai",
+  "preserve_streaming": true,
+  "strip_reasoning_from_history": false,
+  "enable_idle_restart": true,
+  "idle_restart_timeout_seconds": -1,
+  "tokenizer_config": {
+    "claude4.5": "anthropic"
+  },
+  "api_key": ""
+}

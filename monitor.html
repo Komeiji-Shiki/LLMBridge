@@ -1,0 +1,2360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LMArena Bridge 监控面板</title>
+    <style>
+        :root {
+            --bg-deep: linear-gradient(180deg, #090e16 0%, #0a1220 100%);
+            --bg-elev: linear-gradient(135deg, rgba(16,28,48,0.85), rgba(9,16,30,0.9));
+            --line-weak: #162339;
+            --line-strong: #223650;
+            --text-main: #d9e5ff;
+            --text-dim: #8fa0bf;
+            --btn-bg: #0e1a2d;
+            --btn-hover: #15263f;
+            --btn-active: #132745;
+            --btn-border: #223650;
+            --accent: #2aa8ff;
+            --accent-soft: rgba(42,168,255,0.35);
+            --accent-faint: rgba(42,168,255,0.12);
+            --card-bg: rgba(16,28,48,0.6);
+            --notch: 10px;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg-deep);
+            color: var(--text-main);
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: var(--bg-elev);
+            padding: 16px 24px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(255,255,255,0.03);
+            border-bottom: 1px solid var(--line-weak);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--accent);
+            text-shadow: 0 0 20px rgba(42,168,255,0.3);
+        }
+        
+        .header-info {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 20px;
+            font-size: 14px;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #dc2626;
+        }
+        
+        .status-dot.connected {
+            background: #10b981;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .stat-card {
+            background: var(--card-bg);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid var(--line-weak);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(255,255,255,0.03);
+            position: relative;
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 28px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(42,168,255,0.1);
+        }
+        
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(80% 50% at 50% 0%, rgba(42,168,255,0.08), transparent);
+            pointer-events: none;
+        }
+        
+        .stat-card h3 {
+            font-size: 14px;
+            color: var(--text-dim);
+            margin-bottom: 8px;
+            position: relative;
+        }
+        
+        .stat-value {
+            font-size: 32px;
+            font-weight: 600;
+            color: var(--accent);
+            position: relative;
+        }
+        
+        .stat-subtitle {
+            font-size: 12px;
+            color: var(--text-dim);
+            margin-top: 4px;
+            opacity: 0.8;
+            position: relative;
+        }
+        
+        .section {
+            background: var(--card-bg);
+            border-radius: 8px;
+            border: 1px solid var(--line-weak);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(255,255,255,0.03);
+            margin-bottom: 24px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(42,168,255,0.4), transparent);
+            opacity: 0.6;
+        }
+        
+        .section-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--line-weak);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255,255,255,0.02);
+        }
+        
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+        
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--line-weak);
+            background: rgba(0,0,0,0.2);
+        }
+        
+        .tab {
+            padding: 12px 24px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-dim);
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            position: relative;
+        }
+        
+        .tab:hover {
+            color: var(--text-main);
+            background: rgba(255,255,255,0.03);
+        }
+        
+        .tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+            background: rgba(42,168,255,0.08);
+        }
+        
+        .table-container {
+            overflow-x: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            background: rgba(0,0,0,0.3);
+            padding: 12px 16px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid var(--line-weak);
+        }
+        
+        td {
+            padding: 12px 16px;
+            border-top: 1px solid var(--line-weak);
+            font-size: 14px;
+            color: var(--text-main);
+        }
+        
+        tr:hover {
+            background: rgba(255,255,255,0.03);
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .status-badge.success {
+            background: rgba(16,185,129,0.2);
+            color: #10b981;
+            border: 1px solid rgba(16,185,129,0.3);
+        }
+        
+        .status-badge.failed {
+            background: rgba(239,68,68,0.2);
+            color: #ef4444;
+            border: 1px solid rgba(239,68,68,0.3);
+        }
+        
+        .status-badge.active {
+            background: rgba(42,168,255,0.2);
+            color: var(--accent);
+            border: 1px solid var(--accent-soft);
+        }
+        
+        .active-request {
+            padding: 16px;
+            border-bottom: 1px solid var(--line-weak);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.2s;
+        }
+        
+        .active-request:hover {
+            background: rgba(255,255,255,0.03);
+        }
+        
+        .active-request:last-child {
+            border-bottom: none;
+        }
+        
+        .request-info {
+            flex: 1;
+        }
+        
+        .request-id {
+            font-family: monospace;
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+        
+        .request-model {
+            font-weight: 500;
+            margin-top: 4px;
+            color: var(--text-main);
+        }
+        
+        .request-duration {
+            font-size: 14px;
+            color: var(--text-dim);
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 48px;
+            color: var(--text-dim);
+        }
+        
+        .refresh-btn {
+            padding: 8px 16px;
+            background: var(--btn-bg);
+            color: var(--text-main);
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3), inset 0 0 0 1px rgba(255,255,255,0.03);
+        }
+        
+        .refresh-btn:hover {
+            background: var(--btn-hover);
+            border-color: var(--accent-soft);
+            box-shadow: 0 6px 16px rgba(0,0,0,0.4), 0 0 0 1px var(--accent-faint);
+        }
+        
+        .refresh-btn:active {
+            background: var(--btn-active);
+            transform: translateY(1px);
+        }
+        
+        .error-log {
+            padding: 12px;
+            background: rgba(239,68,68,0.1);
+            border: 1px solid rgba(239,68,68,0.3);
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        
+        .error-message {
+            font-size: 14px;
+            color: #f87171;
+            word-break: break-word;
+        }
+        
+        .error-time {
+            font-size: 12px;
+            color: #fca5a5;
+            margin-top: 4px;
+        }
+        
+        .model-card {
+            padding: 16px;
+            border: 1px solid var(--line-weak);
+            border-radius: 8px;
+            background: rgba(0,0,0,0.3);
+            transition: all 0.2s;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.03);
+        }
+        
+        .model-card:hover {
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(42,168,255,0.2);
+            border-color: var(--accent-soft);
+            transform: translateY(-2px);
+        }
+        
+        .model-name {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .model-stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+            font-size: 14px;
+        }
+        
+        .model-stat-label {
+            color: var(--text-dim);
+        }
+        
+        .model-stat-value {
+            font-weight: 500;
+            color: var(--text-main);
+        }
+        
+        .performance-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 16px;
+            padding: 16px;
+        }
+        
+        .perf-item {
+            text-align: center;
+        }
+        
+        .perf-value {
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--accent);
+        }
+        
+        .perf-label {
+            font-size: 12px;
+            color: var(--text-dim);
+            margin-top: 4px;
+        }
+        
+        .info-text {
+            font-size: 12px;
+            color: var(--text-dim);
+            margin: 8px 0;
+        }
+        
+        .api-info {
+            background: rgba(0,0,0,0.3);
+            padding: 16px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+            border: 1px solid var(--line-weak);
+        }
+        
+        .api-endpoint {
+            font-family: monospace;
+            background: rgba(0,0,0,0.4);
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin: 4px 0;
+            font-size: 13px;
+            color: var(--accent);
+            border: 1px solid var(--line-weak);
+        }
+        
+        .mode-indicator {
+            display: inline-block;
+            padding: 4px 8px;
+            background: rgba(124,58,237,0.2);
+            color: #a78bfa;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+            margin-left: 8px;
+            border: 1px solid rgba(124,58,237,0.3);
+        }
+        
+        /* 查看详细按钮样式 */
+        .detail-btn {
+            padding: 4px 8px;
+            background: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: var(--text-main);
+        }
+        
+        .detail-btn:hover {
+            background: var(--btn-hover);
+            border-color: var(--accent-soft);
+        }
+        
+        /* 模态框样式 */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+        
+        .modal-content {
+            position: relative;
+            background: var(--surface);
+            margin: 5% auto;
+            padding: 20px;
+            width: 80%;
+            max-width: 800px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .modal-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+        
+        .close {
+            position: fixed;
+            top: calc(5% + 70px);
+            right: calc((100vw - min(80vw, 800px)) / 2 + 20px);
+            font-size: 28px;
+            font-weight: bold;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: color 0.2s;
+            z-index: 2000;
+            background: var(--surface);
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            border: 1px solid var(--btn-border);
+        }
+        
+        .close:hover {
+            color: var(--text-main);
+            background: var(--btn-hover);
+            border-color: var(--accent-soft);
+        }
+        
+        .detail-section {
+            margin-bottom: 20px;
+        }
+        
+        .detail-section h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #374151;
+        }
+        
+        .detail-item {
+            display: flex;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .detail-label {
+            font-weight: 500;
+            color: #6b7280;
+            min-width: 120px;
+        }
+        
+        .detail-value {
+            color: #111827;
+            word-break: break-word;
+        }
+        
+        .message-box {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 8px;
+        }
+        
+        .message-role {
+            font-weight: 600;
+            color: #4f46e5;
+            margin-bottom: 4px;
+        }
+        
+        .message-content {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        
+        .response-content {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 12px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        /* 图像预览样式 */
+        .image-preview-container {
+            margin: 12px 0;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+            background: white;
+        }
+        
+        .image-preview-wrapper {
+            position: relative;
+            min-height: 100px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f9fafb;
+        }
+        
+        .image-preview {
+            max-width: 100%;
+            max-height: 400px;
+            display: block;
+            margin: 0 auto;
+            border-radius: 4px;
+            cursor: zoom-in;
+        }
+        
+        .image-preview.loading {
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        .image-preview.loaded {
+            opacity: 1;
+        }
+        
+        .image-loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #6b7280;
+            font-size: 14px;
+        }
+        
+        .image-error {
+            padding: 20px;
+            text-align: center;
+            color: #dc2626;
+            background: #fef2f2;
+        }
+        
+        .image-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: #f3f4f6;
+            border-top: 1px solid #e5e7eb;
+        }
+        
+        .image-info {
+            font-size: 12px;
+            color: #6b7280;
+        }
+        
+        .toggle-raw-btn {
+            padding: 4px 12px;
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .toggle-raw-btn:hover {
+            background: #f9fafb;
+            border-color: #d1d5db;
+        }
+        
+        .raw-content-container {
+            display: none;
+            padding: 12px;
+            background: #1f2937;
+            border-top: 1px solid #e5e7eb;
+        }
+        
+        .raw-content-container.show {
+            display: block;
+        }
+        
+        .raw-content {
+            width: 100%;
+            min-height: 100px;
+            max-height: 200px;
+            padding: 8px;
+            background: #111827;
+            color: #10b981;
+            border: 1px solid #374151;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            resize: vertical;
+            overflow-y: auto;
+        }
+        
+        .copy-btn {
+            margin-top: 8px;
+            padding: 4px 12px;
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .copy-btn:hover {
+            background: #4338ca;
+        }
+        
+        .copy-btn.copied {
+            background: #10b981;
+        }
+        
+        /* 图像模态框（全屏查看） */
+        .image-modal {
+            display: none;
+            position: fixed;
+            z-index: 2000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            cursor: zoom-out;
+        }
+        
+        .image-modal-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            max-width: 90%;
+            max-height: 90%;
+        }
+        
+        .image-modal-close {
+            position: absolute;
+            top: 20px;
+            right: 40px;
+            color: white;
+            font-size: 40px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+        
+        .image-modal-close:hover {
+            color: #f3f4f6;
+        }
+        
+        /* 图像类型标签 */
+        .image-type-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            background: #ede9fe;
+            color: #7c3aed;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+            margin-left: 8px;
+        }
+        
+        .download-btn {
+            padding: 6px 12px;
+            background: #059669;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }
+        
+        .download-btn:hover {
+            background: #047857;
+        }
+        
+        /* 隐藏元素时的样式 */
+        .model-stats-hidden,
+        .logs-hidden {
+            display: none !important;
+        }
+    </style>
+    <style>
+      /* ============ Flat Nova-inspired UI Overrides ============ */
+      :root {
+        --notch: 8px;
+        --surface: #0e1a2d;
+        --surface-2: #0b1626;
+        --surface-3: #0b1422;
+      }
+
+      /* Header */
+      .header {
+        background: var(--surface-3) !important;
+        box-shadow: none !important;
+        border-bottom: 1px solid var(--line-strong) !important;
+        backdrop-filter: none !important;
+      }
+      .header h1 {
+        color: var(--text-main) !important;
+        text-shadow: none !important;
+        font-weight: 700 !important;
+      }
+
+      /* Core containers: section/card/model/api-info */
+      .stat-card,
+      .section,
+      .model-card,
+      .api-info {
+        background: var(--surface) !important;
+        border: 1px solid var(--line-strong) !important;
+        box-shadow: none !important;
+        border-radius: 0 !important;
+        clip-path: polygon(
+          0 var(--notch), var(--notch) 0,
+          calc(100% - var(--notch)) 0, 100% var(--notch),
+          100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+          var(--notch) 100%, 0 calc(100% - var(--notch))
+        ) !important;
+      }
+
+      .section::before { display: none !important; }
+
+      .stat-card:hover,
+      .model-card:hover {
+        transform: none !important;
+        background: var(--btn-hover) !important;
+        border-color: var(--btn-border) !important;
+        box-shadow: none !important;
+      }
+
+      /* Tabs */
+      .tabs {
+        background: transparent !important;
+        border-bottom: 1px solid var(--line-strong) !important;
+      }
+      .tab {
+        background: transparent !important;
+        border-bottom: 2px solid transparent !important;
+        color: var(--text-dim) !important;
+      }
+      .tab:hover {
+        background: transparent !important;
+        color: var(--text-main) !important;
+      }
+      .tab.active {
+        color: var(--accent) !important;
+        border-bottom-color: var(--accent) !important;
+        background: transparent !important;
+      }
+
+      /* Table */
+      th {
+        background: transparent !important;
+        border-bottom: 1px solid var(--line-strong) !important;
+        color: var(--text-dim) !important;
+      }
+      td {
+        border-top: 1px solid var(--line-weak) !important;
+      }
+      tr:hover {
+        background: rgba(255,255,255,0.02) !important;
+      }
+
+      /* Buttons: refresh/detail/download/toggle/copy */
+      .refresh-btn,
+      .detail-btn,
+      .download-btn,
+      .toggle-raw-btn,
+      .copy-btn,
+      #toggle-logs-btn,
+      #toggle-model-stats-btn {
+        background: var(--btn-bg) !important;
+        color: var(--text-main) !important;
+        border: 1px solid var(--btn-border) !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        clip-path: polygon(
+          0 var(--notch), var(--notch) 0,
+          calc(100% - var(--notch)) 0, 100% var(--notch),
+          100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+          var(--notch) 100%, 0 calc(100% - var(--notch))
+        ) !important;
+      }
+      .refresh-btn:hover,
+      .detail-btn:hover,
+      .download-btn:hover,
+      .toggle-raw-btn:hover,
+      .copy-btn:hover {
+        background: var(--btn-hover) !important;
+        border-color: var(--line-strong) !important;
+      }
+      .refresh-btn:active,
+      .detail-btn:active,
+      .download-btn:active,
+      .toggle-raw-btn:active,
+      .copy-btn:active {
+        background: var(--btn-active) !important;
+        transform: none !important;
+      }
+
+      /* Status badges */
+      .status-badge {
+        border-radius: 2px !important;
+        border: 1px solid currentColor !important;
+        background: transparent !important;
+      }
+      .status-badge.success { color: #10b981 !important; }
+      .status-badge.failed  { color: #ef4444 !important; }
+      .status-badge.active  { color: var(--accent) !important; }
+
+      /* Modal -> dark */
+      .modal-content {
+        background: var(--surface) !important;
+        color: var(--text-main) !important;
+        border: 1px solid var(--line-strong) !important;
+        box-shadow: none !important;
+        border-radius: 0 !important;
+        clip-path: polygon(
+          0 var(--notch), var(--notch) 0,
+          calc(100% - var(--notch)) 0, 100% var(--notch),
+          100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+          var(--notch) 100%, 0 calc(100% - var(--notch))
+        ) !important;
+      }
+      .close { color: #94a3b8 !important; }
+      .close:hover { color: #e2e8f0 !important; }
+
+      /* API endpoints/Code chips */
+      .api-endpoint {
+        background: var(--surface-2) !important;
+        border: 1px solid var(--line-weak) !important;
+        color: var(--accent) !important;
+        border-radius: 0 !important;
+        clip-path: polygon(
+          0 var(--notch), var(--notch) 0,
+          calc(100% - var(--notch)) 0, 100% var(--notch),
+          100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+          var(--notch) 100%, 0 calc(100% - var(--notch))
+        ) !important;
+      }
+      #api-docs-content .api-info {
+        color: var(--text-main) !important;
+      }
+
+      /* Example tabs -> dark flat */
+      .example-tab {
+        background: var(--btn-bg) !important;
+        border: 1px solid var(--btn-border) !important;
+        color: var(--text-main) !important;
+        border-radius: 0 !important;
+        clip-path: polygon(
+          0 var(--notch), var(--notch) 0,
+          calc(100% - var(--notch)) 0, 100% var(--notch),
+          100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+          var(--notch) 100%, 0 calc(100% - var(--notch))
+        ) !important;
+      }
+      .example-tab.active {
+        background: rgba(42,168,255,0.10) !important;
+        color: var(--accent) !important;
+        border-color: var(--accent-soft) !important;
+      }
+      #example-python > div,
+      #example-nodejs > div,
+      #example-curl > div,
+      #example-javascript > div {
+        background: #0b1220 !important;
+        color: #d1d5db !important;
+        border: 1px solid var(--line-weak) !important;
+      }
+
+      /* Image/Message blocks -> dark */
+      .message-box,
+      .response-content,
+      .image-preview-container,
+      .image-preview-wrapper,
+      .image-controls,
+      .raw-content-container,
+      .raw-content {
+        background: var(--surface-2) !important;
+        border: 1px solid var(--line-weak) !important;
+        color: var(--text-main) !important;
+      }
+      .image-error {
+        background: rgba(239,68,68,0.08) !important;
+        color: #ef4444 !important;
+      }
+      .image-type-badge {
+        background: rgba(124,58,237,0.16) !important;
+        color: #a78bfa !important;
+        border-radius: 2px !important;
+      }
+
+      /* Header status indicator -> hard edges */
+      .status-indicator {
+        background: var(--surface-2) !important;
+        border: 1px solid var(--line-strong) !important;
+        border-radius: 0 !important;
+      }
+
+      /* Tab summary (上方三块统计卡) */
+      #tab-summary > div {
+        background: var(--surface) !important;
+        border: 1px solid var(--line-strong) !important;
+        color: var(--text-main) !important;
+        border-radius: 0 !important;
+        clip-path: polygon(
+          0 var(--notch), var(--notch) 0,
+          calc(100% - var(--notch)) 0, 100% var(--notch),
+          100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+          var(--notch) 100%, 0 calc(100% - var(--notch))
+        ) !important;
+      }
+      #tab-summary > div div[style*="font-size: 28px"] {
+        color: var(--accent) !important;
+      }
+
+      /* Tabs grid cards (JS生成，原有白底/圆角) */
+      #tabs-grid > div {
+        background: var(--surface) !important;
+        border: 1px solid var(--line-strong) !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        color: var(--text-main) !important;
+        clip-path: polygon(
+          0 var(--notch), var(--notch) 0,
+          calc(100% - var(--notch)) 0, 100% var(--notch),
+          100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+          var(--notch) 100%, 0 calc(100% - var(--notch))
+        ) !important;
+      }
+      #tabs-grid [style*="background: #f9fafb"] {
+        background: var(--surface-2) !important;
+        color: var(--text-main) !important;
+      }
+      /* 进度条色系微调为扁平 */
+      #tabs-grid [style*="height: 100%;"][style*="background: #dc2626"],
+      #tabs-grid [style*="height: 100%;"][style*="background: #f59e0b"],
+      #tabs-grid [style*="height: 100%;"][style*="background: #10b981"] {
+        box-shadow: none !important;
+      }
+
+      /* Modal detail section typography */
+      .detail-section h3 {
+        color: var(--text-main) !important;
+      }
+      .detail-label { color: var(--text-dim) !important; }
+      .detail-value { color: var(--text-main) !important; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>🚀 LMArena Bridge 监控面板</h1>
+        <div class="header-info">
+            <a href="/admin" style="padding: 8px 16px; background: var(--btn-bg); color: var(--text-main); border: 1px solid var(--btn-border); border-radius: 6px; text-decoration: none; font-size: 14px; transition: all 0.2s; margin-right: 16px;">📊 管理面板</a>
+            <div class="info-text" id="server-info">正在连接...</div>
+            <div class="status-indicator">
+                <span class="status-dot" id="ws-status"></span>
+                <span id="ws-status-text">未连接</span>
+            </div>
+        </div>
+    </header>
+    
+    <div class="container">
+        <!-- API 文档 -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">📚 API 端点说明</h2>
+                <button class="refresh-btn" onclick="toggleApiDocs()">显示/隐藏</button>
+            </div>
+            <div id="api-docs-content" style="padding: 20px; display: none;">
+                <!-- 基础信息 -->
+                <div style="padding: 16px; background: #e0f2fe; border-radius: 8px; margin-bottom: 20px;">
+                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                        <span style="font-size: 20px;">🌐</span>
+                        <h3 style="color: #0284c7; margin: 0;">服务器基础信息</h3>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-top: 12px;">
+                        <div>
+                            <span style="color: #64748b; font-size: 13px;">API 地址：</span>
+                            <code style="background: white; padding: 4px 8px; border-radius: 4px; font-size: 13px;">http://localhost:5102</code>
+                        </div>
+                        <div>
+                            <span style="color: #64748b; font-size: 13px;">当前状态：</span>
+                            <span style="color: #10b981; font-weight: 500;">✅ 运行中</span>
+                        </div>
+                        <div>
+                            <span style="color: #64748b; font-size: 13px;">协议版本：</span>
+                            <span style="font-weight: 500;">OpenAI API v1 兼容</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px;">
+                    <!-- AI API -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 8px; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>🤖</span>
+                            <span>核心 AI 接口</span>
+                        </h3>
+                        <div style="margin-bottom: 16px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">POST /v1/chat/completions</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>与 AI 模型对话<br>
+                                <strong>支持：</strong>流式/非流式、多模态消息、文生图
+                            </div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /v1/models</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>获取可用模型列表<br>
+                                <strong>返回：</strong>所有配置的模型信息
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 监控与健康 -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #10b981 0%, #047857 100%); padding: 20px; border-radius: 8px; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>📊</span>
+                            <span>监控与统计</span>
+                        </h3>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /monitor</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">实时监控面板（当前页面）</div>
+                        </div>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/monitor/stats</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">获取实时统计数据（JSON）</div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/monitor/active</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">查看当前活跃请求</div>
+                        </div>
+                    </div>
+                    
+                    <!-- 日志与详情 -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); padding: 20px; border-radius: 8px; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>📈</span>
+                            <span>日志与详情</span>
+                        </h3>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/request/{request_id}</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">获取请求完整详情</div>
+                        </div>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/monitor/logs/requests</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>参数：</strong>limit=50（默认）<br>
+                                <strong>返回：</strong>最近的请求日志
+                            </div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/logs/download</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>参数：</strong>log_type=requests|errors<br>
+                                <strong>返回：</strong>JSONL格式日志文件
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- WebSocket -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); padding: 20px; border-radius: 8px; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>🔌</span>
+                            <span>WebSocket 连接</span>
+                        </h3>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">WS /ws</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>油猴脚本通信<br>
+                                <strong>协议：</strong>双向消息传递
+                            </div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">WS /ws/monitor</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>监控面板实时更新<br>
+                                <strong>数据：</strong>统计、活跃请求、事件
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 使用示例 -->
+                <div style="margin-top: 30px;">
+                    <h3 style="margin-bottom: 16px; font-size: 18px; font-weight: 600;">💡 快速集成示例</h3>
+                    
+                    <!-- 多个示例标签 -->
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+                        <button class="example-tab active" onclick="switchExample('python')">Python</button>
+                        <button class="example-tab" onclick="switchExample('nodejs')">Node.js</button>
+                        <button class="example-tab" onclick="switchExample('curl')">cURL</button>
+                        <button class="example-tab" onclick="switchExample('javascript')">JavaScript</button>
+                    </div>
+                    
+                    <!-- Python 示例 -->
+                    <div id="example-python" class="example-content" style="display: block;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;"># Python - 使用 OpenAI SDK</div>
+                            <div style="color: #fbbf24;">from</div> openai <div style="display: inline; color: #fbbf24;">import</div> OpenAI<br>
+                            <br>
+                            <div style="color: #6b7280;"># 初始化客户端</div>
+                            client = OpenAI(<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;base_url=<span style="color: #34d399;">"http://localhost:5102/v1"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;api_key=<span style="color: #34d399;">"sk-any-string-you-like"</span><br>
+                            )<br>
+                            <br>
+                            <div style="color: #6b7280;"># 发送请求</div>
+                            response = client.chat.completions.create(<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;model=<span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;messages=[<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;stream=<span style="color: #93c5fd;">True</span><br>
+                            )<br>
+                            <br>
+                            <div style="color: #6b7280;"># 处理流式响应</div>
+                            <div style="color: #fbbf24;">for</div> chunk <div style="display: inline; color: #fbbf24;">in</div> response:<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">print</div>(chunk.choices[0].delta.content, end=<span style="color: #34d399;">""</span>)
+                        </div>
+                    </div>
+                    
+                    <!-- Node.js 示例 -->
+                    <div id="example-nodejs" class="example-content" style="display: none;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;">// Node.js - 使用 OpenAI SDK</div>
+                            <div style="color: #fbbf24;">const</div> OpenAI = <div style="display: inline; color: #fbbf24;">require</div>(<span style="color: #34d399;">'openai'</span>);<br>
+                            <br>
+                            <div style="color: #6b7280;">// 初始化客户端</div>
+                            <div style="color: #fbbf24;">const</div> openai = <div style="display: inline; color: #fbbf24;">new</div> OpenAI({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;baseURL: <span style="color: #34d399;">'http://localhost:5102/v1'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;apiKey: <span style="color: #34d399;">'sk-any-string-you-like'</span><br>
+                            });<br>
+                            <br>
+                            <div style="color: #6b7280;">// 发送请求</div>
+                            <div style="color: #fbbf24;">async function</div> chat() {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> openai.chat.completions.create({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">true</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;});<br>
+                            <br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #6b7280;">// 处理流式响应</div><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">for await</div> (<div style="display: inline; color: #fbbf24;">const</div> chunk <div style="display: inline; color: #fbbf24;">of</div> response) {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;process.stdout.write(chunk.choices[0]?.delta?.content || <span style="color: #34d399;">''</span>);<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;}<br>
+                            }
+                        </div>
+                    </div>
+                    
+                    <!-- cURL 示例 -->
+                    <div id="example-curl" class="example-content" style="display: none;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;"># cURL - 命令行请求</div>
+                            curl <span style="color: #34d399;">http://localhost:5102/v1/chat/completions</span> \<br>
+                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Content-Type: application/json"</span> \<br>
+                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Authorization: Bearer sk-any-string-you-like"</span> \<br>
+                            &nbsp;&nbsp;-d '{<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"model"</span>: <span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"messages"</span>: [<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"stream"</span>: <span style="color: #93c5fd;">true</span><br>
+                            &nbsp;&nbsp;}'
+                        </div>
+                    </div>
+                    
+                    <!-- JavaScript 示例 -->
+                    <div id="example-javascript" class="example-content" style="display: none;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;">// JavaScript - 浏览器/前端</div>
+                            <div style="color: #fbbf24;">async function</div> chatWithAPI() {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> fetch(<span style="color: #34d399;">'http://localhost:5102/v1/chat/completions'</span>, {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;method: <span style="color: #34d399;">'POST'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;headers: {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Content-Type'</span>: <span style="color: #34d399;">'application/json'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Authorization'</span>: <span style="color: #34d399;">'Bearer sk-any-string-you-like'</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;},<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;body: JSON.stringify({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">false</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;})<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;});<br>
+                            <br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> data = <div style="display: inline; color: #fbbf24;">await</div> response.json();<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;console.log(data.choices[0].message.content);<br>
+                            }
+                        </div>
+                    </div>
+                    
+                    <style>
+                        .example-tab {
+                            padding: 8px 16px;
+                            background: #f3f4f6;
+                            border: 1px solid #e5e7eb;
+                            border-radius: 6px;
+                            cursor: pointer;
+                            font-size: 14px;
+                            transition: all 0.2s;
+                        }
+                        .example-tab:hover {
+                            background: #e5e7eb;
+                        }
+                        .example-tab.active {
+                            background: #4f46e5;
+                            color: white;
+                            border-color: #4f46e5;
+                        }
+                        .example-content {
+                            animation: fadeIn 0.3s;
+                        }
+                        @keyframes fadeIn {
+                            from { opacity: 0; }
+                            to { opacity: 1; }
+                        }
+                    </style>
+                    
+                    <script>
+                        function switchExample(lang) {
+                            // 隐藏所有示例
+                            document.querySelectorAll('.example-content').forEach(el => {
+                                el.style.display = 'none';
+                            });
+                            // 移除所有激活状态
+                            document.querySelectorAll('.example-tab').forEach(el => {
+                                el.classList.remove('active');
+                            });
+                            // 显示选中的示例
+                            document.getElementById('example-' + lang).style.display = 'block';
+                            // 激活选中的标签
+                            event.target.classList.add('active');
+                        }
+                    </script>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 统计卡片 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>活跃请求</h3>
+                <div class="stat-value" id="active-requests">0</div>
+                <div class="stat-subtitle" id="browser-status">浏览器未连接</div>
+            </div>
+            <div class="stat-card">
+                <h3>总请求数</h3>
+                <div class="stat-value" id="total-requests">0</div>
+                <div class="stat-subtitle" id="success-rate-text">成功率: 0%</div>
+            </div>
+            <div class="stat-card">
+                <h3>平均响应时间</h3>
+                <div class="stat-value" id="avg-duration">0s</div>
+                <div class="stat-subtitle">最近100个请求</div>
+            </div>
+            <div class="stat-card">
+                <h3>错误数</h3>
+                <div class="stat-value" id="error-count">0</div>
+                <div class="stat-subtitle">失败请求</div>
+            </div>
+            <div class="stat-card">
+                <h3>运行时间</h3>
+                <div class="stat-value" id="uptime">0h</div>
+                <div class="stat-subtitle">服务器运行时长</div>
+            </div>
+            <div class="stat-card">
+                <h3>当前模式</h3>
+                <div class="stat-value" id="current-mode">-</div>
+                <div class="stat-subtitle" id="mode-details">-</div>
+            </div>
+        </div>
+        
+        <!-- 标签页连接状态 -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">📋 标签页连接状态</h2>
+                <button class="refresh-btn" onclick="refreshTabConnections()">刷新</button>
+            </div>
+            <div id="tab-connections-container">
+                <div style="padding: 20px;">
+                    <div id="tab-summary" style="display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap;">
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: #f0fdf4; border-radius: 8px; border: 1px solid #86efac;">
+                            <div style="font-size: 14px; color: #166534; margin-bottom: 4px;">连接标签页</div>
+                            <div style="font-size: 28px; font-weight: 600; color: #15803d;" id="total-tabs">0</div>
+                        </div>
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: #eff6ff; border-radius: 8px; border: 1px solid #93c5fd;">
+                            <div style="font-size: 14px; color: #1e40af; margin-bottom: 4px;">总并发能力</div>
+                            <div style="font-size: 28px; font-weight: 600; color: #1e3a8a;" id="total-capacity">0</div>
+                            <div style="font-size: 12px; color: #60a5fa; margin-top: 4px;">每个标签页支持6个并发</div>
+                        </div>
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: #fef3c7; border-radius: 8px; border: 1px solid #fcd34d;">
+                            <div style="font-size: 14px; color: #92400e; margin-bottom: 4px;">当前使用</div>
+                            <div style="font-size: 28px; font-weight: 600; color: #b45309;" id="total-used">0</div>
+                            <div style="font-size: 12px; color: #f59e0b; margin-top: 4px;" id="capacity-usage">使用率: 0%</div>
+                        </div>
+                    </div>
+                    
+                    <div id="tabs-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px;">
+                        <div class="empty-state">暂无标签页连接</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 活跃请求 -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">⚡ 活跃请求</h2>
+                <button class="refresh-btn" onclick="refreshData()">刷新</button>
+            </div>
+            <div id="active-requests-list">
+                <div class="empty-state">暂无活跃请求</div>
+            </div>
+        </div>
+        
+        <!-- 模型使用统计 -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">📊 模型使用统计</h2>
+                <button class="refresh-btn" onclick="toggleModelStats()" id="toggle-model-stats-btn">显示统计</button>
+            </div>
+            <div id="model-stats-container" class="model-stats-hidden" style="padding: 20px;">
+                <div id="model-stats-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">
+                    <div class="empty-state">加载中...</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 请求日志 -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">📝 日志</h2>
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <button class="refresh-btn" onclick="toggleLogs()" id="toggle-logs-btn">显示日志</button>
+                    <select id="log-limit" onchange="changeLogLimit()" style="padding: 6px 10px; border: 1px solid #e5e7eb; border-radius: 4px; font-size: 13px;">
+                        <option value="50">最近 50 条</option>
+                        <option value="100">最近 100 条</option>
+                        <option value="200">最近 200 条</option>
+                        <option value="500">最近 500 条</option>
+                        <option value="1000">最近 1000 条</option>
+                        <option value="all">显示全部</option>
+                    </select>
+                    <a href="/api/logs/download?log_type=requests" class="download-btn">下载请求日志</a>
+                    <a href="/api/logs/download?log_type=errors" class="download-btn" style="margin-left: 8px;">下载错误日志</a>
+                </div>
+            </div>
+            <div id="logs-container" class="logs-hidden">
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('requests')">请求日志 <span id="request-count" style="opacity: 0.7; font-size: 12px;"></span></div>
+                    <div class="tab" onclick="switchTab('errors')">错误日志 <span id="error-count" style="opacity: 0.7; font-size: 12px;"></span></div>
+                </div>
+                
+                <div id="requests-tab" class="tab-content">
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>请求ID</th>
+                                    <th>模型</th>
+                                    <th>状态</th>
+                                    <th>耗时</th>
+                                    <th>模式</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="request-logs">
+                                <tr><td colspan="7" style="text-align: center;">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <div id="errors-tab" class="tab-content" style="display: none;">
+                    <div style="padding: 20px;" id="error-logs">
+                        <div class="empty-state">暂无错误日志</div>
+                    </div>
+                </div>
+        </div>
+    </div>
+    
+    <!-- 请求详情模态框 -->
+    <div id="detailModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">请求详情</h2>
+                <span class="close" onclick="closeModal()">&times;</span>
+            </div>
+            <div id="modalBody">
+                <div class="empty-state">加载中...</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let ws = null;
+        let currentTab = 'requests';
+        let browserConnected = false;
+        let currentMode = null;
+        
+        // 显示/隐藏状态变量
+        let modelStatsVisible = false;  // 模型统计默认隐藏
+        let logsVisible = true;  // 🔧 日志默认显示
+        let lastModelStats = [];  // 保存最后的模型统计数据
+        
+        // 连接WebSocket
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws/monitor`);
+            
+            ws.onopen = () => {
+                // 静默连接，不输出日志
+                updateConnectionStatus(true);
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleWebSocketMessage(data);
+            };
+            
+            ws.onclose = () => {
+                // 静默断开，不输出日志
+                updateConnectionStatus(false);
+                // 5秒后重连
+                setTimeout(connectWebSocket, 5000);
+            };
+            
+            ws.onerror = (error) => {
+                // 只在开发环境输出错误
+                if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+                    console.error('WebSocket错误:', error);
+                }
+            };
+        }
+        
+        // 处理WebSocket消息
+        function handleWebSocketMessage(data) {
+            switch(data.type) {
+                case 'initial_data':
+                    updateAllData(data);
+                    break;
+                case 'request_start':
+                    addActiveRequest(data);
+                    break;
+                case 'request_end':
+                    removeActiveRequest(data.request_id);
+                    refreshLogs();
+                    break;
+                case 'stats_update':
+                    updateStats(data.stats);
+                    // 如果WebSocket消息包含模型统计，也更新它
+                    if (data.model_stats) {
+                        updateModelStats(data.model_stats);
+                    }
+                    break;
+                case 'browser_status':
+                    updateBrowserStatus(data.connected);
+                    break;
+                case 'tab_connection':
+                    // 标签页连接状态变化时刷新
+                    refreshTabConnections();
+                    break;
+            }
+        }
+        
+        // 更新连接状态
+        function updateConnectionStatus(connected) {
+            const dot = document.getElementById('ws-status');
+            const text = document.getElementById('ws-status-text');
+            
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = '已连接';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = '未连接';
+            }
+        }
+        
+        // 更新浏览器状态
+        function updateBrowserStatus(connected) {
+            browserConnected = connected;
+            document.getElementById('browser-status').textContent = 
+                connected ? '油猴脚本已连接' : '油猴脚本未连接';
+        }
+        
+        // 更新所有数据
+        function updateAllData(data) {
+            if (data.stats) {
+                updateStats(data.stats);
+            }
+            if (data.active_requests) {
+                updateActiveRequests(data.active_requests);
+            }
+            if (data.mode) {
+                updateMode(data.mode);
+            }
+            refreshStats();
+            refreshLogs();
+        }
+        
+        // 更新模式显示
+        function updateMode(modeData) {
+            currentMode = modeData;
+            const modeElement = document.getElementById('current-mode');
+            const detailsElement = document.getElementById('mode-details');
+            
+            if (modeData) {
+                modeElement.textContent = modeData.mode || 'direct_chat';
+                if (modeData.mode === 'battle') {
+                    detailsElement.textContent = `Battle 目标: ${modeData.target || 'A'}`;
+                } else {
+                    detailsElement.textContent = 'Direct Chat 模式';
+                }
+            }
+        }
+        
+        // 格式化时间
+        function formatDuration(seconds) {
+            if (!seconds || seconds < 0) return '0s';
+            if (seconds < 1) return (seconds * 1000).toFixed(0) + 'ms';
+            if (seconds < 60) return seconds.toFixed(1) + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+            return Math.floor(seconds / 3600) + 'h';
+        }
+        
+        // 格式化数字
+        function formatNumber(num) {
+            if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+            if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+            return num.toString();
+        }
+        
+        // 更新统计数据
+        function updateStats(stats) {
+            if (!stats) return;
+            
+            document.getElementById('active-requests').textContent = stats.active_requests || 0;
+            // 总请求数显示具体数字，不使用K/M格式化
+            document.getElementById('total-requests').textContent = (stats.total_requests || 0).toLocaleString();
+            document.getElementById('avg-duration').textContent = formatDuration(stats.avg_duration || 0);
+            document.getElementById('error-count').textContent = stats.failed_requests || 0;
+            document.getElementById('uptime').textContent = formatDuration(stats.uptime || 0);
+            
+            const successRate = stats.total_requests > 0 
+                ? ((stats.successful_requests / stats.total_requests) * 100).toFixed(1)
+                : 0;
+            document.getElementById('success-rate-text').textContent = `成功率: ${successRate}%`;
+            
+            if (stats.uptime) {
+                document.getElementById('server-info').textContent = 
+                    `服务器运行时间: ${formatDuration(stats.uptime)}`;
+            }
+        }
+        
+        // 更新活跃请求列表
+        function updateActiveRequests(requests) {
+            const container = document.getElementById('active-requests-list');
+            
+            if (!requests || requests.length === 0) {
+                container.innerHTML = '<div class="empty-state">暂无活跃请求</div>';
+                return;
+            }
+            
+            container.innerHTML = requests.map(req => {
+                const duration = ((Date.now() / 1000) - req.timestamp).toFixed(1);
+                return `
+                    <div class="active-request">
+                        <div class="request-info">
+                            <div class="request-id">${req.request_id.substring(0, 8)}...</div>
+                            <div class="request-model">${req.model}
+                                ${req.mode ? `<span class="mode-indicator">${req.mode}</span>` : ''}
+                            </div>
+                        </div>
+                        <div class="request-duration">${duration}s</div>
+                        <span class="status-badge active">处理中</span>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        // 添加活跃请求
+        function addActiveRequest(data) {
+            const count = parseInt(document.getElementById('active-requests').textContent) + 1;
+            document.getElementById('active-requests').textContent = count;
+            refreshActiveRequests();
+        }
+        
+        // 移除活跃请求
+        function removeActiveRequest(requestId) {
+            const count = Math.max(0, parseInt(document.getElementById('active-requests').textContent) - 1);
+            document.getElementById('active-requests').textContent = count;
+            refreshActiveRequests();
+        }
+        
+        // 刷新统计数据
+        async function refreshStats() {
+            try {
+                const response = await fetch('/api/monitor/stats');
+                const data = await response.json();
+                
+                updateStats(data.stats);
+                updateModelStats(data.model_stats);
+                updateBrowserStatus(data.browser_connected);
+                
+                if (data.mode) {
+                    updateMode(data.mode);
+                }
+            } catch (error) {
+                console.error('获取统计数据失败:', error);
+            }
+        }
+        
+        // 存储上一次的模型统计数据用于比较
+        let lastModelStatsJSON = '';
+        
+        // 更新模型统计 - 优化版本，只在数据变化时更新DOM
+        function updateModelStats(modelStats) {
+            // 保存数据供显示时使用
+            lastModelStats = modelStats || [];
+            
+            // 如果模型统计是隐藏的，不更新DOM
+            if (!modelStatsVisible) {
+                return;
+            }
+            
+            const container = document.getElementById('model-stats-list');
+            
+            // 检查数据是否真的发生了变化
+            const currentStatsJSON = JSON.stringify(modelStats);
+            const dataChanged = currentStatsJSON !== lastModelStatsJSON;
+            
+            // 如果数据没有变化，直接返回，避免重复渲染
+            if (!dataChanged) {
+                return;
+            }
+            
+            lastModelStatsJSON = currentStatsJSON;
+            
+            if (!modelStats || modelStats.length === 0) {
+                container.innerHTML = '<div class="empty-state" style="grid-column: 1 / -1;">暂无模型使用数据</div>';
+                return;
+            }
+            
+            // 清空容器并重新填充
+            container.innerHTML = '';
+            
+            // 为每个模型创建卡片
+            modelStats.forEach(stat => {
+                const successRate = stat.success_rate || 0;
+                const avgDuration = stat.avg_duration || 0;
+                const modelName = stat.model || 'unknown';
+                
+                const card = document.createElement('div');
+                card.className = 'model-card';
+                card.innerHTML = `
+                    <div class="model-name" title="${modelName}">${modelName}</div>
+                    <div class="model-stats">
+                        <div>
+                            <span class="model-stat-label">总请求:</span>
+                            <span class="model-stat-value">${formatNumber(stat.total_requests || 0)}</span>
+                        </div>
+                        <div>
+                            <span class="model-stat-label">成功率:</span>
+                            <span class="model-stat-value">${successRate.toFixed(1)}%</span>
+                        </div>
+                        <div>
+                            <span class="model-stat-label">平均耗时:</span>
+                            <span class="model-stat-value">${formatDuration(avgDuration)}</span>
+                        </div>
+                        <div>
+                            <span class="model-stat-label">失败数:</span>
+                            <span class="model-stat-value">${stat.failed_requests || 0}</span>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+        
+        // 刷新日志
+        async function refreshLogs() {
+            // 如果日志是隐藏的，不刷新
+            if (!logsVisible) {
+                return;
+            }
+            
+            if (currentTab === 'requests') {
+                await refreshRequestLogs();
+            } else {
+                await refreshErrorLogs();
+            }
+        }
+        
+        // 当前日志限制
+        let currentLogLimit = 50;
+        
+        // 改变日志显示数量
+        function changeLogLimit() {
+            const select = document.getElementById('log-limit');
+            currentLogLimit = select.value === 'all' ? 10000 : parseInt(select.value);
+            refreshLogs();
+        }
+        
+        // 刷新请求日志
+        async function refreshRequestLogs() {
+            try {
+                const limit = currentLogLimit;
+                const response = await fetch(`/api/monitor/logs/requests?limit=${limit}`);
+                const logs = await response.json();
+                
+                // 更新计数显示
+                document.getElementById('request-count').textContent = `(${logs.length})`;
+                
+                const tbody = document.getElementById('request-logs');
+                
+                if (logs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">暂无请求日志</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = logs.map(log => {
+                    const time = new Date(log.timestamp * 1000).toLocaleString();
+                    const statusClass = log.status === 'success' ? 'success' : 'failed';
+                    const duration = log.duration ? formatDuration(log.duration) : '-';
+                    const mode = log.mode || 'direct_chat';
+                    
+                    return `
+                        <tr>
+                            <td>${time}</td>
+                            <td style="font-family: monospace; font-size: 12px;">${log.request_id.substring(0, 8)}...</td>
+                            <td>${log.model}</td>
+                            <td><span class="status-badge ${statusClass}">${log.status}</span></td>
+                            <td>${duration}</td>
+                            <td>${mode}</td>
+                            <td>
+                                <button class="detail-btn" onclick="viewRequestDetails('${log.request_id}')">查看详细</button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+                
+            } catch (error) {
+                console.error('获取请求日志失败:', error);
+            }
+        }
+        
+        // 刷新错误日志
+        async function refreshErrorLogs() {
+            try {
+                const limit = currentLogLimit === 10000 ? 1000 : Math.min(currentLogLimit, 100);
+                const response = await fetch(`/api/monitor/logs/errors?limit=${limit}`);
+                const logs = await response.json();
+                
+                // 更新计数显示
+                document.getElementById('error-count').textContent = `(${logs.length})`;
+                
+                const container = document.getElementById('error-logs');
+                
+                if (logs.length === 0) {
+                    container.innerHTML = '<div class="empty-state">暂无错误日志</div>';
+                    return;
+                }
+                
+                container.innerHTML = logs.map(log => {
+                    const time = new Date(log.timestamp * 1000).toLocaleString();
+                    
+                    return `
+                        <div class="error-log">
+                            <div class="error-message">${log.error}</div>
+                            <div class="error-time">${time} - 模型: ${log.model} - 请求ID: ${log.request_id || 'N/A'}</div>
+                        </div>
+                    `;
+                }).join('');
+                
+            } catch (error) {
+                console.error('获取错误日志失败:', error);
+            }
+        }
+        
+        // 刷新活跃请求
+        async function refreshActiveRequests() {
+            try {
+                const response = await fetch('/api/monitor/active');
+                const requests = await response.json();
+                updateActiveRequests(requests);
+            } catch (error) {
+                console.error('获取活跃请求失败:', error);
+            }
+        }
+        
+        // 切换标签页
+        function switchTab(tab) {
+            currentTab = tab;
+            
+            // 更新标签样式
+            document.querySelectorAll('.tab').forEach(t => {
+                t.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // 切换内容
+            document.getElementById('requests-tab').style.display = tab === 'requests' ? 'block' : 'none';
+            document.getElementById('errors-tab').style.display = tab === 'errors' ? 'block' : 'none';
+            
+            refreshLogs();
+        }
+        
+        // 刷新数据
+        function refreshData() {
+            refreshStats();
+            refreshLogs();
+            refreshActiveRequests();
+        }
+        
+        // 定时刷新
+        setInterval(() => {
+            refreshStats();
+        }, 5000); // 每5秒刷新统计
+        
+        setInterval(() => {
+            if (logsVisible && currentTab === 'requests') {
+                refreshRequestLogs();
+            }
+        }, 10000); // 每10秒刷新日志（仅在显示状态）
+
+        setInterval(() => {
+            // 仅当存在活跃请求时才刷新计时器
+            const activeContainer = document.getElementById('active-requests-list');
+            if (activeContainer && activeContainer.children.length > 0 &&
+                !activeContainer.querySelector('.empty-state')) {
+                refreshActiveRequests();
+            }
+        }, 1000); // 每秒刷新活跃请求计时器
+        
+        // HTML转义函数 - 防止XSS攻击和渲染问题
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) {
+                return '';
+            }
+            // 转换为字符串并转义HTML特殊字符
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+        
+        // 格式化JSON内容
+        function formatJson(obj) {
+            if (!obj) return 'null';
+            try {
+                if (typeof obj === 'string') {
+                    // 尝试解析字符串为JSON
+                    try {
+                        obj = JSON.parse(obj);
+                    } catch {
+                        // 如果不是JSON，直接返回转义后的字符串
+                        return escapeHtml(obj);
+                    }
+                }
+                // 格式化JSON并转义
+                return escapeHtml(JSON.stringify(obj, null, 2));
+            } catch (e) {
+                console.error('格式化JSON失败:', e);
+                return escapeHtml(String(obj));
+            }
+        }
+        
+        // 查看请求详情
+        async function viewRequestDetails(requestId) {
+            const modal = document.getElementById('detailModal');
+            const modalBody = document.getElementById('modalBody');
+            
+            // 添加调试日志
+            console.log(`[DEBUG] 查看请求详情: ${requestId}`);
+            
+            modal.style.display = 'block';
+            modalBody.innerHTML = '<div class="empty-state">加载中...</div>';
+            
+            try {
+                const response = await fetch(`/api/request/${requestId}`);
+                if (!response.ok) {
+                    throw new Error('请求详情不存在');
+                }
+                
+                const details = await response.json();
+                
+                // 添加调试日志查看数据结构
+                console.log('[DEBUG] 请求详情数据:', details);
+                
+                // 检测可能导致渲染问题的内容
+                if (details.response_content) {
+                    console.log('[DEBUG] 响应内容长度:', details.response_content.length);
+                    if (details.response_content.includes('<') || details.response_content.includes('>')) {
+                        console.warn('[DEBUG] 响应内容包含HTML特殊字符，需要转义');
+                    }
+                }
+                
+                modalBody.innerHTML = `
+                    <div class="detail-section">
+                        <h3>基本信息</h3>
+                        <div class="detail-item">
+                            <div class="detail-label">请求ID:</div>
+                            <div class="detail-value">${escapeHtml(details.request_id)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">时间:</div>
+                            <div class="detail-value">${new Date(details.timestamp * 1000).toLocaleString()}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">模型:</div>
+                            <div class="detail-value">${escapeHtml(details.model)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">状态:</div>
+                            <div class="detail-value"><span class="status-badge ${details.status === 'success' ? 'success' : 'failed'}">${escapeHtml(details.status)}</span></div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">耗时:</div>
+                            <div class="detail-value">${formatDuration(details.duration || 0)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Token使用:</div>
+                            <div class="detail-value">输入: ${details.input_tokens || 0}, 输出: ${details.output_tokens || 0}</div>
+                        </div>
+                        ${details.error ? `
+                        <div class="detail-item">
+                            <div class="detail-label">错误:</div>
+                            <div class="detail-value" style="color: #dc2626;">${escapeHtml(details.error)}</div>
+                        </div>
+                        ` : ''}
+                    </div>
+                    
+                    ${details.request_params ? `
+                    <div class="detail-section">
+                        <h3>请求参数</h3>
+                        <div class="detail-item">
+                            <div class="detail-label">流式输出:</div>
+                            <div class="detail-value">${details.request_params.streaming ? '是' : '否'}</div>
+                        </div>
+                        ${details.request_params.temperature !== undefined && details.request_params.temperature !== null ? `
+                        <div class="detail-item">
+                            <div class="detail-label">Temperature:</div>
+                            <div class="detail-value">${details.request_params.temperature}</div>
+                        </div>
+                        ` : ''}
+                        ${details.request_params.top_p !== undefined && details.request_params.top_p !== null ? `
+                        <div class="detail-item">
+                            <div class="detail-label">Top P:</div>
+                            <div class="detail-value">${details.request_params.top_p}</div>
+                        </div>
+                        ` : ''}
+                        ${details.request_params.top_k !== undefined && details.request_params.top_k !== null ? `
+                        <div class="detail-item">
+                            <div class="detail-label">Top K:</div>
+                            <div class="detail-value">${details.request_params.top_k}</div>
+                        </div>
+                        ` : ''}
+                        ${details.request_params.max_tokens !== undefined && details.request_params.max_tokens !== null ? `
+                        <div class="detail-item">
+                            <div class="detail-label">Max Tokens:</div>
+                            <div class="detail-value">${details.request_params.max_tokens}</div>
+                        </div>
+                        ` : ''}
+                        ${details.request_params.frequency_penalty !== undefined && details.request_params.frequency_penalty !== null ? `
+                        <div class="detail-item">
+                            <div class="detail-label">Frequency Penalty:</div>
+                            <div class="detail-value">${details.request_params.frequency_penalty}</div>
+                        </div>
+                        ` : ''}
+                        ${details.request_params.presence_penalty !== undefined && details.request_params.presence_penalty !== null ? `
+                        <div class="detail-item">
+                            <div class="detail-label">Presence Penalty:</div>
+                            <div class="detail-value">${details.request_params.presence_penalty}</div>
+                        </div>
+                        ` : ''}
+                    </div>
+                    ` : ''}
+                    
+                    ${details.request_messages && details.request_messages.length > 0 ? `
+                    <div class="detail-section">
+                        <h3>请求消息</h3>
+                        ${details.request_messages.map(msg => {
+                            // 处理消息内容，可能是字符串或对象
+                            let content = '';
+                            if (msg.content) {
+                                if (typeof msg.content === 'string') {
+                                    content = msg.content;
+                                } else if (Array.isArray(msg.content)) {
+                                    // 处理多模态消息（文本+图片等）
+                                    content = msg.content.map(part => {
+                                        if (typeof part === 'string') {
+                                            return part;
+                                        } else if (part.type === 'text') {
+                                            return part.text || '';
+                                        } else if (part.type === 'image_url') {
+                                            return '[图片内容]';
+                                        } else {
+                                            return JSON.stringify(part, null, 2);
+                                        }
+                                    }).join('\n');
+                                } else if (typeof msg.content === 'object') {
+                                    // 如果是对象，转换为JSON字符串
+                                    content = JSON.stringify(msg.content, null, 2);
+                                } else {
+                                    content = String(msg.content);
+                                }
+                            } else {
+                                content = '(空消息)';
+                            }
+                            
+                            return `
+                            <div class="message-box">
+                                <div class="message-role">${escapeHtml(msg.role)}</div>
+                                <div class="message-content">${escapeHtml(content)}</div>
+                            </div>
+                            `;
+                        }).join('')}
+                    </div>
+                    ` : ''}
+                    
+                    ${details.reasoning_content ? `
+                    <div class="detail-section">
+                        <h3>💭 思维链 (Reasoning)</h3>
+                        <div class="response-content" style="background: #f0f9ff; border: 1px solid #bae6fd;">
+                            ${escapeHtml(details.reasoning_content)}
+                        </div>
+                    </div>
+                    ` : ''}
+                    
+                    ${details.response_content ? `
+                    <div class="detail-section">
+                        <h3>响应内容</h3>
+                        <div class="response-content">${(() => {
+                            // 处理响应内容，可能是字符串或对象
+                            if (typeof details.response_content === 'string') {
+                                return escapeHtml(details.response_content);
+                            } else if (typeof details.response_content === 'object') {
+                                // 如果是对象，美化JSON显示
+                                return escapeHtml(JSON.stringify(details.response_content, null, 2));
+                            } else {
+                                return escapeHtml(String(details.response_content));
+                            }
+                        })()}</div>
+                    </div>
+                    ` : ''}
+                `;
+                
+            } catch (error) {
+                console.error('[DEBUG] 加载请求详情失败:', error);
+                modalBody.innerHTML = `<div class="empty-state">加载失败: ${escapeHtml(error.message)}</div>`;
+            }
+        }
+        
+        // 关闭模态框
+        function closeModal() {
+            document.getElementById('detailModal').style.display = 'none';
+        }
+        
+        // 点击模态框外部关闭
+        window.onclick = function(event) {
+            const modal = document.getElementById('detailModal');
+            if (event.target == modal) {
+                modal.style.display = 'none';
+            }
+        }
+        
+        // 初始化
+        connectWebSocket();
+        refreshData();
+        
+        // 初始化时设置各个面板的隐藏状态
+        document.addEventListener('DOMContentLoaded', function() {
+            // 模型统计默认隐藏
+            const modelStatsContainer = document.getElementById('model-stats-container');
+            const modelStatsBtn = document.getElementById('toggle-model-stats-btn');
+            if (modelStatsContainer && modelStatsBtn) {
+                modelStatsContainer.classList.add('model-stats-hidden');
+                modelStatsBtn.textContent = '显示统计';
+            }
+            
+            // 🔧 日志默认显示
+            const logsContainer = document.getElementById('logs-container');
+            const logsBtn = document.getElementById('toggle-logs-btn');
+            if (logsContainer && logsBtn) {
+                logsContainer.classList.remove('logs-hidden');
+                logsBtn.textContent = '隐藏日志';
+            }
+        });
+        
+        // 切换API文档显示
+        function toggleApiDocs() {
+            const content = document.getElementById('api-docs-content');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+            } else {
+                content.style.display = 'none';
+            }
+        }
+        
+        // 显示/隐藏模型统计
+        function toggleModelStats() {
+            const container = document.getElementById('model-stats-container');
+            const btn = document.getElementById('toggle-model-stats-btn');
+            
+            modelStatsVisible = !modelStatsVisible;
+            
+            if (modelStatsVisible) {
+                container.classList.remove('model-stats-hidden');
+                btn.textContent = '隐藏统计';
+                updateModelStats(lastModelStats); // 显示时更新数据
+            } else {
+                container.classList.add('model-stats-hidden');
+                btn.textContent = '显示统计';
+            }
+        }
+        
+        // 显示/隐藏日志
+        function toggleLogs() {
+            const container = document.getElementById('logs-container');
+            const btn = document.getElementById('toggle-logs-btn');
+            
+            logsVisible = !logsVisible;
+            
+            if (logsVisible) {
+                container.classList.remove('logs-hidden');
+                btn.textContent = '隐藏日志';
+                refreshLogs(); // 显示时刷新日志
+            } else {
+                container.classList.add('logs-hidden');
+                btn.textContent = '显示日志';
+            }
+        }
+        
+        // 刷新标签页连接状态
+        async function refreshTabConnections() {
+            try {
+                const response = await fetch('/api/monitor/tabs');
+                const data = await response.json();
+                
+                updateTabConnectionsUI(data);
+            } catch (error) {
+                console.error('获取标签页连接状态失败:', error);
+            }
+        }
+        
+        // 更新标签页连接UI
+        function updateTabConnectionsUI(data) {
+            // 更新汇总信息
+            document.getElementById('total-tabs').textContent = data.total_tabs;
+            document.getElementById('total-capacity').textContent = data.total_capacity + ' 个请求';
+            document.getElementById('total-used').textContent = data.total_active_requests;
+            
+            const usagePercentage = data.total_capacity > 0
+                ? ((data.total_active_requests / data.total_capacity) * 100).toFixed(1)
+                : 0;
+            document.getElementById('capacity-usage').textContent = `使用率: ${usagePercentage}%`;
+            
+            // 更新标签页列表
+            const grid = document.getElementById('tabs-grid');
+            
+            if (!data.tabs || data.tabs.length === 0) {
+                grid.innerHTML = '<div class="empty-state" style="grid-column: 1 / -1;">暂无标签页连接</div>';
+                return;
+            }
+            
+            grid.innerHTML = data.tabs.map((tab, index) => {
+                const statusColor = tab.status === 'busy' ? '#dc2626' : '#10b981';
+                const statusText = tab.status === 'busy' ? '繁忙' : '空闲';
+                const statusBg = tab.status === 'busy' ? '#fee2e2' : '#d1fae5';
+                
+                // 生成一个简短的显示ID
+                const shortId = tab.tab_id.split('_').pop().substring(0, 6);
+                
+                // 格式化连接时长
+                const connectedDuration = formatDuration(tab.connected_duration || 0);
+                
+                return `
+                    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; background: white;">
+                        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px;">
+                            <div style="flex: 1;">
+                                <div style="font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 4px;">
+                                    标签页 #${index + 1}
+                                </div>
+                                <div style="font-size: 11px; font-family: monospace; color: #6b7280;">
+                                    ID: ${shortId}
+                                </div>
+                                <div style="font-size: 11px; color: #9ca3af; margin-top: 2px;">
+                                    已连接: ${connectedDuration}
+                                </div>
+                            </div>
+                            <div style="padding: 4px 12px; background: ${statusBg}; color: ${statusColor}; border-radius: 12px; font-size: 12px; font-weight: 500;">
+                                ${statusText}
+                            </div>
+                        </div>
+                        
+                        <div style="margin-bottom: 12px;">
+                            <div style="display: flex; justify-content: space-between; font-size: 13px; color: #6b7280; margin-bottom: 4px;">
+                                <span>请求负载</span>
+                                <span style="font-weight: 600; color: #374151;">${tab.active_requests}/${tab.max_concurrent}</span>
+                            </div>
+                            <div style="height: 8px; background: #f3f4f6; border-radius: 4px; overflow: hidden;">
+                                <div style="height: 100%; background: ${tab.load_percentage >= 100 ? '#dc2626' : tab.load_percentage >= 66 ? '#f59e0b' : '#10b981'}; width: ${tab.load_percentage}%; transition: width 0.3s;"></div>
+                            </div>
+                            <div style="font-size: 11px; color: #9ca3af; margin-top: 4px;">
+                                ${tab.load_percentage.toFixed(0)}% 已使用
+                            </div>
+                        </div>
+                        
+                        <div style="display: flex; gap: 8px; font-size: 12px; margin-bottom: 8px;">
+                            <div style="flex: 1; padding: 8px; background: #f9fafb; border-radius: 4px; text-align: center;">
+                                <div style="color: #6b7280;">活跃请求</div>
+                                <div style="font-weight: 600; color: #374151; margin-top: 2px;">${tab.active_requests}</div>
+                            </div>
+                            <div style="flex: 1; padding: 8px; background: #f9fafb; border-radius: 4px; text-align: center;">
+                                <div style="color: #6b7280;">剩余容量</div>
+                                <div style="font-weight: 600; color: #374151; margin-top: 2px;">${tab.max_concurrent - tab.active_requests}</div>
+                            </div>
+                        </div>
+                        
+                        <div style="padding: 6px 10px; background: ${tab.load_percentage >= 80 ? '#fef3c7' : '#f0fdf4'}; border-radius: 4px; font-size: 11px; color: ${tab.load_percentage >= 80 ? '#92400e' : '#166534'}; text-align: center;">
+                            ${tab.load_percentage >= 80 ? '⚠️ 负载较高' : '✅ 运行良好'}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        // 初始化时加载标签页状态
+        setTimeout(() => {
+            refreshTabConnections();
+        }, 1000);
+        
+        // 定期刷新标签页状态（每3秒）
+        setInterval(() => {
+            refreshTabConnections();
+        }, 3000);
+        
+    </script>
+</body>
+</html>
