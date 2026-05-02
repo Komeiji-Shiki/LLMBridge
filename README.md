@@ -341,6 +341,8 @@ total_cost = (uncached_input × input_price + cached_input × cached_input_price
 
 项目支持上传自定义 tokenizer，配置文件为 `custom_tokenizers.json`（已 gitignore，使用 `custom_tokenizers.json.example` 作为模板）。
 
+> 📖 本地 tokenizer 文件放置与各模型下载指南详见 [`tokenizers/README.md`](tokenizers/README.md)
+
 ### 支持的来源类型
 | 来源类型 | 说明 | 示例 |
 |---------|------|------|
