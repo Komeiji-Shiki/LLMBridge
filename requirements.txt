@@ -13,6 +13,10 @@ typing_extensions
 # HTTP/2 support (C9: 消除浏览器 6 连接限制)
 h2
 
+# File upload / background scheduler
+python-multipart
+apscheduler
+
 # Cache management
 cachetools
 
