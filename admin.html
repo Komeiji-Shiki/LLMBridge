@@ -1,0 +1,1994 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LMArena Bridge 管理面板</title>
+    <style>
+        html, body {
+            min-height: 100%;
+            background: #090e16;
+            color: #d9e5ff;
+        }
+    </style>
+    <script defer src="js/vendor/chart.umd.min.js"></script>
+    <script defer src="js/vendor/Sortable.min.js"></script>
+    
+    <!-- 拆分后的管理面板JS文件 -->
+    <script defer src="js/admin-core.js"></script>
+    <script defer src="js/admin-charts.js"></script>
+    <script defer src="js/admin-overview.js"></script>
+    <script defer src="js/admin-models-edit.js"></script>
+    <script defer src="js/admin-models-list.js"></script>
+    <script defer src="js/admin-models-capture.js"></script>
+    <script defer src="js/admin-tokenizer.js"></script>
+    <script defer src="js/admin-config.js"></script>
+    <script defer src="js/admin-apikeys.js"></script>
+    
+    <style>
+        /* 使用与monitor.html完全相同的深色科技风格 */
+        :root {
+            --bg-deep: linear-gradient(180deg, #090e16 0%, #0a1220 100%);
+            --bg-elev: linear-gradient(135deg, rgba(16,28,48,0.85), rgba(9,16,30,0.9));
+            --line-weak: #162339;
+            --line-strong: #223650;
+            --text-main: #d9e5ff;
+            --text-dim: #8fa0bf;
+            --btn-bg: #0e1a2d;
+            --btn-hover: #15263f;
+            --btn-active: #132745;
+            --btn-border: #223650;
+            --accent: #2aa8ff;
+            --accent-soft: rgba(42,168,255,0.35);
+            --accent-faint: rgba(42,168,255,0.12);
+            --card-bg: rgba(16,28,48,0.6);
+            --surface: #0e1a2d;
+            --surface-2: #0b1626;
+            --surface-3: #0b1422;
+            --notch: 10px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-deep);
+            color: var(--text-main);
+            line-height: 1.6;
+        }
+
+        .container {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* 侧边栏 */
+        .sidebar {
+            width: 250px;
+            background: var(--surface-3);
+            color: var(--text-main);
+            padding: 20px 0;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+            border-right: 1px solid var(--line-strong);
+        }
+
+        .sidebar-header {
+            padding: 0 20px 20px;
+            border-bottom: 1px solid var(--line-weak);
+        }
+
+        .sidebar-header h1 {
+            font-size: 1.5rem;
+            margin-bottom: 5px;
+            color: var(--accent);
+            text-shadow: 0 0 20px rgba(42,168,255,0.3);
+            font-weight: 700;
+        }
+
+        .sidebar-header p {
+            font-size: 0.875rem;
+            color: var(--text-dim);
+        }
+
+        .nav-menu {
+            list-style: none;
+            padding: 20px 0;
+        }
+
+        .nav-item {
+            padding: 12px 20px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border-left: 3px solid transparent;
+            color: var(--text-dim);
+        }
+
+        .nav-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+        }
+
+        .nav-item.active {
+            background: rgba(42, 168, 255, 0.12);
+            border-left-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .nav-item i {
+            margin-right: 10px;
+            width: 20px;
+            display: inline-block;
+        }
+
+        /* 顶部导航 */
+        .top-nav {
+            margin: 10px 20px;
+            padding: 10px;
+            background: var(--surface);
+            border: 1px solid var(--line-strong);
+            border-radius: 8px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .top-nav a {
+            flex: 1;
+            padding: 8px 12px;
+            background: var(--btn-bg);
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            color: var(--text-main);
+            text-decoration: none;
+            text-align: center;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+
+        .top-nav a:hover {
+            background: var(--btn-hover);
+            border-color: var(--accent-soft);
+        }
+
+        /* 主内容区 */
+        .main-content {
+            flex: 1;
+            margin-left: 250px;
+            padding: 30px;
+        }
+
+        .page {
+            display: none;
+        }
+
+        .page.active {
+            display: block;
+        }
+
+        .page-header {
+            margin-bottom: 30px;
+        }
+
+        .page-header h2 {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            color: var(--text-main);
+        }
+
+        .page-header p {
+            color: var(--text-dim);
+        }
+
+        /* 卡片 */
+        .card {
+            background: var(--surface);
+            border-radius: 8px;
+            border: 1px solid var(--line-strong);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(255,255,255,0.03);
+            padding: 20px;
+            margin-bottom: 20px;
+            clip-path: polygon(
+                0 var(--notch), var(--notch) 0,
+                calc(100% - var(--notch)) 0, 100% var(--notch),
+                100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+                var(--notch) 100%, 0 calc(100% - var(--notch))
+            );
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid var(--line-weak);
+        }
+
+        .card-header h3 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        /* 统计卡片 */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: var(--surface);
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid var(--line-strong);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.4), inset 0 0 0 1px rgba(255,255,255,0.03);
+            clip-path: polygon(
+                0 var(--notch), var(--notch) 0,
+                calc(100% - var(--notch)) 0, 100% var(--notch),
+                100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+                var(--notch) 100%, 0 calc(100% - var(--notch))
+            );
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            background: var(--btn-hover);
+        }
+
+        .stat-card-label {
+            font-size: 0.875rem;
+            color: var(--text-dim);
+            margin-bottom: 5px;
+        }
+
+        .stat-card-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: var(--accent);
+        }
+
+        .stat-card-detail {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+        }
+
+        /* 按钮 */
+        .btn {
+            padding: 10px 20px;
+            border: 1px solid var(--btn-border);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--btn-bg);
+            color: var(--text-main);
+            clip-path: polygon(
+                0 var(--notch), var(--notch) 0,
+                calc(100% - var(--notch)) 0, 100% var(--notch),
+                100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+                var(--notch) 100%, 0 calc(100% - var(--notch))
+            );
+        }
+
+        .btn:hover {
+            background: var(--btn-hover);
+            border-color: var(--accent-soft);
+        }
+
+        .btn-primary {
+            background: rgba(42, 168, 255, 0.2);
+            border-color: var(--accent-soft);
+            color: var(--accent);
+        }
+
+        .btn-primary:hover {
+            background: rgba(42, 168, 255, 0.3);
+        }
+
+        .btn-success {
+            background: rgba(16, 185, 129, 0.2);
+            border-color: rgba(16, 185, 129, 0.3);
+            color: #10b981;
+        }
+
+        .btn-danger {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #ef4444;
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 0.75rem;
+        }
+
+        /* 表格 */
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .table th {
+            background: transparent;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 1px solid var(--line-strong);
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 12px;
+        }
+
+        .table td {
+            padding: 12px;
+            border-bottom: 1px solid var(--line-weak);
+            color: var(--text-main);
+        }
+
+        .table tbody tr:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        /* 表单 */
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            font-size: 0.875rem;
+            color: var(--text-main);
+        }
+
+        .form-input, .form-select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--line-strong);
+            border-radius: 6px;
+            font-size: 0.875rem;
+            background: var(--surface-2);
+            color: var(--text-main);
+        }
+
+        .form-input:focus, .form-select:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(42, 168, 255, 0.1);
+        }
+
+        textarea.form-input {
+            font-family: 'Consolas', 'Monaco', monospace;
+            min-height: 400px;
+            resize: vertical;
+        }
+
+        /* 模态框 */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: var(--surface);
+            border-radius: 8px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid var(--line-strong);
+            color: var(--text-main);
+            clip-path: polygon(
+                0 var(--notch), var(--notch) 0,
+                calc(100% - var(--notch)) 0, 100% var(--notch),
+                100% calc(100% - var(--notch)), calc(100% - var(--notch)) 100%,
+                var(--notch) 100%, 0 calc(100% - var(--notch))
+            );
+        }
+
+        .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--line-weak);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            font-size: 1.25rem;
+            color: var(--text-main);
+        }
+
+        .modal-body {
+            padding: 20px;
+        }
+
+        .modal-footer {
+            padding: 20px;
+            border-top: 1px solid var(--line-weak);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: var(--text-dim);
+        }
+
+        .close-btn:hover {
+            color: var(--text-main);
+        }
+
+        /* 徽章 */
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 2px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            border: 1px solid currentColor;
+        }
+
+        .badge-success {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .badge-danger {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+
+        .badge-info {
+            background: rgba(42, 168, 255, 0.2);
+            color: var(--accent);
+            border-color: var(--accent-soft);
+        }
+
+        /* 拖动排序样式 */
+        .drag-handle {
+            cursor: move;
+            color: var(--text-dim);
+            padding: 0 8px;
+            user-select: none;
+            font-size: 1.2rem;
+        }
+
+        .drag-handle:hover {
+            color: var(--accent);
+        }
+
+        .sortable-ghost {
+            opacity: 0.4;
+            background: var(--accent-faint);
+        }
+
+        .sortable-drag {
+            opacity: 0.8;
+            cursor: moving !important;
+        }
+
+        .model-row {
+            transition: background-color 0.2s;
+        }
+
+        .model-row.sorting {
+            background: var(--accent-faint);
+        }
+
+        /* 提示信息 */
+        .alert {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid;
+        }
+
+        .alert-success {
+            background: rgba(16, 185, 129, 0.1);
+            color: #10b981;
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .alert-danger {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+
+        .alert-info {
+            background: rgba(42, 168, 255, 0.1);
+            color: var(--accent);
+            border-color: var(--accent-soft);
+        }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-dim);
+        }
+
+        .empty-state-icon {
+            font-size: 4rem;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        /* ID捕获选项卡 */
+        .capture-options {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .radio-card {
+            position: relative;
+            padding: 15px;
+            border: 2px solid var(--line-strong);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: var(--surface-2);
+        }
+
+        .radio-card:hover {
+            border-color: var(--accent-soft);
+            background: var(--btn-hover);
+        }
+
+        .radio-card input[type="radio"] {
+            position: absolute;
+            opacity: 0;
+        }
+
+        .radio-card input[type="radio"]:checked + .radio-card-content {
+            border-left: 3px solid var(--accent);
+        }
+
+        .radio-card.selected {
+            border-color: var(--accent);
+            background: rgba(42, 168, 255, 0.1);
+        }
+
+        .radio-card-content {
+            padding-left: 10px;
+        }
+
+        .radio-card-title {
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: var(--text-main);
+        }
+
+        .radio-card-desc {
+            font-size: 0.875rem;
+            color: var(--text-dim);
+        }
+
+        /* 折叠面板样式 */
+        .collapsible-section {
+            margin-top: 15px;
+            border: 1px solid var(--line-weak);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        
+        .collapsible-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 15px;
+            background: var(--surface-2);
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        
+        .collapsible-header:hover {
+            background: var(--btn-hover);
+        }
+        
+        .collapsible-header h4 {
+            margin: 0;
+            font-size: 0.9rem;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .collapsible-toggle {
+            font-size: 0.8rem;
+            color: var(--text-dim);
+            transition: transform 0.2s;
+        }
+        
+        .collapsible-section.collapsed .collapsible-toggle {
+            transform: rotate(-90deg);
+        }
+        
+        .collapsible-content {
+            padding: 15px;
+            border-top: 1px solid var(--line-weak);
+            transition: max-height 0.3s ease, opacity 0.2s ease;
+        }
+        
+        .collapsible-section.collapsed .collapsible-content {
+            display: none;
+        }
+
+        /* 加载动画 */
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--line-strong);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: relative;
+            }
+
+            .main-content {
+                margin-left: 0;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 侧边栏 -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h1>🎯 LMArena</h1>
+                <p>Bridge 管理面板</p>
+            </div>
+            
+            <!-- 顶部导航链接 -->
+            <div class="top-nav">
+                <a href="/admin">📊 管理</a>
+                <a href="/monitor" target="_blank">📈 监控</a>
+            </div>
+            
+            <!-- 内存监控小框 -->
+            <div id="memory-widget" style="margin: 10px 20px; padding: 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <span style="font-size: 0.75rem; color: var(--text-dim);">💾 内存占用</span>
+                    <button onclick="refreshMemoryInfo()" style="background: none; border: none; cursor: pointer; color: var(--text-dim); font-size: 0.7rem;" title="刷新">🔄</button>
+                </div>
+                <div id="memory-value" style="font-size: 1.3rem; font-weight: bold; color: var(--accent);">--</div>
+                <div style="margin-top: 6px;">
+                    <div id="memory-bar" style="height: 4px; background: var(--line-strong); border-radius: 2px; overflow: hidden;">
+                        <div id="memory-bar-fill" style="height: 100%; width: 0%; background: var(--accent); transition: width 0.3s;"></div>
+                    </div>
+                </div>
+                <div id="memory-details" style="font-size: 0.65rem; color: var(--text-dim); margin-top: 6px;">
+                    加载中...
+                </div>
+                <div id="tokenizer-info" style="font-size: 0.65rem; color: var(--text-dim); margin-top: 4px; display: none;">
+                </div>
+                <button id="clear-cache-btn" onclick="clearTokenizerCache()" style="display: none; margin-top: 8px; padding: 4px 8px; font-size: 0.7rem; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; border-radius: 4px; cursor: pointer; width: 100%;">
+                    🧹 清理Tokenizer缓存
+                </button>
+            </div>
+            
+            <ul class="nav-menu">
+                <li class="nav-item active" data-page="overview">
+                    <i>📊</i> 概览
+                </li>
+                <li class="nav-item" data-page="models">
+                    <i>🤖</i> 模型端点
+                </li>
+                <li class="nav-item" data-page="tokenizer">
+                        <i>🔤</i> Tokenizer配置
+                    </li>
+                    <li class="nav-item" data-page="token-calculator">
+                        <i>🧮</i> Token计算器
+                    </li>
+                    <li class="nav-item" data-page="id-capture">
+                    <i>🎯</i> ID 捕获
+                </li>
+                <li class="nav-item" data-page="api-keys">
+                    <i>🔑</i> API Key 管理
+                </li>
+                <li class="nav-item" data-page="config">
+                    <i>⚙️</i> 配置编辑
+                </li>
+                <li class="nav-item" data-page="monitor">
+                    <i>📈</i> 监控面板
+                </li>
+            </ul>
+        </div>
+
+        <!-- 主内容区 -->
+        <div class="main-content">
+            <!-- 概览页面 -->
+            <div id="overview" class="page active">
+                <div class="page-header">
+                    <h2>系统概览</h2>
+                    <p>实时监控系统状态和运行情况</p>
+                </div>
+
+                <!-- 总体TPM/RPM统计卡片 -->
+                <div class="card" style="margin-bottom: 20px;">
+                    <div class="card-header">
+                        <h3>总体速率统计</h3>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <button id="rate-period-day" class="btn btn-primary btn-sm" onclick="switchRatePeriod('day')">
+                                📅 一天
+                            </button>
+                            <button id="rate-period-hour" class="btn btn-sm" onclick="switchRatePeriod('hour')">
+                                ⏰ 一小时
+                            </button>
+                        </div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; padding: 20px;">
+                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 RPM</div>
+                            <div id="overall-rpm-value" style="font-size: 1.8rem; font-weight: bold; color: #10b981;">-</div>
+                            <div id="overall-rpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">请求/分钟</div>
+                        </div>
+                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 TPM</div>
+                            <div id="overall-tpm-value" style="font-size: 1.8rem; font-weight: bold; color: #3b82f6;">-</div>
+                            <div id="overall-tpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">Token/分钟</div>
+                        </div>
+                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">统计时段</div>
+                            <div id="rate-period-display" style="font-size: 1.8rem; font-weight: bold; color: var(--accent);">24小时</div>
+                            <div style="font-size: 0.75rem; color: var(--text-dim);">时间范围</div>
+                        </div>
+                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总请求数</div>
+                            <div id="rate-total-requests" style="font-size: 1.8rem; font-weight: bold; color: #a855f7;">-</div>
+                            <div id="rate-period-range" style="font-size: 0.75rem; color: var(--text-dim);">在统计时段内</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card" id="browser-stat">
+                        <div class="stat-card-label">浏览器连接</div>
+                        <div class="stat-card-value">-</div>
+                        <div class="stat-card-detail">标签页数量</div>
+                    </div>
+                    <div class="stat-card" id="models-stat">
+                        <div class="stat-card-label">配置模型</div>
+                        <div class="stat-card-value">-</div>
+                        <div class="stat-card-detail">总计</div>
+                    </div>
+                    <div class="stat-card" id="requests-stat">
+                        <div class="stat-card-label">活跃请求</div>
+                        <div class="stat-card-value">-</div>
+                        <div class="stat-card-detail">正在处理</div>
+                    </div>
+                    <div class="stat-card" id="total-requests-stat">
+                        <div class="stat-card-label">总请求数</div>
+                        <div class="stat-card-value">-</div>
+                        <div class="stat-card-detail">成功率: -</div>
+                    </div>
+                    <div class="stat-card" id="token-stat">
+                        <div class="stat-card-label">Token 用量</div>
+                        <div class="stat-card-value" id="total-tokens-value">-</div>
+                        <div class="stat-card-detail" id="token-ratio">输入/输出: -</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>运行状态</h3>
+                        <button class="btn btn-primary btn-sm" onclick="refreshOverview()">
+                            🔄 刷新
+                        </button>
+                    </div>
+                    <div id="status-details"></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Token 用量统计</h3>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <input type="date" id="token-start-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
+                            <span style="color: var(--text-dim);">至</span>
+                            <input type="date" id="token-end-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
+                            <button class="btn btn-primary btn-sm" onclick="applyDateFilter()">
+                                📅 应用
+                            </button>
+                            <button class="btn btn-sm" onclick="clearDateFilter()">
+                                ✖️ 清除
+                            </button>
+                            <button class="btn btn-sm" onclick="refreshTokenStats()">
+                                🔄 刷新
+                            </button>
+                            <button class="btn btn-sm" onclick="exportTokenReport()" title="导出CSV报告" style="background: #166534; border-color: #22c55e; color: #bbf7d0;">
+                                📥 导出CSV
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- 🔧 成本信息统计卡片（支持 USD/CNY 切换） -->
+                    <div style="padding: 20px; border-bottom: 1px solid var(--line-weak);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                            <h4 style="color: var(--text-main); margin: 0;">💰 成本统计</h4>
+                            <div style="display: flex; gap: 6px;">
+                                <button id="cost-currency-usd" class="btn btn-primary btn-sm" onclick="switchCostCurrency('USD')">
+                                    $ USD
+                                </button>
+                                <button id="cost-currency-cny" class="btn btn-sm" onclick="switchCostCurrency('CNY')">
+                                    ¥ CNY
+                                </button>
+                            </div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                            <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                                <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总成本</div>
+                                <div id="total-cost-value" style="font-size: 1.5rem; font-weight: bold; color: var(--accent);">-</div>
+                                <div id="total-cost-currency" style="font-size: 0.75rem; color: var(--text-dim);">-</div>
+                            </div>
+                            <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                                <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">输入成本</div>
+                                <div id="input-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #2aa8ff;">-</div>
+                            </div>
+                            <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                                <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">输出成本</div>
+                                <div id="output-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #10b981;">-</div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- 第一行：输入/输出饼状图 -->
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                        <div>
+                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输入 Token 分布（饼状图）</h4>
+                            <canvas id="tokenInputPieChart" style="max-height: 300px;"></canvas>
+                        </div>
+                        <div>
+                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输出 Token 分布（饼状图）</h4>
+                            <canvas id="tokenOutputPieChart" style="max-height: 300px;"></canvas>
+                        </div>
+                    </div>
+                    
+                    <!-- 第二行：输入/输出条形图 -->
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+                        <div>
+                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输入 Tokens（条形图）</h4>
+                            <canvas id="tokenInputBarChart" style="max-height: 300px;"></canvas>
+                        </div>
+                        <div>
+                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输出 Tokens（条形图）</h4>
+                            <canvas id="tokenOutputBarChart" style="max-height: 300px;"></canvas>
+                        </div>
+                    </div>
+                    
+                    <!-- 第三行：每日趋势折线图 -->
+                    <div style="margin-bottom: 20px;">
+                        <div style="display: flex; justify-content: center; align-items: center; gap: 12px; margin-bottom: 15px;">
+                            <h4 style="color: var(--text-main); margin: 0;">每日 Token 使用趋势</h4>
+                            <button id="toggle-output-axis-btn" class="btn btn-sm" onclick="toggleOutputAxis()" title="切换输出Token的Y轴模式">
+                                🔄 合并Y轴
+                            </button>
+                        </div>
+                        <canvas id="tokenTrendChart" style="max-height: 300px;"></canvas>
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <div style="display: flex; justify-content: center; align-items: center; gap: 12px; margin-bottom: 15px;">
+                            <h4 style="color: var(--text-main); margin: 0;">每日成本趋势 (USD)</h4>
+                            <button id="toggle-cost-currency-btn" class="btn btn-sm" onclick="toggleCostCurrency()" title="切换成本货币显示">
+                                💱 USD/CNY
+                            </button>
+                        </div>
+                        <canvas id="costTrendChart" style="max-height: 300px;"></canvas>
+                    </div>
+                    <div id="token-stats-table"></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>请求次数趋势</h3>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <input type="date" id="request-start-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
+                            <span style="color: var(--text-dim);">至</span>
+                            <input type="date" id="request-end-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
+                            <button class="btn btn-primary btn-sm" onclick="applyRequestDateFilter()">
+                                📅 应用
+                            </button>
+                            <button class="btn btn-sm" onclick="clearRequestDateFilter()">
+                                ✖️ 清除
+                            </button>
+                            <button class="btn btn-sm" onclick="refreshRequestStats()">
+                                🔄 刷新
+                            </button>
+                        </div>
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <canvas id="requestCountChart" style="max-height: 400px;"></canvas>
+                    </div>
+                    <div id="request-stats-summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);"></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>活跃请求</h3>
+                    </div>
+                    <div id="active-requests-list"></div>
+                </div>
+            </div>
+
+            <!-- 模型端点管理页面 -->
+            <div id="models" class="page">
+                <div class="page-header">
+                    <h2>模型端点管理</h2>
+                    <p>优先管理 Direct API 直连配置，LMArena 模式已弃用但仍保留兼容功能</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>模型列表</h3>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-success" onclick="testAllApiKeys()" id="test-all-keys-btn">
+                                🔑 一键测试所有 Key
+                            </button>
+                            <button class="btn btn-primary" onclick="showAddModelModal()">
+                                ➕ 添加模型
+                            </button>
+                        </div>
+                    </div>
+                    <div id="models-list"></div>
+                    <!-- 测试结果区域 -->
+                    <div id="test-results-container" style="display: none; margin-top: 20px; padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-strong); max-height: 500px; overflow-y: auto;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                            <h4 id="test-results-title" style="margin: 0;">测试结果</h4>
+                            <button class="btn btn-sm" onclick="document.getElementById('test-results-container').style.display='none'">✕ 关闭</button>
+                        </div>
+                        <div id="test-results-summary"></div>
+                        <table class="table" style="margin-top: 15px;">
+                            <thead>
+                                <tr>
+                                    <th>模型</th>
+                                    <th>模型ID</th>
+                                    <th>状态</th>
+                                    <th>响应时间</th>
+                                    <th>详情</th>
+                                </tr>
+                            </thead>
+                            <tbody id="test-results-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tokenizer配置页面 -->
+            <div id="tokenizer" class="page">
+                <div class="page-header">
+                    <h2>Tokenizer 配置</h2>
+                    <p>为每个模型配置使用的分词器类型</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>分词器状态</h3>
+                        <button class="btn btn-primary btn-sm" onclick="refreshTokenizerInfo()">
+                            🔄 刷新
+                        </button>
+                    </div>
+                    <div id="tokenizer-status"></div>
+                </div>
+
+                <!-- 自定义分词器管理 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3>🔧 自定义分词器管理</h3>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-primary" onclick="showAddCustomTokenizerDialog()">
+                                ➕ 添加自定义分词器
+                            </button>
+                            <button class="btn" onclick="showQuickAddTokenizerDialog()">
+                                ⚡ 快速添加
+                            </button>
+                            <button class="btn" onclick="loadCustomTokenizers()">
+                                🔄 刷新
+                            </button>
+                        </div>
+                    </div>
+                    <div class="alert alert-info" style="margin-bottom: 0;">
+                        <span>ℹ️</span>
+                        <div>
+                            <strong>自定义分词器：</strong>添加GLM、Kimi K2、Qwen、Llama等模型的分词器，用于精确计算Token
+                            <ul style="margin-top: 8px; padding-left: 20px; color: var(--text-dim);">
+                                <li><strong>HuggingFace模型</strong>: 输入模型ID（如 THUDM/glm-4-9b-chat）自动下载</li>
+                                <li><strong>本地分词器</strong>: 输入本地tokenizer文件夹路径</li>
+                                <li>需要安装 <code style="background: var(--surface); padding: 2px 6px; border-radius: 3px;">transformers</code> 库</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <div id="custom-tokenizers-list" style="padding: 15px;">
+                        <div style="text-align: center; color: var(--text-dim); padding: 20px;">
+                            正在加载自定义分词器列表...
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>模型分词器配置</h3>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-success" onclick="saveAllTokenizerSettings()">
+                                💾 保存所有设置
+                            </button>
+                            <button class="btn" onclick="loadTokenizerMappings()">
+                                🔄 刷新
+                            </button>
+                        </div>
+                    </div>
+                    <div class="alert alert-info">
+                        <span>ℹ️</span>
+                        <div>
+                            <strong>分词器类型说明：</strong>
+                            <ul style="margin-top: 10px; padding-left: 20px; color: var(--text-dim);">
+                                <li><strong>anthropic</strong>: Anthropic 官方分词器（需要: pip install anthropic）</li>
+                                <li><strong>google</strong>: Google Gemini 官方分词器（需要: pip install google-generativeai）</li>
+                                <li><strong>tiktoken</strong>: OpenAI tiktoken 分词器（需要: pip install tiktoken）</li>
+                                <li><strong>deepseek</strong>: DeepSeek 官方分词器（本地tokenizer文件夹或transformers）</li>
+                                <li><strong>estimate</strong>: 字符估算方法（不需要安装额外包，精度较低）</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <!-- 🔧 新增：Token计数来源配置 -->
+                    <div class="alert alert-info" style="margin-top: 15px;">
+                        <span>⚙️</span>
+                        <div>
+                            <strong>Token计数来源配置：</strong>
+                            <div style="margin-top: 10px;">
+                                <label style="display: flex; align-items: center; margin-bottom: 8px;">
+                                    <input type="radio" name="token_count_source" value="local" id="token-source-local" style="margin-right: 8px;">
+                                    <span>本地计算（使用上述分词器进行精确计算）</span>
+                                </label>
+                                <label style="display: flex; align-items: center;">
+                                    <input type="radio" name="token_count_source" value="api" id="token-source-api" checked style="margin-right: 8px;">
+                                    <span>API返回（优先使用API返回的token统计，更准确）</span>
+                                </label>
+                            </div>
+                            <small style="display: block; margin-top: 8px; color: var(--text-dim);">
+                                推荐使用"API返回"模式，Direct API模式下会优先使用API返回的usage信息
+                            </small>
+                        </div>
+                    </div>
+                    <div id="tokenizer-mappings-list"></div>
+                </div>
+            </div>
+
+            <!-- ID捕获页面 -->
+            <div id="id-capture" class="page">
+                <div class="page-header">
+                    <h2>ID 捕获</h2>
+                    <p>为已弃用但保留兼容的 LMArena 模式一键捕获 Session ID</p>
+                </div>
+
+                <div class="card">
+                    <div class="alert alert-info">
+                        <span>ℹ️</span>
+                        <div>
+                            <strong>使用说明（仅 LMArena 兼容模式）：</strong>
+                            <ol style="margin-top: 10px; padding-left: 20px; color: var(--text-dim);">
+                                <li>确保浏览器已连接（油猴脚本已激活）</li>
+                                <li>选择捕获模式（Direct Chat 或 Battle）</li>
+                                <li>如果是Battle模式，选择目标（A或B）</li>
+                                <li>点击下方"开始捕获"按钮</li>
+                                <li><strong style="color: var(--accent);">在LMArena页面找到已有对话，点击Retry按钮（刷新按钮）</strong></li>
+                                <li>捕获到的ID将自动显示配置窗口</li>
+                            </ol>
+                            <div style="margin-top: 10px; padding: 10px; background: rgba(255, 165, 0, 0.1); border-left: 3px solid orange; border-radius: 4px;">
+                                <strong style="color: orange;">⚠️ 重要：</strong>必须点击<strong>Retry按钮</strong>（对话右侧的刷新图标），而不是发送新消息！
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="padding: 20px 0;">
+                        <h4 style="margin-bottom: 15px; color: var(--text-main);">选择捕获模式</h4>
+                        <div class="capture-options">
+                            <label class="radio-card selected" onclick="selectCaptureMode('direct_chat', this)">
+                                <input type="radio" name="capture_mode" value="direct_chat" checked>
+                                <div class="radio-card-content">
+                                    <div class="radio-card-title">Direct Chat</div>
+                                    <div class="radio-card-desc">直接对话模式</div>
+                                </div>
+                            </label>
+                            <label class="radio-card" onclick="selectCaptureMode('battle', this)">
+                                <input type="radio" name="capture_mode" value="battle">
+                                <div class="radio-card-content">
+                                    <div class="radio-card-title">Battle 模式</div>
+                                    <div class="radio-card-desc">对战模式</div>
+                                </div>
+                            </label>
+                        </div>
+
+                        <div id="battle-target-selection" style="display: none; margin-top: 20px;">
+                            <h4 style="margin-bottom: 15px; color: var(--text-main);">选择Battle目标</h4>
+                            <div class="capture-options">
+                                <label class="radio-card selected" onclick="selectBattleTarget('A', this)">
+                                    <input type="radio" name="battle_target" value="A" checked>
+                                    <div class="radio-card-content">
+                                        <div class="radio-card-title">Target A</div>
+                                        <div class="radio-card-desc">左侧助手</div>
+                                    </div>
+                                </label>
+                                <label class="radio-card" onclick="selectBattleTarget('B', this)">
+                                    <input type="radio" name="battle_target" value="B">
+                                    <div class="radio-card-content">
+                                        <div class="radio-card-title">Target B</div>
+                                        <div class="radio-card-desc">右侧助手</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="text-align: center; padding: 40px 0;">
+                        <button class="btn btn-primary" onclick="startIdCapture()" style="font-size: 1.1rem; padding: 15px 40px;">
+                            🎯 开始捕获
+                        </button>
+                        <div id="capture-status" style="margin-top: 20px;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 配置编辑页面 -->
+            <div id="config" class="page">
+                <div class="page-header">
+                    <h2>配置编辑</h2>
+                    <p>使用JSONC代码模式或友好表单模式编辑配置</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>config.jsonc</h3>
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <!-- 模式切换按钮 -->
+                            <div style="display: flex; gap: 5px; margin-right: 20px;">
+                                <button id="mode-jsonc-btn" class="btn" onclick="switchConfigMode('jsonc')">
+                                    📝 JSONC 模式
+                                </button>
+                                <button id="mode-form-btn" class="btn btn-primary" onclick="switchConfigMode('form')">
+                                    📋 表单模式
+                                </button>
+                            </div>
+                            <button class="btn" onclick="loadConfig()">
+                                🔄 重新加载
+                            </button>
+                            <button class="btn btn-success" onclick="saveConfig()">
+                                💾 保存配置
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- JSONC编辑器 -->
+                    <div id="config-jsonc-editor" style="display: none;">
+                        <div class="form-group">
+                            <textarea id="config-editor" class="form-input" placeholder="加载配置中..."></textarea>
+                        </div>
+                    </div>
+                    
+                    <!-- 表单编辑器 -->
+                    <div id="config-form-editor" style="display: block; max-height: 70vh; overflow-y: auto;">
+                        <div id="config-form-content"><p style="color: var(--text-dim); text-align: center; padding: 40px;">正在加载配置...</p></div>
+                    </div>
+                    
+                    <div id="config-message"></div>
+                </div>
+            </div>
+
+            <!-- Token计算器页面 -->
+            <div id="token-calculator" class="page">
+                <iframe
+                    src="/token_calculator"
+                    style="width: 100%; height: calc(100vh - 100px); border: none; background: var(--bg-deep);"
+                    title="Token计算器"
+                ></iframe>
+            </div>
+
+            <!-- API Key 管理页面 -->
+            <div id="api-keys" class="page">
+                <div class="page-header">
+                    <h2>API Key 管理</h2>
+                    <p>创建和管理访客 API Key，控制模型访问权限和请求频率</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>API Key 列表</h3>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-primary" onclick="showCreateApiKeyModal()">
+                                ➕ 创建 API Key
+                            </button>
+                            <button class="btn" onclick="loadApiKeys()">
+                                🔄 刷新
+                            </button>
+                        </div>
+                    </div>
+                    <div class="alert alert-info">
+                        <span>ℹ️</span>
+                        <div>
+                            <strong>访客 Key 说明：</strong>这些 Key 只能调用 API（聊天补全、模型列表），无法访问管理面板。
+                            每个 Key 可以限制允许使用的模型和每分钟请求数(RPM)。
+                        </div>
+                    </div>
+                    <div id="api-keys-list">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">🔑</div>
+                            <p>尚未创建任何 API Key</p>
+                            <p style="font-size: 0.875rem; margin-top: 10px;">点击上方"创建 API Key"按钮开始</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 创建/编辑 API Key 模态框 -->
+            <div id="apikey-modal" class="modal">
+                <div class="modal-content" style="max-width: 650px;">
+                    <div class="modal-header">
+                        <h3 id="apikey-modal-title">创建 API Key</h3>
+                        <button class="close-btn" onclick="closeApiKeyModal()">×</button>
+                    </div>
+                    <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+                        <div class="form-group">
+                            <label class="form-label">名称 *</label>
+                            <input type="text" id="apikey-name" class="form-input" placeholder="例如: 小明的Key、测试用Key">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">描述</label>
+                            <input type="text" id="apikey-description" class="form-input" placeholder="可选的备注说明">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">RPM 限制（每分钟请求数）</label>
+                            <input type="number" id="apikey-rpm" class="form-input" value="0" min="0" placeholder="0 = 不限制">
+                            <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                设为 0 表示不限制。建议设置合理的值以防止滥用。
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="apikey-enabled" checked style="margin-right: 8px;">
+                                启用此 Key
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">允许的模型</label>
+                            <small style="color: var(--text-dim); display: block; margin-bottom: 10px;">
+                                不选择任何模型 = 允许使用所有模型。勾选后仅允许使用选中的模型。
+                            </small>
+                            <div style="margin-bottom: 10px; display: flex; gap: 8px;">
+                                <button class="btn btn-sm" onclick="apiKeySelectAllModels()">全选</button>
+                                <button class="btn btn-sm" onclick="apiKeyDeselectAllModels()">全不选</button>
+                                <input type="text" id="apikey-model-search" class="form-input" placeholder="🔍 搜索模型..."
+                                    style="flex: 1; padding: 6px 10px; font-size: 0.8rem;" oninput="filterApiKeyModels()">
+                            </div>
+                            <div id="apikey-models-checklist" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 6px; padding: 10px; background: var(--surface-2);">
+                                <div style="text-align: center; color: var(--text-dim); padding: 20px;">加载模型列表中...</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn" onclick="closeApiKeyModal()">取消</button>
+                        <button class="btn btn-primary" id="apikey-save-btn" onclick="saveApiKey()">创建</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- API Key 创建成功提示模态框 -->
+            <div id="apikey-secret-modal" class="modal">
+                <div class="modal-content" style="max-width: 550px;">
+                    <div class="modal-header">
+                        <h3>🔑 API Key 创建成功</h3>
+                        <button class="close-btn" onclick="closeApiKeySecretModal()">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="alert alert-success" style="margin-bottom: 15px;">
+                            <span>✅</span>
+                            <div><strong>API Key 已创建成功！</strong></div>
+                        </div>
+                        <div class="alert alert-danger">
+                            <span>⚠️</span>
+                            <div><strong>请立即复制保存以下密钥，它只会显示这一次！</strong></div>
+                        </div>
+                        <div style="margin-top: 15px;">
+                            <label class="form-label">API Key Secret</label>
+                            <div style="display: flex; gap: 8px;">
+                                <input type="text" id="apikey-secret-display" class="form-input" readonly
+                                    style="font-family: monospace; font-size: 0.9rem; background: var(--surface-3);">
+                                <button class="btn btn-primary" onclick="copyApiKeySecret()" style="white-space: nowrap;">
+                                    📋 复制
+                                </button>
+                            </div>
+                        </div>
+                        <div id="apikey-copy-success" style="display: none; margin-top: 10px; color: #10b981; font-size: 0.875rem;">
+                            ✅ 已复制到剪贴板
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-primary" onclick="closeApiKeySecretModal()">我已保存好了</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 监控面板页面 -->
+            <!-- 🔧 B8 修复：懒加载 iframe，切到 tab 时才设置 src，切走时清空 -->
+            <div id="monitor" class="page">
+                <iframe
+                    id="monitor-iframe"
+                    style="width: 100%; height: calc(100vh - 100px); border: none; background: var(--bg-deep);"
+                    title="监控面板"
+                ></iframe>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加/编辑模型模态框 -->
+    <div id="model-modal" class="modal">
+        <div class="modal-content" style="max-width: 950px;">
+            <div class="modal-header">
+                <h3 id="modal-title">添加模型</h3>
+                <button class="close-btn" onclick="closeModelModal()">×</button>
+            </div>
+            <div class="modal-body" style="max-height: 75vh; overflow-y: auto;">
+                <div class="form-group">
+                    <label class="form-label">模型名称 *</label>
+                    <input type="text" id="model-name" class="form-input" placeholder="例如: claude-3-5-sonnet">
+                </div>
+                
+                <!-- 配置类型选择 -->
+                <div class="form-group">
+                    <label class="form-label">配置类型</label>
+                    <select id="config-type" class="form-select" onchange="toggleConfigType()">
+                        <option value="direct_api">Direct API 模式（默认/推荐）</option>
+                        <option value="lmarena">LMArena 模式（已弃用，保留兼容）</option>
+                    </select>
+                </div>
+                
+                <!-- LMArena 配置（已弃用，保留兼容） -->
+                <div id="lmarena-config" style="display: block;">
+                    <div class="alert alert-info" style="margin-bottom: 15px;">
+                        <span>⚠️</span>
+                        <div>
+                            <strong>LMArena 模式已弃用：</strong>该模式仅为兼容旧配置而保留，新增模型请优先使用 Direct API 模式。
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Session ID</label>
+                        <input type="text" id="session-id" class="form-input" placeholder="从LMArena获取的会话ID">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">模式</label>
+                        <select id="mode" class="form-select" onchange="toggleBattleTarget()">
+                            <option value="direct_chat">Direct Chat</option>
+                            <option value="battle">Battle</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="battle-target-group" style="display: none;">
+                        <label class="form-label">Battle Target</label>
+                        <select id="battle-target" class="form-select">
+                            <option value="A">A</option>
+                            <option value="B">B</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">模型类型</label>
+                        <select id="model-type" class="form-select">
+                            <option value="text">文本模型</option>
+                            <option value="image">图像模型</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">显示名称</label>
+                        <input type="text" id="lmarena-display-name" class="form-input" placeholder="留空则使用模型名称">
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            在统计中显示的名称
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">最高温度限制（可选）</label>
+                        <input type="number" step="0.1" min="0" max="2" id="lmarena-max-temperature" class="form-input" placeholder="留空则不限制">
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            如果请求的温度超过此值，将自动限制为此值。例如 Claude 最高温度为 1.0
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">最大输出Token限制（可选）</label>
+                        <input type="number" step="1" min="1" id="lmarena-max-tokens" class="form-input" placeholder="留空则不限制">
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            如果请求的max_tokens超过此值，将自动限制为此值。不同模型最大输出Token不同，配置后可避免前端每次切换模型都要改
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label" style="margin-bottom: 10px;">计费配置（可选）</label>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                            <div>
+                                <label style="font-size: 0.875rem; color: var(--text-dim);">输入单价</label>
+                                <input type="number" step="0.01" id="lmarena-pricing-input" class="form-input" placeholder="0.00">
+                            </div>
+                            <div>
+                                <label style="font-size: 0.875rem; color: var(--text-dim);">输出单价</label>
+                                <input type="number" step="0.01" id="lmarena-pricing-output" class="form-input" placeholder="0.00">
+                            </div>
+                            <div>
+                                <label style="font-size: 0.875rem; color: var(--text-dim);">计价单位</label>
+                                <input type="number" id="lmarena-pricing-unit" class="form-input" value="1000000" placeholder="1000000">
+                            </div>
+                            <div>
+                                <label style="font-size: 0.875rem; color: var(--text-dim);">货币</label>
+                                <select id="lmarena-pricing-currency" class="form-select">
+                                    <option value="USD">USD (美元)</option>
+                                    <option value="CNY">CNY (人民币)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
+                                <input type="number" step="0.0001" id="lmarena-pricing-cached-input" class="form-input" placeholder="=输入单价">
+                            </div>
+                            <div></div>
+                        </div>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            配置计费后可以在统计中看到成本信息
+                        </small>
+                    </div>
+                </div>
+                
+                <!-- Direct API 配置 -->
+                <div id="direct-api-config" style="display: none;">
+                    <div class="alert alert-info" style="margin-bottom: 15px;">
+                        <span>ℹ️</span>
+                        <div>
+                            <strong>透传模式：</strong>请求和响应将原样转发，不做任何格式转换<br>
+                            <small style="opacity: 0.8;">适合OpenAI兼容的API（DeepSeek、智谱等）</small>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">API类型</label>
+                        <select id="api-type" class="form-select">
+                            <option value="direct_api">OpenAI兼容 (推荐)</option>
+                            <option value="gemini_native">Gemini原生格式</option>
+                        </select>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            选择API接口格式。Gemini原生格式使用Google官方API，更准确地计算Token
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">API Base URL</label>
+                        <input type="text" id="api-base-url" class="form-input" placeholder="http://127.0.0.1:7861 或 https://api.openai.com/v1">
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            API服务器地址。OpenAI兼容格式必填；Gemini原生格式可选（留空使用Google官方地址，填写可用于本地反代）
+                        </small>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">模型端点（可选）</label>
+                        <input type="text" id="endpoint-path" class="form-input" placeholder="/chat/completions 或 /messages">
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            默认 <code>/chat/completions</code>。如果对接 Claude 原生接口，可填写 <code>/messages</code>。
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">API Key（支持多Key轮询）</label>
+                        <div id="model-api-keys-list">
+                            <!-- 动态生成的 API Key 输入行 -->
+                        </div>
+                        <div style="display: flex; gap: 8px; margin-top: 8px;">
+                            <button type="button" class="btn btn-sm" onclick="addApiKeyRow()">
+                                ➕ 添加 API Key
+                            </button>
+                            <button type="button" class="btn btn-sm btn-success" id="test-keys-btn" onclick="testCurrentModelKeys()">
+                                🔑 测试所有 Key
+                            </button>
+                        </div>
+                        <div id="key-test-results" style="display: none; margin-top: 10px;"></div>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            可添加多个 API Key 实现自动轮询。本地反代等无需认证的场景可留空
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">目标模型ID</label>
+                        <div style="display: flex; gap: 10px; margin-bottom: 5px;">
+                            <input type="text" id="model-id" class="form-input" placeholder="留空则使用模型名称">
+                            <button type="button" class="btn btn-primary" onclick="fetchModelsFromAPI(event)" style="white-space: nowrap; flex-shrink: 0;">
+                                📋 从API获取
+                            </button>
+                        </div>
+                        <div id="model-select-container" style="display: none; margin-top: 10px;">
+                            <div style="position: relative; margin-bottom: 8px;">
+                                <input type="text" id="model-search" class="form-input" placeholder="🔍 搜索模型..." oninput="filterModelList()" style="padding-left: 10px;">
+                                <span id="model-search-count" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; color: var(--text-dim);"></span>
+                            </div>
+                            <select id="model-select" class="form-select" onchange="selectModelFromList()" size="8" style="height: auto; max-height: 240px;">
+                                <option value="">-- 选择模型 --</option>
+                            </select>
+                        </div>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            发送给API的实际模型ID（如 gpt-4o）。点击"从API获取"可自动加载可用模型
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">显示名称</label>
+                        <input type="text" id="display-name" class="form-input" placeholder="留空则使用模型名称">
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            在统计中显示的名称
+                        </small>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">
+                            <input type="checkbox" id="passthrough" checked style="margin-right: 8px;">
+                            启用透传模式（推荐）
+                        </label>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            完全透传请求和响应，零延迟。仅适用于OpenAI兼容API
+                        </small>
+                    </div>
+                    
+                    <!-- ===== 消息转换配置（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 15px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>🔄 消息转换</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label class="form-label">
+                                    <input type="checkbox" id="convert-system-to-user" style="margin-right: 8px;">
+                                    将 System 消息转为 User 消息
+                                </label>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    将所有 <code>role: "system"</code> 的消息转换为 <code>role: "user"</code>。
+                                    适用于不支持 system 角色的模型（如某些开源模型或特定API）
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- ===== 预填充/续写模式配置（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>📝 预填充/续写模式</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="form-group">
+                                <label class="form-label">
+                                    <input type="checkbox" id="enable-prefix" style="margin-right: 8px;">
+                                    启用 Prefix 模式（DeepSeek）
+                                </label>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    为最后一条assistant消息添加 <code>prefix: true</code> 参数（适用于DeepSeek等支持续写的模型）
+                                </small>
+                            </div>
+                            
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label class="form-label">
+                                    <input type="checkbox" id="enable-partial" style="margin-right: 8px;">
+                                    启用 Partial 模式（Kimi K2）
+                                </label>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    为最后一条assistant消息添加 <code>"partial": true</code> 参数（适用于Kimi K2等模型的预填充续写）
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- ===== 思维链配置（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>🧠 思维链配置</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="form-group">
+                                <label class="form-label">
+                                    <input type="checkbox" id="enable-thinking" checked style="margin-right: 8px;">
+                                    启用思维链模式
+                                </label>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    启用Gemini思维链输出（thinkingConfig），让模型在回答前进行深度思考。默认启用
+                                </small>
+                            </div>
+                            
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">思维链Token预算</label>
+                                    <input type="number" id="thinking-budget" class="form-input" value="20000" placeholder="20000">
+                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        默认20000，仅在启用思维链时生效
+                                    </small>
+                                </div>
+                                
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">思考内容分隔符</label>
+                                    <input type="text" id="thinking-separator" class="form-input" placeholder="例如: 【思考结束】">
+                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        分隔思考与正文，留空不分隔
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- ===== 参数限制配置（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>⚙️ 参数限制</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">最高温度限制</label>
+                                    <input type="number" step="0.1" min="0" max="2" id="max-temperature" class="form-input" placeholder="留空则不限制">
+                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        例如 Claude 最高温度为 1.0
+                                    </small>
+                                </div>
+                                
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">最大输出Token限制</label>
+                                    <input type="number" step="1" min="1" id="max-tokens" class="form-input" placeholder="留空则不限制">
+                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        不同模型最大输出Token不同
+                                    </small>
+                                </div>
+                            </div>
+                            
+                            <div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
+                                <label class="form-label">缓存Token统计模式</label>
+                                <select id="cached-tokens-mode" class="form-select">
+                                    <option value="off">关闭 - 不处理缓存Token</option>
+                                    <option value="forward">正向 - prompt + cached = 总输入（适合某些反代）</option>
+                                    <option value="reverse" selected>反向 - prompt已是总数，cached只记录（DeepSeek官方，默认）</option>
+                                </select>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    不同API返回cached_tokens的方式不同：<br>
+                                    • <strong>关闭</strong>：直接使用prompt_tokens，不处理缓存<br>
+                                    • <strong>正向</strong>：某些反代把cached单独返回，需要相加得到总输入<br>
+                                    • <strong>反向</strong>：DeepSeek官方API中prompt_tokens已包含全部，cached只是记录
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- ===== 自动重试配置（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>🔁 自动重试配置</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
+                                <span>ℹ️</span>
+                                <div>
+                                    遇到 <code>429/503</code> 或其他错误时自动重试。<strong>每次重试失败都会计入错误统计</strong>。
+                                </div>
+                            </div>
+
+                            <div style="margin-bottom: 12px;">
+                                <label style="display: flex; align-items: center;">
+                                    <input type="checkbox" id="auto-retry-enabled" onchange="toggleAutoRetryOptions()" style="margin-right: 8px;">
+                                    <span>启用模型级自动重试</span>
+                                </label>
+                            </div>
+
+                            <div id="auto-retry-options" style="display: none;">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
+                                    <div>
+                                        <label style="font-size: 0.875rem; color: var(--text-dim);">最大重试次数</label>
+                                        <input type="number" id="auto-retry-max-retries" class="form-input" min="0" max="20" value="2">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 0.875rem; color: var(--text-dim);">重试间隔(秒)</label>
+                                        <input type="number" id="auto-retry-delay-seconds" class="form-input" min="0" step="0.1" value="2">
+                                    </div>
+                                </div>
+
+                                <div style="display: grid; grid-template-columns: 1fr; gap: 8px;">
+                                    <label style="display: flex; align-items: center;">
+                                        <input type="checkbox" id="auto-retry-on-429" style="margin-right: 8px;" checked>
+                                        <span>429 Too Many Requests 时重试</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center;">
+                                        <input type="checkbox" id="auto-retry-on-503" style="margin-right: 8px;" checked>
+                                        <span>503 Service Unavailable 时重试</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center;">
+                                        <input type="checkbox" id="auto-retry-on-other-errors" style="margin-right: 8px;">
+                                        <span>其他错误（4xx/5xx）时也重试</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ===== 自定义参数（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>🔧 自定义参数</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label class="form-label">自定义参数（JSON格式）</label>
+                                <textarea id="custom-params" class="form-input" rows="3" placeholder='例如: {"chat_template_kwargs": {"thinking": true}}'></textarea>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    输入JSON格式的额外参数，这些参数将直接传递给API
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- ===== 计费配置（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>💰 计费配置</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 10px;">
+                                <div>
+                                    <label style="font-size: 0.875rem; color: var(--text-dim);">输入单价</label>
+                                    <input type="number" step="0.01" id="pricing-input" class="form-input" placeholder="0.00">
+                                </div>
+                                <div>
+                                    <label style="font-size: 0.875rem; color: var(--text-dim);">输出单价</label>
+                                    <input type="number" step="0.01" id="pricing-output" class="form-input" placeholder="0.00">
+                                </div>
+                                <div>
+                                    <label style="font-size: 0.875rem; color: var(--text-dim);">计价单位</label>
+                                    <input type="number" id="pricing-unit" class="form-input" value="1000000" placeholder="1000000">
+                                </div>
+                                <div>
+                                    <label style="font-size: 0.875rem; color: var(--text-dim);">货币</label>
+                                    <select id="pricing-currency" class="form-select">
+                                        <option value="USD">USD</option>
+                                        <option value="CNY">CNY</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
+                                    <input type="number" step="0.0001" id="pricing-cached-input" class="form-input" placeholder="=输入单价">
+                                </div>
+                            </div>
+                            <small style="color: var(--text-dim); display: block; margin-top: 8px;">
+                                例如：OpenAI GPT-4o 输入 2.5/百万token = 输入单价2.5, 单位1000000；缓存命中通常为输入的 1/2~1/10（如 1.25）
+                            </small>
+                        </div>
+                    </div>
+                    
+                    <!-- ===== 图片压缩配置（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>🖼️ 图片压缩配置</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div style="margin-bottom: 15px;">
+                                <label style="display: flex; align-items: center;">
+                                    <input type="checkbox" id="img-compression-enabled" style="margin-right: 8px;">
+                                    <span>启用模型级别图片压缩</span>
+                                </label>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    为此模型单独配置图片压缩规则，优先级高于全局配置
+                                </small>
+                            </div>
+                            
+                            <div id="img-compression-options" style="display: none;">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                                    <div>
+                                        <label style="font-size: 0.875rem; color: var(--text-dim);">目标格式</label>
+                                        <select id="img-target-format" class="form-select">
+                                            <option value="">保持原格式</option>
+                                            <option value="jpg">JPG</option>
+                                            <option value="webp">WEBP</option>
+                                            <option value="png">PNG</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 0.875rem; color: var(--text-dim);">压缩质量</label>
+                                        <input type="number" id="img-quality" class="form-input" min="1" max="100" placeholder="80">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 0.875rem; color: var(--text-dim);">目标大小(KB)</label>
+                                        <input type="number" id="img-target-size-kb" class="form-input" min="10" placeholder="500">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 0.875rem; color: var(--text-dim);">最大宽度(px)</label>
+                                        <input type="number" id="img-max-width" class="form-input" min="100" placeholder="1920">
+                                    </div>
+                                </div>
+                                
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                                    <div>
+                                        <label style="font-size: 0.875rem; color: var(--text-dim);">最大高度(px)</label>
+                                        <input type="number" id="img-max-height" class="form-input" min="100" placeholder="1080">
+                                    </div>
+                                    <div style="display: flex; align-items: flex-end;">
+                                        <label style="display: flex; align-items: center;">
+                                            <input type="checkbox" id="img-convert-png-to-jpg" style="margin-right: 8px;">
+                                            <span style="font-size: 0.875rem;">PNG自动转JPG</span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- ===== 系统提示词注入（可折叠） ===== -->
+                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
+                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
+                            <h4>🎭 系统提示词注入（伪装身份）</h4>
+                            <span class="collapsible-toggle">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
+                                <span>💡</span>
+                                <div>
+                                    <strong>用途说明：</strong>通过在 system 消息中注入特定提示词，可以伪装成官方客户端（如 Antigravity），
+                                    从而绕过某些 API 的身份验证检测。
+                                </div>
+                            </div>
+                            
+                            <div style="margin-bottom: 15px;">
+                                <label style="display: flex; align-items: center;">
+                                    <input type="checkbox" id="system-injection-enabled" style="margin-right: 8px;">
+                                    <span>启用系统提示词注入</span>
+                                </label>
+                            </div>
+                            
+                            <div id="system-injection-options" style="display: none;">
+                                <div class="form-group" style="margin-bottom: 15px;">
+                                    <label class="form-label">注入位置</label>
+                                    <select id="system-injection-position" class="form-select">
+                                        <option value="before_system">在 System 消息前（推荐）</option>
+                                        <option value="after_system">在 System 消息后</option>
+                                        <option value="replace_system">替换 System 消息</option>
+                                    </select>
+                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        "前置"模式会将注入内容放在 system 消息的最前面，确保身份信息优先被匹配
+                                    </small>
+                                </div>
+                                
+                                <div class="form-group" style="margin-bottom: 10px;">
+                                    <label class="form-label">预设模板</label>
+                                    <select id="system-injection-preset" class="form-select" onchange="applySystemInjectionPreset()">
+                                        <option value="">-- 选择预设 --</option>
+                                        <option value="antigravity">Antigravity 官方身份</option>
+                                        <option value="custom">自定义内容</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">注入内容</label>
+                                    <textarea id="system-injection-content" class="form-input" rows="4" placeholder="输入要注入的系统提示词内容..."></textarea>
+                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        这段内容会被注入到请求的 system 消息中
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeModelModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveModel()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 🎯 新增：捕获ID后的模型配置模态框 -->
+    <div id="capture-config-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>配置捕获的模型（LMArena 兼容）</h3>
+                <button class="close-btn" onclick="closeCaptureConfigModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-success" style="margin-bottom: 20px;">
+                    <span>✅</span>
+                    <div>
+                        <strong>ID捕获成功！</strong><br>
+                        <span id="captured-ids-display"></span>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">模型名称 *</label>
+                    <input type="text" id="capture-model-name" class="form-input" placeholder="例如: claude-3-5-sonnet">
+                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                        这个名称将用于API调用时指定模型
+                    </small>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">模型类型</label>
+                    <select id="capture-model-type" class="form-select">
+                        <option value="text">文本模型 (默认)</option>
+                        <option value="image">图像模型</option>
+                        <option value="search">搜索模型</option>
+                    </select>
+                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                        选择正确的类型以确保模型正常工作
+                    </small>
+                </div>
+                
+                <div id="capture-mode-info" style="margin-top: 15px; padding: 10px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+                    <div style="font-size: 0.875rem; color: var(--text-dim);">
+                        <strong>捕获信息：</strong><br>
+                        模式: <span id="capture-mode-display"></span><br>
+                        <span id="capture-target-display"></span>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeCaptureConfigModal()">取消</button>
+                <button class="btn btn-primary" onclick="saveCapturedModel()">保存配置</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

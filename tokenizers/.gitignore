@@ -1,0 +1,8 @@
+# 忽略tokenizer文件（用户自行下载）
+*.json
+*.txt
+*.model
+
+# 但保留README
+!README.md
+!.gitignore

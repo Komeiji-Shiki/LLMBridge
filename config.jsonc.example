@@ -1,0 +1,56 @@
+{
+  "version": "1.5.2",
+  "server_port": 5102,
+  "exchange_rate": {
+    "USD_TO_CNY": 7.2
+  },
+  "enable_ipv6": true,
+  // Web 管理面板的访问密码
+  "web_access_key": "YOUR_PASSWORD_HERE",
+  // LMArena 会话 ID（留空则不集成 LMArena）
+  "session_id": "",
+  "id_updater_last_mode": "battle",
+  "id_updater_battle_target": "B",
+  "id_updater_auto_save_mode": "model",
+  "enable_auto_retry": false,
+  "retry_timeout_seconds": 60,
+  "empty_response_retry": {
+    "enabled": false,
+    "max_retries": 5,
+    "base_delay_ms": 100,
+    "max_delay_ms": 3000,
+    "show_retry_info_to_client": true
+  },
+  "bypass_enabled": false,
+  "image_optimization": {
+    "enabled": true,
+    "strip_metadata": true,
+    "convert_to_webp": true,
+    "webp_quality": 70,
+    "max_width": 4096,
+    "max_height": 4096
+  },
+  "force_stream_flush": true,
+  "stream_response_timeout_seconds": 3000,
+  "api_call_timeout_seconds": 3000,
+  "first_chunk_timeout_seconds": 600,
+  "max_concurrent_downloads": 20,
+    "connection_pool": {
+      "total_limit": 50,
+      "per_host_limit": 20
+    },
+    "memory_management": {
+      "gc_threshold_mb": 80,
+      "image_cache_max_size": 100,
+      "image_cache_ttl_seconds": 600
+    },
+  },
+  "enable_lmarena_reasoning": true,
+  "reasoning_output_mode": "openai",
+  "preserve_streaming": true,
+  // Tokenizer 配置：为每个模型指定使用的 tokenizer 类型
+  // 支持: anthropic / google / deepseek / tiktoken / custom_xxx
+  "tokenizer_config": {
+    "YOUR_MODEL_NAME": "anthropic"
+  }
+}

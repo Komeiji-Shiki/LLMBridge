@@ -1,0 +1,68 @@
+# ==================== 测试 & 调试 ====================
+/test
+/Debug
+stress_test.py
+test_openai_request.py
+test_multi_file_upload.py
+test_multimodal_request.py
+test_stream_response.py
+test_antigravity_response.py
+原始openai格式.txt
+/另
+/webdev反代
+/归档/
+
+# ==================== 日志 & 数据库 ====================
+/logs/
+logs/
+*.jsonl
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ==================== 媒体 & 上传 ====================
+/downloaded_images/
+downloaded_images/
+/uploads/
+uploads/
+file_bed_server/uploads/
+
+# ==================== Python 缓存 ====================
+__pycache__/
+*.pyc
+*.pyo
+.cache/
+
+# ==================== 环境 & 依赖 ====================
+.env
+.env.local
+node_modules/
+
+# ==================== 敏感配置（不提交，用 .example.json 模板） ====================
+api_keys.json
+model_endpoint_map.json
+custom_tokenizers.json
+config.jsonc
+models.json
+start_tunnel.cmd
+
+# ==================== IDE & OS ====================
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+# ==================== 临时诊断脚本 ====================
+check_old_tokens.py
+check_stats.py
+check_tokens.py
+verify_token_stats.py
+full_token_check.py
+merge_weather.py
+organize_images.py
+backfill_tokens.py
+update_stats_with_old_tokens.py
+performance_analysis.md

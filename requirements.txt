@@ -1,0 +1,23 @@
+# Core dependencies
+fastapi
+uvicorn[standard]
+requests
+packaging
+aiohttp
+httpx
+Pillow
+psutil
+watchdog
+typing_extensions
+
+# HTTP/2 support (C9: 消除浏览器 6 连接限制)
+h2
+
+# Cache management
+cachetools
+
+# Token counter dependencies (optional)
+tiktoken
+anthropic
+google-generativeai
+transformers
