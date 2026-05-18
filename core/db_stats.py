@@ -151,15 +151,22 @@ class StatsDB:
             rpm_query = '''
                 SELECT model, COUNT(*) as req_count, SUM(total_tokens) as total_tokens
                 FROM requests
-                WHERE timestamp >= ?
+                WHERE timestamp >= ? AND timestamp <= ?
                 GROUP BY model
             '''
-            cursor.execute(rpm_query, [rpm_start_ts])
+            cursor.execute(rpm_query, [rpm_start_ts, now_ts])
             for rpm_row in cursor.fetchall():
                 rpm_data[rpm_row[0]] = {
                     'request_count': rpm_row[1],
                     'total_tokens': rpm_row[2] or 0
                 }
+
+            rate_stats = {
+                'period': 'hour' if rpm_period == 'hour' else 'day',
+                'minutes': rpm_minutes,
+                'request_count': sum(item['request_count'] for item in rpm_data.values()),
+                'total_tokens': sum(item['total_tokens'] for item in rpm_data.values())
+            }
             
             model_stats = []
             for row in model_rows:
@@ -357,6 +364,7 @@ class StatsDB:
                 },
                 'cost_by_currency': cost_by_currency,
                 'exchange_rate': {'USD_TO_CNY': USD_TO_CNY, 'CNY_TO_USD': CNY_TO_USD},
+                'rate_stats': rate_stats,
                 'models_count': len(model_stats)
             }
             

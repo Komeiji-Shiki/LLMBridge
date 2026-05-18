@@ -13,6 +13,8 @@ from datetime import datetime
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
+from utils.monitor_params import build_monitor_request_params
+
 logger = logging.getLogger(__name__)
 
 
@@ -207,12 +209,7 @@ async def handle_lmarena_request(
         session_id=session_id[-6:] if session_id else None,
         mode=mode_override or CONFIG.get("id_updater_last_mode", "direct_chat"),
         messages=openai_req.get("messages", []),
-        params={
-            "temperature": openai_req.get("temperature"),
-            "top_p": openai_req.get("top_p"),
-            "max_tokens": openai_req.get("max_tokens"),
-            "streaming": openai_req.get("stream", False)
-        }
+        params=build_monitor_request_params(openai_req)
     )
     
     # 广播请求开始

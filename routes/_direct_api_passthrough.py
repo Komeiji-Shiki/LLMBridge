@@ -13,13 +13,18 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from core.constants import TimeoutDefaults
+from utils.monitor_params import build_monitor_request_params
 from ._direct_api_utils import (
+    append_tool_call_delta,
+    build_response_message,
     extract_complete_sse_lines,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
+    extract_tool_calls_from_message,
+    finalize_tool_calls,
     is_error_json,
-    normalize_to_openai_error,
     map_upstream_error_to_status_code,
+    normalize_to_openai_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +51,22 @@ async def handle_passthrough_direct(
     logger.info(f"[DIRECT_API_PASSTHROUGH] 启用透传模式")
 
     request_id = str(uuid.uuid4())
+    endpoint_path = endpoint_config.get("endpoint_path", "/chat/completions")
+    if not isinstance(endpoint_path, str) or not endpoint_path.strip():
+        endpoint_path = "/chat/completions"
+    endpoint_path = endpoint_path.strip()
+    if not endpoint_path.startswith("/"):
+        endpoint_path = "/" + endpoint_path
+
+    monitor_extra_params = {"upstream_model": target_model_id, "endpoint_path": endpoint_path}
+    custom_params = endpoint_config.get("custom_params", {})
+    if isinstance(custom_params, dict):
+        monitor_extra_params.update(custom_params)
+    if endpoint_config.get("enable_thinking", True):
+        monitor_extra_params["thinkingConfig"] = {
+            "thinkingBudget": endpoint_config.get("thinking_budget", 20000),
+            "includeThoughts": True
+        }
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -54,12 +75,7 @@ async def handle_passthrough_direct(
         session_id=None,
         mode="direct_api_passthrough",
         messages=openai_req.get("messages", []),
-        params={
-            "temperature": openai_req.get("temperature"),
-            "top_p": openai_req.get("top_p"),
-            "max_tokens": openai_req.get("max_tokens"),
-            "streaming": openai_req.get("stream", False)
-        }
+        params=build_monitor_request_params(openai_req, extra=monitor_extra_params)
     )
 
     await monitoring_service.broadcast_to_monitors({
@@ -75,13 +91,6 @@ async def handle_passthrough_direct(
             openai_req, model_name, target_model_id, endpoint_config)
 
         is_stream = openai_req.get("stream", False)
-        endpoint_path = endpoint_config.get("endpoint_path", "/chat/completions")
-        if not isinstance(endpoint_path, str) or not endpoint_path.strip():
-            endpoint_path = "/chat/completions"
-        endpoint_path = endpoint_path.strip()
-        if not endpoint_path.startswith("/"):
-            endpoint_path = "/" + endpoint_path
-
         logger.info(f"[DIRECT_API_PASSTHROUGH] 使用上游端点: {endpoint_path}")
 
         if is_stream:
@@ -227,6 +236,7 @@ async def _handle_passthrough_stream(
         upstream_done_received = False
         content_parts = []
         reasoning_parts = []
+        tool_call_accumulator = {}
         input_tokens = 0
         output_tokens = 0
         total_tokens = 0
@@ -249,16 +259,19 @@ async def _handle_passthrough_stream(
             partial_content = ''.join(content_parts)
             partial_reasoning = ''.join(reasoning_parts)
             local_input_tokens = input_tokens or 0
+            partial_tool_calls = finalize_tool_calls(tool_call_accumulator)
             local_output_tokens = output_tokens or (
                 len(partial_reasoning + partial_content) // 4
-                if (partial_reasoning or partial_content) else 0)
+                if (partial_reasoning or partial_content or partial_tool_calls) else 0)
 
             monitoring_service.request_end(
                 request_id=request_id, success=False,
                 input_tokens=local_input_tokens, output_tokens=local_output_tokens,
                 cached_tokens=cached_tokens, error=error_msg,
                 response_content=partial_content, reasoning_content=partial_reasoning,
-                full_messages=full_messages)
+                full_messages=full_messages,
+                response_message=build_response_message(partial_content, partial_reasoning, partial_tool_calls),
+                response_tool_calls=partial_tool_calls)
             request_end_called = True
 
         async def _handle_client_disconnect():
@@ -330,7 +343,7 @@ async def _handle_passthrough_stream(
                 nonlocal input_tokens, output_tokens, total_tokens, reasoning_tokens
                 nonlocal error_msg, upstream_error_detected
                 nonlocal decode_buffer
-                nonlocal content_parts, reasoning_parts
+                nonlocal content_parts, reasoning_parts, tool_call_accumulator
                 nonlocal cached_tokens
                 nonlocal upstream_done_received
                 nonlocal pending_line
@@ -418,11 +431,16 @@ async def _handle_passthrough_stream(
                                 delta = chunk_json['choices'][0].get('delta', {})
                                 raw_content = delta.get('content', '')
                                 raw_reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
+                                raw_tool_calls = delta.get('tool_calls')
 
                                 message = chunk_json['choices'][0].get('message', {}) if isinstance(chunk_json['choices'][0], dict) else {}
                                 if isinstance(message, dict):
                                     raw_content = raw_content or message.get('content', '')
                                     raw_reasoning = raw_reasoning or message.get('reasoning_content', '') or message.get('reasoning', '')
+                                    raw_tool_calls = raw_tool_calls or extract_tool_calls_from_message(message)
+
+                                if raw_tool_calls:
+                                    append_tool_call_delta(tool_call_accumulator, raw_tool_calls)
 
                                 # thinking_separator 处理
                                 if thinking_separator and not split_done and raw_content:
@@ -664,6 +682,7 @@ async def _handle_passthrough_stream(
                 input_tokens=input_tokens, output_tokens=output_tokens,
                 cached_tokens=cached_tokens,
                 pricing=pricing_config) if pricing_config else {}
+            final_tool_calls = finalize_tool_calls(tool_call_accumulator)
 
             monitoring_service.request_end(
                 request_id=request_id, success=request_success,
@@ -671,7 +690,9 @@ async def _handle_passthrough_stream(
                 cached_tokens=cached_tokens, error=error_msg,
                 response_content=final_content,
                 reasoning_content=final_reasoning,
-                cost_info=cost_info, full_messages=full_messages)
+                cost_info=cost_info, full_messages=full_messages,
+                response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
+                response_tool_calls=final_tool_calls)
             await monitoring_service.broadcast_to_monitors({
                 "type": "request_end", "request_id": request_id,
                 "success": request_success})
@@ -810,7 +831,7 @@ async def _handle_passthrough_non_stream(
                 output_tokens = len(_extract_response_content(response_json) or "") // 4
 
         # 提取内容并应用思考分隔
-        content, reasoning_content, response_json = _extract_and_split_content(
+        content, reasoning_content, response_tool_calls, response_message, response_json = _extract_and_split_content(
             response_json, thinking_separator, direct_api_service)
 
         # 🔧 关键修复：_extract_and_split_content 可能修改了 response_json
@@ -828,7 +849,9 @@ async def _handle_passthrough_non_stream(
             cached_tokens=cached_tokens,
             response_content=content,
             reasoning_content=reasoning_content,
-            cost_info=cost_info, full_messages=full_messages)
+            cost_info=cost_info, full_messages=full_messages,
+            response_message=response_message,
+            response_tool_calls=response_tool_calls)
 
         await monitoring_service.broadcast_to_monitors({
             "type": "request_end", "request_id": request_id, "success": True})
@@ -980,10 +1003,13 @@ def _extract_and_split_content(response_json, thinking_separator, direct_api_ser
     """提取响应内容并应用思考分隔符"""
     content = ""
     reasoning_content = ""
+    tool_calls = None
+    response_message = None
     if "choices" in response_json and len(response_json["choices"]) > 0:
         message = response_json["choices"][0].get("message", {})
         content = message.get("content", "")
         reasoning_content = message.get("reasoning_content", "") or message.get("reasoning", "")
+        tool_calls = extract_tool_calls_from_message(message)
 
         if "reasoning" in message and "reasoning_content" not in message and reasoning_content:
             message["reasoning_content"] = message.pop("reasoning")
@@ -1000,4 +1026,5 @@ def _extract_and_split_content(response_json, thinking_separator, direct_api_ser
                 reasoning_content = reasoning_part
                 logger.info(f"[THINKING_SPLIT] 非流式响应已应用思考分隔")
 
-    return content, reasoning_content, response_json
+    response_message = build_response_message(content, reasoning_content, tool_calls)
+    return content, reasoning_content, tool_calls, response_message, response_json

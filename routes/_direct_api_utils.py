@@ -14,6 +14,116 @@ from core.config_loader import MODEL_ROUND_ROBIN_INDEX, MODEL_ROUND_ROBIN_LOCK
 logger = logging.getLogger(__name__)
 
 
+def append_tool_call_delta(tool_call_accumulator: dict, tool_calls):
+    """聚合 OpenAI 兼容流式响应中的 tool_calls 增量。"""
+    if not tool_calls:
+        return
+
+    if isinstance(tool_calls, dict):
+        tool_calls = [tool_calls]
+    if not isinstance(tool_calls, list):
+        return
+
+    for position, tool_call in enumerate(tool_calls):
+        if not isinstance(tool_call, dict):
+            continue
+
+        index = tool_call.get("index", position)
+        accumulator_key = str(index)
+        current = tool_call_accumulator.setdefault(accumulator_key, {"index": index})
+
+        tool_call_id = tool_call.get("id")
+        if tool_call_id:
+            current["id"] = tool_call_id
+
+        tool_call_type = tool_call.get("type")
+        if tool_call_type:
+            current["type"] = tool_call_type
+        elif "type" not in current:
+            current["type"] = "function"
+
+        function_delta = tool_call.get("function")
+        if isinstance(function_delta, dict):
+            function = current.setdefault("function", {})
+
+            function_name = function_delta.get("name")
+            if function_name:
+                existing_name = function.get("name", "")
+                if not existing_name:
+                    function["name"] = function_name
+                elif existing_name != function_name and not existing_name.endswith(function_name):
+                    function["name"] = existing_name + function_name
+
+            if "arguments" in function_delta:
+                arguments_part = function_delta.get("arguments")
+                if arguments_part is not None:
+                    function["arguments"] = f"{function.get('arguments', '')}{arguments_part}"
+
+        for key, value in tool_call.items():
+            if key in {"index", "id", "type", "function"}:
+                continue
+            if value is not None:
+                current[key] = value
+
+
+def finalize_tool_calls(tool_call_accumulator: dict):
+    """将聚合后的 tool_calls 转成稳定列表，空结果返回 None。"""
+    if not tool_call_accumulator:
+        return None
+
+    def _sort_key(item):
+        key, value = item
+        index = value.get("index", key) if isinstance(value, dict) else key
+        try:
+            return int(index)
+        except (TypeError, ValueError):
+            return 0
+
+    result = []
+    for _, tool_call in sorted(tool_call_accumulator.items(), key=_sort_key):
+        if not isinstance(tool_call, dict):
+            continue
+        clean_call = {key: value for key, value in tool_call.items() if value is not None}
+        clean_call.setdefault("type", "function")
+        result.append(clean_call)
+
+    return result or None
+
+
+def extract_tool_calls_from_message(message: dict):
+    """从非流式 assistant message 中提取 tool_calls，兼容 legacy function_call。"""
+    if not isinstance(message, dict):
+        return None
+
+    tool_calls = message.get("tool_calls")
+    if tool_calls:
+        accumulator = {}
+        append_tool_call_delta(accumulator, tool_calls)
+        return finalize_tool_calls(accumulator) or tool_calls
+
+    function_call = message.get("function_call")
+    if isinstance(function_call, dict):
+        return [{"type": "function", "function": function_call}]
+
+    return None
+
+
+def build_response_message(content, reasoning_content=None, tool_calls=None):
+    """构建用于监控面板展示的 assistant 响应消息。"""
+    message = {"role": "assistant"}
+
+    if reasoning_content:
+        message["reasoning_content"] = reasoning_content
+
+    if tool_calls:
+        message["content"] = content if content else None
+        message["tool_calls"] = tool_calls
+    else:
+        message["content"] = content or ""
+
+    return message
+
+
 # ============================================================
 # API Key 轮询
 # ============================================================

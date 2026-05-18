@@ -11,9 +11,13 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from core.constants import TimeoutDefaults
+from utils.monitor_params import build_monitor_request_params
 from ._direct_api_utils import (
+    append_tool_call_delta,
+    build_response_message,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
+    finalize_tool_calls,
     map_upstream_error_to_status_code,
 )
 
@@ -41,6 +45,28 @@ async def handle_gemini_native_direct(
 
     request_id = str(uuid.uuid4())
 
+    extra_kwargs = {}
+    custom_params = endpoint_config.get("custom_params", {})
+    if custom_params and isinstance(custom_params, dict):
+        extra_kwargs.update(custom_params)
+        logger.info(f"[GEMINI_NATIVE] 已添加自定义参数:")
+        for key, value in custom_params.items():
+            logger.info(f"  - {key}: {value}")
+
+    thinking_config = None
+    enable_thinking = endpoint_config.get("enable_thinking", True)
+    if enable_thinking:
+        thinking_budget = endpoint_config.get("thinking_budget", 20000)
+        thinking_config = {
+            "thinkingBudget": thinking_budget,
+            "includeThoughts": True
+        }
+        logger.info(f"[GEMINI_NATIVE] 已启用思维链模式 (budget={thinking_budget})")
+
+    monitor_extra_params = {"upstream_model": target_model_id, **extra_kwargs}
+    if thinking_config:
+        monitor_extra_params["thinking_config"] = thinking_config
+
     monitoring_service.request_start(
         request_id=request_id,
         model=display_name,
@@ -48,12 +74,7 @@ async def handle_gemini_native_direct(
         session_id=None,
         mode="gemini_native",
         messages=openai_req.get("messages", []),
-        params={
-            "temperature": openai_req.get("temperature"),
-            "top_p": openai_req.get("top_p"),
-            "max_tokens": openai_req.get("max_tokens"),
-            "streaming": openai_req.get("stream", False)
-        }
+        params=build_monitor_request_params(openai_req, extra=monitor_extra_params)
     )
 
     await monitoring_service.broadcast_to_monitors({
@@ -66,24 +87,6 @@ async def handle_gemini_native_direct(
     try:
         is_stream = openai_req.get("stream", False)
         logger.info(f"[GEMINI_NATIVE] 模型映射: '{model_name}' -> '{target_model_id}'")
-
-        extra_kwargs = {}
-        custom_params = endpoint_config.get("custom_params", {})
-        if custom_params and isinstance(custom_params, dict):
-            extra_kwargs.update(custom_params)
-            logger.info(f"[GEMINI_NATIVE] 已添加自定义参数:")
-            for key, value in custom_params.items():
-                logger.info(f"  - {key}: {value}")
-
-        thinking_config = None
-        enable_thinking = endpoint_config.get("enable_thinking", True)
-        if enable_thinking:
-            thinking_budget = endpoint_config.get("thinking_budget", 20000)
-            thinking_config = {
-                "thinkingBudget": thinking_budget,
-                "includeThoughts": True
-            }
-            logger.info(f"[GEMINI_NATIVE] 已启用思维链模式 (budget={thinking_budget})")
 
         gemini_generator = direct_api_service.call_gemini_native_api(
             api_key=api_key,
@@ -108,6 +111,7 @@ async def handle_gemini_native_direct(
             async def gemini_stream_generator():
                 content_parts = []
                 reasoning_parts = []
+                tool_call_accumulator = {}
                 input_tokens = 0
                 output_tokens = 0
                 total_tokens = 0
@@ -209,11 +213,14 @@ async def handle_gemini_native_direct(
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
                         delta_content = delta.get("content", "")
                         delta_reasoning = delta.get("reasoning_content", "")
+                        delta_tool_calls = delta.get("tool_calls")
 
                         if delta_content:
                             content_parts.append(delta_content)
                         if delta_reasoning:
                             reasoning_parts.append(delta_reasoning)
+                        if delta_tool_calls:
+                            append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
 
                         if "usage" in openai_chunk and openai_chunk["usage"]:
                             usage = openai_chunk["usage"]
@@ -237,11 +244,14 @@ async def handle_gemini_native_direct(
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
                         delta_content = delta.get("content", "")
                         delta_reasoning = delta.get("reasoning_content", "")
+                        delta_tool_calls = delta.get("tool_calls")
 
                         if delta_content:
                             content_parts.append(delta_content)
                         if delta_reasoning:
                             reasoning_parts.append(delta_reasoning)
+                        if delta_tool_calls:
+                            append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
 
                         if "usage" in openai_chunk and openai_chunk["usage"]:
                             usage = openai_chunk["usage"]
@@ -284,14 +294,19 @@ async def handle_gemini_native_direct(
                         input_tokens=input_tokens, output_tokens=output_tokens,
                         cached_tokens=0,
                         pricing=pricing_config) if pricing_config else {}
+                    final_content = ''.join(content_parts)
+                    final_reasoning = ''.join(reasoning_parts)
+                    final_tool_calls = finalize_tool_calls(tool_call_accumulator)
 
                     monitoring_service.request_end(
                         request_id=request_id, success=request_success,
                         input_tokens=input_tokens, output_tokens=output_tokens,
                         cached_tokens=0, error=error_msg,
-                        response_content=''.join(content_parts),
-                        reasoning_content=''.join(reasoning_parts),
-                        cost_info=cost_info, full_messages=full_messages)
+                        response_content=final_content,
+                        reasoning_content=final_reasoning,
+                        cost_info=cost_info, full_messages=full_messages,
+                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
+                        response_tool_calls=final_tool_calls)
 
                     await monitoring_service.broadcast_to_monitors({
                         "type": "request_end", "request_id": request_id,
@@ -367,10 +382,12 @@ async def handle_gemini_native_direct(
 
             response_content = ""
             reasoning_content = ""
+            response_tool_calls = None
             if "choices" in openai_response and len(openai_response["choices"]) > 0:
                 message = openai_response["choices"][0].get("message", {})
                 response_content = message.get("content", "")
                 reasoning_content = message.get("reasoning_content", "")
+                response_tool_calls = message.get("tool_calls")
 
             usage = openai_response.get("usage", {})
             input_tokens = usage.get("prompt_tokens", 0)
@@ -398,7 +415,9 @@ async def handle_gemini_native_direct(
                 input_tokens=input_tokens, output_tokens=output_tokens,
                 response_content=response_content,
                 reasoning_content=reasoning_content,
-                cost_info=cost_info, full_messages=full_messages)
+                cost_info=cost_info, full_messages=full_messages,
+                response_message=build_response_message(response_content, reasoning_content, response_tool_calls),
+                response_tool_calls=response_tool_calls)
 
             await monitoring_service.broadcast_to_monitors({
                 "type": "request_end", "request_id": request_id, "success": True})

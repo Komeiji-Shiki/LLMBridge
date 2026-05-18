@@ -558,18 +558,21 @@ class MonitoringService:
     def request_end(self, request_id: str, success: bool, error: str = None,
                     response_content: str = None, reasoning_content: str = None,
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
-                    cost_info: dict = None, full_messages: List[dict] = None):
+                    cost_info: dict = None, full_messages: List[dict] = None,
+                    response_message: dict = None, response_tool_calls: List[dict] = None):
         """记录请求结束（非阻塞版：提交到线程池，不阻塞事件循环）"""
         self._monitor_pool.submit(
             self._request_end_sync,
             request_id, success, error, response_content, reasoning_content,
-            input_tokens, output_tokens, cached_tokens, cost_info, full_messages
+            input_tokens, output_tokens, cached_tokens, cost_info, full_messages,
+            response_message, response_tool_calls
         )
     
     def _request_end_sync(self, request_id: str, success: bool, error: str = None,
                     response_content: str = None, reasoning_content: str = None,
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
-                    cost_info: dict = None, full_messages: List[dict] = None):
+                    cost_info: dict = None, full_messages: List[dict] = None,
+                    response_message: dict = None, response_tool_calls: List[dict] = None):
         """记录请求结束（实际执行，在线程池中运行）"""
         # 🔧 缩锁优化：锁内只做数据更新，asdict/日志构建移到锁外
         current_time = time.time()
@@ -653,6 +656,8 @@ class MonitoringService:
             'request_messages': full_messages,
             'request_params': _request_params,
             'response_content': response_content,
+            'response_message': response_message,
+            'response_tool_calls': response_tool_calls,
             'reasoning_content': reasoning_content,
             'cost_info': cost_info
         }

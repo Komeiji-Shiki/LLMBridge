@@ -155,12 +155,12 @@ async function refreshOverallRates() {
     }
 }
 
-// 🔧 优化：从缓存的 Token 统计数据中推算总体 RPM/TPM
+// 🔧 优化：从缓存的 Token 统计数据中刷新总体速率卡片
 // 避免重复发起 /api/admin/token_stats 请求
 function updateOverallRatesFromCachedData() {
     try {
         const data = latestTokenStatsData;
-        if (!data || !data.model_stats || data.model_stats.length === 0) {
+        if (!data || !data.rate_stats) {
             document.getElementById('overall-rpm-value').textContent = '-';
             document.getElementById('overall-tpm-value').textContent = '-';
             document.getElementById('rate-total-requests').textContent = '0';
@@ -170,17 +170,13 @@ function updateOverallRatesFromCachedData() {
             return;
         }
 
-        // 从后端返回的 model_stats 中汇总 RPM/TPM
-        // 后端已根据 rpm_period 参数计算好每模型的 rpm 和 tpm
-        let totalRpm = 0;
-        let totalTpm = 0;
-        let totalRequests = 0;
-
-        data.model_stats.forEach(stat => {
-            totalRpm += stat.rpm || 0;
-            totalTpm += stat.tpm || 0;
-            totalRequests += stat.request_count || 0;
-        });
+        // “总体速率统计”卡片只统计当前 24小时/1小时周期，不能使用 model_stats 的全量 request_count
+        const rateStats = data.rate_stats;
+        const minutes = rateStats.minutes || (currentRatePeriod === 'day' ? 1440 : 60);
+        const totalRequests = rateStats.request_count || 0;
+        const totalTokens = rateStats.total_tokens || 0;
+        const totalRpm = minutes > 0 ? totalRequests / minutes : 0;
+        const totalTpm = minutes > 0 ? totalTokens / minutes : 0;
 
         // 更新显示
         document.getElementById('overall-rpm-value').textContent = totalRpm.toFixed(2);
@@ -192,7 +188,6 @@ function updateOverallRatesFromCachedData() {
 
         // 更新时间范围显示
         const now = new Date();
-        const minutes = currentRatePeriod === 'day' ? 1440 : 60;
         const startTime = new Date(now.getTime() - minutes * 60 * 1000);
         const timeRange = `${startTime.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} - ${now.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
         document.getElementById('rate-period-range').textContent = timeRange;
@@ -322,7 +317,7 @@ async function refreshTokenStats() {
         if (currentStartDate) params.append('start_date', currentStartDate);
         if (currentEndDate) params.append('end_date', currentEndDate);
         
-        // rpm_period 参数只影响 RPM/TPM 计算，不影响其他统计
+        // rpm_period 参数只影响“总体速率统计”卡片，不影响下方 Token/成本/概览总数
         params.append('rpm_period', currentRatePeriod);
         
         if (params.toString()) url += '?' + params.toString();

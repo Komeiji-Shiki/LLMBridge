@@ -15,8 +15,10 @@ test_antigravity_response.py
 # ==================== 日志 & 数据库 ====================
 /logs/
 logs/
+*.log
 *.jsonl
 *.db
+*.sqlite*
 *.db-journal
 *.db-wal
 *.db-shm
@@ -33,10 +35,25 @@ __pycache__/
 *.pyc
 *.pyo
 .cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
 
 # ==================== 环境 & 依赖 ====================
 .env
 .env.local
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.venv/
+venv/
+env/
 node_modules/
 
 # ==================== 敏感配置（不提交，用 .example.json 模板） ====================
@@ -46,6 +63,19 @@ custom_tokenizers.json
 config.jsonc
 models.json
 start_tunnel.cmd
+local_settings.py
+secrets.*
+*.secret.*
+credentials.*
+*credentials*.json
+service_account*.json
+*service-account*.json
+cookies.txt
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
 
 # ==================== IDE & OS ====================
 .vscode/

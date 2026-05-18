@@ -13,6 +13,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from core.config_loader import CONFIG
+from utils.monitor_params import build_monitor_request_params
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +105,8 @@ async def gemini_native_api(
             session_id=None,
             mode="gemini_v1beta",
             messages=[],
-            params={
-                "streaming": is_stream
-            }
+            params=build_monitor_request_params(
+                gemini_req, extra={"streaming": is_stream, "upstream_model": target_model_id})
         )
         
         # 广播请求开始
