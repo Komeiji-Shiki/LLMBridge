@@ -3,25 +3,23 @@ Direct API - 透传模式处理
 支持 OpenAI/Anthropic 兼容 API 的流式与非流式透传
 """
 import asyncio
-import codecs
 import json
 import logging
 import time
 import uuid
+from typing import Optional
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
+from ._direct_api_stream_session import PassthroughStreamSession, SSE_DATA_PREFIX
 from ._direct_api_utils import (
-    append_tool_call_delta,
     build_response_message,
-    extract_complete_sse_lines,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     extract_tool_calls_from_message,
-    finalize_tool_calls,
     is_error_json,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
@@ -35,17 +33,17 @@ async def handle_passthrough_direct(
     model_name: str,
     target_model_id: str,
     display_name: str,
-    api_base_url: str,
-    api_key: str,
+    api_base_url: Optional[str],
+    api_key: Optional[str],
     endpoint_config: dict,
     pricing_config: dict,
-    thinking_separator: str,
+    thinking_separator: Optional[str],
     monitoring_service,
     direct_api_service,
     estimate_message_tokens_func,
     estimate_tokens_func,
-    full_messages: list = None,
-    CONFIG: dict = None
+    full_messages: Optional[list] = None,
+    CONFIG: Optional[dict] = None
 ):
     """处理透传模式的Direct API请求"""
     logger.info(f"[DIRECT_API_PASSTHROUGH] 启用透传模式")
@@ -62,11 +60,9 @@ async def handle_passthrough_direct(
     custom_params = endpoint_config.get("custom_params", {})
     if isinstance(custom_params, dict):
         monitor_extra_params.update(custom_params)
-    if endpoint_config.get("enable_thinking", True):
-        monitor_extra_params["thinkingConfig"] = {
-            "thinkingBudget": endpoint_config.get("thinking_budget", 20000),
-            "includeThoughts": True
-        }
+    enable_thinking = endpoint_config.get("enable_thinking")
+    if enable_thinking is not None:
+        monitor_extra_params["enable_thinking"] = enable_thinking
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -133,6 +129,20 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
     passthrough_request = openai_req.copy()
     passthrough_request["model"] = target_model_id
 
+    # 🔍 诊断：打印实际发送的图片 URL 格式
+    if "messages" in passthrough_request:
+        for msg in passthrough_request["messages"]:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "image_url":
+                        url = part.get("image_url", {}).get("url", "")
+                        url_preview = url[:120] if url else "(empty)"
+                        is_base64 = url.startswith("data:") if url else False
+                        logger.info(
+                            f"[IMG_DIAG] 透传图片URL: is_base64={is_base64}, "
+                            f"len={len(url)}, preview={url_preview}...")
+
     # 过滤空文本块（Claude 不接受）
     if "messages" in passthrough_request:
         for msg in passthrough_request["messages"]:
@@ -194,14 +204,84 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                 if rc is None or (isinstance(rc, str) and not rc.strip()):
                     msg["reasoning_content"] = " "
 
-    # Gemini Thinking 模式
-    if endpoint_config.get("enable_thinking", True):
-        thinking_budget = endpoint_config.get("thinking_budget", 20000)
-        passthrough_request["thinkingConfig"] = {
-            "thinkingBudget": thinking_budget,
-            "includeThoughts": True
-        }
-        logger.info(f"[DIRECT_API_THINKING] 已启用思维链模式 (thinkingBudget={thinking_budget})")
+    # 判断是否为 OpenRouter 端点（用于走 OpenRouter 专属参数格式）
+    api_base_url = (endpoint_config.get("api_base_url") or "").lower()
+    is_openrouter = "openrouter.ai" in api_base_url
+
+    if is_openrouter:
+        # OpenRouter：thinking 参数走 reasoning 对象
+        is_qwen = "qwen" in (target_model_id or "").lower()
+        enable_thinking = endpoint_config.get("enable_thinking")
+        if enable_thinking is True:
+            passthrough_request.setdefault("reasoning", {})
+            reasoning_effort = endpoint_config.get("reasoning_effort")
+            if reasoning_effort:
+                # 强度等级控制（OpenRouter 支持 effort: low/medium/high）
+                passthrough_request["reasoning"]["effort"] = reasoning_effort
+            else:
+                # Token 预算控制（默认，向后兼容）
+                thinking_budget = endpoint_config.get("thinking_budget", 20000)
+                passthrough_request["reasoning"]["max_tokens"] = thinking_budget
+            passthrough_request["reasoning"]["exclude"] = False
+            # Qwen 模型需要额外的原生参数：enable_thinking 启用思考，preserve_thinking 保留历史思考链
+            # OpenRouter 会将这些参数透传给底层 Qwen API
+            if is_qwen:
+                passthrough_request["enable_thinking"] = True
+                passthrough_request["preserve_thinking"] = True
+            logger.info(
+                f"[DIRECT_API_THINKING] OpenRouter reasoning 模式已启用 "
+                f"({'effort=' + reasoning_effort if reasoning_effort else 'max_tokens=' + str(endpoint_config.get('thinking_budget', 20000))}, "
+                f"qwen_native={'yes' if is_qwen else 'no'})")
+        elif enable_thinking is False:
+            passthrough_request.setdefault("reasoning", {})
+            passthrough_request["reasoning"]["exclude"] = True
+            # Qwen 模型需要原生 enable_thinking=false 才能真正关闭思考
+            if is_qwen:
+                passthrough_request["enable_thinking"] = False
+            logger.info(f"[DIRECT_API_THINKING] OpenRouter reasoning 已显式关闭")
+        # enable_thinking 为 None/缺失时不发送任何 reasoning 字段
+
+        # OpenRouter：assistant 消息回传时，reasoning_content → reasoning
+        # OpenRouter 文档要求用 message.reasoning 保留上一轮思考链，否则模型无法延续推理
+        # 注意：openai_req.copy() 是浅拷贝，messages 内的 dict 是同一引用。
+        # 不能直接修改原 dict（会污染监控记录的 full_messages），只能对需要改的消息创建副本。
+        if "messages" in passthrough_request:
+            new_messages = []
+            for msg in passthrough_request["messages"]:
+                if isinstance(msg, dict) and msg.get("role") == "assistant":
+                    rc = msg.get("reasoning_content")
+                    if rc and "reasoning" not in msg:
+                        # 需要重命名：创建消息副本，带上 reasoning 字段，不带 reasoning_content
+                        msg_copy = {k: v for k, v in msg.items() if k != "reasoning_content"}
+                        msg_copy["reasoning"] = rc
+                        new_messages.append(msg_copy)
+                    else:
+                        new_messages.append(msg)
+                else:
+                    new_messages.append(msg)
+            passthrough_request["messages"] = new_messages
+            # DEBUG: 临时调试日志，确认 reasoning 字段是否被正确转换
+            for i, m in enumerate(new_messages):
+                if isinstance(m, dict) and m.get("role") == "assistant":
+                    rc_val = m.get("reasoning") or ""
+                    logger.info(
+                        f"[DEBUG_OR_CONVERT] msg[{i}] assistant keys={list(m.keys())} "
+                        f"reasoning_len={len(rc_val) if isinstance(rc_val, str) else 'N/A'} "
+                        f"reasoning[:50]={repr(rc_val[:50]) if isinstance(rc_val, str) else rc_val}")
+    else:
+        # 非 OpenRouter：将 enable_thinking 作为顶层字段注入请求体
+        # 仅处理布尔值，字符串值（adaptive/strip）由 Anthropic 原生模式处理
+        enable_thinking = endpoint_config.get("enable_thinking")
+        if enable_thinking is True or enable_thinking is False:
+            passthrough_request["enable_thinking"] = enable_thinking
+            logger.info(f"[DIRECT_API_THINKING] enable_thinking={enable_thinking}（已注入请求体顶层）")
+        # 思考强度等级（OpenAI 风格 reasoning_effort：minimal/low/medium/high 等）
+        # 大部分 OAI 兼容上游识别顶层 reasoning_effort 字段
+        if enable_thinking is True:
+            reasoning_effort = endpoint_config.get("reasoning_effort")
+            if reasoning_effort:
+                passthrough_request["reasoning_effort"] = reasoning_effort
+                logger.info(f"[DIRECT_API_THINKING] reasoning_effort={reasoning_effort}（已注入请求体顶层）")
 
     return passthrough_request
 
@@ -218,7 +298,12 @@ async def _handle_passthrough_stream(
     estimate_message_tokens_func, estimate_tokens_func,
     full_messages, CONFIG
 ):
-    """处理流式透传请求"""
+    """处理流式透传请求。
+
+    SSE 解析、thinking 分离、token 统计、监控上报全部委托给
+    PassthroughStreamSession（routes/_direct_api_stream_session.py）；
+    本函数只负责心跳、上游迭代与异常边界。
+    """
 
     api_iterator = direct_api_service.call_api_passthrough(
         base_url=api_base_url, api_key=api_key,
@@ -228,61 +313,23 @@ async def _handle_passthrough_stream(
     if CONFIG:
         first_chunk_timeout = CONFIG.get("first_chunk_timeout_seconds", TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
 
+    session = PassthroughStreamSession(
+        request_id=request_id,
+        display_name=display_name,
+        openai_req=openai_req,
+        endpoint_config=endpoint_config,
+        pricing_config=pricing_config,
+        thinking_separator=thinking_separator,
+        monitoring_service=monitoring_service,
+        direct_api_service=direct_api_service,
+        estimate_message_tokens_func=estimate_message_tokens_func,
+        estimate_tokens_func=estimate_tokens_func,
+        full_messages=full_messages,
+    )
+
     async def combined_stream_generator():
-        request_success = False
-        stream_completed = False
-        error_msg = None
-        upstream_error_detected = False
-        upstream_done_received = False
-        content_parts = []
-        reasoning_parts = []
-        tool_call_accumulator = {}
-        input_tokens = 0
-        output_tokens = 0
-        total_tokens = 0
-        reasoning_tokens = 0
-        separator_found = False
-        repetition_detected = False
-        cached_tokens = 0
-        request_end_called = False
-        client_disconnected = False
-
-        def _mark_client_disconnect_sync(reason: str):
-            nonlocal request_end_called, request_success, error_msg, client_disconnected
-            if request_end_called:
-                return
-
-            client_disconnected = True
-            request_success = False
-            error_msg = reason
-
-            partial_content = ''.join(content_parts)
-            partial_reasoning = ''.join(reasoning_parts)
-            local_input_tokens = input_tokens or 0
-            partial_tool_calls = finalize_tool_calls(tool_call_accumulator)
-            local_output_tokens = output_tokens or (
-                len(partial_reasoning + partial_content) // 4
-                if (partial_reasoning or partial_content or partial_tool_calls) else 0)
-
-            monitoring_service.request_end(
-                request_id=request_id, success=False,
-                input_tokens=local_input_tokens, output_tokens=local_output_tokens,
-                cached_tokens=cached_tokens, error=error_msg,
-                response_content=partial_content, reasoning_content=partial_reasoning,
-                full_messages=full_messages,
-                response_message=build_response_message(partial_content, partial_reasoning, partial_tool_calls),
-                response_tool_calls=partial_tool_calls)
-            request_end_called = True
-
-        async def _handle_client_disconnect():
-            if request_end_called:
-                return
-            _mark_client_disconnect_sync("Client disconnected")
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id, "success": False})
-
         try:
-            # === 预读第一个块（发送心跳） ===
+            # === 预读第一个块（期间向客户端发送心跳） ===
             api_task = asyncio.create_task(anext(api_iterator))
             heartbeat_interval = min(endpoint_config.get("client_disconnect_probe_interval", 30), 30)
             first_chunk_wait_start = time.time()
@@ -295,10 +342,11 @@ async def _handle_passthrough_stream(
                         await api_task
                     except asyncio.CancelledError:
                         pass
-                    error_msg = f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
-                    logger.error(f"[DIRECT_API_PASSTHROUGH] {error_msg}")
+                    session.error_msg = (
+                        f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块")
+                    logger.error(f"[DIRECT_API_PASSTHROUGH] {session.error_msg}")
                     await _record_failed_request(
-                        monitoring_service, request_id, display_name, error_msg,
+                        monitoring_service, request_id, display_name, session.error_msg,
                         openai_req, pricing_config, direct_api_service,
                         estimate_message_tokens_func, full_messages)
                     return
@@ -310,10 +358,11 @@ async def _handle_passthrough_stream(
             try:
                 first_chunk_bytes = await api_task
             except StopAsyncIteration:
-                error_msg = f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
-                logger.error(f"[DIRECT_API_PASSTHROUGH] {error_msg}")
+                session.error_msg = (
+                    f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块")
+                logger.error(f"[DIRECT_API_PASSTHROUGH] {session.error_msg}")
                 await _record_failed_request(
-                    monitoring_service, request_id, display_name, error_msg,
+                    monitoring_service, request_id, display_name, session.error_msg,
                     openai_req, pricing_config, direct_api_service,
                     estimate_message_tokens_func, full_messages)
                 return
@@ -325,231 +374,14 @@ async def _handle_passthrough_stream(
                     error_json, monitoring_service, request_id, display_name,
                     openai_req, pricing_config, direct_api_service,
                     estimate_message_tokens_func, full_messages)
-                yield f"data: {json.dumps(error_json, ensure_ascii=False)}\n\n".encode('utf-8')
+                yield (SSE_DATA_PREFIX + json.dumps(error_json, ensure_ascii=False) + "\n\n").encode('utf-8')
                 yield "data: [DONE]\n\n".encode('utf-8')
                 return
 
-            # === SSE 流处理 ===
-            accumulated_for_split = ""
-            output_position = 0
-            sep_len = len(thinking_separator) if thinking_separator else 0
-            split_done = False
-            utf8_decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-            decode_buffer = ""
-            pending_line = ""
+            # === SSE 流处理（解析与统计委托给 session） ===
+            processed_first = session.process_sse_chunk(first_chunk_bytes)
 
-            def process_sse_chunk(chunk_bytes):
-                nonlocal separator_found, accumulated_for_split, output_position, split_done
-                nonlocal input_tokens, output_tokens, total_tokens, reasoning_tokens
-                nonlocal error_msg, upstream_error_detected
-                nonlocal decode_buffer
-                nonlocal content_parts, reasoning_parts, tool_call_accumulator
-                nonlocal cached_tokens
-                nonlocal upstream_done_received
-                nonlocal pending_line
-
-                try:
-                    chunk_str = utf8_decoder.decode(chunk_bytes, final=False)
-                except Exception as e:
-                    logger.warning(f"[UTF8_DECODE] 解码失败: {e}")
-                    chunk_str = chunk_bytes.decode('utf-8', errors='replace')
-
-                if not chunk_str:
-                    return b''
-
-                lines, pending_line, buffered_incomplete_line = extract_complete_sse_lines(
-                    chunk_str, pending_line)
-                result_lines = []
-                modified = False
-                lines_skipped = False
-
-                for line in lines:
-                    line_stripped = line.rstrip('\r')
-                    if line_stripped.startswith('data:'):
-                        data_content = line_stripped[5:].lstrip()
-                        if data_content == '':
-                            result_lines.append(line_stripped)
-                            continue
-                        if data_content == '[DONE]':
-                            upstream_done_received = True
-                            lines_skipped = True
-                            logger.debug(f"[SSE_FILTER] 过滤掉上游 [DONE]")
-                            continue
-                        line_modified = False
-                        try:
-                            chunk_json = json.loads(data_content)
-                        except json.JSONDecodeError as json_err:
-                            fixed = False
-
-                            if hasattr(json_err, 'pos') and json_err.pos > 1 and json_err.pos < len(data_content):
-                                try:
-                                    truncated_json = json.loads(data_content[:json_err.pos])
-                                    if isinstance(truncated_json, dict) and (
-                                            'choices' in truncated_json or 'error' in truncated_json or 'usage' in truncated_json):
-                                        chunk_json = truncated_json
-                                        fixed = True
-                                        logger.warning(f"[JSON_TRUNCATE_FIX] 截取前 {json_err.pos}/{len(data_content)} 字符修复成功")
-                                except json.JSONDecodeError:
-                                    pass
-
-                            if not fixed:
-                                concat_patterns = ['}{', '}\n{', '}\r\n{']
-                                for pattern in concat_patterns:
-                                    if pattern in data_content:
-                                        split_pos = data_content.find(pattern) + 1
-                                        first_json_str = data_content[:split_pos]
-                                        second_json_str = data_content[split_pos:].lstrip('\n\r')
-                                        for json_str in [second_json_str, first_json_str]:
-                                            try:
-                                                chunk_json = json.loads(json_str)
-                                                if 'choices' in chunk_json or 'error' in chunk_json:
-                                                    logger.warning(f"[JSON_CONCAT_FIX] 检测到拼接JSON，已修复。模式: '{pattern}'")
-                                                    fixed = True
-                                                    break
-                                            except json.JSONDecodeError:
-                                                continue
-                                        if fixed:
-                                            break
-
-                            if not fixed:
-                                logger.debug(f"[JSON_PARSE_FAIL] 位置: {json_err.pos if hasattr(json_err, 'pos') else 'N/A'}, 数据前100字符: {data_content[:100]}")
-                                result_lines.append(line_stripped)
-                                continue
-
-                            modified = True
-                            line_modified = True
-
-                        try:
-                            if isinstance(chunk_json, dict) and 'error' in chunk_json and chunk_json['error'] is not None:
-                                upstream_error_detected = True
-                                error_msg = str(chunk_json.get('error'))
-                                logger.error(f"[DIRECT_API_PASSTHROUGH] 流式上游返回错误事件: {chunk_json}")
-
-                            if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
-                                finish_reason = chunk_json['choices'][0].get('finish_reason')
-
-                                delta = chunk_json['choices'][0].get('delta', {})
-                                raw_content = delta.get('content', '')
-                                raw_reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
-                                raw_tool_calls = delta.get('tool_calls')
-
-                                message = chunk_json['choices'][0].get('message', {}) if isinstance(chunk_json['choices'][0], dict) else {}
-                                if isinstance(message, dict):
-                                    raw_content = raw_content or message.get('content', '')
-                                    raw_reasoning = raw_reasoning or message.get('reasoning_content', '') or message.get('reasoning', '')
-                                    raw_tool_calls = raw_tool_calls or extract_tool_calls_from_message(message)
-
-                                if raw_tool_calls:
-                                    append_tool_call_delta(tool_call_accumulator, raw_tool_calls)
-
-                                # thinking_separator 处理
-                                if thinking_separator and not split_done and raw_content:
-                                    accumulated_for_split += raw_content
-
-                                    if thinking_separator in accumulated_for_split:
-                                        separator_found = True
-                                        split_done = True
-
-                                        parts = accumulated_for_split.split(thinking_separator, 1)
-                                        full_reasoning = parts[0]
-                                        content_part = parts[1] if len(parts) > 1 else ""
-
-                                        remaining_reasoning = full_reasoning[output_position:]
-                                        raw_reasoning = remaining_reasoning
-                                        raw_content = content_part
-
-                                        new_delta = {}
-                                        if remaining_reasoning:
-                                            new_delta['reasoning_content'] = remaining_reasoning
-                                        if content_part:
-                                            new_delta['content'] = content_part
-
-                                        if new_delta:
-                                            chunk_json['choices'][0]['delta'] = new_delta
-                                            line_modified = True
-                                            logger.info(f"[THINKING_SPLIT_STREAM] 检测到分隔符'{thinking_separator}'")
-                                            logger.info(f"  - 思考总长: {len(full_reasoning)} 字符")
-                                            logger.info(f"  - 本次输出reasoning: {len(remaining_reasoning)} 字符")
-                                            logger.info(f"  - 正文部分: {len(content_part)} 字符")
-                                        else:
-                                            lines_skipped = True
-                                            continue
-                                    else:
-                                        sep_len = len(thinking_separator)
-                                        safe_position = max(output_position, len(accumulated_for_split) - sep_len)
-                                        safe_content = accumulated_for_split[output_position:safe_position]
-
-                                        if safe_content:
-                                            raw_reasoning = safe_content
-                                            raw_content = ""
-                                            delta['reasoning_content'] = safe_content
-                                            delta.pop('content', None)
-                                            output_position = safe_position
-                                            line_modified = True
-                                        else:
-                                            lines_skipped = True
-                                            continue
-
-                                if raw_content:
-                                    content_parts.append(raw_content)
-                                if raw_reasoning:
-                                    reasoning_parts.append(raw_reasoning)
-
-                            if 'usage' in chunk_json and chunk_json['usage'] is not None:
-                                usage = chunk_json['usage']
-                                base_prompt = usage.get('prompt_tokens', 0) or usage.get('input_tokens', 0)
-                                base_output = usage.get('completion_tokens', 0) or usage.get('output_tokens', 0)
-
-                                prompt_details = usage.get('prompt_tokens_details', {})
-                                cached = prompt_details.get('cached_tokens', 0) if isinstance(prompt_details, dict) else 0
-                                if cached > 0:
-                                    cached_tokens = cached
-
-                                cached_mode = endpoint_config.get('cached_tokens_mode', 'reverse')
-                                if cached > 0 and cached_mode == 'forward':
-                                    usage['prompt_tokens'] = base_prompt + cached
-                                    line_modified = True
-                                    logger.info(f"[CACHED_TOKENS] 正向模式修正: prompt {base_prompt} + cached {cached} = {usage['prompt_tokens']}")
-
-                                if cached_mode == 'forward':
-                                    if base_prompt > 0:
-                                        input_tokens = base_prompt + cached
-                                else:
-                                    if base_prompt > 0:
-                                        input_tokens = base_prompt
-                                if base_output > 0:
-                                    output_tokens = base_output
-                                total_tokens = usage.get('total_tokens', 0)
-                                reasoning_tokens = usage.get('reasoning_tokens', 0)
-
-                            if 'reasoning' in delta and 'reasoning_content' not in delta and raw_reasoning:
-                                delta['reasoning_content'] = delta.pop('reasoning')
-                                chunk_json['choices'][0]['delta'] = delta
-                                line_modified = True
-                                logger.debug(f"[REASONING_FIELD_CONVERT] 将 reasoning 转换为 reasoning_content")
-
-                            if line_modified:
-                                modified = True
-                                result_lines.append(f'data: {json.dumps(chunk_json, ensure_ascii=False)}')
-                                continue
-
-                        except Exception as process_err:
-                            logger.debug(f"[PROCESS_SSE] 处理行时出错: {process_err}")
-                            if line_modified:
-                                result_lines.append(f'data: {json.dumps(chunk_json, ensure_ascii=False)}')
-                                continue
-
-                    result_lines.append(line)
-
-                if modified or lines_skipped or buffered_incomplete_line:
-                    return '\n'.join(result_lines).encode('utf-8')
-                else:
-                    return chunk_bytes
-
-            # 处理第一个块
-            processed_first = process_sse_chunk(first_chunk_bytes)
-
-            if upstream_error_detected:
+            if session.upstream_error_detected:
                 yield processed_first
                 return
 
@@ -567,7 +399,7 @@ async def _handle_passthrough_stream(
                         yield f": keep-alive {int(time.time())}\n\n".encode("utf-8")
                     except asyncio.CancelledError:
                         logger.warning(f"[DIRECT_API_PASSTHROUGH] 客户端在上游空闲期间断开: {request_id[:8]}")
-                        await _handle_client_disconnect()
+                        await session.handle_client_disconnect()
                         try:
                             await api_iterator.aclose()
                         except Exception:
@@ -575,14 +407,14 @@ async def _handle_passthrough_stream(
                         return
                     continue
 
-                processed_chunk = process_sse_chunk(chunk_bytes)
+                processed_chunk = session.process_sse_chunk(chunk_bytes)
 
-                if upstream_error_detected:
+                if session.upstream_error_detected:
                     try:
                         yield processed_chunk
                     except asyncio.CancelledError:
                         logger.warning(f"[DIRECT_API_PASSTHROUGH] 客户端在错误块输出时断开: {request_id[:8]}")
-                        await _handle_client_disconnect()
+                        await session.handle_client_disconnect()
                         try:
                             await api_iterator.aclose()
                         except Exception:
@@ -594,144 +426,36 @@ async def _handle_passthrough_stream(
                     yield processed_chunk
                 except asyncio.CancelledError:
                     logger.warning(f"[DIRECT_API_PASSTHROUGH] 客户端在流式输出中断开: {request_id[:8]}")
-                    await _handle_client_disconnect()
+                    await session.handle_client_disconnect()
                     try:
                         await api_iterator.aclose()
                     except Exception:
                         pass
                     return
 
-            stream_completed = not upstream_error_detected
-            request_success = (not upstream_error_detected) and (error_msg is None)
+            session.stream_completed = not session.upstream_error_detected
+            session.request_success = (not session.upstream_error_detected) and (session.error_msg is None)
 
         except asyncio.CancelledError:
             logger.warning(f"[DIRECT_API_PASSTHROUGH] 流式任务被取消: {request_id[:8]}")
-            await _handle_client_disconnect()
+            await session.handle_client_disconnect()
         except GeneratorExit:
             logger.warning(f"[DIRECT_API_PASSTHROUGH] 生成器被提前关闭: {request_id[:8]}")
-            _mark_client_disconnect_sync("Client disconnected (GeneratorExit)")
+            session.mark_client_disconnect("Client disconnected (GeneratorExit)")
         except Exception as e:
-            error_msg = str(e)
+            session.error_msg = str(e)
             logger.error(f"[DIRECT_API_PASSTHROUGH] 流式处理中发生异常: {e}", exc_info=True)
         finally:
-            if request_end_called:
-                try:
-                    await api_iterator.aclose()
-                except Exception:
-                    pass
-                return
-
             try:
                 await api_iterator.aclose()
             except Exception:
                 pass
 
-            # 应用思考内容分隔符
-            accumulated_content = ''.join(content_parts)
-            accumulated_reasoning = ''.join(reasoning_parts)
-            final_reasoning = accumulated_reasoning
-            final_content = accumulated_content
-
-            if thinking_separator and accumulated_content and not accumulated_reasoning:
-                reasoning_part, main_part = direct_api_service.split_thinking_content(
-                    accumulated_content, thinking_separator)
-                if reasoning_part:
-                    final_reasoning = reasoning_part
-                    final_content = main_part
-                    logger.info(f"[THINKING_SPLIT] 检测到思考内容分隔符，分离出 {len(reasoning_part)} 字符的思考内容")
-
-            # Token 计算
-            if input_tokens == 0:
-                logger.warning(f"[DIRECT_API_PASSTHROUGH] API未返回input_tokens，使用tokenizer计算")
-                try:
-                    input_tokens = await estimate_message_tokens_non_blocking(
-                        estimate_message_tokens_func,
-                        openai_req.get('messages', []), display_name)
-                except Exception as token_error:
-                    logger.error(f"[DIRECT_API_PASSTHROUGH] Input token计算失败: {token_error}")
-                    input_tokens = sum(len(str(m.get('content', ''))) for m in openai_req.get('messages', [])) // 4
-
-            total_output_text = (final_reasoning or "") + (final_content or "")
-            content_char_count = len(total_output_text) if total_output_text else 0
-            min_expected_tokens = content_char_count // 3 if content_char_count > 0 else 0
-
-            should_recalculate = (
-                output_tokens <= 1
-                or repetition_detected
-                or (content_char_count > 100 and output_tokens < min_expected_tokens * 0.5)
-            )
-
-            if should_recalculate and total_output_text:
-                try:
-                    calculated_output_tokens = await estimate_text_tokens_non_blocking(
-                        estimate_tokens_func, total_output_text, display_name)
-                    if calculated_output_tokens >= 10:
-                        reason = "回放检测" if repetition_detected else (
-                            "上游值偏小" if output_tokens > 1 else "上游未返回")
-                        logger.info(f"[DIRECT_API_PASSTHROUGH] Token修正({reason}): 上游={output_tokens}, 计算={calculated_output_tokens}, 内容={content_char_count}字符")
-                        output_tokens = calculated_output_tokens
-                except Exception as token_error:
-                    logger.error(f"[DIRECT_API_PASSTHROUGH] Output token计算失败: {token_error}")
-                    fallback_tokens = len(total_output_text) // 4
-                    if fallback_tokens >= 10:
-                        output_tokens = fallback_tokens
-
-            total_tokens = input_tokens + output_tokens
-
-            cost_info = direct_api_service.calculate_cost(
-                input_tokens=input_tokens, output_tokens=output_tokens,
-                cached_tokens=cached_tokens,
-                pricing=pricing_config) if pricing_config else {}
-            final_tool_calls = finalize_tool_calls(tool_call_accumulator)
-
-            monitoring_service.request_end(
-                request_id=request_id, success=request_success,
-                input_tokens=input_tokens, output_tokens=output_tokens,
-                cached_tokens=cached_tokens, error=error_msg,
-                response_content=final_content,
-                reasoning_content=final_reasoning,
-                cost_info=cost_info, full_messages=full_messages,
-                response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
-                response_tool_calls=final_tool_calls)
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id,
-                "success": request_success})
-
-            logger.info(f"[DIRECT_API_PASSTHROUGH] 流式请求完成: {request_id[:8]}, 成功: {request_success}")
-            if final_reasoning:
-                logger.info(f"  - 思考内容: {len(final_reasoning)} 字符")
-            if input_tokens > 0 or output_tokens > 0:
-                usage_parts = [f"输入={input_tokens}"]
-                if cached_tokens > 0:
-                    usage_parts.append(f"(缓存={cached_tokens})")
-                usage_parts.append(f"输出={output_tokens}")
-                if reasoning_tokens > 0:
-                    usage_parts.append(f"思考={reasoning_tokens}")
-                usage_parts.append(f"总计={total_tokens}")
-                logger.info(f"[DIRECT_API_PASSTHROUGH] Token统计: {', '.join(usage_parts)}")
-            if cost_info.get("total_cost"):
-                logger.info(f"[DIRECT_API_PASSTHROUGH] 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-
-            # 发送最后的 usage 和 [DONE]
+            # 收尾统计与监控上报（断连路径已上报时返回空列表，不再补发）
+            tail_chunks = await session.finalize()
             try:
-                if input_tokens > 0 or output_tokens > 0:
-                    final_total_tokens = total_tokens if total_tokens > 0 else (input_tokens + output_tokens)
-                    usage_final_chunk = {
-                        "id": f"chatcmpl-{request_id}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": display_name,
-                        "choices": [],
-                        "usage": {
-                            "prompt_tokens": input_tokens,
-                            "completion_tokens": output_tokens,
-                            "total_tokens": final_total_tokens
-                        }
-                    }
-                    yield f"data: {json.dumps(usage_final_chunk, ensure_ascii=False)}\n\n".encode('utf-8')
-                    logger.debug(f"[SSE_USAGE] 已发送 usage chunk: input={input_tokens}, output={output_tokens}, total={final_total_tokens}")
-
-                yield "data: [DONE]\n\n".encode('utf-8')
+                for tail_chunk in tail_chunks:
+                    yield tail_chunk
             except (GeneratorExit, Exception) as yield_err:
                 logger.debug(f"[SSE_USAGE] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
 
@@ -745,6 +469,8 @@ async def _handle_passthrough_stream(
             'Transfer-Encoding': 'chunked'
         }
     )
+
+
 
 
 # ============================================================
@@ -815,24 +541,28 @@ async def _handle_passthrough_non_stream(
         input_tokens, output_tokens, reasoning_tokens, total_tokens, cached_tokens = \
             _extract_tokens_from_response(response_json, endpoint_config)
 
-        if not response_json.get("usage") or (input_tokens == 0 and output_tokens == 0):
-            logger.warning(f"[DIRECT_API] API未返回usage或tokens为0，使用tokenizer计算")
+        # 提取内容并应用思考分隔
+        content, reasoning_content, response_tool_calls, response_message, response_json = _extract_and_split_content(
+            response_json, thinking_separator, direct_api_service)
+
+        local_stats = endpoint_config.get("token_stats_mode") == "local"
+        if local_stats or not response_json.get("usage") or (input_tokens == 0 and output_tokens == 0):
+            if local_stats:
+                logger.info(f"[TOKEN_STATS_LOCAL] local统计模式：使用本地tokenizer计算")
+            else:
+                logger.warning(f"[DIRECT_API] API未返回usage或tokens为0，使用tokenizer计算")
+            output_text = (reasoning_content or "") + (content or "")
             try:
                 input_tokens = await estimate_message_tokens_non_blocking(
                     estimate_message_tokens_func,
                     openai_req.get('messages', []), display_name)
-                content = _extract_response_content(response_json)
                 output_tokens = await estimate_text_tokens_non_blocking(
-                    estimate_tokens_func, content or "", display_name)
+                    estimate_tokens_func, output_text, display_name)
                 logger.info(f"[DIRECT_API] Tokenizer计算结果: 输入={input_tokens}, 输出={output_tokens}")
             except Exception as token_error:
                 logger.warning(f"[DIRECT_API] Tokenizer计算失败: {token_error}，使用简单估算")
                 input_tokens = sum(len(str(m.get('content', ''))) for m in openai_req.get('messages', [])) // 4
-                output_tokens = len(_extract_response_content(response_json) or "") // 4
-
-        # 提取内容并应用思考分隔
-        content, reasoning_content, response_tool_calls, response_message, response_json = _extract_and_split_content(
-            response_json, thinking_separator, direct_api_service)
+                output_tokens = len(output_text) // 4
 
         # 🔧 关键修复：_extract_and_split_content 可能修改了 response_json
         # （如添加 reasoning_content、字段转换等），必须重新编码以确保客户端收到修改后的数据

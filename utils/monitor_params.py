@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 
 _DEFAULT_EXCLUDED_KEYS = {"messages", "contents", "model"}
+MONITOR_PARAM_EXCLUDED_KEYS = set(_DEFAULT_EXCLUDED_KEYS)
 _SENSITIVE_EXACT_KEYS = {
     "api_key",
     "apikey",
@@ -62,7 +63,7 @@ def build_monitor_request_params(
     model 已在监控记录顶层记录；其余请求体字段（tools、tool_choice、thinkingConfig、
     response_format、stream_options、自定义参数等）都会保留。
     """
-    excluded = set(_DEFAULT_EXCLUDED_KEYS)
+    excluded = set(MONITOR_PARAM_EXCLUDED_KEYS)
     if exclude_keys:
         excluded.update(exclude_keys)
 

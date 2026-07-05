@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+from typing import Optional
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -29,16 +30,16 @@ async def handle_gemini_native_direct(
     model_name: str,
     target_model_id: str,
     display_name: str,
-    api_key: str,
-    api_base_url: str,
+    api_key: Optional[str],
+    api_base_url: Optional[str],
     endpoint_config: dict,
     pricing_config: dict,
     monitoring_service,
     direct_api_service,
     estimate_message_tokens_func,
     estimate_tokens_func,
-    full_messages: list = None,
-    CONFIG: dict = None
+    full_messages: Optional[list] = None,
+    CONFIG: Optional[dict] = None
 ):
     """处理Gemini原生API的Direct请求"""
     logger.info(f"[GEMINI_NATIVE] 使用Gemini原生API格式")
@@ -54,14 +55,30 @@ async def handle_gemini_native_direct(
             logger.info(f"  - {key}: {value}")
 
     thinking_config = None
-    enable_thinking = endpoint_config.get("enable_thinking", True)
-    if enable_thinking:
-        thinking_budget = endpoint_config.get("thinking_budget", 20000)
+    enable_thinking = endpoint_config.get("enable_thinking")
+    if enable_thinking is True:
+        reasoning_effort = endpoint_config.get("reasoning_effort")
+        if reasoning_effort:
+            # Gemini 原生 API 不支持 effort 等级，映射为等效的 thinkingBudget
+            effort_budget_map = {
+                "minimal": 512, "low": 4096, "medium": 12288,
+                "high": 24576, "xhigh": 32768, "max": 32768,
+            }
+            thinking_budget = effort_budget_map.get(str(reasoning_effort).lower(), 20000)
+            logger.info(f"[GEMINI_NATIVE] reasoning_effort={reasoning_effort} 映射为 thinkingBudget={thinking_budget}")
+        else:
+            thinking_budget = endpoint_config.get("thinking_budget", 20000)
         thinking_config = {
             "thinkingBudget": thinking_budget,
             "includeThoughts": True
         }
         logger.info(f"[GEMINI_NATIVE] 已启用思维链模式 (budget={thinking_budget})")
+    elif enable_thinking is False:
+        thinking_config = {
+            "includeThoughts": False
+        }
+        logger.info(f"[GEMINI_NATIVE] 已显式关闭思维链模式")
+    # enable_thinking 为 None/缺失时不发送 thinking_config
 
     monitor_extra_params = {"upstream_model": target_model_id, **extra_kwargs}
     if thinking_config:

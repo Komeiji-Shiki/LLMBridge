@@ -394,9 +394,26 @@ def is_error_json(obj: dict) -> bool:
 
 
 def normalize_to_openai_error(obj: dict) -> dict:
-    """将非标准错误格式转换为 OpenAI 兼容的 {"error": {...}} 格式"""
+    """将非标准错误格式转换为 OpenAI 兼容的 {"error": {...}} 格式。
+
+    支持的输入格式：
+    - {"error": {"message": "...", "type": "...", "code": ...}}  → 直接返回
+    - {"error": "some string"}  → 包装为 {"error": {"message": "...", ...}}
+    - {"msg": "...", "code": ...}  → 包装
+    """
     if 'error' in obj and obj.get('error') is not None:
-        return obj
+        error_val = obj['error']
+        if isinstance(error_val, dict):
+            # 已是标准 OpenAI 错误格式
+            return obj
+        # error 是字符串或其他非对象类型 → 包装成标准格式
+        return {
+            "error": {
+                "message": str(error_val),
+                "type": "upstream_error",
+                "code": "unknown"
+            }
+        }
     msg = obj.get('msg') or obj.get('message') or str(obj)
     code = obj.get('code', 'unknown')
     return {

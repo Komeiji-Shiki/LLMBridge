@@ -1503,9 +1503,10 @@
                         <select id="api-type" class="form-select">
                             <option value="direct_api">OpenAI兼容 (推荐)</option>
                             <option value="gemini_native">Gemini原生格式</option>
+                            <option value="anthropic_native">Anthropic原生格式</option>
                         </select>
                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            选择API接口格式。Gemini原生格式使用Google官方API，更准确地计算Token
+                            选择API接口格式。Gemini原生使用Google官方API；Anthropic原生以 /messages 格式透传，适用于 Claude 系列模型
                         </small>
                     </div>
                     
@@ -1519,9 +1520,9 @@
 
                     <div class="form-group">
                         <label class="form-label">模型端点（可选）</label>
-                        <input type="text" id="endpoint-path" class="form-input" placeholder="/chat/completions 或 /messages">
+                        <input type="text" id="endpoint-path" class="form-input" placeholder="/chat/completions">
                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            默认 <code>/chat/completions</code>。如果对接 Claude 原生接口，可填写 <code>/messages</code>。
+                            默认 <code>/chat/completions</code>（OpenAI兼容）。启用 Anthropic 原生模式后默认变为 <code>/messages</code>。
                         </small>
                     </div>
                     
@@ -1580,7 +1581,7 @@
                             启用透传模式（推荐）
                         </label>
                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            完全透传请求和响应，零延迟。仅适用于OpenAI兼容API
+                            完全透传请求和响应，零延迟。适用于 OpenAI 兼容 API
                         </small>
                     </div>
                     
@@ -1621,13 +1622,24 @@
                                 </small>
                             </div>
                             
-                            <div class="form-group" style="margin-bottom: 0;">
+                            <div class="form-group">
                                 <label class="form-label">
                                     <input type="checkbox" id="enable-partial" style="margin-right: 8px;">
                                     启用 Partial 模式（Kimi K2）
                                 </label>
                                 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     为最后一条assistant消息添加 <code>"partial": true</code> 参数（适用于Kimi K2等模型的预填充续写）
+                                </small>
+                            </div>
+
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label class="form-label">预填充内容（Assistant Prefill）</label>
+                                <textarea id="prefill-content" class="form-input" rows="3"
+                                    placeholder="在消息末尾追加一条 assistant 消息，用于跳过思考/引导输出。&#10;例如：&lt;think&gt;&#10;留空则不启用"
+                                    style="font-family: monospace; font-size: 0.85rem; margin-top: 5px;"></textarea>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    在此输入的内容将作为 <code>{"role": "assistant", "content": "..."}</code> 追加到消息列表末尾。
+                                    常用于跳过模型思考阶段或预设回答开头。留空则不启用。
                                 </small>
                             </div>
                         </div>
@@ -1641,30 +1653,73 @@
                         </div>
                         <div class="collapsible-content">
                             <div class="form-group">
-                                <label class="form-label">
-                                    <input type="checkbox" id="enable-thinking" checked style="margin-right: 8px;">
-                                    启用思维链模式
-                                </label>
+                                <label class="form-label">思维链模式</label>
+                                <select id="enable-thinking" class="form-input" onchange="toggleThinkingOptions()">
+                                    <option value="">不发送（透传客户端参数）</option>
+                                    <option value="true">启用思考</option>
+                                    <option value="adaptive">自适应思考（仅 Anthropic）</option>
+                                    <option value="false">显式禁用</option>
+                                </select>
                                 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    启用Gemini思维链输出（thinkingConfig），让模型在回答前进行深度思考。默认启用
+                                    控制如何处理 thinking 参数。"不发送" 透传客户端原始参数不做修改；"启用" 注入 thinking.type=enabled + budget_tokens；"自适应" 将客户端 thinking.type=enabled 转为 adaptive（适用于 Claude Opus 4.7 / Mythos 5 等新模型）；"显式禁用" 注入 thinking.type=disabled
                                 </small>
                             </div>
-                            
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label">思维链Token预算</label>
-                                    <input type="number" id="thinking-budget" class="form-input" value="20000" placeholder="20000">
-                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                        默认20000，仅在启用思维链时生效
-                                    </small>
-                                </div>
-                                
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label">思考内容分隔符</label>
-                                    <input type="text" id="thinking-separator" class="form-input" placeholder="例如: 【思考结束】">
-                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                        分隔思考与正文，留空不分隔
-                                    </small>
+
+                            <div id="thinking-options" style="display: none;">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                                    <div id="thinking-control-config" class="form-group" style="margin-bottom: 0; display: none;">
+                                        <label class="form-label">思考控制方式</label>
+                                        <select id="thinking-control" class="form-input" onchange="toggleThinkingOptions()">
+                                            <option value="budget">Token 预算（thinking_budget）</option>
+                                            <option value="effort">强度等级（reasoning_effort）</option>
+                                        </select>
+                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            Token 预算适用于 Anthropic/Gemini/OpenRouter 等；强度等级（low/medium/high）适用于大部分 OpenAI 兼容上游
+                                        </small>
+                                    </div>
+
+                                    <div id="thinking-budget-config" class="form-group" style="margin-bottom: 0;">
+                                        <label class="form-label">思维链Token预算</label>
+                                        <input type="number" id="thinking-budget" class="form-input" value="20000" placeholder="20000">
+                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            默认20000，仅在启用思考时生效
+                                        </small>
+                                    </div>
+
+                                    <div id="thinking-effort-config" class="form-group" style="margin-bottom: 0; display: none;">
+                                        <label class="form-label">思考强度（Effort）</label>
+                                        <select id="thinking-effort" class="form-input">
+                                            <option value="">留空（让模型自行决定）</option>
+                                            <option value="minimal">minimal（最少思考，OpenAI 风格）</option>
+                                            <option value="low">low（低，简单问题可能跳过）</option>
+                                            <option value="medium">medium（中等）</option>
+                                            <option value="high">high（几乎总是思考）</option>
+                                            <option value="xhigh">xhigh（超强，Opus 4.7+）</option>
+                                            <option value="max">max（最大，Opus 4.6+）</option>
+                                        </select>
+                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            启用思考时注入 reasoning_effort（OAI 兼容）/ reasoning.effort（OpenRouter）/ output_config.effort（Anthropic）；自适应模式下留空则不注入
+                                        </small>
+                                    </div>
+
+                                    <div id="thinking-display-config" class="form-group" style="margin-bottom: 0; display: none;">
+                                        <label class="form-label">思考内容显示（Display）</label>
+                                        <select id="thinking-display" class="form-input">
+                                            <option value="summarized">summarized（返回思维链摘要）</option>
+                                            <option value="omitted">omitted（不返回思维链，仅签名）</option>
+                                        </select>
+                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            Opus 4.7+ 默认 omitted（不返回思维链），设为 summarized 可看到思考内容
+                                        </small>
+                                    </div>
+
+                                    <div class="form-group" style="margin-bottom: 0;">
+                                        <label class="form-label">思考内容分隔符</label>
+                                        <input type="text" id="thinking-separator" class="form-input" placeholder="例如: 【思考结束】">
+                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            分隔思考与正文，留空不分隔
+                                        </small>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1707,6 +1762,17 @@
                                     • <strong>关闭</strong>：直接使用prompt_tokens，不处理缓存<br>
                                     • <strong>正向</strong>：某些反代把cached单独返回，需要相加得到总输入<br>
                                     • <strong>反向</strong>：DeepSeek官方API中prompt_tokens已包含全部，cached只是记录
+                                </small>
+                            </div>
+
+                            <div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
+                                <label class="form-label">Token统计来源</label>
+                                <select id="token-stats-mode" class="form-select">
+                                    <option value="api" selected>API返回 - 使用上游返回的usage统计（默认）</option>
+                                    <option value="local">本地Tokenizer - 忽略上游usage，用本地分词器计算</option>
+                                </select>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    上游usage不可信时（如输入恒为个位数的反代），选择“本地Tokenizer”用tiktoken等本地分词器估算输入/输出token
                                 </small>
                             </div>
                         </div>

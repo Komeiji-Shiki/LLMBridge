@@ -133,10 +133,11 @@ class SQLiteLogger:
             mode = log_entry.get('mode')
             session_id = log_entry.get('session_id')
             messages_count = log_entry.get('messages_count', 0)
-            input_tokens = log_entry.get('input_tokens', 0)
-            output_tokens = log_entry.get('output_tokens', 0)
+            # ⚠️ 键存在但值为 None 时 get 的默认值不生效，统一归零避免 None 相加崩溃
+            input_tokens = log_entry.get('input_tokens') or 0
+            output_tokens = log_entry.get('output_tokens') or 0
             total_tokens = input_tokens + output_tokens
-            cached_tokens = log_entry.get('cached_tokens', 0)
+            cached_tokens = log_entry.get('cached_tokens') or 0
             
             cost_info = log_entry.get('cost_info') or {}
             input_cost = cost_info.get('input_cost', 0.0)
@@ -162,7 +163,7 @@ class SQLiteLogger:
                 ))
                 conn.commit()
             
-            logger.debug(f"已写入数据库: {request_id[:8]}")
+            logger.debug(f"已写入数据库: {str(request_id or '')[:8]}")
             
         except Exception as e:
             logger.error(f"写入SQLite数据库失败: {e}", exc_info=True)
@@ -221,49 +222,99 @@ class SQLiteLogger:
     
     def get_recent_requests(self, limit: int = 50) -> List[Dict]:
         """从SQLite快速获取最近的N条请求摘要（走timestamp索引，O(log n + limit)）"""
+        result = self.query_requests(limit=limit, offset=0)
+        return result.get('items', [])
+
+    @staticmethod
+    def _row_to_request_dict(row) -> Dict:
+        """将 SQLite Row 映射为日志条目字典（与分层日志格式对齐）"""
+        return {
+            'type': 'request_end',
+            'request_id': row['request_id'],
+            'timestamp': row['timestamp'],
+            'model': row['model'],
+            'status': row['status'],
+            'success': bool(row['success']),
+            'duration': row['duration'],
+            'error': row['error'],
+            'mode': row['mode'],
+            'session_id': row['session_id'],
+            'messages_count': row['messages_count'],
+            'input_tokens': row['input_tokens'],
+            'output_tokens': row['output_tokens'],
+            'total_tokens': row['total_tokens'],
+            'cached_tokens': row['cached_tokens'] or 0,
+            'cached_cost': row['cached_cost'] or 0.0,
+            'input_cost': row['input_cost'],
+            'output_cost': row['output_cost'],
+            'total_cost': row['total_cost'],
+            'currency': row['currency'],
+        }
+
+    def query_requests(self, limit: int = 50, offset: int = 0,
+                       model: Optional[str] = None, status: Optional[str] = None,
+                       search: Optional[str] = None) -> Dict:
+        """分页 + 过滤查询请求日志。
+
+        Args:
+            limit/offset: 分页参数
+            model: 按模型名精确过滤
+            status: 'success' / 'failed'（其他值忽略）
+            search: 在 request_id / model / error 中模糊搜索
+
+        Returns:
+            {'total': 总条数, 'items': 日志列表}
+        """
         try:
             conn = self._get_connection()
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
-            cursor.execute('''
+
+            where_clauses = []
+            params: list = []
+            if model:
+                where_clauses.append("model = ?")
+                params.append(model)
+            if status == 'success':
+                where_clauses.append("success = 1")
+            elif status == 'failed':
+                where_clauses.append("success = 0")
+            if search:
+                like = f"%{search}%"
+                where_clauses.append("(request_id LIKE ? OR model LIKE ? OR error LIKE ?)")
+                params.extend([like, like, like])
+
+            where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+            cursor.execute(f"SELECT COUNT(*) FROM requests{where_sql}", params)
+            total = cursor.fetchone()[0]
+
+            cursor.execute(f'''
                 SELECT
                     request_id, timestamp, date, model, status, success,
                     duration, error, mode, session_id, messages_count,
                     input_tokens, output_tokens, total_tokens,
                     cached_tokens, cached_cost,
                     input_cost, output_cost, total_cost, currency
-                FROM requests
+                FROM requests{where_sql}
                 ORDER BY timestamp DESC
-                LIMIT ?
-            ''', (limit,))
-            
-            results = []
-            for row in cursor.fetchall():
-                results.append({
-                    'type': 'request_end',
-                    'request_id': row['request_id'],
-                    'timestamp': row['timestamp'],
-                    'model': row['model'],
-                    'status': row['status'],
-                    'success': bool(row['success']),
-                    'duration': row['duration'],
-                    'error': row['error'],
-                    'mode': row['mode'],
-                    'session_id': row['session_id'],
-                    'messages_count': row['messages_count'],
-                    'input_tokens': row['input_tokens'],
-                    'output_tokens': row['output_tokens'],
-                    'total_tokens': row['total_tokens'],
-                    'cached_tokens': row['cached_tokens'] or 0,
-                    'cached_cost': row['cached_cost'] or 0.0,
-                    'input_cost': row['input_cost'],
-                    'output_cost': row['output_cost'],
-                    'total_cost': row['total_cost'],
-                    'currency': row['currency'],
-                })
-            return results
-            
+                LIMIT ? OFFSET ?
+            ''', params + [limit, offset])
+
+            items = [self._row_to_request_dict(row) for row in cursor.fetchall()]
+            return {'total': total, 'items': items}
+
         except Exception as e:
-            logger.error(f"获取最近请求列表失败: {e}", exc_info=True)
+            logger.error(f"过滤查询请求日志失败: {e}", exc_info=True)
+            return {'total': 0, 'items': []}
+
+    def get_distinct_models(self) -> List[str]:
+        """获取日志中出现过的所有模型名（用于前端筛选下拉）"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT model FROM requests ORDER BY model")
+            return [row[0] for row in cursor.fetchall() if row[0]]
+        except Exception as e:
+            logger.error(f"获取模型列表失败: {e}", exc_info=True)
             return []

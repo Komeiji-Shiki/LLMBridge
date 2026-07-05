@@ -22,6 +22,115 @@ from core.config_loader import CONFIG
 logger = logging.getLogger(__name__)
 
 
+def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> dict:
+    """将上游返回的错误 JSON 归一化为 OpenAI 兼容格式。
+
+    处理以下情况：
+    - {"error": {"message": "...", ...}}  → 保持原样
+    - {"error": "some string"}            → 包装为 {"error": {"message": "...", ...}}
+    - {"message": "...", "code": ...}    → 包装
+    """
+    if not isinstance(error_json, dict):
+        return {
+            "error": {
+                "message": str(error_json),
+                "type": "api_error",
+                "code": status_code or 500
+            }
+        }
+
+    if 'error' in error_json and error_json.get('error') is not None:
+        error_val = error_json['error']
+        if isinstance(error_val, dict):
+            return error_json
+        # error 是字符串 → 包装
+        return {
+            "error": {
+                "message": str(error_val),
+                "type": "api_error",
+                "code": status_code or 500
+            }
+        }
+
+    # 其他格式（如 {"message": "..."}）
+    msg = error_json.get('message') or error_json.get('msg') or str(error_json)
+    code = error_json.get('code', status_code or 500)
+    return {
+        "error": {
+            "message": msg,
+            "type": "api_error",
+            "code": code
+        }
+    }
+
+
+async def _iter_sse_json_events(
+    response: "aiohttp.ClientResponse",
+    tag: str,
+    parse_bare_json: bool = False,
+) -> AsyncGenerator[Dict[str, Any], None]:
+    """把 aiohttp 响应体解析为 SSE JSON 事件流（公共实现）。
+
+    🔧 重构说明：旧版在 call_api / call_gemini_native_api 里各自手写一份
+    几乎相同的解析循环，且使用 `async for line in response.content`（readline），
+    遇到超长行（图像模型的 base64 数据行可达数 MB）会抛
+    "Chunk too big" 导致流中断。现在：
+    - 用 iter_any + 增量 UTF-8 解码器 + 手工行缓冲，不受行长度限制，
+      也不会在多字节字符中间截断
+    - `data: [DONE]` → yield {"done": True} 并结束
+    - 带 data 前缀的 JSON 行 → yield 解析后的 dict
+    - parse_bare_json=True 时，无 data: 前缀的行也尝试按 JSON 解析（Gemini 兼容）
+    """
+    import codecs
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    buffer = ""
+
+    def _parse_line(line: str) -> Optional[Dict[str, Any]]:
+        """解析单行，返回事件 dict；[DONE] 返回 {"done": True}；无效行返回 None"""
+        if line.startswith('data:'):
+            data = line[5:].lstrip()
+            if data == '[DONE]':
+                logger.debug(f"[{tag}] 流式响应结束")
+                return {"done": True}
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError as e:
+                logger.warning(f"[{tag}] JSON解析失败: {e}, 数据: {data[:100]}")
+                return None
+        if parse_bare_json:
+            # 纯JSON格式（无前缀，Gemini 部分网关会这样返回）
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.warning(f"[{tag}] JSON解析失败: {e}, 数据: {line[:100]}")
+        return None
+
+    async for raw_chunk in response.content.iter_any():
+        buffer += decoder.decode(raw_chunk)
+        while True:
+            newline_pos = buffer.find('\n')
+            if newline_pos < 0:
+                break
+            line = buffer[:newline_pos].strip()
+            buffer = buffer[newline_pos + 1:]
+            if not line:
+                continue
+            event = _parse_line(line)
+            if event is not None:
+                yield event
+                if event.get("done"):
+                    return
+
+    # flush 残留（没有尾随换行符的最后一行）
+    buffer += decoder.decode(b"", final=True)
+    line = buffer.strip()
+    if line:
+        event = _parse_line(line)
+        if event is not None:
+            yield event
+
+
+
 class DirectAPIService:
     """Direct API调用服务"""
     
@@ -291,9 +400,10 @@ class DirectAPIService:
                     error_text = await response.text()
                     logger.error(f"[DIRECT_API] API调用失败: {response.status} - {error_text}")
                     try:
-                        # 尝试将错误解析为JSON，如果可以，就直接返回原始的JSON错误
+                        # 尝试将错误解析为JSON，并归一化 error 格式
                         error_json = json.loads(error_text)
-                        yield error_json
+                        yield _normalize_error_for_passthrough(
+                            error_json, response.status)
                     except json.JSONDecodeError:
                         # 如果不是JSON，就封装成一个OpenAI风格的错误格式
                         yield {
@@ -306,28 +416,9 @@ class DirectAPIService:
                     return
                 
                 if stream:
-                    # 流式响应
-                    async for line in response.content:
-                        line = line.decode('utf-8').strip()
-                        
-                        if not line:
-                            continue
-                        
-                        # 处理SSE格式
-                        if line.startswith('data: '):
-                            data = line[6:]  # 移除 "data: " 前缀
-                            
-                            if data == '[DONE]':
-                                logger.debug("[DIRECT_API] 流式响应结束")
-                                yield {"done": True}
-                                break
-                            
-                            try:
-                                chunk = json.loads(data)
-                                yield chunk
-                            except json.JSONDecodeError as e:
-                                logger.warning(f"[DIRECT_API] JSON解析失败: {e}, 数据: {data[:100]}")
-                                continue
+                    # 流式响应（公共 SSE 解析器，支持超长行与跨 chunk UTF-8）
+                    async for chunk in _iter_sse_json_events(response, "DIRECT_API"):
+                        yield chunk
                 else:
                     # 非流式响应
                     response_data = await response.json()
@@ -634,7 +725,7 @@ class DirectAPIService:
                 })
         
         # 构建请求体
-        request_body = {
+        request_body: Dict[str, Any] = {
             "contents": gemini_contents
         }
         
@@ -713,7 +804,8 @@ class DirectAPIService:
                     logger.error(f"[GEMINI_NATIVE] API调用失败: {response.status} - {error_text}")
                     try:
                         error_json = json.loads(error_text)
-                        yield error_json
+                        yield _normalize_error_for_passthrough(
+                            error_json, response.status)
                     except json.JSONDecodeError:
                         yield {
                             "error": {
@@ -725,36 +817,9 @@ class DirectAPIService:
                     return
                 
                 if stream:
-                    # 流式响应
-                    async for line in response.content:
-                        line = line.decode('utf-8').strip()
-                        
-                        if not line:
-                            continue
-                        
-                        # 处理SSE格式（带data:前缀）
-                        if line.startswith('data: '):
-                            data = line[6:]  # 移除 "data: " 前缀
-                            
-                            if data == '[DONE]':
-                                logger.debug("[GEMINI_NATIVE] 流式响应结束")
-                                yield {"done": True}
-                                break
-                            
-                            try:
-                                chunk = json.loads(data)
-                                yield chunk
-                            except json.JSONDecodeError as e:
-                                logger.warning(f"[GEMINI_NATIVE] JSON解析失败: {e}, 数据: {data[:100]}")
-                                continue
-                        else:
-                            # 纯JSON格式（无data:前缀）
-                            try:
-                                chunk = json.loads(line)
-                                yield chunk
-                            except json.JSONDecodeError as e:
-                                logger.warning(f"[GEMINI_NATIVE] JSON解析失败: {e}, 数据: {line[:100]}")
-                                continue
+                    # 流式响应（公共 SSE 解析器；Gemini 兼容无前缀的裸 JSON 行）
+                    async for chunk in _iter_sse_json_events(response, "GEMINI_NATIVE", parse_bare_json=True):
+                        yield chunk
                 else:
                     # 非流式响应
                     response_data = await response.json()
@@ -907,7 +972,7 @@ class DirectAPIService:
                 
             return response
         else:
-            message = {"role": "assistant"}
+            message: Dict[str, Any] = {"role": "assistant"}
             
             if reasoning_content:
                 message["reasoning_content"] = reasoning_content
@@ -1007,10 +1072,12 @@ class DirectAPIService:
                     logger.error(f"[DIRECT_API_PASSTHROUGH] API调用失败: {response.status} - {error_text}")
                     
                     try:
-                        # 检查原始错误是否为有效JSON
-                        json.loads(error_text)
-                        # 如果是，直接透传原始错误
-                        yield error_body
+                        # 检查原始错误是否为有效JSON，并归一化 error 格式
+                        error_json = json.loads(error_text)
+                        normalized = _normalize_error_for_passthrough(
+                            error_json, response.status)
+                        yield json.dumps(
+                            normalized, ensure_ascii=False).encode('utf-8')
                     except json.JSONDecodeError:
                         # 如果不是JSON，则封装成OpenAI兼容的错误格式
                         error_response = {

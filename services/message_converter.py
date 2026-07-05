@@ -162,8 +162,8 @@ def _process_openai_message_sync(message: dict) -> dict:
 async def convert_openai_to_lmarena_payload(
     openai_data: dict,
     session_id: str,
-    mode_override: str = None,
-    battle_target_override: str = None
+    mode_override: Optional[str] = None,
+    battle_target_override: Optional[str] = None
 ) -> dict:
     """在线程池中执行消息转换，避免大历史消息在事件循环中阻塞其他流式请求。"""
     return await asyncio.to_thread(
@@ -178,8 +178,8 @@ async def convert_openai_to_lmarena_payload(
 def _convert_openai_to_lmarena_payload_sync(
     openai_data: dict,
     session_id: str,
-    mode_override: str = None,
-    battle_target_override: str = None
+    mode_override: Optional[str] = None,
+    battle_target_override: Optional[str] = None
 ) -> dict:
     """
     将 OpenAI 请求体转换为油猴脚本所需的简化载荷，并应用酒馆模式、绕过模式以及对战模式。
@@ -481,8 +481,16 @@ def _convert_openai_to_lmarena_payload_sync(
             logger.info(f"[BYPASS_DEBUG] 从 model_endpoint_map.json (list) 获取模型类型: {model_type}")
     
     # 回退到 models.json 中的定义（仅在model_endpoint_map.json未提供type时）
+    # 注意：endpoint_info 可能是 dict 或 list（多端点配置），list 没有 .get 方法
+    endpoint_has_type = (
+        (isinstance(endpoint_info, dict) and endpoint_info.get("type"))
+        or (
+            isinstance(endpoint_info, list) and endpoint_info
+            and isinstance(endpoint_info[0], dict) and endpoint_info[0].get("type")
+        )
+    )
     model_info = MODEL_NAME_TO_ID_MAP.get(model_name, {})  # 关键修复：确保 model_info 总是一个字典
-    if not endpoint_info.get("type") and model_info:
+    if not endpoint_has_type and model_info:
         old_type = model_type
         model_type = model_info.get("type", "text")
         logger.info(f"[BYPASS_DEBUG] 从 models.json 获取模型类型: {old_type} -> {model_type}")

@@ -337,6 +337,35 @@
             transform: translateY(1px);
         }
         
+        .filter-input {
+            padding: 6px 10px;
+            background: var(--btn-bg);
+            color: var(--text-main);
+            border: 1px solid var(--btn-border);
+            border-radius: 4px;
+            font-size: 13px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        
+        .filter-input:hover {
+            border-color: var(--accent-soft);
+        }
+        
+        .filter-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-faint);
+        }
+        
+        .filter-input::placeholder {
+            color: var(--text-dim);
+        }
+        
+        select.filter-input option {
+            background: var(--btn-bg);
+            color: var(--text-main);
+        }
+        
         .error-log {
             padding: 12px;
             background: rgba(239,68,68,0.1);
@@ -545,7 +574,7 @@
             font-size: 16px;
             font-weight: 600;
             margin-bottom: 10px;
-            color: #374151;
+            color: var(--text-main);
         }
         
         .detail-item {
@@ -556,18 +585,18 @@
         
         .detail-label {
             font-weight: 500;
-            color: #6b7280;
+            color: var(--text-dim);
             min-width: 120px;
         }
         
         .detail-value {
-            color: #111827;
+            color: var(--text-main);
             word-break: break-word;
         }
         
         .message-box {
-            background: #f9fafb;
-            border: 1px solid #e5e7eb;
+            background: var(--surface-2);
+            border: 1px solid var(--line-weak);
             border-radius: 6px;
             padding: 12px;
             margin-bottom: 8px;
@@ -575,7 +604,7 @@
         
         .message-role {
             font-weight: 600;
-            color: #4f46e5;
+            color: var(--accent);
             margin-bottom: 4px;
         }
         
@@ -585,8 +614,8 @@
         }
         
         .response-content {
-            background: #f9fafb;
-            border: 1px solid #e5e7eb;
+            background: var(--surface-2);
+            border: 1px solid var(--line-weak);
             border-radius: 6px;
             padding: 12px;
             white-space: pre-wrap;
@@ -598,10 +627,10 @@
         /* 图像预览样式 */
         .image-preview-container {
             margin: 12px 0;
-            border: 1px solid #e5e7eb;
+            border: 1px solid var(--line-weak);
             border-radius: 8px;
             overflow: hidden;
-            background: white;
+            background: var(--surface-2);
         }
         
         .image-preview-wrapper {
@@ -610,7 +639,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            background: #f9fafb;
+            background: var(--surface-2);
         }
         
         .image-preview {
@@ -636,15 +665,15 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            color: #6b7280;
+            color: var(--text-dim);
             font-size: 14px;
         }
         
         .image-error {
             padding: 20px;
             text-align: center;
-            color: #dc2626;
-            background: #fef2f2;
+            color: #f87171;
+            background: rgba(239,68,68,0.12);
         }
         
         .image-controls {
@@ -652,19 +681,20 @@
             justify-content: space-between;
             align-items: center;
             padding: 8px 12px;
-            background: #f3f4f6;
-            border-top: 1px solid #e5e7eb;
+            background: var(--surface-3);
+            border-top: 1px solid var(--line-weak);
         }
         
         .image-info {
             font-size: 12px;
-            color: #6b7280;
+            color: var(--text-dim);
         }
         
         .toggle-raw-btn {
             padding: 4px 12px;
-            background: white;
-            border: 1px solid #e5e7eb;
+            background: var(--btn-bg);
+            color: var(--text-main);
+            border: 1px solid var(--btn-border);
             border-radius: 4px;
             font-size: 12px;
             cursor: pointer;
@@ -672,15 +702,15 @@
         }
         
         .toggle-raw-btn:hover {
-            background: #f9fafb;
-            border-color: #d1d5db;
+            background: var(--btn-hover);
+            border-color: var(--accent-soft);
         }
         
         .raw-content-container {
             display: none;
             padding: 12px;
             background: #1f2937;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid var(--line-weak);
         }
         
         .raw-content-container.show {
@@ -1027,10 +1057,10 @@
         ) !important;
       }
       #tab-summary > div div[style*="font-size: 28px"] {
-        color: var(--accent) !important;
+        text-shadow: 0 0 12px rgba(42,168,255,0.15);
       }
 
-      /* Tabs grid cards (JS生成，原有白底/圆角) */
+      /* Tabs grid cards (JS生成) */
       #tabs-grid > div {
         background: var(--surface) !important;
         border: 1px solid var(--line-strong) !important;
@@ -1044,23 +1074,12 @@
           var(--notch) 100%, 0 calc(100% - var(--notch))
         ) !important;
       }
-      #tabs-grid [style*="background: #f9fafb"] {
-        background: var(--surface-2) !important;
-        color: var(--text-main) !important;
-      }
       /* 进度条色系微调为扁平 */
       #tabs-grid [style*="height: 100%;"][style*="background: #dc2626"],
       #tabs-grid [style*="height: 100%;"][style*="background: #f59e0b"],
       #tabs-grid [style*="height: 100%;"][style*="background: #10b981"] {
         box-shadow: none !important;
       }
-
-      /* Modal detail section typography */
-      .detail-section h3 {
-        color: var(--text-main) !important;
-      }
-      .detail-label { color: var(--text-dim) !important; }
-      .detail-value { color: var(--text-main) !important; }
     </style>
 </head>
 <body>
@@ -1085,22 +1104,22 @@
             </div>
             <div id="api-docs-content" style="padding: 20px; display: none;">
                 <!-- 基础信息 -->
-                <div style="padding: 16px; background: #e0f2fe; border-radius: 8px; margin-bottom: 20px;">
+                <div style="padding: 16px; background: var(--accent-faint); border: 1px solid var(--line-weak); border-radius: 8px; margin-bottom: 20px;">
                     <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
                         <span style="font-size: 20px;">🌐</span>
-                        <h3 style="color: #0284c7; margin: 0;">服务器基础信息</h3>
+                        <h3 style="color: var(--accent); margin: 0;">服务器基础信息</h3>
                     </div>
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-top: 12px;">
                         <div>
-                            <span style="color: #64748b; font-size: 13px;">API 地址：</span>
-                            <code style="background: white; padding: 4px 8px; border-radius: 4px; font-size: 13px;">http://localhost:5102</code>
+                            <span style="color: var(--text-dim); font-size: 13px;">API 地址：</span>
+                            <code style="background: var(--surface-2); color: var(--text-main); padding: 4px 8px; border-radius: 4px; font-size: 13px;">http://localhost:5102</code>
                         </div>
                         <div>
-                            <span style="color: #64748b; font-size: 13px;">当前状态：</span>
+                            <span style="color: var(--text-dim); font-size: 13px;">当前状态：</span>
                             <span style="color: #10b981; font-weight: 500;">✅ 运行中</span>
                         </div>
                         <div>
-                            <span style="color: #64748b; font-size: 13px;">协议版本：</span>
+                            <span style="color: var(--text-dim); font-size: 13px;">协议版本：</span>
                             <span style="font-weight: 500;">OpenAI API v1 兼容</span>
                         </div>
                     </div>
@@ -1309,20 +1328,22 @@
                     <style>
                         .example-tab {
                             padding: 8px 16px;
-                            background: #f3f4f6;
-                            border: 1px solid #e5e7eb;
+                            background: var(--btn-bg);
+                            color: var(--text-main);
+                            border: 1px solid var(--btn-border);
                             border-radius: 6px;
                             cursor: pointer;
                             font-size: 14px;
                             transition: all 0.2s;
                         }
                         .example-tab:hover {
-                            background: #e5e7eb;
+                            background: var(--btn-hover);
+                            border-color: var(--accent-soft);
                         }
                         .example-tab.active {
-                            background: #4f46e5;
-                            color: white;
-                            border-color: #4f46e5;
+                            background: var(--accent);
+                            color: #06101f;
+                            border-color: var(--accent);
                         }
                         .example-content {
                             animation: fadeIn 0.3s;
@@ -1396,18 +1417,18 @@
             <div id="tab-connections-container">
                 <div style="padding: 20px;">
                     <div id="tab-summary" style="display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap;">
-                        <div style="flex: 1; min-width: 200px; padding: 16px; background: #f0fdf4; border-radius: 8px; border: 1px solid #86efac;">
-                            <div style="font-size: 14px; color: #166534; margin-bottom: 4px;">连接标签页</div>
-                            <div style="font-size: 28px; font-weight: 600; color: #15803d;" id="total-tabs">0</div>
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--line-strong);">
+                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">连接标签页</div>
+                            <div style="font-size: 28px; font-weight: 600; color: #34d399;" id="total-tabs">0</div>
                         </div>
-                        <div style="flex: 1; min-width: 200px; padding: 16px; background: #eff6ff; border-radius: 8px; border: 1px solid #93c5fd;">
-                            <div style="font-size: 14px; color: #1e40af; margin-bottom: 4px;">总并发能力</div>
-                            <div style="font-size: 28px; font-weight: 600; color: #1e3a8a;" id="total-capacity">0</div>
-                            <div style="font-size: 12px; color: #60a5fa; margin-top: 4px;">每个标签页支持6个并发</div>
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--line-strong);">
+                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">总并发能力</div>
+                            <div style="font-size: 28px; font-weight: 600; color: var(--accent);" id="total-capacity">0</div>
+                            <div style="font-size: 12px; color: var(--text-dim); margin-top: 4px;">每个标签页支持6个并发</div>
                         </div>
-                        <div style="flex: 1; min-width: 200px; padding: 16px; background: #fef3c7; border-radius: 8px; border: 1px solid #fcd34d;">
-                            <div style="font-size: 14px; color: #92400e; margin-bottom: 4px;">当前使用</div>
-                            <div style="font-size: 28px; font-weight: 600; color: #b45309;" id="total-used">0</div>
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--line-strong);">
+                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">当前使用</div>
+                            <div style="font-size: 28px; font-weight: 600; color: #fbbf24;" id="total-used">0</div>
                             <div style="font-size: 12px; color: #f59e0b; margin-top: 4px;" id="capacity-usage">使用率: 0%</div>
                         </div>
                     </div>
@@ -1448,20 +1469,34 @@
             <div class="section-header">
                 <h2 class="section-title">📝 日志</h2>
                 <div style="display: flex; align-items: center; gap: 12px;">
-                    <button class="refresh-btn" onclick="toggleLogs()" id="toggle-logs-btn">显示日志</button>
-                    <select id="log-limit" onchange="changeLogLimit()" style="padding: 6px 10px; border: 1px solid #e5e7eb; border-radius: 4px; font-size: 13px;">
-                        <option value="50">最近 50 条</option>
-                        <option value="100">最近 100 条</option>
-                        <option value="200">最近 200 条</option>
-                        <option value="500">最近 500 条</option>
-                        <option value="1000">最近 1000 条</option>
-                        <option value="all">显示全部</option>
+                    <button class="refresh-btn" onclick="toggleLogs()" id="toggle-logs-btn">隐藏日志</button>
+                    <select id="log-limit" class="filter-input" onchange="changeLogLimit()">
+                        <option value="20">每页 20 条</option>
+                        <option value="50" selected>每页 50 条</option>
+                        <option value="100">每页 100 条</option>
                     </select>
                     <a href="/api/logs/download?log_type=requests" class="download-btn">下载请求日志</a>
                     <a href="/api/logs/download?log_type=errors" class="download-btn" style="margin-left: 8px;">下载错误日志</a>
                 </div>
             </div>
-            <div id="logs-container" class="logs-hidden">
+            <div id="logs-container">
+                <!-- 筛选工具栏 -->
+                <div id="log-filters" style="display: flex; align-items: center; gap: 10px; padding: 10px 0; flex-wrap: wrap;">
+                    <select id="filter-model" class="filter-input" onchange="applyLogFilters()">
+                        <option value="">全部模型</option>
+                    </select>
+                    <select id="filter-status" class="filter-input" onchange="applyLogFilters()">
+                        <option value="">全部状态</option>
+                        <option value="success">成功</option>
+                        <option value="failed">失败</option>
+                    </select>
+                    <input type="text" id="filter-search" class="filter-input" placeholder="搜索 request_id / 模型 / 错误信息..." 
+                           style="min-width: 220px;"
+                           onkeydown="if(event.key==='Enter') applyLogFilters()">
+                    <button class="refresh-btn" onclick="applyLogFilters()" style="padding: 4px 14px; font-size: 13px;">筛选</button>
+                    <span id="filter-total" style="font-size: 12px; color: var(--text-dim); margin-left: auto;"></span>
+                </div>
+
                 <div class="tabs">
                     <div class="tab active" onclick="switchTab('requests')">请求日志 <span id="request-count" style="opacity: 0.7; font-size: 12px;"></span></div>
                     <div class="tab" onclick="switchTab('errors')">错误日志 <span id="error-count" style="opacity: 0.7; font-size: 12px;"></span></div>
@@ -1477,14 +1512,28 @@
                                     <th>模型</th>
                                     <th>状态</th>
                                     <th>耗时</th>
-                                    <th>模式</th>
+                                    <th>输入Tokens</th>
+                                    <th>输出Tokens</th>
+                                    <th>费用</th>
                                     <th>操作</th>
                                 </tr>
                             </thead>
                             <tbody id="request-logs">
-                                <tr><td colspan="7" style="text-align: center;">加载中...</td></tr>
+                                <tr><td colspan="9" style="text-align: center;">加载中...</td></tr>
                             </tbody>
                         </table>
+                    </div>
+                    <!-- 分页控件 -->
+                    <div id="log-pagination" style="display: none; justify-content: center; align-items: center; gap: 12px; padding: 12px 0;">
+                        <button id="pagination-prev" class="refresh-btn" onclick="changePage(-1)" style="padding: 4px 12px; font-size: 13px;">上一页</button>
+                        <span style="font-size: 13px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px;">
+                            第
+                            <input type="number" id="pagination-page-input" class="filter-input" min="1" value="1"
+                                   style="width: 64px; padding: 3px 6px; text-align: center;"
+                                   onkeydown="if(event.key==='Enter') jumpToPage()" onchange="jumpToPage()">
+                            / <span id="pagination-total-pages">1</span> 页，共 <span id="pagination-total-count">0</span> 条
+                        </span>
+                        <button id="pagination-next" class="refresh-btn" onclick="changePage(1)" style="padding: 4px 12px; font-size: 13px;">下一页</button>
                     </div>
                 </div>
                 
@@ -1817,31 +1866,102 @@
         
         // 当前日志限制
         let currentLogLimit = 50;
+        let currentLogPage = 0;
+        let currentLogTotal = 0;
+        let searchDebounceTimer = null;
+        
+        // 加载模型下拉列表
+        async function loadModelFilter() {
+            try {
+                const resp = await fetch('/api/monitor/logs/requests/query?limit=1&offset=0');
+                const data = await resp.json();
+                const models = data.models || [];
+                const sel = document.getElementById('filter-model');
+                while (sel.options.length > 1) sel.remove(1);
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    sel.appendChild(opt);
+                });
+            } catch (e) {
+                console.error('加载模型列表失败:', e);
+            }
+        }
         
         // 改变日志显示数量
         function changeLogLimit() {
-            const select = document.getElementById('log-limit');
-            currentLogLimit = select.value === 'all' ? 10000 : parseInt(select.value);
+            currentLogLimit = parseInt(document.getElementById('log-limit').value) || 50;
+            currentLogPage = 0;
             refreshLogs();
+        }
+        
+        // 应用筛选（防抖 300ms）
+        function applyLogFilters() {
+            clearTimeout(searchDebounceTimer);
+            searchDebounceTimer = setTimeout(() => {
+                currentLogPage = 0;
+                refreshLogs();
+            }, 300);
+        }
+        
+        // 翻页
+        function changePage(delta) {
+            const maxPage = Math.max(0, Math.ceil(currentLogTotal / currentLogLimit) - 1);
+            currentLogPage = Math.max(0, Math.min(currentLogPage + delta, maxPage));
+            refreshLogs();
+        }
+        
+        // 跳转到指定页（输入框回车/失焦触发）
+        function jumpToPage() {
+            const input = document.getElementById('pagination-page-input');
+            const totalPages = Math.max(1, Math.ceil(currentLogTotal / currentLogLimit));
+            const page = Math.max(1, Math.min(parseInt(input.value, 10) || 1, totalPages));
+            input.value = page;
+            if (page - 1 === currentLogPage) return;
+            currentLogPage = page - 1;
+            refreshLogs();
+        }
+        
+        function _renderPagination() {
+            const totalPages = Math.max(1, Math.ceil(currentLogTotal / currentLogLimit));
+            document.getElementById('log-pagination').style.display = currentLogTotal > currentLogLimit ? 'flex' : 'none';
+            document.getElementById('pagination-prev').disabled = currentLogPage <= 0;
+            document.getElementById('pagination-next').disabled = currentLogPage >= totalPages - 1;
+            const pageInput = document.getElementById('pagination-page-input');
+            pageInput.value = currentLogPage + 1;
+            pageInput.max = totalPages;
+            document.getElementById('pagination-total-pages').textContent = totalPages;
+            document.getElementById('pagination-total-count').textContent = currentLogTotal.toLocaleString();
         }
         
         // 刷新请求日志
         async function refreshRequestLogs() {
             try {
+                const model = document.getElementById('filter-model')?.value || '';
+                const status = document.getElementById('filter-status')?.value || '';
+                const search = document.getElementById('filter-search')?.value.trim() || '';
                 const limit = currentLogLimit;
-                const response = await fetch(`/api/monitor/logs/requests?limit=${limit}`);
-                let logs = await response.json();
+                const offset = currentLogPage * limit;
+                const params = new URLSearchParams({ limit, offset });
+                if (model) params.set('model', model);
+                if (status) params.set('status', status);
+                if (search) params.set('search', search);
+
+                const response = await fetch(`/api/monitor/logs/requests/query?${params}`);
+                const data = await response.json();
+                const logs = data.items || [];
+                currentLogTotal = data.total || 0;
                 
-                // 🔧 修复：按时间戳降序排序（最新的在前）
-                logs.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-                
-                // 更新计数显示
-                document.getElementById('request-count').textContent = `(${logs.length})`;
+                // 更新计数
+                document.getElementById('request-count').textContent = `(${currentLogTotal})`;
+                document.getElementById('filter-total').textContent = currentLogTotal ? `共 ${currentLogTotal} 条` : '';
+                _renderPagination();
                 
                 const tbody = document.getElementById('request-logs');
                 
                 if (logs.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">暂无请求日志</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="9" style="text-align: center;">暂无匹配的请求日志</td></tr>';
                     return;
                 }
                 
@@ -1849,7 +1969,10 @@
                     const time = new Date(log.timestamp * 1000).toLocaleString();
                     const statusClass = log.status === 'success' ? 'success' : 'failed';
                     const duration = log.duration ? formatDuration(log.duration) : '-';
-                    const mode = log.mode || 'direct_chat';
+                    const inTokens = log.input_tokens ? log.input_tokens.toLocaleString() : '-';
+                    const outTokens = log.output_tokens ? log.output_tokens.toLocaleString() : '-';
+                    const costVal = log.total_cost != null ? Number(log.total_cost).toFixed(6) : '';
+                    const costDisplay = costVal ? '$' + costVal : '-';
                     
                     // 🔧 显示思维链/工具调用标记
                     let featureBadges = '';
@@ -1871,7 +1994,9 @@
                             <td>${log.model}${featureBadges ? ' ' + featureBadges : ''}</td>
                             <td><span class="status-badge ${statusClass}">${log.status}</span></td>
                             <td>${duration}</td>
-                            <td>${mode}</td>
+                            <td>${inTokens}</td>
+                            <td>${outTokens}</td>
+                            <td style="font-family: monospace; font-size: 11px;">${costDisplay}</td>
                             <td>
                                 <button class="detail-btn" onclick="viewRequestDetails('${log.request_id}')">查看详细</button>
                             </td>
@@ -2112,6 +2237,29 @@
                     }
                 }
                 
+                // 统一构造结构化响应消息：有它就只渲染“模型响应消息”一块，
+                // 避免与单独的“思维链”“响应内容”区块重复展示
+                let responseMsg = null;
+                if (details.response_message) {
+                    responseMsg = { ...details.response_message };
+                } else if (details.response_tool_calls) {
+                    responseMsg = {
+                        role: 'assistant',
+                        content: details.response_content || null,
+                        reasoning_content: details.reasoning_content || null,
+                        tool_calls: details.response_tool_calls
+                    };
+                }
+                if (responseMsg) {
+                    // 补齐结构化消息里缺失的字段，保证信息不丢
+                    if (!responseMsg.reasoning_content && details.reasoning_content) {
+                        responseMsg.reasoning_content = details.reasoning_content;
+                    }
+                    if ((responseMsg.content === null || responseMsg.content === undefined || responseMsg.content === '') && details.response_content) {
+                        responseMsg.content = details.response_content;
+                    }
+                }
+                
                 modalBody.innerHTML = `
                     <div class="detail-section">
                         <h3>基本信息</h3>
@@ -2165,7 +2313,7 @@
                     </div>
                     ` : ''}
                     
-                    ${details.reasoning_content ? `
+                    ${!responseMsg && details.reasoning_content ? `
                     <div class="detail-section">
                         <h3>💭 思维链 (Reasoning)</h3>
                         <div class="response-content" style="background: rgba(42,168,255,0.06); border: 1px solid rgba(42,168,255,0.2);">
@@ -2174,7 +2322,7 @@
                     </div>
                     ` : ''}
                     
-                    ${details.response_content && !(details.response_message && !details.response_message.tool_calls) ? `
+                    ${!responseMsg && details.response_content ? `
                     <div class="detail-section">
                         <h3>响应内容</h3>
                         <div class="response-content">${(() => {
@@ -2191,15 +2339,10 @@
                     </div>
                     ` : ''}
 
-                    ${(details.response_message || details.response_tool_calls) ? `
+                    ${responseMsg ? `
                     <div class="detail-section">
                         <h3>模型响应消息</h3>
-                        ${renderMessageBox(details.response_message || {
-                            role: 'assistant',
-                            content: details.response_content || null,
-                            reasoning_content: details.reasoning_content || null,
-                            tool_calls: details.response_tool_calls || null
-                        })}
+                        ${renderMessageBox(responseMsg)}
                     </div>
                     ` : ''}
                 `;
@@ -2226,6 +2369,7 @@
         // 初始化
         connectWebSocket();
         refreshData();
+        loadModelFilter();
         
         // 初始化时设置各个面板的隐藏状态
         document.addEventListener('DOMContentLoaded', function() {
@@ -2283,6 +2427,7 @@
             if (logsVisible) {
                 container.classList.remove('logs-hidden');
                 btn.textContent = '隐藏日志';
+                loadModelFilter().catch(e => console.error('模型筛选下拉加载失败:', e)); // 加载模型筛选下拉
                 refreshLogs(); // 显示时刷新日志
             } else {
                 container.classList.add('logs-hidden');
@@ -2323,9 +2468,9 @@
             }
             
             grid.innerHTML = data.tabs.map((tab, index) => {
-                const statusColor = tab.status === 'busy' ? '#dc2626' : '#10b981';
+                const statusColor = tab.status === 'busy' ? '#f87171' : '#34d399';
                 const statusText = tab.status === 'busy' ? '繁忙' : '空闲';
-                const statusBg = tab.status === 'busy' ? '#fee2e2' : '#d1fae5';
+                const statusBg = tab.status === 'busy' ? 'rgba(220,38,38,0.18)' : 'rgba(16,185,129,0.15)';
                 
                 // 生成一个简短的显示ID
                 const shortId = tab.tab_id.split('_').pop().substring(0, 6);
@@ -2334,16 +2479,16 @@
                 const connectedDuration = formatDuration(tab.connected_duration || 0);
                 
                 return `
-                    <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; background: white;">
+                    <div style="border: 1px solid var(--line-weak); border-radius: 8px; padding: 16px; background: var(--card-bg);">
                         <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 12px;">
                             <div style="flex: 1;">
-                                <div style="font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 4px;">
+                                <div style="font-size: 14px; font-weight: 600; color: var(--text-main); margin-bottom: 4px;">
                                     标签页 #${index + 1}
                                 </div>
-                                <div style="font-size: 11px; font-family: monospace; color: #6b7280;">
+                                <div style="font-size: 11px; font-family: monospace; color: var(--text-dim);">
                                     ID: ${shortId}
                                 </div>
-                                <div style="font-size: 11px; color: #9ca3af; margin-top: 2px;">
+                                <div style="font-size: 11px; color: var(--text-dim); margin-top: 2px;">
                                     已连接: ${connectedDuration}
                                 </div>
                             </div>
@@ -2353,30 +2498,30 @@
                         </div>
                         
                         <div style="margin-bottom: 12px;">
-                            <div style="display: flex; justify-content: space-between; font-size: 13px; color: #6b7280; margin-bottom: 4px;">
+                            <div style="display: flex; justify-content: space-between; font-size: 13px; color: var(--text-dim); margin-bottom: 4px;">
                                 <span>请求负载</span>
-                                <span style="font-weight: 600; color: #374151;">${tab.active_requests}/${tab.max_concurrent}</span>
+                                <span style="font-weight: 600; color: var(--text-main);">${tab.active_requests}/${tab.max_concurrent}</span>
                             </div>
-                            <div style="height: 8px; background: #f3f4f6; border-radius: 4px; overflow: hidden;">
+                            <div style="height: 8px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden;">
                                 <div style="height: 100%; background: ${tab.load_percentage >= 100 ? '#dc2626' : tab.load_percentage >= 66 ? '#f59e0b' : '#10b981'}; width: ${tab.load_percentage}%; transition: width 0.3s;"></div>
                             </div>
-                            <div style="font-size: 11px; color: #9ca3af; margin-top: 4px;">
+                            <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">
                                 ${tab.load_percentage.toFixed(0)}% 已使用
                             </div>
                         </div>
                         
                         <div style="display: flex; gap: 8px; font-size: 12px; margin-bottom: 8px;">
-                            <div style="flex: 1; padding: 8px; background: #f9fafb; border-radius: 4px; text-align: center;">
-                                <div style="color: #6b7280;">活跃请求</div>
-                                <div style="font-weight: 600; color: #374151; margin-top: 2px;">${tab.active_requests}</div>
+                            <div style="flex: 1; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; text-align: center;">
+                                <div style="color: var(--text-dim);">活跃请求</div>
+                                <div style="font-weight: 600; color: var(--text-main); margin-top: 2px;">${tab.active_requests}</div>
                             </div>
-                            <div style="flex: 1; padding: 8px; background: #f9fafb; border-radius: 4px; text-align: center;">
-                                <div style="color: #6b7280;">剩余容量</div>
-                                <div style="font-weight: 600; color: #374151; margin-top: 2px;">${tab.max_concurrent - tab.active_requests}</div>
+                            <div style="flex: 1; padding: 8px; background: rgba(255,255,255,0.05); border-radius: 4px; text-align: center;">
+                                <div style="color: var(--text-dim);">剩余容量</div>
+                                <div style="font-weight: 600; color: var(--text-main); margin-top: 2px;">${tab.max_concurrent - tab.active_requests}</div>
                             </div>
                         </div>
                         
-                        <div style="padding: 6px 10px; background: ${tab.load_percentage >= 80 ? '#fef3c7' : '#f0fdf4'}; border-radius: 4px; font-size: 11px; color: ${tab.load_percentage >= 80 ? '#92400e' : '#166534'}; text-align: center;">
+                        <div style="padding: 6px 10px; background: ${tab.load_percentage >= 80 ? 'rgba(245,158,11,0.15)' : 'rgba(16,185,129,0.12)'}; border-radius: 4px; font-size: 11px; color: ${tab.load_percentage >= 80 ? '#fbbf24' : '#34d399'}; text-align: center;">
                             ${tab.load_percentage >= 80 ? '⚠️ 负载较高' : '✅ 运行良好'}
                         </div>
                     </div>

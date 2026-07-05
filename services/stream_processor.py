@@ -31,6 +31,7 @@ from services.image_handler import (
     ImageProcessor,
     CloudflareHandler,
 )
+from utils.task_registry import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +39,26 @@ logger = logging.getLogger(__name__)
 _pattern_matcher = StreamPatternMatcher()
 
 
-async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict, CONFIG: dict, 
+async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict, CONFIG: dict,
                                    browser_connections: dict, response_channels: dict,
-                                   IS_REFRESHING_FOR_VERIFICATION: bool, VERIFICATION_COOLDOWN_UNTIL: Optional[float],
-                                   aiohttp_session, IMAGE_BASE64_CACHE: dict, IMAGE_CACHE_MAX_SIZE: int,
-                                   IMAGE_CACHE_TTL: int, save_downloaded_image_async, _download_image_data_with_retry,
-                                   release_tab_request):
+                                   IMAGE_BASE64_CACHE: dict, IMAGE_CACHE_MAX_SIZE: int,
+                                   IMAGE_CACHE_TTL: int):
     """
     核心内部生成器：处理来自浏览器的原始数据流，并产生结构化事件。
     事件类型: ('content', str), ('finish', str), ('error', str), ('retry_info', dict)
+
+    人机验证状态统一读写 AppState.server（通过 CloudflareHandler），
+    图片下载/保存与标签页释放函数直接从对应模块导入。
     """
+    from services.image_service import (
+        save_downloaded_image_async,
+        download_image_data_with_retry,
+    )
+    from core.load_balancer import release_tab
+    from core.app_state import get_app_state
+
+    _state = get_app_state()
+
     stream_cancelled = False
     logger.info(f"[STREAM_LIFECYCLE] 🚀 _process_lmarena_stream 开始处理: {request_id[:8]}")
     
@@ -68,21 +79,37 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
     stream_start_time = time.time()
     
     # 初始化图片处理器
+    # 🔧 包装下载/保存函数：ImageProcessor 只传核心参数，
+    # 其余依赖（session/信号量/去重集合/配置）从 AppState 获取
+    async def _download_image_for_processor(url: str):
+        return await download_image_data_with_retry(
+            url,
+            _state.server.aiohttp_session,
+            _state.server.DOWNLOAD_SEMAPHORE,
+            _state.server.MAX_CONCURRENT_DOWNLOADS,
+            CONFIG,
+        )
+
+    async def _save_image_for_processor(image_data: bytes, url: str, rid: str):
+        await save_downloaded_image_async(
+            image_data,
+            url,
+            rid,
+            _state.image.downloaded_urls_set,
+            CONFIG,
+        )
+
     image_processor = ImageProcessor(
         config=CONFIG,
         image_cache=IMAGE_BASE64_CACHE,
         cache_max_size=IMAGE_CACHE_MAX_SIZE,
         cache_ttl=IMAGE_CACHE_TTL,
-        download_func=_download_image_data_with_retry,
-        save_func=save_downloaded_image_async,
+        download_func=_download_image_for_processor,
+        save_func=_save_image_for_processor,
     )
     
-    # 初始化 Cloudflare 处理器
-    cloudflare_handler = CloudflareHandler(
-        browser_connections=browser_connections,
-        is_refreshing=IS_REFRESHING_FOR_VERIFICATION,
-        cooldown_until=VERIFICATION_COOLDOWN_UNTIL,
-    )
+    # 初始化 Cloudflare 处理器（验证状态自动读写 AppState.server）
+    cloudflare_handler = CloudflareHandler(browser_connections=browser_connections)
 
     try:
         while True:
@@ -138,7 +165,7 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
                     has_yielded_content = True
                     yield event
                 
-                if has_yielded_content and IS_REFRESHING_FOR_VERIFICATION:
+                if has_yielded_content and cloudflare_handler.is_refreshing:
                     logger.info(f"PROCESSOR [ID: {request_id[:8]}]: 请求成功，人机验证状态将在下次连接时重置。")
                 break
 
@@ -200,7 +227,7 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
         await _cleanup_stream(
             request_id, stream_cancelled, stream_buffer, stream_start_time,
             enable_reasoning_output, has_reasoning, reasoning_buffer, CONFIG,
-            response_channels, request_metadata, release_tab_request,
+            response_channels, request_metadata, release_tab,
             monitoring_service=None  # stream_generator 层负责 request_end
         )
 
@@ -212,10 +239,10 @@ async def _send_cancel_to_browser(request_id: str, request_metadata: dict, brows
         if tab_id and tab_id in browser_connections:
             ws = browser_connections[tab_id]
             try:
-                asyncio.create_task(ws.send_text(json.dumps({
+                spawn(ws.send_text(json.dumps({
                     "command": "cancel_request",
                     "request_id": request_id
-                })))
+                })), name="cancel-request")
                 logger.warning(f"[STREAM_LIFECYCLE] ✉️ 已向浏览器发送取消指令: {request_id[:8]}")
             except Exception as e:
                 logger.error(f"[STREAM_LIFECYCLE] 发送取消指令失败: {e}")
@@ -316,7 +343,7 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
                            format_openai_chunk_func, format_openai_finish_chunk_func, format_openai_error_chunk_func,
                            CONFIG: dict, response_channels: dict, request_metadata: dict,
                            monitoring_service, estimate_message_tokens, estimate_tokens,
-                           browser_connections: dict, full_messages: list = None):
+                           browser_connections: dict, full_messages: Optional[list] = None):
     """将内部事件流格式化为 OpenAI SSE 响应。"""
     response_id = generate_response_id()
     chunk_builder = StreamChunkBuilder(model, response_id)
@@ -628,7 +655,7 @@ async def non_stream_response(request_id: str, model: str, _process_lmarena_stre
                               format_openai_non_stream_response_func, CONFIG: dict,
                               response_channels: dict, request_metadata: dict,
                               monitoring_service, estimate_message_tokens, estimate_tokens,
-                              release_tab_request, Response, full_messages: list = None):
+                              release_tab_request, Response, full_messages: Optional[list] = None):
     """聚合内部事件流并返回单个 OpenAI JSON 响应。"""
     response_id = f"chatcmpl-{uuid.uuid4()}"
     logger.info(f"NON-STREAM [ID: {request_id[:8]}]: 开始处理非流式响应。")

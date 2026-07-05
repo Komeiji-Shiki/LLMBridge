@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>访问验证 - LMArena Bridge</title>
+    <style>
+        :root {
+            --bg-deep: linear-gradient(180deg, #090e16 0%, #0a1220 100%);
+            --surface: #0e1a2d;
+            --line-strong: #223650;
+            --text-main: #d9e5ff;
+            --text-dim: #8fa0bf;
+            --accent: #2aa8ff;
+            --accent-soft: rgba(42,168,255,0.35);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-deep);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-box {
+            background: var(--surface);
+            border: 1px solid var(--line-strong);
+            border-radius: 12px;
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        h1 {
+            color: var(--accent);
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 1.8rem;
+        }
+        .subtitle {
+            text-align: center;
+            color: var(--text-dim);
+            margin-bottom: 30px;
+            font-size: 0.9rem;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+        input {
+            width: 100%;
+            padding: 12px 15px;
+            background: #0b1422;
+            border: 1px solid var(--line-strong);
+            border-radius: 6px;
+            color: var(--text-main);
+            font-size: 1rem;
+        }
+        input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(42, 168, 255, 0.1);
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: rgba(42, 168, 255, 0.2);
+            border: 1px solid var(--accent-soft);
+            border-radius: 6px;
+            color: var(--accent);
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: rgba(42, 168, 255, 0.3);
+        }
+        .error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #ef4444;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .error.show { display: block; }
+        .success {
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            color: #10b981;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        .success.show { display: block; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>🔐 访问验证</h1>
+        <p class="subtitle">请输入Web访问密钥</p>
+        <div id="error" class="error"></div>
+        <div id="success" class="success"></div>
+        <form onsubmit="return submitKey()">
+            <div class="form-group">
+                <label for="key">访问密钥</label>
+                <input type="password" id="key" placeholder="请输入密钥..." autofocus>
+            </div>
+            <button type="submit">🚀 验证并进入</button>
+        </form>
+    </div>
+    <script>
+        // 读取 next 参数并限制为站内路径，防止开放重定向
+        function getNextPath() {
+            var next = new URLSearchParams(location.search).get('next') || '/admin';
+            if (next.charAt(0) !== '/' || next.charAt(1) === '/') {
+                next = '/admin';
+            }
+            return next;
+        }
+
+        function submitKey() {
+            var key = document.getElementById('key').value;
+            var errorDiv = document.getElementById('error');
+            var btn = document.querySelector('button');
+            var successDiv = document.getElementById('success');
+
+            if (!key) {
+                errorDiv.textContent = '请输入密钥';
+                errorDiv.className = 'error show';
+                return false;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '验证中...';
+            errorDiv.className = 'error';
+            successDiv.className = 'success';
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/auth/verify', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    try {
+                        var data = JSON.parse(xhr.responseText);
+                        if (data.success) {
+                            document.cookie = "web_access_key=" + encodeURIComponent(key) + "; path=/; max-age=86400";
+                            var next = getNextPath();
+                            successDiv.textContent = '✅ 验证成功！点击下方按钮进入';
+                            successDiv.className = 'success show';
+                            btn.textContent = '👉 进入管理面板';
+                            btn.disabled = false;
+                            btn.onclick = function() { window.location.href = next; return false; };
+                        } else {
+                            errorDiv.textContent = data.message || '密钥错误';
+                            errorDiv.className = 'error show';
+                            btn.disabled = false;
+                            btn.textContent = '🚀 验证并进入';
+                        }
+                    } catch (e) {
+                        errorDiv.textContent = '验证失败: ' + (xhr.status === 0 ? '网络错误' : xhr.statusText);
+                        errorDiv.className = 'error show';
+                        btn.disabled = false;
+                        btn.textContent = '🚀 验证并进入';
+                    }
+                }
+            };
+            xhr.send(JSON.stringify({ key: key }));
+            return false;
+        }
+    </script>
+</body>
+</html>

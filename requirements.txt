@@ -1,6 +1,6 @@
 # Core dependencies
 fastapi
-uvicorn[standard]
+hypercorn
 requests
 packaging
 aiohttp
@@ -10,7 +10,7 @@ psutil
 watchdog
 typing_extensions
 
-# HTTP/2 support (C9: 消除浏览器 6 连接限制)
+# HTTP/2 support (Hypercorn 原生支持 h2c/h2，h2 为其依赖项)
 h2
 
 # File upload / background scheduler

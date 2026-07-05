@@ -48,7 +48,7 @@ function buildModelsTable(modelEndpointMap) {
         <tbody id="models-tbody">
             ${Object.entries(modelEndpointMap).map(([name, config]) => {
                 const cfg = Array.isArray(config) ? config[0] : config;
-                    const isDirectAPI = cfg.api_type === 'direct_api' || cfg.api_type === 'gemini_native';
+                    const isDirectAPI = cfg.api_type === 'direct_api' || cfg.api_type === 'gemini_native' || cfg.api_type === 'anthropic_native';
                     const autoRetryConfig = (cfg && typeof cfg === 'object') ? (cfg.auto_retry || {}) : {};
                     const autoRetryEnabled = !!autoRetryConfig.enabled;
                     
@@ -58,7 +58,7 @@ function buildModelsTable(modelEndpointMap) {
                     if (isDirectAPI) {
                         const baseUrl = cfg.api_base_url || '';
                         const displayUrl = baseUrl.length > 30 ? baseUrl.substring(0, 30) + '...' : baseUrl;
-                        const apiTypeLabel = cfg.api_type === 'gemini_native' ? 'Gemini原生' : 'OpenAI兼容';
+                        const apiTypeLabel = cfg.api_type === 'gemini_native' ? 'Gemini原生' : (cfg.api_type === 'anthropic_native' ? 'Anthropic原生' : 'OpenAI兼容');
                         const endpointPath = (cfg.endpoint_path || '/chat/completions');
                         
                         // 🔧 多 API Key 轮询：显示 key 数量
@@ -88,6 +88,7 @@ function buildModelsTable(modelEndpointMap) {
                         modeInfo = `
                             <span class="badge badge-success">Direct API</span>
                             ${cfg.passthrough ? '<span class="badge badge-info">透传</span>' : ''}
+                            ${cfg.api_type === 'anthropic_native' ? '<span class="badge badge-info">Anthropic原生</span>' : ''}
                             ${cfg.api_type === 'gemini_native' ? '<span class="badge badge-info">Gemini原生</span>' : ''}
                             ${autoRetryEnabled ? '<span class="badge" style="background: rgba(249, 115, 22, 0.2); color: #f97316; border-color: rgba(249, 115, 22, 0.3);">🔁重试</span>' : ''}
                             ${cfg.image_compression?.enabled ? '<span class="badge" style="background: rgba(147, 51, 234, 0.2); color: #a855f7; border-color: rgba(147, 51, 234, 0.3);">🖼️压缩</span>' : ''}
@@ -199,8 +200,10 @@ async function deleteModel(name) {
     if (!confirm(`确定要删除模型 "${name}" 吗？`)) return;
     
     try {
-        const response = await fetch(`/api/admin/models/${encodeURIComponent(name)}`, {
-            method: 'DELETE'
+        const response = await fetch('/api/admin/models/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: name })
         });
         
         if (!response.ok) {

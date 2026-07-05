@@ -20,6 +20,9 @@ from typing import Dict, Optional, List
 import logging
 from pathlib import Path
 
+from utils.monitor_params import MONITOR_PARAM_EXCLUDED_KEYS
+from utils.task_registry import spawn
+
 logger = logging.getLogger(__name__)
 # 导入SQLite扩展
 try:
@@ -127,7 +130,7 @@ class LogManager:
         )
         self._writer_thread.start()
         
-    def _get_hierarchical_log_path(self, timestamp: float, request_id: str, log_type: str = "request", model_name: str = None) -> Path:
+    def _get_hierarchical_log_path(self, timestamp: float, request_id: str, log_type: str = "request", model_name: Optional[str] = None) -> Path:
         """
         生成分层日志文件路径
         格式: logs/YYYYMMDD/HH/模型名_YYYYMMDD_HHMM_requestID[:8].json[.gz]
@@ -346,6 +349,48 @@ class LogManager:
             logger.warning("错误日志队列已满，回退为同步写入")
             self._write_error_log_sync(log_entry)
     
+    def query_request_logs(self, limit: int = 50, offset: int = 0,
+                           model: Optional[str] = None, status: Optional[str] = None,
+                           search: Optional[str] = None) -> dict:
+        """分页 + 过滤查询请求日志（供监控面板使用）。
+
+        SQLite 优先（走索引 + SQL 过滤）；不可用时回退内存过滤。
+        Returns: {'total': int, 'items': [...], 'models': [模型名列表]}
+        """
+        if self.sqlite_logger:
+            try:
+                result = self.sqlite_logger.query_requests(
+                    limit=limit, offset=offset, model=model, status=status, search=search)
+                result['models'] = self.sqlite_logger.get_distinct_models()
+                return result
+            except Exception as e:
+                logger.warning(f"SQLite 过滤查询失败，回退内存过滤: {e}")
+
+        # 回退：读最近日志后在内存中过滤
+        logs = self.read_recent_logs("requests", 1000)
+        search_lower = (search or "").lower()
+
+        def _match(entry: dict) -> bool:
+            if model and entry.get('model') != model:
+                return False
+            if status == 'success' and not entry.get('success', entry.get('status') == 'success'):
+                return False
+            if status == 'failed' and entry.get('success', entry.get('status') == 'success'):
+                return False
+            if search_lower:
+                haystack = f"{entry.get('request_id', '')} {entry.get('model', '')} {entry.get('error', '')}".lower()
+                if search_lower not in haystack:
+                    return False
+            return True
+
+        filtered = [entry for entry in logs if _match(entry)]
+        models = sorted({m for entry in logs if (m := entry.get('model'))})
+        return {
+            'total': len(filtered),
+            'items': filtered[offset:offset + limit],
+            'models': models,
+        }
+
     def read_recent_logs(self, log_type: str = "requests", limit: int = 50) -> List[dict]:
         """读取最近的日志。SQLite优先（O(log n)走索引），分层日志兜底，JSONL最后"""
         # 1️⃣ SQLite 优先 — 走 timestamp 索引，O(log n + limit)
@@ -463,7 +508,7 @@ class MonitoringService:
         self.recent_errors = deque(maxlen=MonitorConfig.MAX_RECENT_ERRORS)
         self.model_stats = defaultdict(lambda: {
             'total': 0, 'success': 0, 'failed': 0,
-            'total_duration': 0, 'count_with_duration': 0
+            'total_duration': 0.0, 'count_with_duration': 0
         })
         self._lock = threading.Lock()
         
@@ -498,8 +543,8 @@ class MonitoringService:
         logger.info(f"  专用线程池: {self._monitor_pool._max_workers} workers (隔离于默认asyncio线程池)")
     
     def request_start(self, request_id: str, model: str, messages_count: int = 0,
-                     session_id: str = None, mode: str = None,
-                     messages: List[dict] = None, params: dict = None):
+                     session_id: Optional[str] = None, mode: Optional[str] = None,
+                     messages: Optional[List[dict]] = None, params: Optional[dict] = None):
         """记录请求开始（非阻塞版：提交到线程池，不阻塞事件循环）"""
         self._monitor_pool.submit(
             self._request_start_sync,
@@ -507,8 +552,8 @@ class MonitoringService:
         )
     
     def _request_start_sync(self, request_id: str, model: str, messages_count: int = 0,
-                     session_id: str = None, mode: str = None,
-                     messages: List[dict] = None, params: dict = None):
+                     session_id: Optional[str] = None, mode: Optional[str] = None,
+                     messages: Optional[List[dict]] = None, params: Optional[dict] = None):
         """记录请求开始（实际执行，在线程池中运行）"""
         # 热路径只保留轻量预览，不再在 request_start 阶段遍历整份 messages 做伪 token 估算
         estimated_input_tokens = 0
@@ -555,11 +600,11 @@ class MonitoringService:
         
         logger.info(f"请求开始 [ID: {request_id[:8]}] 模型: {model}")
     
-    def request_end(self, request_id: str, success: bool, error: str = None,
-                    response_content: str = None, reasoning_content: str = None,
+    def request_end(self, request_id: str, success: bool, error: Optional[str] = None,
+                    response_content: Optional[str] = None, reasoning_content: Optional[str] = None,
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
-                    cost_info: dict = None, full_messages: List[dict] = None,
-                    response_message: dict = None, response_tool_calls: List[dict] = None):
+                    cost_info: Optional[dict] = None, full_messages: Optional[List[dict]] = None,
+                    response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None):
         """记录请求结束（非阻塞版：提交到线程池，不阻塞事件循环）"""
         self._monitor_pool.submit(
             self._request_end_sync,
@@ -568,11 +613,11 @@ class MonitoringService:
             response_message, response_tool_calls
         )
     
-    def _request_end_sync(self, request_id: str, success: bool, error: str = None,
-                    response_content: str = None, reasoning_content: str = None,
+    def _request_end_sync(self, request_id: str, success: bool, error: Optional[str] = None,
+                    response_content: Optional[str] = None, reasoning_content: Optional[str] = None,
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
-                    cost_info: dict = None, full_messages: List[dict] = None,
-                    response_message: dict = None, response_tool_calls: List[dict] = None):
+                    cost_info: Optional[dict] = None, full_messages: Optional[List[dict]] = None,
+                    response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None):
         """记录请求结束（实际执行，在线程池中运行）"""
         # 🔧 缩锁优化：锁内只做数据更新，asdict/日志构建移到锁外
         current_time = time.time()
@@ -654,13 +699,18 @@ class MonitoringService:
             'output_tokens': request_info.output_tokens,
             'cached_tokens': cached_tokens,
             'request_messages': full_messages,
-            'request_params': _request_params,
             'response_content': response_content,
-            'response_message': response_message,
             'response_tool_calls': response_tool_calls,
             'reasoning_content': reasoning_content,
             'cost_info': cost_info
         }
+        if isinstance(_request_params, dict):
+            for param_key, param_value in _request_params.items():
+                # 请求参数直接平铺到日志顶层，便于搜索，且避免 request_params 再存一份造成重复膨胀。
+                if param_key in log_entry:
+                    log_entry[f'request_param_{param_key}'] = param_value
+                else:
+                    log_entry[param_key] = param_value
         
         if _error_info:
             self.log_manager.write_error_log(_error_info)
@@ -683,9 +733,9 @@ class MonitoringService:
             failed_all_time = sum(s['failed'] for s in self.model_stats.values())
             
             # 使用所有时间的总数
-            stats.total_requests = total_all_time
-            stats.success_requests = success_all_time  # 修复：统一使用success_requests
-            stats.failed_requests = failed_all_time
+            stats.total_requests = int(total_all_time)
+            stats.success_requests = int(success_all_time)
+            stats.failed_requests = int(failed_all_time)
             
             # 计算总消息数（从最近的请求中累加）
             stats.total_messages = sum(req.get('messages_count', 0) for req in self.recent_requests)
@@ -732,7 +782,7 @@ class MonitoringService:
         with self._lock:
             return [asdict(req) for req in self.active_requests.values()]
     
-    def cleanup_stale_requests(self) -> int:
+    def cleanup_stale_requests(self):
         """
         🔧 核心修复：清理超时的活跃请求
         
@@ -860,7 +910,7 @@ class MonitoringService:
 
         # 监控广播不应阻塞正常请求；后台发送，慢客户端超时后自动剔除
         for client in list(self.monitor_clients):
-            asyncio.create_task(self._send_to_monitor_client(client, data))
+            spawn(self._send_to_monitor_client(client, data), name="monitor-broadcast")
     
     def add_monitor_client(self, websocket):
         """添加监控客户端"""
@@ -905,6 +955,70 @@ class MonitoringService:
         if len(self.request_details_cache) % 500 == 0:
             logger.debug(f"[CACHE] 详情缓存状态 - 项数: {len(self.request_details_cache)}, 大小: ~{cache_size_mb:.2f}MB")
     
+    def _ensure_request_params_for_view(self, details: dict) -> dict:
+        """
+        给 monitor 详情页临时还原 request_params。
+
+        日志文件里为了方便直接搜索且避免重复存储，已经把请求参数平铺到顶层；
+        前端详情页仍然使用 request_params 展示，因此读取时从顶层字段重建一份内存视图。
+        """
+        if not isinstance(details, dict):
+            return details
+        if isinstance(details.get('request_params'), dict):
+            return details
+
+        core_fields = {
+            'type',
+            'timestamp',
+            'end_timestamp',
+            'request_id',
+            'date',
+            'model',
+            'status',
+            'success',
+            'duration',
+            'error',
+            'mode',
+            'session_id',
+            'messages_count',
+            'input_tokens',
+            'output_tokens',
+            'total_tokens',
+            'cached_tokens',
+            'request_messages',
+            'request_messages_preview',
+            'response_content',
+            'response_preview',
+            'response_message',
+            'response_tool_calls',
+            'reasoning_content',
+            'reasoning_preview',
+            'cost_info',
+            'input_cost',
+            'output_cost',
+            'cached_cost',
+            'total_cost',
+            'currency',
+            'created_at',
+            'request_params',
+        }
+
+        request_params = {}
+        for key, value in details.items():
+            if key.startswith('request_param_'):
+                request_params[key[len('request_param_'):]] = value
+                continue
+            if key in core_fields or key in MONITOR_PARAM_EXCLUDED_KEYS:
+                continue
+            request_params[key] = value
+
+        if not request_params:
+            return details
+
+        view_details = details.copy()
+        view_details['request_params'] = request_params
+        return view_details
+
     def get_request_details(self, request_id: str) -> Optional[dict]:
         """获取请求详情 (优先从日志获取全量数据)"""
         # 🔧 重构：SQLite 优先（有索引），分层日志精确定位（用 timestamp），避免目录遍历
@@ -912,7 +1026,7 @@ class MonitoringService:
         # 1. 从日志文件中查找（SQLite优先 → 分层日志精确定位 → JSONL兜底）
         log_detail = self._find_request_in_logs(request_id)
         if log_detail:
-            return log_detail
+            return self._ensure_request_params_for_view(log_detail)
 
         with self._lock:
             # 2. 没入库的（还在活跃），从内存找
@@ -1135,7 +1249,7 @@ class MonitoringService:
                 
                 self.model_stats = defaultdict(
                     lambda: {'total': 0, 'success': 0, 'failed': 0,
-                            'total_duration': 0, 'count_with_duration': 0},
+                            'total_duration': 0.0, 'count_with_duration': 0},
                     loaded_stats
                 )
             

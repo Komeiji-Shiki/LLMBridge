@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 
 # 配置文件修改时间跟踪（用于热更新）
 CONFIG_FILE_MTIMES = {
-    'config.jsonc': 0,
-    'model_endpoint_map.json': 0,
-    'models.json': 0
+    'config.jsonc': 0.0,
+    'model_endpoint_map.json': 0.0,
+    'models.json': 0.0
 }
 CONFIG_LOCK = Lock()  # 保护配置重载的线程锁
 
@@ -32,77 +32,54 @@ MODEL_ROUND_ROBIN_LOCK = asyncio.Lock()
 
 def _parse_jsonc(jsonc_string: str) -> dict:
     """
-    稳健地解析 JSONC 字符串，移除注释。
-    改进版：正确处理字符串内的 // 和 /* */
-    """
-    lines = jsonc_string.splitlines()
-    no_comments_lines = []
-    in_block_comment = False
-    
-    for line in lines:
-        if in_block_comment:
-            # 在块注释中，查找结束标记
-            if '*/' in line:
-                in_block_comment = False
-                # 保留块注释结束后的内容
-                line = line.split('*/', 1)[1]
-            else:
-                continue
-        
-        # 处理可能的块注释开始
-        if '/*' in line:
-            # 需要更智能地处理，避免删除字符串中的 /*
-            before_comment, _, after_comment = line.partition('/*')
-            if '*/' in after_comment:
-                # 单行块注释
-                _, _, after_block = after_comment.partition('*/')
-                line = before_comment + after_block
-            else:
-                # 多行块注释开始
-                line = before_comment
-                in_block_comment = True
-        
-        # 处理单行注释 //，但要避免删除字符串中的 //
-        # 使用更智能的方法：查找不在引号内的 //
-        processed_line = ""
-        in_string = False
-        escape_next = False
-        i = 0
-        
-        while i < len(line):
-            char = line[i]
-            
-            if escape_next:
-                processed_line += char
-                escape_next = False
-                i += 1
-                continue
-            
-            if char == '\\':
-                processed_line += char
-                escape_next = True
-                i += 1
-                continue
-            
-            if char == '"' and not in_string:
-                in_string = True
-                processed_line += char
-            elif char == '"' and in_string:
-                in_string = False
-                processed_line += char
-            elif char == '/' and i + 1 < len(line) and line[i + 1] == '/' and not in_string:
-                # 找到了真正的注释，停止处理这一行
-                break
-            else:
-                processed_line += char
-            
-            i += 1
-        
-        # 只有非空行才添加
-        if processed_line.strip():
-            no_comments_lines.append(processed_line)
+    稳健地解析 JSONC 字符串，移除 // 和 /* */ 注释。
 
-    return json.loads("\n".join(no_comments_lines))
+    使用单遍字符状态机，正确处理字符串字面量内出现的
+    //、/*、*/ 与转义引号，避免误删字符串内容。
+    """
+    result_chars = []
+    i = 0
+    n = len(jsonc_string)
+    in_string = False
+
+    while i < n:
+        char = jsonc_string[i]
+
+        if in_string:
+            result_chars.append(char)
+            if char == '\\' and i + 1 < n:
+                # 保留转义序列的下一个字符，避免 \" 被误判为字符串结束
+                result_chars.append(jsonc_string[i + 1])
+                i += 2
+                continue
+            if char == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            result_chars.append(char)
+            i += 1
+            continue
+
+        if char == '/' and i + 1 < n:
+            next_char = jsonc_string[i + 1]
+            if next_char == '/':
+                # 单行注释：跳到行尾（保留换行符以维持行号）
+                newline_pos = jsonc_string.find('\n', i)
+                i = n if newline_pos == -1 else newline_pos
+                continue
+            if next_char == '*':
+                # 块注释：跳到 */ 之后
+                end_pos = jsonc_string.find('*/', i + 2)
+                i = n if end_pos == -1 else end_pos + 2
+                continue
+
+        result_chars.append(char)
+        i += 1
+
+    return json.loads(''.join(result_chars))
 
 
 def load_config(force_reload=False):

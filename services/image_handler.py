@@ -10,6 +10,8 @@ import mimetypes
 import time
 from typing import Optional, Tuple, Dict, Any, Callable, Awaitable
 
+from utils.task_registry import spawn
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +21,7 @@ class ImageProcessor:
     def __init__(
         self,
         config: Dict[str, Any],
-        image_cache: Dict[str, Tuple[str, float]],
+        image_cache: Any,
         cache_max_size: int = 100,
         cache_ttl: int = 3600,
         download_func: Optional[Callable[[str], Awaitable[Tuple[Optional[bytes], Optional[str]]]]] = None,
@@ -30,7 +32,7 @@ class ImageProcessor:
         
         Args:
             config: 配置字典
-            image_cache: 图片缓存字典 {url: (base64_data, timestamp)}
+            image_cache: 图片缓存（TTLCache，{url: markdown_base64}，过期由 TTLCache 自动管理）
             cache_max_size: 缓存最大大小
             cache_ttl: 缓存过期时间（秒）
             download_func: 下载函数
@@ -159,7 +161,7 @@ class ImageProcessor:
                 except Exception as e:
                     logger.error(f"[IMG_PROCESS] 后台任务异常: {e}")
             
-            asyncio.create_task(async_download_and_save())
+            spawn(async_download_and_save(), name="img-bg-download")
         elif not save_locally:
             logger.info(f"[IMG_PROCESS] save_images_locally=false，跳过下载")
         
@@ -190,7 +192,7 @@ class ImageProcessor:
         # 保存到本地
         if save_locally and image_data:
             logger.info(f"[IMG_PROCESS] 异步保存图片到本地")
-            asyncio.create_task(self._save_image(image_data, image_url, request_id))
+            spawn(self._save_image(image_data, image_url, request_id), name="img-save-local")
         elif not save_locally:
             logger.info(f"[IMG_PROCESS] save_images_locally=false，跳过本地保存")
         
@@ -212,31 +214,50 @@ class ImageProcessor:
 
 
 class CloudflareHandler:
-    """Cloudflare人机验证处理器"""
-    
+    """Cloudflare人机验证处理器
+
+    验证状态（是否正在刷新/冷却截止时间）统一读写 AppState.server，
+    保证多个并发流之间共享同一份全局状态（旧版每流一个实例各自
+    持有副本，冷却机制实际失效）。
+    """
+
     # Cloudflare检测模式
     PATTERNS = [
         r'<title>Just a moment...</title>',
         r'Enable JavaScript and cookies to continue'
     ]
-    
-    def __init__(
-        self,
-        browser_connections: Dict[str, Any],
-        is_refreshing: bool = False,
-        cooldown_until: Optional[float] = None,
-    ):
+
+    def __init__(self, browser_connections: Optional[Dict[str, Any]] = None):
         """
         初始化Cloudflare处理器
-        
+
         Args:
-            browser_connections: 浏览器WebSocket连接字典
-            is_refreshing: 是否正在刷新
-            cooldown_until: 冷却结束时间
+            browser_connections: 浏览器WebSocket连接字典（缺省取 AppState）
         """
-        self.browser_connections = browser_connections
-        self.is_refreshing = is_refreshing
-        self.cooldown_until = cooldown_until
+        from core.app_state import get_app_state
+        app_state = get_app_state()
+        self._server_state = app_state.server
+        self.browser_connections = (
+            browser_connections
+            if browser_connections is not None
+            else app_state.connection.browser_connections
+        )
+
+    @property
+    def is_refreshing(self) -> bool:
+        return self._server_state.IS_REFRESHING_FOR_VERIFICATION
+
+    @is_refreshing.setter
+    def is_refreshing(self, value: bool):
+        self._server_state.IS_REFRESHING_FOR_VERIFICATION = value
+
+    @property
+    def cooldown_until(self) -> Optional[float]:
+        return self._server_state.VERIFICATION_COOLDOWN_UNTIL
+
+    @cooldown_until.setter
+    def cooldown_until(self, value: Optional[float]):
+        self._server_state.VERIFICATION_COOLDOWN_UNTIL = value
     
     async def handle_verification(self, request_id: str) -> str:
         """
@@ -258,7 +279,7 @@ class CloudflareHandler:
             # 发送刷新指令
             if self.browser_connections:
                 first_ws = list(self.browser_connections.values())[0]
-                asyncio.create_task(first_ws.send_text(json.dumps({"command": "refresh"}, ensure_ascii=False)))
+                spawn(first_ws.send_text(json.dumps({"command": "refresh"}, ensure_ascii=False)), name="cf-refresh")
             
             # 启动冷却重置任务
             async def reset_status():
@@ -267,7 +288,7 @@ class CloudflareHandler:
                 self.cooldown_until = None
                 logger.info("⏰ 人机验证冷却期已结束，系统已恢复正常。")
             
-            asyncio.create_task(reset_status())
+            spawn(reset_status(), name="cf-cooldown-reset")
             return "检测到人机验证，已发送刷新指令。系统将冷却25秒，请稍后重试。"
         else:
             # 计算剩余冷却时间

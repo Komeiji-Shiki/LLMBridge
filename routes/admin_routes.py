@@ -145,11 +145,16 @@ async def update_model_config(
 
 
 async def delete_model_config(
-    model_name: str,
+    request: Request,
     load_model_endpoint_map_func
 ):
     """删除模型端点配置"""
     try:
+        body = await request.json()
+        model_name = body.get("model_name")
+        if not model_name:
+            raise HTTPException(status_code=400, detail="缺少 model_name 字段")
+
         # 读取现有配置
         with open('model_endpoint_map.json', 'r', encoding='utf-8') as f:
             current_config = json.load(f)
@@ -168,6 +173,8 @@ async def delete_model_config(
         load_model_endpoint_map_func()
         
         return {"status": "success", "message": f"模型 {model_name} 已删除"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"删除模型配置失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

@@ -11,6 +11,7 @@ Direct API处理模块 - 路由入口
 import asyncio
 import logging
 import uuid
+from typing import Any, Optional
 
 from fastapi import HTTPException
 from fastapi.responses import Response
@@ -24,6 +25,7 @@ from ._direct_api_utils import (
 )
 from ._direct_api_gemini import handle_gemini_native_direct
 from ._direct_api_passthrough import handle_passthrough_direct
+from ._direct_api_anthropic import handle_anthropic_native_from_openai
 
 logger = logging.getLogger(__name__)
 
@@ -37,28 +39,30 @@ __all__ = [
 
 async def handle_direct_api_request(
     openai_req: dict,
-    model_name: str,
+    model_name: Optional[str],
     endpoint_config: dict,
     CONFIG: dict,
-    PROCESSED_IMAGE_CACHE: dict,
+    PROCESSED_IMAGE_CACHE: Any,
     monitoring_service,
     direct_api_service,
     estimate_message_tokens_func,
     estimate_tokens_func,
     process_image_data_func,
-    full_messages: list = None
+    full_messages: Optional[list] = None
 ):
     """处理Direct API请求（Gemini Native或OpenAI兼容API）
 
     根据 api_type 分发到对应的处理模块。
     """
+    # 规范化 model_name，避免 None 沿调用链传播
+    model_name = model_name or openai_req.get("model") or "unknown"
     api_type = endpoint_config.get("api_type")
     logger.info(f"[DIRECT_API] 检测到Direct API模式: {model_name} (类型: {api_type})")
 
-    # 系统提示词注入
+    # 系统提示词注入（anthropic_native 由 handle_anthropic_native_from_openai 内部用 Anthropic 格式处理，此处跳过）
     system_injection_config = endpoint_config.get("system_prompt_injection")
     convert_system_to_user = endpoint_config.get("convert_system_to_user", False)
-    if system_injection_config and system_injection_config.get("enabled", False):
+    if api_type != "anthropic_native" and system_injection_config and system_injection_config.get("enabled", False):
         original_messages = openai_req.get("messages", [])
         injected_messages = inject_system_prompt(
             original_messages, system_injection_config, convert_system_to_user)
@@ -67,6 +71,16 @@ async def handle_direct_api_request(
             f"[DIRECT_API] 系统提示词注入已启用 "
             f"(位置: {system_injection_config.get('position', 'before_system')}, "
             f"兼容System转User: {convert_system_to_user})")
+
+    # 预填充注入（anthropic_native 跳过，Anthropic 格式 prefilling 方式不同）
+    prefill_content = endpoint_config.get("prefill_content")
+    if api_type != "anthropic_native" and prefill_content and isinstance(prefill_content, str) and prefill_content.strip():
+        messages = openai_req.get("messages", [])
+        messages.append({"role": "assistant", "content": prefill_content})
+        openai_req["messages"] = messages
+        logger.info(
+            f"[DIRECT_API] 预填充已启用: 在消息末尾追加 assistant 消息 "
+            f"({len(prefill_content)} 字符)")
 
     # 获取配置
     api_base_url = endpoint_config.get("api_base_url")
@@ -101,7 +115,9 @@ async def handle_direct_api_request(
             logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' 最大输出Token限制: {original_max_tokens} -> {max_tokens_limit}")
 
     # 验证必需配置
-    if not api_key:
+    # 本地部署模型（localhost/127.0.0.1/局域网）不需要 API key
+    api_key_required = not _is_local_api_base(api_base_url)
+    if api_key_required and not api_key:
         raw_config = endpoint_config.get("api_keys") or endpoint_config.get("api_key")
         if isinstance(raw_config, list):
             detail = f"模型 '{model_name}' 的Direct API配置中所有 api_keys 均为空。"
@@ -139,6 +155,17 @@ async def handle_direct_api_request(
                 estimate_message_tokens_func=estimate_message_tokens_func,
                 estimate_tokens_func=estimate_tokens_func,
                 full_messages=full_messages, CONFIG=CONFIG)
+
+        if api_type == "anthropic_native":
+            return await handle_anthropic_native_from_openai(
+                openai_req=openai_req, model_name=model_name,
+                endpoint_config=endpoint_config,
+                CONFIG=CONFIG,
+                monitoring_service=monitoring_service,
+                direct_api_service=direct_api_service,
+                estimate_message_tokens_func=estimate_message_tokens_func,
+                estimate_tokens_func=estimate_tokens_func,
+                full_messages=full_messages)
 
         if passthrough_mode:
             return await handle_passthrough_direct(
@@ -215,63 +242,72 @@ async def _preprocess_images(openai_req, CONFIG, endpoint_config,
     if not optimization_enabled:
         return
 
-    logger.info(f"[DIRECT_API] 开始图片预处理...")
-    if model_image_config:
-        logger.info(f"[DIRECT_API] 使用模型级别图片配置: {model_image_config}")
+    # 🔧 Direct API 透传模式下强制禁用图床上传
+    # process_image_data 会读取全局 file_bed_enabled，如果为 true 会把
+    # base64 图片上传到图床并替换为 HTTP URL，但上游 API 只接受 base64。
+    original_file_bed = CONFIG.get("file_bed_enabled", False)
+    CONFIG["file_bed_enabled"] = False
 
-    import re
-    request_id_for_img = str(uuid.uuid4())[:8]
-    messages_to_process = openai_req.get("messages", [])
-    image_processed_count = 0
+    try:
+        logger.info(f"[DIRECT_API] 开始图片预处理...")
+        if model_image_config:
+            logger.info(f"[DIRECT_API] 使用模型级别图片配置: {model_image_config}")
 
-    for msg_index, message in enumerate(messages_to_process):
-        role = message.get("role", "unknown")
-        content = message.get("content")
+        import re
+        request_id_for_img = str(uuid.uuid4())[:8]
+        messages_to_process = openai_req.get("messages", [])
+        image_processed_count = 0
 
-        if isinstance(content, str):
-            markdown_image_pattern = r'!\[([^\]]*)\]\((data:[^)]+)\)'
-            markdown_matches = re.findall(markdown_image_pattern, content)
+        for msg_index, message in enumerate(messages_to_process):
+            role = message.get("role", "unknown")
+            content = message.get("content")
 
-            for match_index, (alt_text, base64_url) in enumerate(markdown_matches):
-                processed_data, proc_error = await process_image_data_func(
-                    base64_data=base64_url,
-                    filename=f"direct_{role}_{msg_index}_{match_index}_{uuid.uuid4()}.png",
-                    request_id=request_id_for_img,
-                    CONFIG=CONFIG,
-                    PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
-                    model_image_config=model_image_config)
+            if isinstance(content, str):
+                markdown_image_pattern = r'!\[([^\]]*)\]\((data:[^)]+)\)'
+                markdown_matches = re.findall(markdown_image_pattern, content)
 
-                if proc_error:
-                    logger.warning(f"[DIRECT_API] 图片处理警告: {proc_error}")
+                for match_index, (alt_text, base64_url) in enumerate(markdown_matches):
+                    processed_data, proc_error = await process_image_data_func(
+                        base64_data=base64_url,
+                        filename=f"direct_{role}_{msg_index}_{match_index}_{uuid.uuid4()}.png",
+                        request_id=request_id_for_img,
+                        CONFIG=CONFIG,
+                        PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
+                        model_image_config=model_image_config)
 
-                old_markdown = f"![{alt_text}]({base64_url})"
-                new_markdown = f"![{alt_text}]({processed_data})"
-                content = content.replace(old_markdown, new_markdown)
-                message["content"] = content
-                image_processed_count += 1
+                    if proc_error:
+                        logger.warning(f"[DIRECT_API] 图片处理警告: {proc_error}")
 
-        elif isinstance(content, list):
-            for part_index, part in enumerate(content):
-                if part.get("type") == "image_url":
-                    url_content = part.get("image_url", {}).get("url")
+                    old_markdown = f"![{alt_text}]({base64_url})"
+                    new_markdown = f"![{alt_text}]({processed_data})"
+                    content = content.replace(old_markdown, new_markdown)
+                    message["content"] = content
+                    image_processed_count += 1
 
-                    if url_content and url_content.startswith("data:"):
-                        processed_data, proc_error = await process_image_data_func(
-                            base64_data=url_content,
-                            filename=f"direct_{role}_{msg_index}_{part_index}_{uuid.uuid4()}.png",
-                            request_id=request_id_for_img,
-                            CONFIG=CONFIG,
-                            PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
-                            model_image_config=model_image_config)
+            elif isinstance(content, list):
+                for part_index, part in enumerate(content):
+                    if part.get("type") == "image_url":
+                        url_content = part.get("image_url", {}).get("url")
 
-                        if proc_error:
-                            logger.warning(f"[DIRECT_API] 图片处理警告: {proc_error}")
+                        if url_content and url_content.startswith("data:"):
+                            processed_data, proc_error = await process_image_data_func(
+                                base64_data=url_content,
+                                filename=f"direct_{role}_{msg_index}_{part_index}_{uuid.uuid4()}.png",
+                                request_id=request_id_for_img,
+                                CONFIG=CONFIG,
+                                PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
+                                model_image_config=model_image_config)
 
-                        part["image_url"]["url"] = processed_data
-                        image_processed_count += 1
+                            if proc_error:
+                                logger.warning(f"[DIRECT_API] 图片处理警告: {proc_error}")
 
-    if image_processed_count > 0:
-        logger.info(f"[DIRECT_API] 图片预处理完成: 处理了 {image_processed_count} 张图片")
+                            part["image_url"]["url"] = processed_data
+                            image_processed_count += 1
+
+        if image_processed_count > 0:
+            logger.info(f"[DIRECT_API] 图片预处理完成: 处理了 {image_processed_count} 张图片")
+    finally:
+        CONFIG["file_bed_enabled"] = original_file_bed
 
 
 def _log_config_info(api_type, api_base_url, target_model_id, display_name,
@@ -305,3 +341,28 @@ def _log_retry_info(model_name, retry_config):
         f"max_retries={retry_config.get('max_retries', 0)}, "
         f"delay={retry_config.get('retry_delay_seconds', 0)}s, "
         f"targets={','.join(retry_targets) if retry_targets else 'none'}")
+
+
+def _is_local_api_base(url: Optional[str]) -> bool:
+    """判断 api_base_url 是否指向本地/局域网地址（无需 API key）"""
+    if not url:
+        return False
+    url_lower = url.lower()
+    # localhost / 127.0.0.1 / [::1]
+    local_hosts = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]']
+    for host in local_hosts:
+        if host in url_lower:
+            return True
+    # 私有网络段: 192.168.x.x, 10.x.x.x, 172.16-31.x.x
+    import re
+    private_patterns = [
+        r'://192\.168\.',
+        r'://10\.',
+        r'://172\.(1[6-9]|2[0-9]|3[01])\.',
+        r'://169\.254\.',  # link-local
+    ]
+    for pat in private_patterns:
+        if re.search(pat, url_lower):
+            return True
+    return False
+

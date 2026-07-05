@@ -115,9 +115,13 @@ function showAddModelModal() {
     document.getElementById('convert-system-to-user').checked = false;
     document.getElementById('enable-prefix').checked = false;
     document.getElementById('enable-partial').checked = false;
-    document.getElementById('enable-thinking').checked = true;
+    document.getElementById('prefill-content').value = '';
+    document.getElementById('enable-thinking').value = '';
     document.getElementById('thinking-budget').value = '20000';
+    document.getElementById('thinking-effort').value = '';
+    document.getElementById('thinking-display').value = 'summarized';
     document.getElementById('thinking-separator').value = '';
+    toggleThinkingOptions();
     document.getElementById('pricing-input').value = '';
     document.getElementById('pricing-output').value = '';
     document.getElementById('pricing-unit').value = '1000000';
@@ -397,7 +401,7 @@ function editModel(name, config) {
 // 填充模型表单（editModel和copyModel共用）
 function fillModelForm(config) {
     
-    if (config.api_type === 'direct_api' || config.api_type === 'gemini_native') {
+    if (config.api_type === 'direct_api' || config.api_type === 'gemini_native' || config.api_type === 'anthropic_native') {
         document.getElementById('config-type').value = 'direct_api';
         document.getElementById('api-type').value = config.api_type || 'direct_api';
         document.getElementById('api-base-url').value = config.api_base_url || '';
@@ -422,8 +426,26 @@ function fillModelForm(config) {
         document.getElementById('convert-system-to-user').checked = config.convert_system_to_user || false;
         document.getElementById('enable-prefix').checked = config.enable_prefix || false;
         document.getElementById('enable-partial').checked = config.enable_partial || false;
-        document.getElementById('enable-thinking').checked = config.enable_thinking !== false;
+        document.getElementById('prefill-content').value = config.prefill_content || '';
+        // 思维链模式：兼容旧的 thinking_mode 配置和布尔值 enable_thinking
+        const et = config.enable_thinking;
+        const tm = config.thinking_mode;
+        if (et === true || et === 'enabled') {
+            document.getElementById('enable-thinking').value = 'true';
+        } else if (et === false || et === 'disabled') {
+            document.getElementById('enable-thinking').value = 'false';
+        } else if (et === 'adaptive' || tm === 'adaptive') {
+            document.getElementById('enable-thinking').value = 'adaptive';
+        } else {
+            document.getElementById('enable-thinking').value = '';
+        }
         document.getElementById('thinking-budget').value = config.thinking_budget || 20000;
+        // 思考控制方式：配置了 reasoning_effort 则为强度等级模式，否则为 Token 预算模式
+        document.getElementById('thinking-control').value = config.reasoning_effort ? 'effort' : 'budget';
+        // thinking_effort（adaptive 模式）/ reasoning_effort（启用思考模式）共用同一个下拉框
+        document.getElementById('thinking-effort').value = config.reasoning_effort || config.thinking_effort || '';
+        document.getElementById('thinking-display').value = config.thinking_display || 'summarized';
+        toggleThinkingOptions();
         document.getElementById('thinking-separator').value = config.thinking_separator || '';
         
         // 加载自定义参数
@@ -456,6 +478,9 @@ function fillModelForm(config) {
         
         // 加载缓存Token统计模式
         document.getElementById('cached-tokens-mode').value = config.cached_tokens_mode || 'off';
+        
+        // 加载Token统计来源
+        document.getElementById('token-stats-mode').value = config.token_stats_mode || 'api';
         
         // 加载图片压缩配置
         loadImageCompressionConfig(config.image_compression);
@@ -525,9 +550,9 @@ async function saveModel() {
         const apiType = document.getElementById('api-type').value;
         
         // 🔧 修复：API Key变为可选（支持本地反代等无需认证的场景）
-        // 但 OpenAI 兼容格式仍然需要 api_base_url
-        if (apiType === 'direct_api' && !apiBaseUrl) {
-            alert('OpenAI兼容格式需要填写 API Base URL');
+        // OpenAI 兼容和 Anthropic 原生格式都需要 api_base_url，Gemini 原生可选
+        if ((apiType === 'direct_api' || apiType === 'anthropic_native') && !apiBaseUrl) {
+            alert(apiType === 'anthropic_native' ? 'Anthropic原生格式需要填写 API Base URL' : 'OpenAI兼容格式需要填写 API Base URL');
             return;
         }
         
@@ -556,9 +581,47 @@ async function saveModel() {
             convert_system_to_user: document.getElementById('convert-system-to-user').checked,
             enable_prefix: document.getElementById('enable-prefix').checked,
             enable_partial: document.getElementById('enable-partial').checked,
-            enable_thinking: document.getElementById('enable-thinking').checked,
-            thinking_budget: parseInt(document.getElementById('thinking-budget').value) || 20000
         };
+
+        // 思维链模式：四态处理
+        // true/false 保存为布尔值（兼容 OpenRouter/OpenAI 模式），adaptive 保存为字符串
+        const etVal = document.getElementById('enable-thinking').value;
+        if (etVal === 'true') {
+            config.enable_thinking = true;
+            const controlMode = document.getElementById('thinking-control').value;
+            const effortLevel = document.getElementById('thinking-effort').value;
+            if (controlMode === 'effort' && effortLevel) {
+                // 强度等级控制：保存 reasoning_effort，不写 thinking_budget
+                config.reasoning_effort = effortLevel;
+            } else {
+                // Token 预算控制（默认，向后兼容）
+                config.thinking_budget = parseInt(document.getElementById('thinking-budget').value) || 20000;
+            }
+        } else if (etVal === 'false') {
+            config.enable_thinking = false;
+        } else if (etVal === 'adaptive') {
+            config.enable_thinking = 'adaptive';
+            // thinking_effort 仅在显式选择时才保存，留空时不注入 output_config
+            const effort = document.getElementById('thinking-effort').value;
+            if (effort) {
+                config.thinking_effort = effort;
+            }
+        }
+        // etVal === '' 时不设置 enable_thinking 字段（透传客户端参数）
+
+        // thinking_display 在启用思考（true/adaptive）时生效
+        if (etVal === 'true' || etVal === 'adaptive') {
+            const displayVal = document.getElementById('thinking-display').value;
+            if (displayVal) {
+                config.thinking_display = displayVal;
+            }
+        }
+
+        // 预填充内容：只在非空时保存
+        const prefillContent = document.getElementById('prefill-content').value;
+        if (prefillContent && prefillContent.trim()) {
+            config.prefill_content = prefillContent;
+        }
 
         // 可选模型端点：默认 /chat/completions，留空或默认值则不写入配置
         if (endpointPathInput) {
@@ -633,6 +696,12 @@ async function saveModel() {
         const cachedTokensMode = document.getElementById('cached-tokens-mode').value;
         if (cachedTokensMode && cachedTokensMode !== 'off') {
             config.cached_tokens_mode = cachedTokensMode;
+        }
+        
+        // 保存Token统计来源（默认api不写入配置）
+        const tokenStatsMode = document.getElementById('token-stats-mode').value;
+        if (tokenStatsMode && tokenStatsMode !== 'api') {
+            config.token_stats_mode = tokenStatsMode;
         }
         
         // 保存图片压缩配置
@@ -727,4 +796,33 @@ async function saveModel() {
         console.error('错误详情:', error.message);
         showMessage('danger', '保存失败: ' + error.message);
     }
+}
+
+
+// 思维链模式下拉框联动：根据选择动态显示 budget 或 effort
+function toggleThinkingOptions() {
+    const select = document.getElementById('enable-thinking');
+    const optionsDiv = document.getElementById('thinking-options');
+    const controlDiv = document.getElementById('thinking-control-config');
+    const budgetDiv = document.getElementById('thinking-budget-config');
+    const effortDiv = document.getElementById('thinking-effort-config');
+    const displayDiv = document.getElementById('thinking-display-config');
+    if (!select || !optionsDiv) return;
+    const val = select.value;
+    // 启用思考或自适应思考时显示子选项区域
+    const showOptions = (val === 'true' || val === 'adaptive');
+    optionsDiv.style.display = showOptions ? 'block' : 'none';
+    if (val === 'true') {
+        // 启用思考：显示控制方式选择器，按控制方式切换 budget / effort
+        const controlMode = document.getElementById('thinking-control')?.value || 'budget';
+        if (controlDiv) controlDiv.style.display = 'block';
+        if (budgetDiv) budgetDiv.style.display = (controlMode === 'budget') ? 'block' : 'none';
+        if (effortDiv) effortDiv.style.display = (controlMode === 'effort') ? 'block' : 'none';
+    } else {
+        // 自适应思考（仅 Anthropic）：只有 effort，无 budget
+        if (controlDiv) controlDiv.style.display = 'none';
+        if (budgetDiv) budgetDiv.style.display = 'none';
+        if (effortDiv) effortDiv.style.display = (val === 'adaptive') ? 'block' : 'none';
+    }
+    if (displayDiv) displayDiv.style.display = showOptions ? 'block' : 'none';
 }

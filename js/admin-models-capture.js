@@ -419,7 +419,9 @@ async function testCurrentModelKeys() {
     const apiBaseUrl = document.getElementById('api-base-url').value.trim();
     const apiType = document.getElementById('api-type').value;
     const modelId = document.getElementById('model-id').value.trim() || document.getElementById('model-name').value.trim();
-    const endpointPath = document.getElementById('endpoint-path').value.trim() || '/chat/completions';
+    const isAnthropicNative = apiType === 'anthropic_native';
+    const defaultEndpoint = isAnthropicNative ? '/messages' : '/chat/completions';
+    const endpointPath = document.getElementById('endpoint-path').value.trim() || defaultEndpoint;
     
     if (apiType === 'direct_api' && !apiBaseUrl) {
         alert('请先填写 API Base URL');

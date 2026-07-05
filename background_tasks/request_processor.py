@@ -17,13 +17,30 @@ async def process_pending_requests(
     pending_requests_queue: asyncio.Queue,
     handle_single_completion_func
 ):
-    """在后台处理暂存队列中的所有请求。"""
-    while not pending_requests_queue.empty():
-        pending_item = await pending_requests_queue.get()
+    """在后台处理暂存队列中的所有请求。
+
+    🔧 修复说明：
+    - 使用 get_nowait 循环替代 `while not empty(): await get()`，
+      消除判空与取出之间的竞态窗口（其他消费者取走后 await get() 会永久挂起）。
+    - future 可能已被客户端超时取消（asyncio.wait_for 超时会 cancel future），
+      此时 set_result/set_exception 会抛 InvalidStateError 并炸掉整个处理循环，
+      故所有写入前都先检查 future.done()。
+    """
+    while True:
+        try:
+            pending_item = pending_requests_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+
         future = pending_item["future"]
         request_data = pending_item["request_data"]
         original_request_id = pending_item.get("original_request_id")
-        
+
+        if future.done():
+            # 客户端已超时放弃，跳过无谓的重试
+            logger.info(f"跳过已放弃的暂存请求 {original_request_id[:8] if original_request_id else '(new)'}")
+            continue
+
         if original_request_id:
             logger.info(f"正在恢复请求 {original_request_id[:8]}...")
         else:
@@ -32,10 +49,11 @@ async def process_pending_requests(
         try:
             # 关键修复：重试时传递原始请求ID，以便使用绑定的endpoint
             response = await handle_single_completion_func(request_data, retry_request_id=original_request_id)
-            
+
             # 将成功的结果设置到 future 中，以唤醒等待的客户端
-            future.set_result(response)
-            
+            if not future.done():
+                future.set_result(response)
+
             if original_request_id:
                 logger.info(f"✅ 请求 {original_request_id[:8]} 已成功恢复并返回响应。")
             else:
@@ -44,8 +62,9 @@ async def process_pending_requests(
         except Exception as e:
             logger.error(f"重试暂存请求时发生错误: {e}", exc_info=True)
             # 将错误设置到 future 中，以便客户端知道请求失败了
-            future.set_exception(e)
-        
+            if not future.done():
+                future.set_exception(e)
+
         # 添加短暂的延迟，避免同时发送过多请求
         await asyncio.sleep(1)
 

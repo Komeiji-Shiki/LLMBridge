@@ -151,7 +151,7 @@ class AppState:
         return self.connection.tab_request_counts
     
     @property
-    def IMAGE_BASE64_CACHE(self) -> Dict[str, tuple]:
+    def IMAGE_BASE64_CACHE(self) -> TTLCache:
         return self.image.IMAGE_BASE64_CACHE
     
     def update_activity(self):

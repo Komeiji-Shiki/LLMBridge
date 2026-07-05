@@ -86,6 +86,9 @@ Thumbs.db
 Desktop.ini
 
 # ==================== 临时诊断脚本 ====================
+# 根目录下划线开头的临时调试/测试脚本（不影响子目录中的 _ 开头模块）
+/_*.py
+/test_thinking.py
 check_old_tokens.py
 check_stats.py
 check_tokens.py

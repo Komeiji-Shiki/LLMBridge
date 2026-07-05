@@ -2,32 +2,25 @@
 # 原4000+行代码已拆分到多个模块
 
 import asyncio
-import json
 import logging
-import os
 import queue
 import sys
-import time
-import uuid
-from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from logging.handlers import QueueHandler, QueueListener
-from pathlib import Path
-from threading import Lock
 from typing import Optional
 
 import aiohttp
-import uvicorn
+from hypercorn.config import Config as HypercornConfig
+from hypercorn.asyncio import serve as hypercorn_serve
 from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, Response, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 # 内部模块导入
-from modules.file_uploader import upload_to_file_bed
 from modules.monitoring import monitoring_service, MonitorConfig
-from modules.image_processor import optimize_image, image_to_base64, get_mime_type_from_format, decode_base64_image
+from utils.task_registry import spawn
 from modules.token_counter import (
     estimate_message_tokens, estimate_tokens, get_token_counter_info,
     get_all_tokenizers_status, calculate_tokens_for_text, compare_tokenizers,
@@ -37,41 +30,23 @@ from modules.token_counter import (
 
 # Core模块
 from core.config_loader import (
-    CONFIG, MODEL_NAME_TO_ID_MAP, MODEL_ENDPOINT_MAP, DEFAULT_MODEL_ID,
-    CONFIG_FILE_MTIMES, CONFIG_LOCK, MODEL_ROUND_ROBIN_INDEX, MODEL_ROUND_ROBIN_LOCK,
-    load_config, load_model_map, load_model_endpoint_map, save_config, _parse_jsonc
+    CONFIG, MODEL_NAME_TO_ID_MAP, MODEL_ENDPOINT_MAP,
+    CONFIG_FILE_MTIMES,
+    load_config, load_model_map, load_model_endpoint_map, _parse_jsonc
 )
 from core.api_key_manager import api_key_manager
-from core.load_balancer import (
-    select_best_tab_for_request as _select_best_tab_for_request,
-    release_tab_request as _release_tab_request,
-    reassign_pending_requests as _reassign_pending_requests
-)
 from core.db_stats import stats_db
 from core.app_state import get_app_state, AppState
-from core.constants import ConnectionDefaults, CacheDefaults, TimeoutDefaults
+from core.constants import CacheDefaults
 
 # Services
-from services.message_converter import convert_openai_to_lmarena_payload
-from services.stream_processor import _process_lmarena_stream, stream_generator, non_stream_response
 from services.direct_api_service import DirectAPIService
-from services.image_service import (
-    calculate_image_hash, save_image_data, save_downloaded_image_async,
-    download_image_data_with_retry as _download_image_data_with_retry,
-    process_image_data
-)
-
-# Utils
-from utils.api_helpers import (
-    format_openai_chunk, format_openai_finish_chunk,
-    format_openai_error_chunk, format_openai_non_stream_response
-)
 
 # Routes
 from routes import websocket_routes, internal_routes, monitor_routes, admin_routes, api_routes
 
 # Background tasks
-from background_tasks import monitors, request_processor
+from background_tasks import monitors
 
 # 基础配置
 MODEL_ENDPOINT_MAP_PATH = 'model_endpoint_map.json'
@@ -100,7 +75,7 @@ logger = logging.getLogger(__name__)
 
 # 日志过滤器
 class EndpointFilter(logging.Filter):
-    """过滤 uvicorn access 日志：抑制监控轮询和恶意扫描的噪音"""
+    """过滤 HTTP access 日志：抑制监控轮询和恶意扫描的噪音（兼容 uvicorn/hypercorn）"""
     
     # 恶意扫描路径特征（不区分大小写）
     _SCAN_PATTERNS = (
@@ -123,66 +98,16 @@ class EndpointFilter(logging.Filter):
             return False
         return True
 
-logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+logging.getLogger("hypercorn.access").addFilter(EndpointFilter())
+logging.getLogger("hypercorn.error").addFilter(EndpointFilter())
 
-# ==================== 全局状态（使用 AppState 管理） ====================
-# 所有状态通过 AppState 单例集中管理
-# 保留变量别名以维持向后兼容
+# ==================== 全局状态（AppState 单例统一管理） ====================
+# 🔧 重构：删除模块级镜像别名。
+# 旧版把 AppState 字段镜像成模块级变量，对标量（布尔/数值）和会被重新赋值的
+# 引用（aiohttp_session 等）只是一次性快照，赋值瞬间即与 AppState 脱钩，
+# 已经造成过“人机验证状态失效”级别的 bug。现在所有状态统一走 _app_state。
 
-# 初始化 AppState（单例模式）
-_app_state: Optional[AppState] = None
-
-def _get_state() -> AppState:
-    """获取应用状态单例（延迟初始化）"""
-    global _app_state
-    if _app_state is None:
-        _app_state = get_app_state()
-    return _app_state
-
-# 预初始化 AppState
-_app_state = get_app_state()
-
-# ========== 连接状态（通过 AppState.connection 管理）==========
-browser_connections = _app_state.connection.browser_connections
-browser_connections_lock = _app_state.connection.browser_connections_lock
-tab_connection_times = _app_state.connection.tab_connection_times
-browser_ws_ref = _app_state.connection.browser_ws_ref
-tab_request_counts = _app_state.connection.tab_request_counts
-tab_request_counts_lock = _app_state.connection.tab_request_counts_lock
-
-# ========== 请求状态（通过 AppState.request 管理）==========
-response_channels = _app_state.request.response_channels
-request_metadata = _app_state.request.request_metadata
-pending_requests_queue = _app_state.request.pending_requests_queue
-
-# ========== 服务器状态（通过 AppState.server 管理）==========
-last_activity_time_ref = _app_state.server.last_activity_time_ref
-main_event_loop = _app_state.server.main_event_loop
-IS_REFRESHING_FOR_VERIFICATION = _app_state.server.IS_REFRESHING_FOR_VERIFICATION
-VERIFICATION_COOLDOWN_UNTIL = _app_state.server.VERIFICATION_COOLDOWN_UNTIL
-aiohttp_session = _app_state.server.aiohttp_session
-direct_api_service = _app_state.server.direct_api_service
-DOWNLOAD_SEMAPHORE = _app_state.server.DOWNLOAD_SEMAPHORE
-MAX_CONCURRENT_DOWNLOADS = _app_state.server.MAX_CONCURRENT_DOWNLOADS
-
-# ========== 图片状态（通过 AppState.image 管理）==========
-IMAGE_SAVE_DIR = _app_state.image.IMAGE_SAVE_DIR
-downloaded_image_urls = _app_state.image.downloaded_image_urls
-downloaded_urls_set = _app_state.image.downloaded_urls_set
-DISABLED_ENDPOINTS = _app_state.image.DISABLED_ENDPOINTS
-ROUND_ROBIN_INDEX = _app_state.image.ROUND_ROBIN_INDEX
-FILEBED_RECOVERY_TIME = _app_state.image.FILEBED_RECOVERY_TIME
-IMAGE_BASE64_CACHE = _app_state.image.IMAGE_BASE64_CACHE
-IMAGE_CACHE_MAX_SIZE = _app_state.image.IMAGE_CACHE_MAX_SIZE
-IMAGE_CACHE_TTL = _app_state.image.IMAGE_CACHE_TTL
-FILEBED_URL_CACHE = _app_state.image.FILEBED_URL_CACHE
-FILEBED_URL_CACHE_TTL = _app_state.image.FILEBED_URL_CACHE_TTL
-FILEBED_URL_CACHE_MAX_SIZE = _app_state.image.FILEBED_URL_CACHE_MAX_SIZE
-PROCESSED_IMAGE_CACHE = _app_state.image.PROCESSED_IMAGE_CACHE
-
-# ========== 管理面板状态（通过 AppState.admin 管理）==========
-ADMIN_CAPTURED_IDS = _app_state.admin.ADMIN_CAPTURED_IDS
-ADMIN_CAPTURED_IDS_LOCK = _app_state.admin.ADMIN_CAPTURED_IDS_LOCK
+_app_state: AppState = get_app_state()
 
 logger.info("[STARTUP] ✅ 全局状态已通过 AppState 初始化")
 
@@ -192,11 +117,12 @@ async def _warmup_admin_cache():
     await asyncio.sleep(0.5)
     try:
         logger.info("🔥 预热 admin 首屏缓存...")
+        conn = _app_state.connection
         # 预热 overview（含 SQLite 汇总查询）
         await admin_routes.get_overview(
-            monitoring_service, stats_db, MonitorConfig, browser_ws_ref['ws'],
-            browser_connections, browser_connections_lock, tab_connection_times,
-            tab_request_counts, CONFIG, MODEL_ENDPOINT_MAP
+            monitoring_service, stats_db, MonitorConfig, conn.browser_ws_ref['ws'],
+            conn.browser_connections, conn.browser_connections_lock, conn.tab_connection_times,
+            conn.tab_request_counts, CONFIG, MODEL_ENDPOINT_MAP
         )
         # 预热 token_stats（最重的查询：多个 GROUP BY + 成本计算）
         await admin_routes.get_token_stats(
@@ -215,27 +141,28 @@ async def _warmup_admin_cache():
 # FastAPI生命周期
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global main_event_loop, aiohttp_session, DOWNLOAD_SEMAPHORE, MAX_CONCURRENT_DOWNLOADS
-    global direct_api_service, last_activity_time_ref
-    global IMAGE_BASE64_CACHE, IMAGE_CACHE_MAX_SIZE, IMAGE_CACHE_TTL
-    
-    main_event_loop = asyncio.get_running_loop()
+    server_state = _app_state.server
+    image_state = _app_state.image
+    request_state = _app_state.request
+    conn_state = _app_state.connection
+
+    server_state.main_event_loop = asyncio.get_running_loop()
     load_config()
-    
-    # 🔧 修复：用 CONFIG 中的值重建 IMAGE_BASE64_CACHE（app_state 中是硬编码默认值）
+
+    # 🔧 用 CONFIG 中的值重建 IMAGE_BASE64_CACHE（app_state 中是硬编码默认值）
     from cachetools import TTLCache
     mem_config = CONFIG.get("memory_management", {})
-    IMAGE_CACHE_MAX_SIZE = mem_config.get("image_cache_max_size", CacheDefaults.IMAGE_CACHE_MAX_SIZE)
-    IMAGE_CACHE_TTL = mem_config.get("image_cache_ttl_seconds", CacheDefaults.IMAGE_CACHE_TTL)
-    IMAGE_BASE64_CACHE = TTLCache(maxsize=IMAGE_CACHE_MAX_SIZE, ttl=IMAGE_CACHE_TTL)
-    _app_state.image.IMAGE_BASE64_CACHE = IMAGE_BASE64_CACHE
-    _app_state.image.IMAGE_CACHE_MAX_SIZE = IMAGE_CACHE_MAX_SIZE
-    _app_state.image.IMAGE_CACHE_TTL = IMAGE_CACHE_TTL
-    logger.info(f"🔧 IMAGE_BASE64_CACHE 已按配置重建: maxsize={IMAGE_CACHE_MAX_SIZE}, ttl={IMAGE_CACHE_TTL}s")
-    
-    MAX_CONCURRENT_DOWNLOADS = CONFIG.get("max_concurrent_downloads", 50)
+    image_state.IMAGE_CACHE_MAX_SIZE = mem_config.get("image_cache_max_size", CacheDefaults.IMAGE_CACHE_MAX_SIZE)
+    image_state.IMAGE_CACHE_TTL = mem_config.get("image_cache_ttl_seconds", CacheDefaults.IMAGE_CACHE_TTL)
+    image_state.IMAGE_BASE64_CACHE = TTLCache(
+        maxsize=image_state.IMAGE_CACHE_MAX_SIZE, ttl=image_state.IMAGE_CACHE_TTL
+    )
+    logger.info(
+        f"🔧 IMAGE_BASE64_CACHE 已按配置重建: "
+        f"maxsize={image_state.IMAGE_CACHE_MAX_SIZE}, ttl={image_state.IMAGE_CACHE_TTL}s"
+    )
+
     pool_config = CONFIG.get("connection_pool", {})
-    
     connector = aiohttp.TCPConnector(
         limit=pool_config.get("total_limit", 200),
         limit_per_host=pool_config.get("per_host_limit", 50),
@@ -251,11 +178,13 @@ async def lifespan(app: FastAPI):
         connect=timeout_config.get("connect", 5),
         sock_read=timeout_config.get("sock_read", 10)
     )
-    
-    aiohttp_session = aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=True)
-    direct_api_service = DirectAPIService(aiohttp_session)
-    DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-    
+
+    # 所有运行时依赖直接写入 AppState，全部路由链路从 AppState 读取
+    server_state.aiohttp_session = aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=True)
+    server_state.direct_api_service = DirectAPIService(server_state.aiohttp_session)
+    server_state.MAX_CONCURRENT_DOWNLOADS = CONFIG.get("max_concurrent_downloads", 50)
+    server_state.DOWNLOAD_SEMAPHORE = asyncio.Semaphore(server_state.MAX_CONCURRENT_DOWNLOADS)
+
     logger.info(f"全局aiohttp会话已创建（优化配置）")
     logger.info(f"✅ Direct API服务已初始化")
     
@@ -274,19 +203,22 @@ async def lifespan(app: FastAPI):
     load_model_endpoint_map()
     logger.info("服务器启动完成。等待油猴脚本连接...")
 
-    last_activity_time_ref['time'] = datetime.now()
+    server_state.last_activity_time_ref['time'] = datetime.now()
     
-    # 启动后台任务
-    asyncio.create_task(monitors.memory_monitor(
-        CONFIG, DOWNLOAD_SEMAPHORE, MAX_CONCURRENT_DOWNLOADS,
-        response_channels, request_metadata, IMAGE_BASE64_CACHE,
-        FILEBED_URL_CACHE, FILEBED_URL_CACHE_TTL, downloaded_urls_set, downloaded_image_urls
-    ))
-    asyncio.create_task(monitors.config_monitor(
+    # 启动后台任务（spawn 持有强引用，防止常驻监控任务被垃圾回收）
+    spawn(monitors.memory_monitor(
+        CONFIG, server_state.DOWNLOAD_SEMAPHORE, server_state.MAX_CONCURRENT_DOWNLOADS,
+        request_state.response_channels, request_state.request_metadata, image_state.IMAGE_BASE64_CACHE,
+        image_state.FILEBED_URL_CACHE, image_state.FILEBED_URL_CACHE_TTL,
+        image_state.downloaded_urls_set, image_state.downloaded_image_urls
+    ), name="memory-monitor")
+    spawn(monitors.config_monitor(
         CONFIG, CONFIG_FILE_MTIMES, load_config, load_model_endpoint_map, load_model_map,
-        browser_connections, response_channels, MODEL_ENDPOINT_MAP
-    ))
-    asyncio.create_task(monitors.stale_request_cleaner(monitoring_service, response_channels, request_metadata))
+        conn_state.browser_connections, request_state.response_channels, MODEL_ENDPOINT_MAP
+    ), name="config-monitor")
+    spawn(monitors.stale_request_cleaner(
+        monitoring_service, request_state.response_channels, request_state.request_metadata
+    ), name="stale-request-cleaner")
     
     if stats_db.enabled and MODEL_ENDPOINT_MAP:
         # 🔧 A3 修复：用 asyncio.to_thread 包装同步 SQLite 批量操作，不阻塞事件循环
@@ -300,20 +232,20 @@ async def lifespan(app: FastAPI):
                 logger.info("="*60)
             except Exception as e:
                 logger.error(f"❌ 费用重算失败: {e}", exc_info=True)
-        asyncio.create_task(_recalculate_costs_bg())
+        spawn(_recalculate_costs_bg(), name="recalculate-costs")
     
     # 🔥 预热 admin 首屏缓存（异步后台，不阻塞启动）
-    asyncio.create_task(_warmup_admin_cache())
+    spawn(_warmup_admin_cache(), name="warmup-admin-cache")
     
     yield
     
     # 保存 API Key 统计数据
     api_key_manager.save_now()
     
-    if direct_api_service:
-        await direct_api_service.close()
-    if aiohttp_session:
-        await aiohttp_session.close()
+    if server_state.direct_api_service:
+        await server_state.direct_api_service.close()
+    if server_state.aiohttp_session:
+        await server_state.aiohttp_session.close()
     logger.info("服务器正在关闭。")
     if _LOG_QUEUE_LISTENER:
         _LOG_QUEUE_LISTENER.stop()
@@ -387,46 +319,16 @@ class CachedStaticFiles(StaticFiles):
 app.mount("/js", CachedStaticFiles(directory="js"), name="js")
 app.mount("/css", CachedStaticFiles(directory="css"), name="css")
 
-# 负载均衡包装器
-async def select_best_tab_for_request():
-    return await _select_best_tab_for_request(
-        browser_connections, browser_connections_lock, tab_request_counts
-    )
-
-async def release_tab_request(tab_id: str):
-    await _release_tab_request(tab_id, tab_request_counts, tab_request_counts_lock)
-
-async def reassign_pending_requests(disconnected_tab_id: str, browser_id: str = None):
-    await _reassign_pending_requests(
-        disconnected_tab_id, browser_connections, browser_connections_lock,
-        response_channels, request_metadata, tab_request_counts,
-        CONFIG, convert_openai_to_lmarena_payload
-    )
-
 # ==================== WebSocket端点 ====================
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    await websocket_routes.websocket_endpoint(
-        websocket=websocket,
-        browser_ws_ref=browser_ws_ref,
-        browser_connections=browser_connections,
-        browser_connections_lock=browser_connections_lock,
-        tab_connection_times=tab_connection_times,
-        tab_request_counts=tab_request_counts,
-        tab_request_counts_lock=tab_request_counts_lock,
-        response_channels=response_channels,
-        request_metadata=request_metadata,
-        pending_requests_queue=pending_requests_queue,
-        IS_REFRESHING_FOR_VERIFICATION=IS_REFRESHING_FOR_VERIFICATION,
-        VERIFICATION_COOLDOWN_UNTIL=VERIFICATION_COOLDOWN_UNTIL,
-        CONFIG=CONFIG,
-        monitoring_service=monitoring_service,
-        process_pending_requests_func=lambda: request_processor.process_pending_requests(
-            pending_requests_queue, handle_single_completion
-        ),
-        reassign_pending_requests_func=reassign_pending_requests,
-        release_tab_request_func=release_tab_request
-    )
+    """油猴脚本 WebSocket 入口。
+
+    🔧 修复：websocket_routes.websocket_endpoint 已重构为从 AppState 自取依赖，
+    只接受 websocket 单参数。旧版传入 18 个关键字参数会直接 TypeError，
+    导致浏览器永远无法建立连接。
+    """
+    await websocket_routes.websocket_endpoint(websocket)
 
 # ==================== 核心API端点 ====================
 # 所有核心API已拆分到 routes/api_routes.py
@@ -455,6 +357,12 @@ async def get_models_endpoint(request: Request):
     provided_key = None
     if auth_header and auth_header.startswith("Bearer "):
         provided_key = auth_header.split(" ", 1)[1]
+
+    # Anthropic/Claude 客户端常用 x-api-key；与 Bearer 等效
+    if not provided_key:
+        x_api_key = request.headers.get("x-api-key")
+        if x_api_key:
+            provided_key = x_api_key.strip()
 
     global_api_key = CONFIG.get("api_key")
     has_guest_keys = api_key_manager.has_keys()
@@ -575,131 +483,62 @@ async def get_gemini_models_endpoint(request: Request):
 @app.post("/v1beta/models/{model_name}:streamGenerateContent")
 async def gemini_native_api_endpoint(model_name: str, request: Request):
     """处理Gemini原生API格式的请求"""
+    server_state = _app_state.server
     return await api_routes.gemini_native_api(
         model_name=model_name,
         request=request,
         MODEL_ENDPOINT_MAP=MODEL_ENDPOINT_MAP,
         monitoring_service=monitoring_service,
-        direct_api_service=direct_api_service,
-        last_activity_time_setter=lambda dt: last_activity_time_ref.update({'time': dt}),
-        aiohttp_session=aiohttp_session
+        direct_api_service=server_state.direct_api_service,
+        last_activity_time_setter=lambda dt: server_state.last_activity_time_ref.update({'time': dt}),
+        aiohttp_session=server_state.aiohttp_session
     )
 
 @app.post("/v1/chat/completions")
 async def chat_completions_endpoint(request: Request):
     """处理聊天补全请求"""
-    return await api_routes.chat_completions(
-        request=request,
-        CONFIG=CONFIG,
-        MODEL_ENDPOINT_MAP=MODEL_ENDPOINT_MAP,
-        MODEL_NAME_TO_ID_MAP=MODEL_NAME_TO_ID_MAP,
-        MODEL_ROUND_ROBIN_INDEX=MODEL_ROUND_ROBIN_INDEX,
-        MODEL_ROUND_ROBIN_LOCK=MODEL_ROUND_ROBIN_LOCK,
-        last_activity_time_setter=lambda dt: last_activity_time_ref.update({'time': dt}),
-        VERIFICATION_COOLDOWN_UNTIL=VERIFICATION_COOLDOWN_UNTIL,
-        IS_REFRESHING_FOR_VERIFICATION=IS_REFRESHING_FOR_VERIFICATION,
-        browser_ws=browser_ws_ref['ws'],
-        browser_connections=browser_connections,
-        browser_connections_lock=browser_connections_lock,
-        tab_request_counts=tab_request_counts,
-        response_channels=response_channels,
-        request_metadata=request_metadata,
-        pending_requests_queue=pending_requests_queue,
-        monitoring_service=monitoring_service,
-        direct_api_service=direct_api_service,
-        aiohttp_session=aiohttp_session,
-        IMAGE_BASE64_CACHE=IMAGE_BASE64_CACHE,
-        IMAGE_CACHE_MAX_SIZE=IMAGE_CACHE_MAX_SIZE,
-        IMAGE_CACHE_TTL=IMAGE_CACHE_TTL,
-        save_downloaded_image_async_func=save_downloaded_image_async,
-        download_image_data_with_retry_func=_download_image_data_with_retry,
-        release_tab_request_func=release_tab_request,
-        select_best_tab_for_request_func=select_best_tab_for_request,
-        convert_openai_to_lmarena_payload_func=convert_openai_to_lmarena_payload,
-        process_lmarena_stream_func=_process_lmarena_stream,
-        stream_generator_func=stream_generator,
-        non_stream_response_func=non_stream_response,
-        format_openai_chunk_func=format_openai_chunk,
-        format_openai_finish_chunk_func=format_openai_finish_chunk,
-        format_openai_error_chunk_func=format_openai_error_chunk,
-        format_openai_non_stream_response_func=format_openai_non_stream_response,
-        estimate_message_tokens_func=estimate_message_tokens,
-        estimate_tokens_func=estimate_tokens,
-        process_image_data_func=process_image_data
-    )
+    return await api_routes.chat_completions(request)
 
 @app.post("/v1/messages")
 async def anthropic_messages_endpoint(request: Request):
     """处理 Anthropic Claude 兼容消息请求"""
-    return await api_routes.anthropic_messages(
-        request=request,
-        CONFIG=CONFIG,
-        MODEL_ENDPOINT_MAP=MODEL_ENDPOINT_MAP,
-        MODEL_NAME_TO_ID_MAP=MODEL_NAME_TO_ID_MAP,
-        MODEL_ROUND_ROBIN_INDEX=MODEL_ROUND_ROBIN_INDEX,
-        MODEL_ROUND_ROBIN_LOCK=MODEL_ROUND_ROBIN_LOCK,
-        last_activity_time_setter=lambda dt: last_activity_time_ref.update({'time': dt}),
-        VERIFICATION_COOLDOWN_UNTIL=VERIFICATION_COOLDOWN_UNTIL,
-        IS_REFRESHING_FOR_VERIFICATION=IS_REFRESHING_FOR_VERIFICATION,
-        browser_ws=browser_ws_ref['ws'],
-        browser_connections=browser_connections,
-        browser_connections_lock=browser_connections_lock,
-        tab_request_counts=tab_request_counts,
-        response_channels=response_channels,
-        request_metadata=request_metadata,
-        pending_requests_queue=pending_requests_queue,
-        monitoring_service=monitoring_service,
-        direct_api_service=direct_api_service,
-        aiohttp_session=aiohttp_session,
-        IMAGE_BASE64_CACHE=IMAGE_BASE64_CACHE,
-        IMAGE_CACHE_MAX_SIZE=IMAGE_CACHE_MAX_SIZE,
-        IMAGE_CACHE_TTL=IMAGE_CACHE_TTL,
-        save_downloaded_image_async_func=save_downloaded_image_async,
-        download_image_data_with_retry_func=_download_image_data_with_retry,
-        release_tab_request_func=release_tab_request,
-        select_best_tab_for_request_func=select_best_tab_for_request,
-        convert_openai_to_lmarena_payload_func=convert_openai_to_lmarena_payload,
-        process_lmarena_stream_func=_process_lmarena_stream,
-        stream_generator_func=stream_generator,
-        non_stream_response_func=non_stream_response,
-        format_openai_chunk_func=format_openai_chunk,
-        format_openai_finish_chunk_func=format_openai_finish_chunk,
-        format_openai_error_chunk_func=format_openai_error_chunk,
-        format_openai_non_stream_response_func=format_openai_non_stream_response,
-        estimate_message_tokens_func=estimate_message_tokens,
-        estimate_tokens_func=estimate_tokens,
-        process_image_data_func=process_image_data
-    )
+    return await api_routes.anthropic_messages(request)
 
 # ==================== 内部通信端点 ====================
 @app.post("/internal/start_id_capture")
 async def start_id_capture_endpoint(request: Request):
+    admin_state = _app_state.admin
     return await internal_routes.start_id_capture(
-        request, browser_ws_ref['ws'], ADMIN_CAPTURED_IDS, ADMIN_CAPTURED_IDS_LOCK
+        request, _app_state.connection.browser_ws_ref['ws'],
+        admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK
     )
 
 @app.post("/internal/receive_captured_ids")
 async def receive_captured_ids_endpoint(request: Request):
+    admin_state = _app_state.admin
     return await internal_routes.receive_captured_ids(
-        request, ADMIN_CAPTURED_IDS, ADMIN_CAPTURED_IDS_LOCK
+        request, admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK
     )
 
 @app.post("/update")
 async def update_endpoint(request: Request):
+    admin_state = _app_state.admin
     return await internal_routes.receive_captured_ids(
-        request, ADMIN_CAPTURED_IDS, ADMIN_CAPTURED_IDS_LOCK
+        request, admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK
     )
 
 @app.get("/api/admin/capture_status")
 async def get_capture_status_endpoint():
+    admin_state = _app_state.admin
     return await internal_routes.get_capture_status(
-        ADMIN_CAPTURED_IDS, ADMIN_CAPTURED_IDS_LOCK
+        admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK
     )
 
 @app.post("/api/admin/save_captured_model")
 async def save_captured_model_endpoint(request: Request):
+    admin_state = _app_state.admin
     return await internal_routes.save_captured_model(
-        request, ADMIN_CAPTURED_IDS, ADMIN_CAPTURED_IDS_LOCK,
+        request, admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK,
         MODEL_ENDPOINT_MAP_PATH, load_model_endpoint_map
     )
 
@@ -731,9 +570,9 @@ async def get_models_config_endpoint():
 async def update_model_config_endpoint(request: Request):
     return await admin_routes.update_model_config(request, load_model_endpoint_map)
 
-@app.delete("/api/admin/models/{model_name}")
-async def delete_model_config_endpoint(model_name: str):
-    return await admin_routes.delete_model_config(model_name, load_model_endpoint_map)
+@app.post("/api/admin/models/delete")
+async def delete_model_config_endpoint(request: Request):
+    return await admin_routes.delete_model_config(request, load_model_endpoint_map)
 
 @app.post("/api/admin/models/reorder")
 async def reorder_models_endpoint(request: Request):
@@ -749,10 +588,11 @@ async def update_config_endpoint(request: Request):
 
 @app.get("/api/admin/overview")
 async def get_overview_endpoint():
+    conn = _app_state.connection
     return await admin_routes.get_overview(
-        monitoring_service, stats_db, MonitorConfig, browser_ws_ref['ws'],
-        browser_connections, browser_connections_lock, tab_connection_times,
-        tab_request_counts, CONFIG, MODEL_ENDPOINT_MAP
+        monitoring_service, stats_db, MonitorConfig, conn.browser_ws_ref['ws'],
+        conn.browser_connections, conn.browser_connections_lock, conn.tab_connection_times,
+        conn.tab_request_counts, CONFIG, MODEL_ENDPOINT_MAP
     )
 
 @app.get("/api/admin/tokenizer_info")
@@ -807,7 +647,7 @@ async def list_custom_tokenizers_endpoint():
 @app.post("/api/admin/test_model_keys")
 async def test_model_keys_endpoint(request: Request):
     """测试单个模型配置中的所有 API Key（并行请求）"""
-    return await admin_routes.test_model_keys(request, direct_api_service)
+    return await admin_routes.test_model_keys(request, _app_state.server.direct_api_service)
 
 @app.get("/api/admin/token_stats")
 async def get_token_stats_endpoint(start_date: str = None, end_date: str = None, start_time: str = None, end_time: str = None, rpm_period: str = None):
@@ -846,13 +686,13 @@ async def monitor_dashboard_endpoint():
 @app.websocket("/ws/monitor")
 async def monitor_websocket_endpoint(websocket: WebSocket):
     await monitor_routes.monitor_websocket(
-        websocket, monitoring_service, browser_ws_ref['ws'], CONFIG
+        websocket, monitoring_service, _app_state.connection.browser_ws_ref['ws'], CONFIG
     )
 
 @app.get("/api/monitor/stats")
 async def get_monitor_stats_endpoint():
     return await monitor_routes.get_monitor_stats(
-        monitoring_service, browser_ws_ref['ws'], CONFIG
+        monitoring_service, _app_state.connection.browser_ws_ref['ws'], CONFIG
     )
 
 @app.get("/api/monitor/active")
@@ -862,6 +702,15 @@ async def get_active_requests_endpoint():
 @app.get("/api/monitor/logs/requests")
 async def get_request_logs_endpoint(limit: int = 50):
     return await monitor_routes.get_request_logs(limit, monitoring_service)
+
+@app.get("/api/monitor/logs/requests/query")
+async def query_request_logs_endpoint(limit: int = 50, offset: int = 0,
+                                      model: Optional[str] = None,
+                                      status: Optional[str] = None,
+                                      search: Optional[str] = None):
+    """分页 + 过滤查询请求日志（返回 {total, items, models}）"""
+    return await monitor_routes.query_request_logs(
+        monitoring_service, limit, offset, model, status, search)
 
 @app.get("/api/monitor/logs/errors")
 async def get_error_logs_endpoint(limit: int = 30):
@@ -873,17 +722,28 @@ async def get_recent_data_endpoint():
 
 @app.get("/api/monitor/performance")
 async def get_performance_metrics_endpoint():
+    # 🔧 修复：旧版按位置传参且顺序与函数签名完全错位（CONFIG 被当成
+    # MAX_CONCURRENT_DOWNLOADS、int 被当成 aiohttp_session 等），改用关键字传参
+    server_state = _app_state.server
+    image_state = _app_state.image
     return await monitor_routes.get_performance_metrics(
-        CONFIG, DOWNLOAD_SEMAPHORE, MAX_CONCURRENT_DOWNLOADS,
-        aiohttp_session, IMAGE_BASE64_CACHE, IMAGE_CACHE_MAX_SIZE,
-        downloaded_urls_set, response_channels, DISABLED_ENDPOINTS
+        MAX_CONCURRENT_DOWNLOADS=server_state.MAX_CONCURRENT_DOWNLOADS,
+        DOWNLOAD_SEMAPHORE=server_state.DOWNLOAD_SEMAPHORE,
+        aiohttp_session=server_state.aiohttp_session,
+        IMAGE_BASE64_CACHE=image_state.IMAGE_BASE64_CACHE,
+        IMAGE_CACHE_MAX_SIZE=image_state.IMAGE_CACHE_MAX_SIZE,
+        downloaded_urls_set=image_state.downloaded_urls_set,
+        response_channels=_app_state.request.response_channels,
+        DISABLED_ENDPOINTS=image_state.DISABLED_ENDPOINTS,
+        CONFIG=CONFIG,
     )
 
 @app.get("/api/monitor/tabs")
 async def get_tab_connections_endpoint():
+    conn = _app_state.connection
     return await monitor_routes.get_tab_connections(
-        browser_connections, browser_connections_lock, tab_connection_times,
-        tab_request_counts
+        conn.browser_connections, conn.browser_connections_lock, conn.tab_connection_times,
+        conn.tab_request_counts
     )
 
 @app.get("/api/monitor/memory")
@@ -929,116 +789,6 @@ async def download_logs_endpoint(log_type: str = "requests"):
         media_type="application/json"
     )
 
-# ==================== 辅助函数 ====================
-async def handle_single_completion(openai_req: dict, retry_request_id: str = None):
-    """
-    处理单个聊天补全请求
-    
-    用于从pending_requests_queue中处理待处理的请求
-    
-    Args:
-        openai_req: OpenAI格式的请求数据
-        retry_request_id: 重试请求ID（可选）
-    
-    Returns:
-        处理结果
-    """
-    from fastapi import Request
-    from starlette.requests import Request as StarletteRequest
-    from starlette.datastructures import Headers
-    import io
-    
-    # 构造一个模拟的FastAPI Request对象
-    # 这是一个简化实现，主要用于内部重试逻辑
-    try:
-        # 直接调用 api_routes.chat_completions 的核心逻辑
-        # 由于这个函数是从队列中处理请求，我们需要模拟请求上下文
-        
-        model = openai_req.get("model", "unknown")
-        logger.info(f"[HANDLE_SINGLE] 处理待处理请求: 模型={model}, 重试ID={retry_request_id}")
-        
-        # 获取模型配置
-        endpoint_config = MODEL_ENDPOINT_MAP.get(model)
-        if not endpoint_config:
-            logger.error(f"[HANDLE_SINGLE] 模型 '{model}' 未找到配置")
-            return {"error": f"Model '{model}' not configured"}
-        
-        # 处理多端点情况
-        if isinstance(endpoint_config, list) and endpoint_config:
-            endpoint_config = endpoint_config[0]
-        
-        # 检查是否为Direct API模式
-        api_type = endpoint_config.get("api_type") if isinstance(endpoint_config, dict) else None
-        
-        if api_type in ["direct_api", "passthrough", "gemini_native"]:
-            # Direct API模式 - 使用direct_api_service
-            if direct_api_service:
-                from routes.direct_api_handler import handle_direct_api_request
-                result = await handle_direct_api_request(
-                    openai_req=openai_req,
-                    model_name=model,
-                    endpoint_config=endpoint_config,
-                    CONFIG=CONFIG,
-                    PROCESSED_IMAGE_CACHE=IMAGE_BASE64_CACHE,
-                    monitoring_service=monitoring_service,
-                    direct_api_service=direct_api_service,
-                    estimate_message_tokens_func=estimate_message_tokens,
-                    estimate_tokens_func=estimate_tokens,
-                    process_image_data_func=process_image_data,
-                    full_messages=openai_req.get("messages", []),
-                )
-                return result
-            else:
-                logger.error("[HANDLE_SINGLE] direct_api_service 未初始化")
-                return {"error": "Direct API service not initialized"}
-        else:
-            # LMArena模式 - 需要WebSocket连接
-            if not browser_connections:
-                logger.warning("[HANDLE_SINGLE] 没有可用的浏览器连接")
-                # 重新放回队列
-                await pending_requests_queue.put({
-                    "openai_req": openai_req,
-                    "retry_request_id": retry_request_id
-                })
-                return {"error": "No browser connections available", "queued": True}
-            
-            # 选择最佳标签页
-            tab_id = await select_best_tab_for_request()
-            if not tab_id:
-                logger.warning("[HANDLE_SINGLE] 无法获取可用标签页")
-                return {"error": "No available tabs"}
-            
-            # 转换请求格式
-            session_id = CONFIG.get("session_id")
-            lmarena_payload = await convert_openai_to_lmarena_payload(openai_req, session_id)
-            
-            # 创建响应通道
-            request_id = retry_request_id or str(uuid.uuid4())
-            response_queue = asyncio.Queue()
-            response_channels[request_id] = response_queue
-            request_metadata[request_id] = {
-                "tab_id": tab_id,
-                "model": model,
-                "start_time": time.time()
-            }
-            
-            # 发送请求到浏览器
-            ws = browser_connections[tab_id]
-            await ws.send_text(json.dumps({
-                "command": "send_message",
-                "request_id": request_id,
-                "payload": lmarena_payload
-            }))
-            
-            logger.info(f"[HANDLE_SINGLE] 请求已发送到标签页 {tab_id}: {request_id[:8]}")
-            
-            # 等待响应（这里简化处理，实际应该是流式的）
-            # 完整的流式处理在 stream_generator 和 non_stream_response 中
-            return {"request_id": request_id, "status": "processing"}
-            
-    except Exception as e:
-        logger.error(f"[HANDLE_SINGLE] 处理请求时发生错误: {e}", exc_info=True)
-        return {"error": str(e)}
 
 # ==================== Web访问密钥验证 ====================
 from starlette.responses import RedirectResponse
@@ -1094,7 +844,7 @@ class WebAccessKeyMiddleware:
         
         # ---- 验证失败 ----
         if scope["type"] == "websocket":
-            # WebSocket 握手阶段直接关闭；Uvicorn 会将未 accept 的 close 映射为握手失败
+            # WebSocket 握手阶段直接关闭；ASGI 服务器会将未 accept 的 close 映射为握手失败
             await send({
                 "type": "websocket.close",
                 "code": 1008,
@@ -1139,182 +889,17 @@ app.add_middleware(WebAccessKeyMiddleware)
 
 # ==================== 登录页面和验证API ====================
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(next: str = "/admin"):
-    """返回登录页面"""
-    html_content = f'''<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>访问验证 - LMArena Bridge</title>
-    <style>
-        :root {{
-            --bg-deep: linear-gradient(180deg, #090e16 0%, #0a1220 100%);
-            --surface: #0e1a2d;
-            --line-strong: #223650;
-            --text-main: #d9e5ff;
-            --text-dim: #8fa0bf;
-            --accent: #2aa8ff;
-            --accent-soft: rgba(42,168,255,0.35);
-        }}
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: var(--bg-deep);
-            color: var(--text-main);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }}
-        .login-box {{
-            background: var(--surface);
-            border: 1px solid var(--line-strong);
-            border-radius: 12px;
-            padding: 40px;
-            width: 100%;
-            max-width: 400px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-        }}
-        h1 {{
-            color: var(--accent);
-            text-align: center;
-            margin-bottom: 10px;
-            font-size: 1.8rem;
-        }}
-        .subtitle {{
-            text-align: center;
-            color: var(--text-dim);
-            margin-bottom: 30px;
-            font-size: 0.9rem;
-        }}
-        .form-group {{
-            margin-bottom: 20px;
-        }}
-        label {{
-            display: block;
-            margin-bottom: 8px;
-            color: var(--text-dim);
-            font-size: 0.9rem;
-        }}
-        input {{
-            width: 100%;
-            padding: 12px 15px;
-            background: #0b1422;
-            border: 1px solid var(--line-strong);
-            border-radius: 6px;
-            color: var(--text-main);
-            font-size: 1rem;
-        }}
-        input:focus {{
-            outline: none;
-            border-color: var(--accent);
-            box-shadow: 0 0 0 3px rgba(42, 168, 255, 0.1);
-        }}
-        button {{
-            width: 100%;
-            padding: 14px;
-            background: rgba(42, 168, 255, 0.2);
-            border: 1px solid var(--accent-soft);
-            border-radius: 6px;
-            color: var(--accent);
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }}
-        button:hover {{
-            background: rgba(42, 168, 255, 0.3);
-        }}
-        .error {{
-            background: rgba(239, 68, 68, 0.1);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            color: #ef4444;
-            padding: 12px;
-            border-radius: 6px;
-            margin-bottom: 20px;
-            display: none;
-        }}
-        .error.show {{ display: block; }}
-        .success {{
-            background: rgba(16, 185, 129, 0.1);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-            color: #10b981;
-            padding: 12px;
-            border-radius: 6px;
-            margin-bottom: 20px;
-            display: none;
-        }}
-        .success.show {{ display: block; }}
-    </style>
-</head>
-<body>
-    <div class="login-box">
-        <h1>🔐 访问验证</h1>
-        <p class="subtitle">请输入Web访问密钥</p>
-        <div id="error" class="error"></div>
-        <div id="success" class="success"></div>
-        <form onsubmit="return submitKey()">
-            <div class="form-group">
-                <label for="key">访问密钥</label>
-                <input type="password" id="key" placeholder="请输入密钥..." autofocus>
-            </div>
-            <button type="submit">🚀 验证并进入</button>
-        </form>
-    </div>
-    <script>
-        function submitKey() {{
-            var key = document.getElementById('key').value;
-            var errorDiv = document.getElementById('error');
-            var btn = document.querySelector('button');
-            var successDiv = document.getElementById('success');
-            
-            if (!key) {{
-                errorDiv.textContent = '请输入密钥';
-                errorDiv.className = 'error show';
-                return false;
-            }}
-            
-            btn.disabled = true;
-            btn.textContent = '验证中...';
-            errorDiv.className = 'error';
-            successDiv.className = 'success';
-            
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', '/auth/verify', true);
-            xhr.setRequestHeader('Content-Type', 'application/json');
-            xhr.onreadystatechange = function() {{
-                if (xhr.readyState === 4) {{
-                    try {{
-                        var data = JSON.parse(xhr.responseText);
-                        if (data.success) {{
-                            document.cookie = "web_access_key=" + encodeURIComponent(key) + "; path=/; max-age=86400";
-                            successDiv.textContent = '✅ 验证成功！点击下方按钮进入';
-                            successDiv.className = 'success show';
-                            btn.textContent = '👉 进入管理面板';
-                            btn.disabled = false;
-                            btn.onclick = function() {{ window.location.href = '/admin'; return false; }};
-                        }} else {{
-                            errorDiv.textContent = data.message || '密钥错误';
-                            errorDiv.className = 'error show';
-                            btn.disabled = false;
-                            btn.textContent = '🚀 验证并进入';
-                        }}
-                    }} catch (e) {{
-                        errorDiv.textContent = '验证失败: ' + (xhr.status === 0 ? '网络错误' : xhr.statusText);
-                        errorDiv.className = 'error show';
-                        btn.disabled = false;
-                        btn.textContent = '🚀 验证并进入';
-                    }}
-                }}
-            }};
-            xhr.send(JSON.stringify({{ key: key }}));
-            return false;
-        }}
-    </script>
-</body>
-</html>'''
-    return HTMLResponse(content=html_content)
+async def login_page():
+    """返回登录页面（HTML 已外置到 login.html，next 参数由页面 JS 读取并校验）"""
+    try:
+        with open('login.html', 'r', encoding='utf-8') as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>登录页面未找到</h1><p>请确保 login.html 文件在服务器根目录。</p>",
+            status_code=404
+        )
+
 
 @app.post("/auth/verify")
 async def verify_web_key(request: Request):
@@ -1433,7 +1018,6 @@ async def reload_api_keys_endpoint():
 
 # ==================== 主程序入口 ====================
 if __name__ == "__main__":
-    import socket
     import sys
     
     # ===== Windows 平台兼容性修复 =====
@@ -1460,8 +1044,9 @@ if __name__ == "__main__":
     api_port = CONFIG.get("server_port", 5102)
     enable_ipv6 = CONFIG.get("enable_ipv6", True)
     
-    logger.info(f"🚀 LMArena Bridge v2.0 API 服务器正在启动（重构版）...")
+    logger.info(f"🚀 LMArena Bridge v2.0 API 服务器正在启动（Hypercorn / HTTP/2）...")
     logger.info(f"   - 端口: {api_port}")
+    logger.info(f"   - 协议: HTTP/1.1 + HTTP/2 (h2c)")
     
     # 检查是否配置了web访问密钥
     if CONFIG.get("web_access_key"):
@@ -1469,52 +1054,29 @@ if __name__ == "__main__":
     else:
         logger.info(f"   - Web访问保护: ❌ 未配置（任何人可访问管理面板）")
     
-    async def run_with_dual_stack():
-        """使用双栈模式运行服务器（IPv4 + IPv6）"""
-        # Windows 下使用两个独立 socket，避免 IPV6_V6ONLY=0 的兼容性问题
-        if sys.platform == "win32":
-            sock_v4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock_v4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock_v4.bind(("0.0.0.0", api_port))
-            sock_v4.listen(128)
-            sock_v4.setblocking(False)
-            
-            sock_v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            sock_v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # 纯 IPv6，不映射 IPv4
-            sock_v6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-            sock_v6.bind(("::", api_port))
-            sock_v6.listen(128)
-            sock_v6.setblocking(False)
-            
-            config = uvicorn.Config(app, host="::", port=api_port)
-            server = uvicorn.Server(config)
-            await server.serve(sockets=[sock_v4, sock_v6])
-        else:
-            # Linux/macOS 上使用单 socket 双栈模式
-            sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-            sock.bind(("::", api_port))
-            sock.listen(128)
-            sock.setblocking(False)
-            
-            config = uvicorn.Config(app, host="::", port=api_port)
-            server = uvicorn.Server(config)
-            await server.serve(sockets=[sock])
+    # Hypercorn 配置
+    hc_config = HypercornConfig()
+    hc_config.keep_alive_timeout = CONFIG.get("connection_pool", {}).get("keepalive_timeout", 30)
+    hc_config.graceful_timeout = CONFIG.get("timeout_graceful_shutdown", 10)
     
     if enable_ipv6:
-        # 尝试使用双栈模式
-        try:
-            logger.info(f"   - 双栈模式: ✅ IPv4 + IPv6")
-            logger.info(f"   - IPv4访问: http://127.0.0.1:{api_port}")
-            logger.info(f"   - IPv6访问: http://[::1]:{api_port}")
-            asyncio.run(run_with_dual_stack())
-        except Exception as e:
-            logger.warning(f"   - 双栈模式失败: {e}")
-            logger.info(f"   - 回退到仅IPv4模式")
-            logger.info(f"   - IPv4访问: http://127.0.0.1:{api_port}")
-            uvicorn.run(app, host="0.0.0.0", port=api_port)
+        hc_config.bind = [f"0.0.0.0:{api_port}", f"[::]:{api_port}"]
+        logger.info(f"   - 双栈模式: ✅ IPv4 + IPv6")
     else:
-        logger.info(f"   - IPv4访问: http://127.0.0.1:{api_port}")
-        uvicorn.run(app, host="0.0.0.0", port=api_port)
+        hc_config.bind = [f"0.0.0.0:{api_port}"]
+    
+    logger.info(f"   - IPv4访问: http://127.0.0.1:{api_port}")
+    if enable_ipv6:
+        logger.info(f"   - IPv6访问: http://[::1]:{api_port}")
+    
+    def _run():
+        """启动 Hypercorn（asyncio 模式，支持 HTTP/2 h2c）"""
+        asyncio.run(hypercorn_serve(app, hc_config))
+    
+    try:
+        _run()
+    except KeyboardInterrupt:
+        logger.info("服务器已收到中断信号，正在关闭...")
+    except Exception as e:
+        logger.error(f"服务器启动失败: {e}", exc_info=True)
+        sys.exit(1)

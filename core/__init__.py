@@ -6,7 +6,6 @@ Core模块 - 核心功能组件
 - load_balancer: 负载均衡
 - db_stats: SQLite数据库统计
 - app_state: 应用状态管理
-- context: 依赖注入上下文
 - errors: 统一错误处理
 - constants: 全局常量和默认配置
 """
@@ -28,9 +27,9 @@ from .config_loader import (
 )
 
 from .load_balancer import (
-    select_best_tab_for_request,
-    release_tab_request,
-    reassign_pending_requests
+    select_best_tab,
+    release_tab,
+    reassign_tab_requests
 )
 
 from .db_stats import stats_db
@@ -44,18 +43,6 @@ from .app_state import (
     ImageState,
     AdminState,
     ServerState
-)
-
-from .context import (
-    RequestContext,
-    ServiceContext,
-    StateContext,
-    ConfigContext,
-    CacheContext,
-    FunctionContext,
-    get_request_context,
-    init_request_context,
-    reset_request_context
 )
 
 from .errors import (
@@ -112,9 +99,9 @@ __all__ = [
     '_parse_jsonc',
     
     # load_balancer
-    'select_best_tab_for_request',
-    'release_tab_request',
-    'reassign_pending_requests',
+    'select_best_tab',
+    'release_tab',
+    'reassign_tab_requests',
     
     # db_stats
     'stats_db',
@@ -128,17 +115,6 @@ __all__ = [
     'ImageState',
     'AdminState',
     'ServerState',
-    
-    # context
-    'RequestContext',
-    'ServiceContext',
-    'StateContext',
-    'ConfigContext',
-    'CacheContext',
-    'FunctionContext',
-    'get_request_context',
-    'init_request_context',
-    'reset_request_context',
     
     # errors
     'APIError',

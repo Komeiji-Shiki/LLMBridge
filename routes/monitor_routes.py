@@ -5,6 +5,7 @@
 import logging
 import os
 import time
+from typing import Optional
 import psutil
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -95,6 +96,16 @@ async def get_request_logs(limit: int, monitoring_service):
     """获取请求日志"""
     import asyncio
     return await asyncio.to_thread(monitoring_service.log_manager.read_recent_logs, "requests", limit)
+
+
+async def query_request_logs(monitoring_service, limit: int = 50, offset: int = 0,
+                             model: Optional[str] = None, status: Optional[str] = None,
+                             search: Optional[str] = None):
+    """分页 + 过滤查询请求日志（监控面板增强版）"""
+    import asyncio
+    return await asyncio.to_thread(
+        monitoring_service.log_manager.query_request_logs,
+        limit, offset, model or None, status or None, search or None)
 
 
 async def get_error_logs(limit: int, monitoring_service):

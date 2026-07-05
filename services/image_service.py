@@ -193,8 +193,8 @@ async def save_downloaded_image_async(image_data, url, request_id, downloaded_ur
 
 async def download_image_data_with_retry(
     url: str, 
-    aiohttp_session: aiohttp.ClientSession,
-    DOWNLOAD_SEMAPHORE: asyncio.Semaphore,
+    aiohttp_session: Optional[aiohttp.ClientSession],
+    DOWNLOAD_SEMAPHORE: Optional[asyncio.Semaphore],
     MAX_CONCURRENT_DOWNLOADS: int,
     CONFIG: dict
 ) -> Tuple[Optional[bytes], Optional[str]]:
@@ -269,7 +269,8 @@ async def download_image_data_with_retry(
                 
                 # 🔍 诊断日志：连接开始
                 logger.info(f"[DOWNLOAD_DEBUG] 开始建立连接...")
-                
+
+                assert aiohttp_session is not None  # 上方已创建紧急会话兜底
                 async with aiohttp_session.get(
                     url,
                     timeout=timeout,
@@ -338,14 +339,14 @@ async def download_image_data_with_retry(
 
 async def process_image_data(
     base64_data: str,
-    filename: str = None,
-    request_id: str = None,
-    CONFIG: dict = None,
-    PROCESSED_IMAGE_CACHE: dict = None,
-    DISABLED_ENDPOINTS: dict = None,
-    ROUND_ROBIN_INDEX_REF: list = None,  # 使用列表作为可变引用
+    filename: Optional[str] = None,
+    request_id: Optional[str] = None,
+    CONFIG: Optional[dict] = None,
+    PROCESSED_IMAGE_CACHE: Optional[dict] = None,
+    DISABLED_ENDPOINTS: Optional[dict] = None,
+    ROUND_ROBIN_INDEX_REF: Optional[list] = None,  # 使用列表作为可变引用
     FILEBED_RECOVERY_TIME: int = 300,
-    model_image_config: dict = None  # 新增：模型级别的图片压缩配置
+    model_image_config: Optional[dict] = None  # 新增：模型级别的图片压缩配置
 ) -> Tuple[str, Optional[str]]:
     """
     统一的图片处理函数，根据配置决定处理流程
@@ -384,6 +385,7 @@ async def process_image_data(
     if not filename:
         filename = f"image_{uuid.uuid4()}.png"
     
+    CONFIG = CONFIG or {}
     req_log = f"[IMG_PROC {request_id[:8] if request_id else 'N/A'}]"
     
     # 读取全局配置
@@ -393,7 +395,7 @@ async def process_image_data(
     cache_enabled = cache_config.get("enabled", True)
     
     # 合并模型级别配置（模型配置优先级更高）
-    optimization_config = merge_image_config(global_optimization_config, model_image_config)
+    optimization_config = merge_image_config(global_optimization_config, model_image_config or {})
     optimization_enabled = optimization_config.get("enabled", False)
     
     # 如果模型配置中显式启用了压缩，覆盖全局设置
@@ -422,6 +424,9 @@ async def process_image_data(
         if decode_error:
             logger.error(f"{req_log} 解码失败: {decode_error}")
             return base64_data, decode_error
+        if image_bytes is None:
+            logger.error(f"{req_log} 解码失败: 空数据")
+            return base64_data, "图片解码失败：空数据"
         
         # 确定处理后的图片数据和格式
         final_image_data = image_bytes
@@ -440,8 +445,8 @@ async def process_image_data(
                 logger.warning(f"{req_log} 优化失败: {opt_error}，使用原图")
                 # 优化失败，降级使用原图
             else:
-                final_image_data = optimized_data
-                final_format = optimized_format
+                final_image_data = optimized_data or image_bytes
+                final_format = optimized_format or image_format
                 logger.info(f"{req_log} 优化成功: {len(image_bytes)/1024:.1f}KB -> {len(final_image_data)/1024:.1f}KB")
         else:
             logger.info(f"{req_log} 跳过图片优化（配置已禁用）")
@@ -451,7 +456,7 @@ async def process_image_data(
             logger.info(f"{req_log} 上传到图床...")
             
             # 将图片数据转换为base64 Data URI用于上传
-            mime_type = get_mime_type_from_format(final_format)
+            mime_type = get_mime_type_from_format(final_format or "png")
             upload_base64 = image_to_base64(final_image_data, mime_type)
             
             # 获取活跃的图床端点
@@ -477,7 +482,7 @@ async def process_image_data(
                 error_msg = "没有可用的图床端点"
                 logger.error(f"{req_log} {error_msg}，降级返回base64")
                 # 降级：返回base64
-                mime_type = get_mime_type_from_format(final_format)
+                mime_type = get_mime_type_from_format(final_format or "png")
                 return image_to_base64(final_image_data, mime_type), None
             
             # 根据策略选择端点
@@ -519,7 +524,7 @@ async def process_image_data(
                     endpoint=endpoint
                 )
                 
-                if not upload_error:
+                if not upload_error and uploaded_url:
                     final_url = uploaded_url
                     upload_successful = True
                     logger.info(f"{req_log} 上传成功到 '{endpoint_name}': {uploaded_url[:100]}...")
@@ -534,7 +539,7 @@ async def process_image_data(
                         ROUND_ROBIN_INDEX_REF[0] += 1
                         logger.info(f"{req_log} [Failover] 默认图床失败，切换到下一个")
             
-            if upload_successful:
+            if upload_successful and final_url:
                 # 存入缓存（TTLCache 自动管理大小和过期）
                 if cache_enabled and image_hash and PROCESSED_IMAGE_CACHE is not None:
                     PROCESSED_IMAGE_CACHE[image_hash] = final_url
@@ -544,7 +549,7 @@ async def process_image_data(
                 error_msg = f"所有图床端点均上传失败。最后错误: {last_error}"
                 logger.error(f"{req_log} {error_msg}，降级返回base64")
                 # 降级：返回base64
-                mime_type = get_mime_type_from_format(final_format)
+                mime_type = get_mime_type_from_format(final_format or "png")
                 base64_result = image_to_base64(final_image_data, mime_type)
                 
                 # 即使失败也要缓存降级结果（TTLCache 自动管理）
@@ -557,7 +562,7 @@ async def process_image_data(
         else:
             # 不使用图床，返回base64
             logger.info(f"{req_log} 转换为base64（图床已禁用）")
-            mime_type = get_mime_type_from_format(final_format)
+            mime_type = get_mime_type_from_format(final_format or "png")
             base64_result = image_to_base64(final_image_data, mime_type)
             logger.info(f"{req_log} Base64转换完成: {len(base64_result)} 字符")
             
