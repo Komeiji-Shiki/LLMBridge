@@ -12,8 +12,11 @@ Direct API - Anthropic 原生格式兼容处理
   - 系统提示词注入（Anthropic 原生格式，system 顶层字段）
 """
 import asyncio
+import codecs
+import copy
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,45 +28,64 @@ from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
 from utils.task_registry import spawn
 from converters.anthropic_openai import extract_anthropic_usage_tokens
+from utils.json_unescape import StreamingUnicodeUnescaper
 from ._direct_api_utils import (
+    detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     is_error_json,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
-    get_round_robin_api_key,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def _truncate_body_for_log(body: dict) -> dict:
-    """截断请求体中的长文本块用于调试日志，避免日志过大。"""
-    import copy
-    debug = copy.deepcopy(body)
-    if "messages" in debug and isinstance(debug["messages"], list):
+    """截断请求体中的长文本块用于调试日志，避免日志过大。
+
+    🔧 性能修复：旧版对整个请求体 copy.deepcopy，含 base64 图片时
+    每次打日志都要完整深拷贝几 MB 数据。现在只对需要截断的路径
+    做选择性浅拷贝（返回值仅供 json.dumps 打印，不会被修改），
+    并顺带截断图片 source.data，避免序列化大 base64 白耗 CPU。
+    """
+    def _trunc(val):
+        if isinstance(val, str) and len(val) > 80:
+            return val[:80] + "...[truncated]"
+        return val
+
+    def _trunc_block(block):
+        if not isinstance(block, dict):
+            return block
+        nb = dict(block)
+        for key in ("text", "thinking", "data", "partial_json"):
+            if isinstance(nb.get(key), str):
+                nb[key] = _trunc(nb[key])
+        if nb.get("type") == "tool_result" and isinstance(nb.get("content"), str):
+            nb["content"] = _trunc(nb["content"])
+        source = nb.get("source")
+        if isinstance(source, dict) and isinstance(source.get("data"), str):
+            ns = dict(source)
+            ns["data"] = _trunc(ns["data"])
+            nb["source"] = ns
+        return nb
+
+    debug = dict(body)
+    if isinstance(debug.get("messages"), list):
+        new_msgs = []
         for msg in debug["messages"]:
-            if isinstance(msg.get("content"), list):
-                for block in msg["content"]:
-                    if isinstance(block, dict):
-                        for key in ("text", "thinking", "data", "partial_json"):
-                            val = block.get(key)
-                            if isinstance(val, str) and len(val) > 80:
-                                block[key] = val[:80] + "...[truncated]"
-                        if block.get("type") == "tool_result":
-                            tc = block.get("content")
-                            if isinstance(tc, str) and len(tc) > 80:
-                                block["content"] = tc[:80] + "...[truncated]"
-    if "system" in debug:
-        sys_val = debug["system"]
-        if isinstance(sys_val, list):
-            for block in sys_val:
-                if isinstance(block, dict) and isinstance(block.get("text"), str):
-                    t = block["text"]
-                    if len(t) > 80:
-                        block["text"] = t[:80] + "...[truncated]"
-        elif isinstance(sys_val, str) and len(sys_val) > 80:
-            debug["system"] = sys_val[:80] + "...[truncated]"
+            if isinstance(msg, dict) and isinstance(msg.get("content"), list):
+                new_msg = dict(msg)
+                new_msg["content"] = [_trunc_block(b) for b in msg["content"]]
+                new_msgs.append(new_msg)
+            else:
+                new_msgs.append(msg)
+        debug["messages"] = new_msgs
+    sys_val = debug.get("system")
+    if isinstance(sys_val, list):
+        debug["system"] = [_trunc_block(b) for b in sys_val]
+    elif isinstance(sys_val, str):
+        debug["system"] = _trunc(sys_val)
     return debug
 
 
@@ -92,17 +114,31 @@ def _convert_openai_system_to_anthropic(system_msg: Any) -> Any:
 
 
 def _parse_data_url(url: str) -> Optional[Tuple[str, str]]:
-    """解析 data URL，返回 (media_type, base64_data) 或 None。"""
+    """解析 data URL，返回 (media_type, base64_data) 或 None。
+
+    支持的格式：
+      data:image/png;base64,<data>  → ("image/png", "<data>")
+      data:image/jpeg,<data>        → ("image/jpeg", "<data>")
+      data:image/webp;base64,<data> → ("image/webp", "<data>")
+    """
     if not isinstance(url, str) or not url.startswith("data:"):
         return None
     try:
         header, data = url.split(",", 1)
-        media_type = "image/jpeg"
-        if ":" in header and ";" in header:
-            media_type = header.split(":")[1].split(";")[0]
-        return media_type, data
     except (ValueError, IndexError):
         return None
+
+    # 从 header 中提取纯 MIME 类型（去掉 "data:" 前缀，去掉 ;base64 等参数）
+    media_type = "image/jpeg"
+    if ":" in header:
+        # "data:image/png;base64" → "image/png;base64" → ["image/png", "base64"] → "image/png"
+        # "data:image/png"           → "image/png"           → ["image/png"]            → "image/png"
+        mime_part = header.split(":", 1)[1]
+        extracted = mime_part.split(";")[0].strip()
+        if extracted and "/" in extracted:
+            media_type = extracted
+
+    return media_type, data
 
 
 def _convert_openai_content_to_anthropic_blocks(content: Any, role: str) -> List[Dict[str, Any]]:
@@ -140,6 +176,14 @@ def _convert_openai_content_to_anthropic_blocks(content: Any, role: str) -> List
                 parsed = _parse_data_url(url)
                 if parsed:
                     media_type, data = parsed
+                    # 安全兜底：杜绝 image/png;base64 这样的非法 media_type
+                    # （正常路径 _parse_data_url 已保证正确，此处对异常做最终清洁）
+                    clean_media_type = media_type.split(";")[0].strip()
+                    if clean_media_type != media_type:
+                        logger.warning(
+                            f"[OAI_TO_ANTHROPIC] 修正异常的 media_type: "
+                            f"{media_type!r} → {clean_media_type!r}")
+                        media_type = clean_media_type
                     blocks.append({
                         "type": "image",
                         "source": {"type": "base64", "media_type": media_type, "data": data}
@@ -156,6 +200,13 @@ def _convert_openai_content_to_anthropic_blocks(content: Any, role: str) -> List
             parsed = _parse_data_url(url)
             if parsed:
                 media_type, data = parsed
+                # 安全兜底：同上
+                clean_media_type = media_type.split(";")[0].strip()
+                if clean_media_type != media_type:
+                    logger.warning(
+                        f"[OAI_TO_ANTHROPIC] 修正异常的 media_type (input_image): "
+                        f"{media_type!r} → {clean_media_type!r}")
+                    media_type = clean_media_type
                 blocks.append({
                     "type": "image",
                     "source": {"type": "base64", "media_type": media_type, "data": data}
@@ -333,11 +384,20 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
     if system_blocks:
         anthropic_req["system"] = system_blocks
 
-    # 常见参数透传
-    passthrough_fields = ["temperature", "top_p", "top_k", "metadata", "user"]
-    for key in passthrough_fields:
+    # 常见参数透传（🔧 白名单：OpenAI 的 user/metadata 不是 Anthropic 合法顶层字段，
+    # 原样透传会被 Anthropic 严格校验拒绝 400。user 映射到 metadata.user_id，
+    # metadata 只挑 user_id，其余键同样非法）
+    for key in ("temperature", "top_p", "top_k"):
         if key in openai_req:
             anthropic_req[key] = openai_req[key]
+
+    if "user" in openai_req and openai_req["user"] is not None:
+        # Anthropic 要求 metadata.user_id 为不含 PII 的字符串，长度上限 256
+        anthropic_req.setdefault("metadata", {})["user_id"] = str(openai_req["user"])[:256]
+
+    openai_meta = openai_req.get("metadata")
+    if isinstance(openai_meta, dict) and openai_meta.get("user_id") is not None:
+        anthropic_req.setdefault("metadata", {})["user_id"] = str(openai_meta["user_id"])[:256]
 
     # stop → stop_sequences
     stop = openai_req.get("stop")
@@ -379,16 +439,31 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
         et_mode = "disabled"
 
     if et_mode == "enabled":
-        budget = endpoint_config.get("thinking_budget", 20000)
+        budget = int(endpoint_config.get("thinking_budget", 20000) or 0)
         passthrough_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        # 🔧 校验修复：Anthropic 强制要求 max_tokens > thinking.budget_tokens，
+        # 而 convert_openai_to_anthropic_request 在客户端不传 max_tokens 时兜底
+        # 为 4096，enabled 模式下必然 400。这里把 max_tokens 与 budget 协调：
+        # 不超过端点硬上限时给正文预留空间，否则优先保证 max_tokens 合法。
+        hard_cap = endpoint_config.get("max_tokens")
+        reserve = 4096  # 给正文输出预留的最小 token 数
+        if hard_cap:
+            hard_cap = int(hard_cap)
+            if budget + reserve > hard_cap:
+                budget = max(1024, hard_cap - reserve)
+                passthrough_body["thinking"]["budget_tokens"] = budget
+        cur_max = int(passthrough_body.get("max_tokens") or 0)
+        if cur_max <= budget:
+            new_max = budget + reserve
+            passthrough_body["max_tokens"] = min(new_max, hard_cap) if hard_cap else new_max
         # 思考强度等级（Claude Opus 4.5+ 支持 output_config.effort），与 budget 二选一
         configured_effort = endpoint_config.get("reasoning_effort")
         if configured_effort:
             passthrough_body["output_config"] = {"effort": configured_effort}
-            logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用: budget_tokens={budget}, output_config.effort={configured_effort}")
+            logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用: budget_tokens={budget}, max_tokens={passthrough_body.get('max_tokens')}, output_config.effort={configured_effort}")
         else:
             passthrough_body.pop("output_config", None)
-            logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用: budget_tokens={budget}")
+            logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用: budget_tokens={budget}, max_tokens={passthrough_body.get('max_tokens')}")
     elif et_mode == "adaptive":
         thinking = passthrough_body.get("thinking")
         if isinstance(thinking, dict) and thinking.get("type") == "enabled":
@@ -410,10 +485,14 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
         logger.info(f"[OAI_TO_ANTHROPIC] thinking 显式禁用")
 
     # thinking display 注入
+    # 🔧 白名单修复：disabled 等不支持 display 的 type 不能注入该字段，
+    # 否则 enable_thinking=false 的模型每次请求都会被 Anthropic 400。
     thinking_display = endpoint_config.get("thinking_display", "summarized")
     if thinking_display:
         thinking_obj = passthrough_body.get("thinking")
-        if isinstance(thinking_obj, dict) and "display" not in thinking_obj:
+        if (isinstance(thinking_obj, dict)
+                and thinking_obj.get("type") in ("enabled", "adaptive")
+                and "display" not in thinking_obj):
             thinking_obj["display"] = thinking_display
             logger.info(f"[OAI_TO_ANTHROPIC] thinking.display={thinking_display}")
 
@@ -454,6 +533,117 @@ def apply_system_injection(passthrough_body: Dict[str, Any], endpoint_config: Di
     logger.info(
         f"[OAI_TO_ANTHROPIC] 系统提示词注入已启用 "
         f"(位置: {position}, 内容长度: {len(inject_content)})")
+
+    return passthrough_body
+
+
+# ============================================================
+# 自动提示词缓存（Anthropic Prompt Caching）
+# ============================================================
+
+# 允许携带 cache_control 的 content block 类型（thinking/redacted_thinking 不允许打点）
+_CACHEABLE_BLOCK_TYPES = ("text", "image", "tool_use", "tool_result", "document", "search_result")
+
+
+def _find_last_cacheable_block(blocks: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """返回 blocks 中最后一个可打 cache_control 断点的 block，找不到返回 None。"""
+    for block in reversed(blocks):
+        if isinstance(block, dict) and block.get("type") in _CACHEABLE_BLOCK_TYPES:
+            return block
+    return None
+
+
+def _body_has_cache_control(body: Dict[str, Any]) -> bool:
+    """检测请求体（tools/system/messages）中是否已存在客户端设置的 cache_control 断点。"""
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict) and tool.get("cache_control"):
+                return True
+
+    system = body.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and block.get("cache_control"):
+                return True
+
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("cache_control"):
+                        return True
+    return False
+
+
+def apply_auto_cache_control(
+    passthrough_body: Dict[str, Any],
+    endpoint_config: Dict[str, Any],
+    log_tag: str = "OAI_TO_ANTHROPIC"
+) -> Dict[str, Any]:
+    """自动注入 Anthropic prompt caching 断点（cache_control: {"type": "ephemeral"}）。
+
+    endpoint_config.auto_cache 为 true 时启用。注入策略（Anthropic 上限 4 个断点）：
+      1. tools 数组最后一个工具（缓存工具定义）
+      2. system 最后一个 block（缓存系统提示词，字符串形式先转 blocks）
+      3. 倒数第二个 user 消息的最后一个可缓存 block（命中上一轮写入的缓存）
+      4. 最后一个 user 消息的最后一个可缓存 block（写入本轮缓存供下一轮命中）
+
+    客户端已自带 cache_control 时跳过注入，尊重客户端的打点策略。
+    低于模型最小可缓存长度（如 1024 tokens）时上游会自动忽略断点，不会报错。
+    """
+    if not endpoint_config.get("auto_cache", False):
+        return passthrough_body
+
+    if _body_has_cache_control(passthrough_body):
+        logger.info(f"[{log_tag}] 自动缓存：客户端已自带 cache_control，跳过注入")
+        return passthrough_body
+
+    injected: List[str] = []
+
+    # 1. tools 最后一个工具
+    tools = passthrough_body.get("tools")
+    if isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+        tools[-1]["cache_control"] = {"type": "ephemeral"}
+        injected.append("tools")
+
+    # 2. system 最后一个 block（字符串形式先转 blocks 数组）
+    system = passthrough_body.get("system")
+    if isinstance(system, str) and system:
+        system = [{"type": "text", "text": system}]
+        passthrough_body["system"] = system
+    if isinstance(system, list):
+        target = _find_last_cacheable_block(system)
+        if target is not None:
+            target["cache_control"] = {"type": "ephemeral"}
+            injected.append("system")
+
+    # 3/4. 最后两个 user 消息（滚动缓存：上一断点命中缓存，最新断点写入缓存）
+    messages = passthrough_body.get("messages")
+    if isinstance(messages, list):
+        user_indexes = [i for i, m in enumerate(messages)
+                        if isinstance(m, dict) and m.get("role") == "user"]
+        for msg_idx in user_indexes[-2:]:
+            msg = messages[msg_idx]
+            content = msg.get("content")
+            if isinstance(content, str):
+                if not content:
+                    continue
+                content = [{"type": "text", "text": content}]
+                msg["content"] = content
+            if isinstance(content, list):
+                target = _find_last_cacheable_block(content)
+                if target is not None:
+                    target["cache_control"] = {"type": "ephemeral"}
+                    injected.append(f"messages[{msg_idx}]")
+
+    if injected:
+        logger.info(
+            f"[{log_tag}] 自动缓存：已注入 {len(injected)} 个 cache_control 断点 → {', '.join(injected)}")
+    else:
+        logger.info(f"[{log_tag}] 自动缓存：请求体中没有可打断点的位置，未注入")
 
     return passthrough_body
 
@@ -573,6 +763,10 @@ def convert_anthropic_response_to_openai(
 # Anthropic SSE → OpenAI SSE 流式转换
 # ============================================================
 
+# SSE 事件分隔符：兼容 LF 空行与 CRLF 空行
+_SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
+
+
 def _parse_anthropic_sse_events(chunk_str: str, pending: str) -> Tuple[List[Dict[str, Any]], str]:
     """从 SSE 数据块中解析出 Anthropic 事件。
 
@@ -582,8 +776,11 @@ def _parse_anthropic_sse_events(chunk_str: str, pending: str) -> Tuple[List[Dict
     events: List[Dict[str, Any]] = []
     buffer = pending + chunk_str
 
-    while "\n\n" in buffer:
-        event_block, buffer = buffer.split("\n\n", 1)
+    while True:
+        m = _SSE_EVENT_SPLIT.search(buffer)
+        if not m:
+            break
+        event_block, buffer = buffer[:m.start()], buffer[m.end():]
         event_type = None
         data_str = None
         for line in event_block.splitlines():
@@ -617,7 +814,8 @@ def build_openai_stream_from_anthropic(
     estimate_message_tokens_func,
     openai_req: dict,
     full_messages: list,
-    estimate_tokens_func=None
+    estimate_tokens_func=None,
+    thinking_separator: Optional[str] = None
 ):
     """将 Anthropic SSE 流转换为 OpenAI SSE 流。
 
@@ -639,6 +837,7 @@ def build_openai_stream_from_anthropic(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
+    upstream_usage: Dict[str, Any] = {}  # 上游原生 usage（message_start/message_delta 增量合并）
     stop_reason = "end_turn"
     token_stats_local = (endpoint_config or {}).get("token_stats_mode") == "local"
 
@@ -648,10 +847,17 @@ def build_openai_stream_from_anthropic(
         pending = ""
         success = True
         error_msg = None
+        # 增量 UTF-8 解码器：防止中文多字节字符被 chunk 边界切断后变成 U+FFFD
+        utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         # tool_use 状态
         next_oai_idx = 0
         active_tool: Optional[Dict[str, Any]] = None  # {anthropic_idx, oai_idx, id, name}
+
+        # thinking_separator 流式切分状态
+        accumulated_for_split = ""
+        split_done = False
+        output_position = 0
 
         def _make_delta_chunk(delta: Dict[str, Any], finish_reason=None) -> bytes:
             choice = {"index": 0, "delta": delta, "finish_reason": finish_reason}
@@ -684,7 +890,7 @@ def build_openai_stream_from_anthropic(
         try:
             async for chunk_bytes in api_iterator:
                 if isinstance(chunk_bytes, bytes):
-                    chunk_str = chunk_bytes.decode("utf-8", errors="replace")
+                    chunk_str = utf8_decoder.decode(chunk_bytes, final=False)
                 else:
                     chunk_str = str(chunk_bytes)
 
@@ -695,7 +901,10 @@ def build_openai_stream_from_anthropic(
 
                     if etype == "message_start":
                         msg = event.get("message", {})
-                        inp, outp, cached = extract_anthropic_usage_tokens(msg.get("usage"))
+                        raw_usage = msg.get("usage")
+                        if isinstance(raw_usage, dict) and raw_usage:
+                            upstream_usage.update(raw_usage)
+                        inp, outp, cached = extract_anthropic_usage_tokens(raw_usage)
                         if inp:
                             input_tokens = inp
                         if cached:
@@ -715,7 +924,10 @@ def build_openai_stream_from_anthropic(
                                 "anthropic_idx": idx,
                                 "oai_idx": oai_idx,
                                 "id": tool_id,
-                                "name": tool_name
+                                "name": tool_name,
+                                "arguments_parts": [],
+                                # 把 arguments 增量中的 \uXXXX 转义提前解码为明文
+                                "args_unescaper": StreamingUnicodeUnescaper()
                             }
                             # 发送 tool_call 起始 delta
                             tc_delta = {
@@ -747,29 +959,68 @@ def build_openai_stream_from_anthropic(
                         elif dtype == "text_delta":
                             t = delta.get("text", "")
                             if t:
-                                content_parts.append(t)
-                                yield _make_delta_chunk({"content": t})
+                                if thinking_separator and not split_done:
+                                    accumulated_for_split += t
+                                    if thinking_separator in accumulated_for_split:
+                                        split_done = True
+                                        parts = accumulated_for_split.split(thinking_separator, 1)
+                                        full_reasoning = parts[0]
+                                        content_part = parts[1] if len(parts) > 1 else ""
+                                        remaining_reasoning = full_reasoning[output_position:]
+                                        if remaining_reasoning:
+                                            reasoning_parts.append(remaining_reasoning)
+                                            yield _make_delta_chunk({"reasoning_content": remaining_reasoning})
+                                        if content_part:
+                                            content_parts.append(content_part)
+                                            yield _make_delta_chunk({"content": content_part})
+                                        logger.info(f"[THINKING_SPLIT_STREAM] 检测到分隔符'{thinking_separator}'")
+                                        logger.info(f"  - 思考总长: {len(full_reasoning)} 字符")
+                                    else:
+                                        sep_len = len(thinking_separator)
+                                        safe_position = max(output_position, len(accumulated_for_split) - sep_len)
+                                        safe_content = accumulated_for_split[output_position:safe_position]
+                                        if safe_content:
+                                            reasoning_parts.append(safe_content)
+                                            yield _make_delta_chunk({"reasoning_content": safe_content})
+                                            output_position = safe_position
+                                else:
+                                    content_parts.append(t)
+                                    yield _make_delta_chunk({"content": t})
 
                         elif dtype == "input_json_delta":
                             pj = delta.get("partial_json", "")
                             if pj and active_tool:
-                                yield _make_delta_chunk({
-                                    "tool_calls": [{
-                                        "index": active_tool["oai_idx"],
-                                        "function": {"arguments": pj}
-                                    }]
-                                })
+                                # 提前把 \uXXXX 转义解码为明文再发给下游（跨 chunk 安全）
+                                decoded = active_tool["args_unescaper"].feed(pj)
+                                if decoded:
+                                    active_tool["arguments_parts"].append(decoded)
+                                    yield _make_delta_chunk({
+                                        "tool_calls": [{
+                                            "index": active_tool["oai_idx"],
+                                            "function": {"arguments": decoded}
+                                        }]
+                                    })
 
                     elif etype == "content_block_stop":
                         idx = event.get("index", 0)
                         if active_tool and active_tool.get("anthropic_idx") == idx:
-                            # 记录完整的 tool_call
+                            # 冲刷解码器残留（正常完整 JSON 无残留；截断流原样补发）
+                            tail = active_tool["args_unescaper"].flush()
+                            if tail:
+                                active_tool["arguments_parts"].append(tail)
+                                yield _make_delta_chunk({
+                                    "tool_calls": [{
+                                        "index": active_tool["oai_idx"],
+                                        "function": {"arguments": tail}
+                                    }]
+                                })
+                            # 记录完整的 tool_call（arguments 从流式增量中累积，供监控日志使用）
                             tool_calls_acc.append({
                                 "id": active_tool["id"],
                                 "type": "function",
                                 "function": {
                                     "name": active_tool["name"],
-                                    "arguments": ""
+                                    "arguments": "".join(active_tool.get("arguments_parts", []))
                                 }
                             })
                             active_tool = None
@@ -781,6 +1032,8 @@ def build_openai_stream_from_anthropic(
                         if sr:
                             stop_reason = sr
                         if isinstance(usage, dict):
+                            if usage:
+                                upstream_usage.update(usage)
                             inp, outp, cached = extract_anthropic_usage_tokens(usage)
                             if inp:
                                 input_tokens = inp
@@ -792,20 +1045,27 @@ def build_openai_stream_from_anthropic(
                     elif etype == "message_stop":
                         pass
 
-                    elif etype == "error":
+                    elif etype == "error" or is_error_json(event):
+                        # 两种形态：
+                        # - Anthropic 原生错误事件（event: error + {"type":"error","error":{...}}）
+                        # - 无 type 字段的错误对象（如 OpenRouter /messages 或
+                        #   call_api_passthrough 包装的 {"error": {...}}），
+                        #   此前会因不匹配任何事件分支被静默丢弃，导致监控记 success、
+                        #   客户端收到一条空消息而看不到任何报错
                         success = False
-                        error_info = event.get("error", event)
-                        error_msg = json.dumps(error_info, ensure_ascii=False)
+                        event_payload = {k: v for k, v in event.items() if k != "_event_type"}
+                        # normalize 会通过 _enrich_error_message 合并 metadata.raw 中的详细原因
+                        normalized = normalize_to_openai_error(event_payload)
+                        error_obj = normalized.get("error", normalized)
+                        error_msg = json.dumps(error_obj, ensure_ascii=False)
                         logger.warning(f"[OAI_FROM_ANTHROPIC] 流式上游返回错误: {error_msg[:300]}")
-                        # 转换为 OpenAI 错误格式
-                        normalized = normalize_to_openai_error(error_info)
                         error_chunk = {
                             "id": completion_id,
                             "object": "chat.completion.chunk",
                             "created": created,
                             "model": model_name,
                             "choices": [],
-                            "error": normalized
+                            "error": error_obj
                         }
                         yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
                         yield b"data: [DONE]\n\n"
@@ -847,6 +1107,15 @@ def build_openai_stream_from_anthropic(
             resp_content = "".join(content_parts) if success else (error_msg or "")
             resp_reasoning = "".join(reasoning_parts) if success else None
 
+            # 兜底：流式过程中未找到分隔符时，对最终累积内容应用分隔符
+            if thinking_separator and resp_content and not resp_reasoning and direct_api_service:
+                reasoning_part, main_part = direct_api_service.split_thinking_content(
+                    resp_content, thinking_separator)
+                if reasoning_part:
+                    resp_reasoning = reasoning_part
+                    resp_content = main_part
+                    logger.info(f"[THINKING_SPLIT] 流式兜底：已应用思考分隔，reasoning={len(reasoning_part)}字符, content={len(main_part)}字符")
+
             # 如果上游没有返回 input_tokens，用 tokenizer 估算
             if input_tokens == 0:
                 try:
@@ -858,10 +1127,25 @@ def build_openai_stream_from_anthropic(
                 except Exception as te:
                     logger.warning(f"[OAI_FROM_ANTHROPIC] input token估算失败: {te}")
 
-            # 如果 output_tokens 偏小，用文本长度估算
+            # 🔧 修复：旧版无条件套用 "output_tokens < len(text)//6 就改成 len//4"
+            # 的字符数启发式，有两个问题：
+            #   1. token_stats_mode=local 上面刚用本地 tokenizer 精确算完，
+            #      这里立刻被 len//4 粗估覆盖，local 模式形同虚设；
+            #   2. len//4 对中文严重低估（中文约 1.5 字符/token），对代码等
+            #      高压缩内容又会误触发，等于用更差的数据替换上游精确值。
+            # 现与 PassthroughStreamSession.finalize 的策略对齐：只有上游确实
+            # 没给出有效 output_tokens 时才回退到本地估算。
             total_output = (resp_reasoning or "") + (resp_content if success else "")
-            if total_output and (output_tokens <= 1 or output_tokens < len(total_output) // 6):
-                output_tokens = len(total_output) // 4
+            if total_output and output_tokens <= 1:
+                if estimate_tokens_func:
+                    try:
+                        output_tokens = await estimate_text_tokens_non_blocking(
+                            estimate_tokens_func, total_output, model_name)
+                    except Exception as te:
+                        logger.warning(f"[OAI_FROM_ANTHROPIC] output token估算失败: {te}")
+                        output_tokens = len(total_output) // 4
+                else:
+                    output_tokens = len(total_output) // 4
 
             cost_info = {}
             if pricing_config and direct_api_service:
@@ -889,7 +1173,8 @@ def build_openai_stream_from_anthropic(
                 output_tokens=output_tokens or 0,
                 cached_tokens=cached_tokens or 0,
                 cost_info=cost_info,
-                full_messages=full_messages
+                full_messages=full_messages,
+                upstream_usage=upstream_usage or None
             )
             try:
                 spawn(
@@ -923,25 +1208,28 @@ async def handle_anthropic_native_from_openai(
     openai_req: dict,
     model_name: str,
     endpoint_config: dict,
+    api_key: str,
     CONFIG: dict,
     monitoring_service,
     direct_api_service,
     estimate_message_tokens_func,
     estimate_tokens_func,
-    full_messages: Optional[list] = None
+    full_messages: Optional[list] = None,
+    thinking_separator: Optional[str] = None
 ):
     """处理 OpenAI 格式请求 → Anthropic 原生透传 → OpenAI 格式响应。
 
     在 /v1/chat/completions 接口中调用 anthropic_native 类型的模型时使用。
+
+    🔧 api_key 由调用方（direct_api_handler）统一轮询后传入，本函数不再二次
+    轮询——旧版 handler 与这里各调一次 get_round_robin_api_key，每次请求把
+    计数器推进两次，偶数个 key 时有一半永远不会被选中。
     """
     api_base_url = endpoint_config.get("api_base_url")
     if not api_base_url:
         raise HTTPException(
             status_code=500,
             detail=f"模型 '{model_name}' 的 anthropic_native 配置缺少 api_base_url。")
-
-    raw_api_key = endpoint_config.get("api_keys") or endpoint_config.get("api_key")
-    api_key = await get_round_robin_api_key(model_name, raw_api_key)
 
     target_model_id = endpoint_config.get("model_id", model_name)
     display_name = endpoint_config.get("display_name", model_name)
@@ -961,13 +1249,19 @@ async def handle_anthropic_native_from_openai(
             openai_req["temperature"] = max_temperature
             logger.info(f"[TEMP_LIMIT] 模型 '{model_name}' 温度限制: {original_temp} -> {max_temperature}")
 
-    # max_tokens 限制
+    # max_tokens 限制（新版 OpenAI SDK 可能只发 max_completion_tokens，两者都检查）
     max_tokens_limit = endpoint_config.get("max_tokens")
-    if max_tokens_limit is not None and "max_tokens" in openai_req:
-        original_max = openai_req["max_tokens"]
-        if original_max > max_tokens_limit:
-            openai_req["max_tokens"] = max_tokens_limit
-            logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' max_tokens: {original_max} -> {max_tokens_limit}")
+    if max_tokens_limit is not None:
+        if "max_tokens" in openai_req:
+            original_max = openai_req["max_tokens"]
+            if original_max > max_tokens_limit:
+                openai_req["max_tokens"] = max_tokens_limit
+                logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' max_tokens: {original_max} -> {max_tokens_limit}")
+        if "max_completion_tokens" in openai_req:
+            original_max = openai_req["max_completion_tokens"]
+            if original_max > max_tokens_limit:
+                openai_req["max_completion_tokens"] = max_tokens_limit
+                logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' max_completion_tokens: {original_max} -> {max_tokens_limit}")
 
     # ── OpenAI 请求 → Anthropic 请求 ──
     anthropic_body = convert_openai_to_anthropic_request(openai_req)
@@ -979,11 +1273,35 @@ async def handle_anthropic_native_from_openai(
     # ── 应用系统提示词注入 ──
     anthropic_body = apply_system_injection(anthropic_body, endpoint_config)
 
-    # ── 自定义参数合并 ──
+    # ── 自定义参数合并（deepcopy：后续 auto_cache 会在请求体上原地打
+    # cache_control 断点，直接引用配置对象会把断点永久写进内存配置，
+    # 造成跨请求污染）──
     custom_params = endpoint_config.get("custom_params", {})
     if isinstance(custom_params, dict) and custom_params:
-        anthropic_body.update(custom_params)
+        anthropic_body.update(copy.deepcopy(custom_params))
         logger.info(f"[OAI_TO_ANTHROPIC] 已合并自定义参数: {list(custom_params.keys())}")
+
+    # ── 附加主体参数合并（在自定义参数之后，同名键优先）──
+    extra_body_params = endpoint_config.get("extra_body_params", {})
+    if isinstance(extra_body_params, dict) and extra_body_params:
+        anthropic_body.update(copy.deepcopy(extra_body_params))
+        logger.info(f"[OAI_TO_ANTHROPIC] 已合并附加主体参数: {list(extra_body_params.keys())}")
+
+    # ── 自动提示词缓存（在 custom_params 之后注入，避免断点被顶层字段覆盖丢失）──
+    anthropic_body = apply_auto_cache_control(anthropic_body, endpoint_config)
+
+    # ── 诊断：打印最终请求体中图片的 media_type ──
+    for msg_idx, msg in enumerate(anthropic_body.get("messages", [])):
+        content = msg.get("content")
+        if isinstance(content, list):
+            for blk_idx, block in enumerate(content):
+                if isinstance(block, dict) and block.get("type") == "image":
+                    src = block.get("source", {})
+                    logger.info(
+                        f"[OAI_TO_ANTHROPIC] 消息[{msg_idx}] 图片块[{blk_idx}]: "
+                        f"source.type={src.get('type')!r}, "
+                        f"media_type={src.get('media_type')!r}, "
+                        f"data_len={len(src.get('data', ''))}")
 
     is_stream = bool(openai_req.get("stream", False))
 
@@ -995,9 +1313,19 @@ async def handle_anthropic_native_from_openai(
         "endpoint_path": endpoint_path,
         "mode": "oai_to_anthropic_passthrough"
     }
-    custom_params_for_monitor = endpoint_config.get("custom_params", {})
-    if isinstance(custom_params_for_monitor, dict):
-        monitor_extra.update(custom_params_for_monitor)
+    # 自定义参数/附加主体参数以独立字段记录到监控日志，避免平铺覆盖监控字段
+    custom_params_for_monitor = endpoint_config.get("custom_params")
+    if isinstance(custom_params_for_monitor, dict) and custom_params_for_monitor:
+        monitor_extra["custom_params"] = custom_params_for_monitor
+    extra_body_params_for_monitor = endpoint_config.get("extra_body_params")
+    if isinstance(extra_body_params_for_monitor, dict) and extra_body_params_for_monitor:
+        monitor_extra["extra_body_params"] = extra_body_params_for_monitor
+    # 记录思考/缓存相关配置到监控日志
+    for key in ("enable_thinking", "reasoning_effort", "thinking_budget", "thinking_effort",
+                "thinking_display", "force_stream", "auto_cache"):
+        val = endpoint_config.get(key)
+        if val is not None and val != "":
+            monitor_extra[key] = val
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -1038,9 +1366,9 @@ async def handle_anthropic_native_from_openai(
             endpoint_path=endpoint_path
         )
 
-        # 预读第一个块，检测错误和超时
+        # 预读第一个块，检测错误和超时（下限 1 秒，避免配置为 0/负数时 busy-loop）
         api_task = asyncio.create_task(anext(api_iter))
-        heartbeat_interval = min(endpoint_config.get("client_disconnect_probe_interval", 30), 30)
+        heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
         wait_start = time.time()
 
         while not api_task.done():
@@ -1049,6 +1377,11 @@ async def handle_anthropic_native_from_openai(
                 try:
                     await api_task
                 except asyncio.CancelledError:
+                    pass
+                # 🔧 资源回收：504 超时路径此前同样丢弃 api_iter，上游连接挂到超时
+                try:
+                    await api_iter.aclose()
+                except Exception:
                     pass
                 error_msg = f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                 logger.error(f"[OAI_TO_ANTHROPIC] {error_msg}")
@@ -1061,13 +1394,24 @@ async def handle_anthropic_native_from_openai(
                 raise HTTPException(status_code=504, detail=error_msg)
             try:
                 await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
+                break  # 任务正常完成，交给循环外 await api_task 取结果
             except asyncio.TimeoutError:
                 continue
+            except BaseException:
+                # 🔧 死代码修复：StopAsyncIteration（上游空响应）会从 wait_for 直接
+                # 抛出并绕过 while 逃逸——原本会逃出整个函数使请求永久挂起。
+                # 跳出循环，统一交给下面的 await api_task 处理（此处会重新抛出）。
+                break
 
         try:
             first_chunk = await api_task
         except StopAsyncIteration:
             error_msg = "上游API返回空响应"
+            # 🔧 资源回收：空响应路径此前直接把 api_iter 丢弃，上游连接挂到超时
+            try:
+                await api_iter.aclose()
+            except Exception:
+                pass
             monitoring_service.request_end(
                 request_id=request_id, success=False, error=error_msg,
                 full_messages=full_messages)
@@ -1075,23 +1419,20 @@ async def handle_anthropic_native_from_openai(
                 "type": "request_end", "request_id": request_id, "success": False})
             raise HTTPException(status_code=502, detail=error_msg)
 
-        # 检测首个块是否为非SSE的JSON错误
-        try:
-            decoded = first_chunk.decode("utf-8") if isinstance(first_chunk, bytes) else first_chunk
-            maybe_error = json.loads(decoded)
-            if is_error_json(maybe_error):
-                normalized = normalize_to_openai_error(maybe_error)
-                status_code = map_upstream_error_to_status_code(normalized, default_status_code=500)
-                error_msg = str(normalized.get("error", {}))
-                logger.error(f"[OAI_TO_ANTHROPIC] 流式上游返回错误: {error_msg[:300]}")
-                monitoring_service.request_end(
-                    request_id=request_id, success=False, error=error_msg,
-                    full_messages=full_messages)
-                await monitoring_service.broadcast_to_monitors({
-                    "type": "request_end", "request_id": request_id, "success": False})
-                return JSONResponse(status_code=status_code, content=normalized)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass  # 正常SSE流
+        # 检测首个块是否为上游错误：裸 JSON 错误体，或
+        # call_api_passthrough 对非 2xx 响应输出的 "data: {错误}" SSE 包装块
+        # （此前只解析裸 JSON，SSE 包装的错误会被当作正常流漏检）
+        is_err, normalized = detect_first_chunk_error(first_chunk)
+        if is_err:
+            status_code = map_upstream_error_to_status_code(normalized, default_status_code=500)
+            error_msg = str(normalized.get("error", {}))
+            logger.error(f"[OAI_TO_ANTHROPIC] 流式上游返回错误: {error_msg[:300]}")
+            monitoring_service.request_end(
+                request_id=request_id, success=False, error=error_msg,
+                full_messages=full_messages)
+            await monitoring_service.broadcast_to_monitors({
+                "type": "request_end", "request_id": request_id, "success": False})
+            return JSONResponse(status_code=status_code, content=normalized)
 
         # 构建一个能先发送 first_chunk 再继续的迭代器
         async def _stream_with_first():
@@ -1110,11 +1451,13 @@ async def handle_anthropic_native_from_openai(
             estimate_message_tokens_func=estimate_message_tokens_func,
             estimate_tokens_func=estimate_tokens_func,
             openai_req=openai_req,
-            full_messages=full_messages
+            full_messages=full_messages,
+            thinking_separator=thinking_separator
         )
 
     else:
         # ── 非流式：Anthropic JSON → OpenAI JSON ──
+        response_buf = bytearray()
         response_bytes = b""
         success = True
         error_msg = None
@@ -1124,6 +1467,7 @@ async def handle_anthropic_native_from_openai(
         resp_input_tokens = None
         resp_output_tokens = None
         resp_cached_tokens = 0
+        resp_upstream_usage = None
 
         try:
             async for chunk in direct_api_service.call_api_passthrough(
@@ -1132,19 +1476,10 @@ async def handle_anthropic_native_from_openai(
                 request_body=anthropic_body,
                 endpoint_path=endpoint_path
             ):
-                response_bytes += chunk
+                response_buf.extend(chunk)
 
-            response_text = response_bytes.decode("utf-8")
-            try:
-                response_json = json.loads(response_text)
-            except json.JSONDecodeError as e:
-                if hasattr(e, "pos") and e.pos > 1 and e.pos < len(response_text):
-                    try:
-                        response_json = json.loads(response_text[:e.pos])
-                    except json.JSONDecodeError:
-                        raise
-                else:
-                    raise
+            response_text = bytes(response_buf).decode("utf-8")
+            response_json = json.loads(response_text)
 
             if is_error_json(response_json):
                 success = False
@@ -1162,6 +1497,8 @@ async def handle_anthropic_native_from_openai(
             # 提取内容用于监控
             resp_content, resp_reasoning, resp_tool_calls, resp_input_tokens, resp_output_tokens, resp_cached_tokens = \
                 extract_anthropic_response_content(response_json)
+            raw_usage = response_json.get("usage")
+            resp_upstream_usage = raw_usage if isinstance(raw_usage, dict) else None
 
             # local 统计模式：忽略上游 usage，用本地 tokenizer 重算
             if endpoint_config.get("token_stats_mode") == "local":
@@ -1180,6 +1517,18 @@ async def handle_anthropic_native_from_openai(
             # 转换为 OpenAI 格式
             openai_response = convert_anthropic_response_to_openai(
                 response_json, display_name, request_id)
+
+            # 应用思考内容分隔符（仅在无原生 reasoning 且用户配置了分隔符时生效）
+            if thinking_separator and resp_content and not resp_reasoning:
+                reasoning_part, main_part = direct_api_service.split_thinking_content(
+                    resp_content, thinking_separator)
+                if reasoning_part:
+                    resp_reasoning = reasoning_part
+                    resp_content = main_part
+                    msg = openai_response["choices"][0]["message"]
+                    msg["reasoning_content"] = reasoning_part
+                    msg["content"] = main_part
+                    logger.info(f"[THINKING_SPLIT] 非流式响应已应用思考分隔，reasoning={len(reasoning_part)}字符, content={len(main_part)}字符")
 
             response_bytes = json.dumps(openai_response, ensure_ascii=False).encode("utf-8")
 
@@ -1209,14 +1558,15 @@ async def handle_anthropic_native_from_openai(
 
                 monitoring_service.request_end(
                     request_id=request_id, success=True,
-                    input_tokens=resp_input_tokens,
-                    output_tokens=resp_output_tokens,
+                    input_tokens=resp_input_tokens or 0,
+                    output_tokens=resp_output_tokens or 0,
                     cached_tokens=resp_cached_tokens or 0,
                     response_content=resp_content,
                     reasoning_content=resp_reasoning,
                     response_tool_calls=resp_tool_calls,
                     cost_info=cost_info,
-                    full_messages=full_messages)
+                    full_messages=full_messages,
+                    upstream_usage=resp_upstream_usage)
                 try:
                     await monitoring_service.broadcast_to_monitors({
                         "type": "request_end", "request_id": request_id, "success": True})

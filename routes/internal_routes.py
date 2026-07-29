@@ -3,17 +3,27 @@
 处理ID捕获、请求详情等内部端点。
 其中 ID 捕获主要服务于已弃用但保留兼容的 LMArena 模式。
 """
+import asyncio
 import json
 import logging
 import time
 from threading import Lock
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
 from datetime import datetime
 from pathlib import Path
 
+from core.app_state import get_app_state
+from core.config_loader import load_model_endpoint_map
+from utils.jsonc_edit import atomic_write_json
+
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["internal"])
+
+_app_state = get_app_state()
+
+# model_endpoint_map.json 的路径（save_captured_model 的写入目标）
+MODEL_ENDPOINT_MAP_PATH = 'model_endpoint_map.json'
 
 
 async def start_id_capture(
@@ -41,9 +51,9 @@ async def start_id_capture(
             battle_target = "A"
         
         # 清空之前的捕获数据，准备新的捕获
+        # （message_id 早已不再使用，AdminState 里也没有这个字段，不再写入）
         with ADMIN_CAPTURED_IDS_LOCK:
             ADMIN_CAPTURED_IDS['session_id'] = None
-            ADMIN_CAPTURED_IDS['message_id'] = None
             ADMIN_CAPTURED_IDS['timestamp'] = None
             ADMIN_CAPTURED_IDS['mode'] = mode
             ADMIN_CAPTURED_IDS['battle_target'] = battle_target
@@ -80,10 +90,18 @@ async def receive_captured_ids(
     try:
         data = await request.json()
         session_id = data.get('sessionId')
-        
+
         if not session_id:
             raise HTTPException(status_code=400, detail="Missing sessionId")
-        
+
+        # 🔧 UUID 格式校验：session_id 必须是合法的 UUID 格式，
+        # 防止恶意输入将非 UUID 字符串存入模型配置。
+        import uuid as _uuid
+        try:
+            _uuid.UUID(str(session_id))
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="sessionId 必须是合法的 UUID 格式")
+
         # 存储捕获的ID
         with ADMIN_CAPTURED_IDS_LOCK:
             ADMIN_CAPTURED_IDS['session_id'] = session_id
@@ -96,7 +114,11 @@ async def receive_captured_ids(
             "status": "success",
             "message": "Session ID captured successfully"
         })
-    
+
+    except HTTPException:
+        # 🔧 修复：HTTPException 也是 Exception 的子类，旧版被下面的兜底分支
+        # 捕获后重新包装成 500，客户端永远看不到"缺少 sessionId"这类 400
+        raise
     except Exception as e:
         logger.error(f"接收捕获ID时出错: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -144,10 +166,13 @@ async def save_captured_model(
         if not session_id:
             raise HTTPException(status_code=400, detail="No captured Session ID available")
         
-        # 读取现有配置
-        with open(MODEL_ENDPOINT_MAP_PATH, 'r', encoding='utf-8') as f:
-            endpoint_map = json.load(f)
-        
+        # 读取现有配置（同步 IO 走线程池，避免阻塞事件循环）
+        def _load_map():
+            with open(MODEL_ENDPOINT_MAP_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+
+        endpoint_map = await asyncio.to_thread(_load_map)
+
         # 构建配置条目
         entry = {
             "session_id": session_id,
@@ -160,15 +185,13 @@ async def save_captured_model(
         if mode == "battle" and battle_target:
             entry["battle_target"] = battle_target
         
-        # 保存配置
+        # 保存配置（原子写：避免半截文件毁掉整套模型配置）
         endpoint_map[model_name] = entry
-        
-        with open(MODEL_ENDPOINT_MAP_PATH, 'w', encoding='utf-8') as f:
-            json.dump(endpoint_map, f, indent=2, ensure_ascii=False)
-        
+        await asyncio.to_thread(atomic_write_json, MODEL_ENDPOINT_MAP_PATH, endpoint_map)
+
         # 重新加载配置
-        load_model_endpoint_map_func(force_reload=True)
-        
+        await asyncio.to_thread(load_model_endpoint_map_func, True)
+
         logger.info(f"✅ 模型 '{model_name}' 配置已保存")
         logger.info(f"  - session_id: {session_id}")
         logger.info(f"  - mode: {mode}")
@@ -183,44 +206,13 @@ async def save_captured_model(
             "model_name": model_name,
             "config": entry
         })
-    
+
+    except HTTPException:
+        # 同 receive_captured_ids：不要把自己抛的 400 吞成 500
+        raise
     except Exception as e:
         logger.error(f"保存模型配置时出错: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-async def get_request_details(
-    request_id: str,
-    monitoring_service
-):
-    """获取特定请求的详细信息"""
-    details = monitoring_service.get_request_details(request_id)
-    if details:
-        return details
-    else:
-        raise HTTPException(status_code=404, detail="请求详情未找到")
-
-
-async def download_logs(
-    log_type: str,
-    MonitorConfig
-):
-    """下载日志文件"""
-    if log_type == "requests":
-        log_path = MonitorConfig.LOG_DIR / MonitorConfig.REQUEST_LOG_FILE
-    elif log_type == "errors":
-        log_path = MonitorConfig.LOG_DIR / MonitorConfig.ERROR_LOG_FILE
-    else:
-        raise HTTPException(status_code=400, detail="无效的日志类型")
-    
-    if not log_path.exists():
-        raise HTTPException(status_code=404, detail="日志文件不存在")
-    
-    return FileResponse(
-        path=str(log_path),
-        filename=f"{log_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
-        media_type="application/json"
-    )
 
 
 async def get_request_transfer_stats(
@@ -248,3 +240,51 @@ async def get_request_transfer_stats(
             })
     
     return transfer_stats
+
+
+# ============================================================================
+# 端点注册（依赖从 AppState / config_loader 自取）
+# ============================================================================
+
+@router.post("/internal/start_id_capture")
+async def start_id_capture_endpoint(request: Request):
+    admin_state = _app_state.admin
+    return await start_id_capture(
+        request, _app_state.connection.browser_ws_ref['ws'],
+        admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK
+    )
+
+
+@router.post("/internal/receive_captured_ids")
+async def receive_captured_ids_endpoint(request: Request):
+    admin_state = _app_state.admin
+    return await receive_captured_ids(
+        request, admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK
+    )
+
+
+@router.post("/update")
+async def update_endpoint(request: Request):
+    """历史别名端点：行为与 /internal/receive_captured_ids 完全一致。
+
+    ⚠️ 安全：此路径缺少 /internal 前缀，无法被 WebAccessKeyMiddleware 保护。
+    已废弃，仅保留占位返回 410 Gone 提示旧版脚本升级。
+    """
+    raise HTTPException(status_code=410, detail="此端点已废弃，请使用 /internal/receive_captured_ids")
+
+
+@router.get("/api/admin/capture_status")
+async def get_capture_status_endpoint():
+    admin_state = _app_state.admin
+    return await get_capture_status(
+        admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK
+    )
+
+
+@router.post("/api/admin/save_captured_model")
+async def save_captured_model_endpoint(request: Request):
+    admin_state = _app_state.admin
+    return await save_captured_model(
+        request, admin_state.ADMIN_CAPTURED_IDS, admin_state.ADMIN_CAPTURED_IDS_LOCK,
+        MODEL_ENDPOINT_MAP_PATH, load_model_endpoint_map
+    )

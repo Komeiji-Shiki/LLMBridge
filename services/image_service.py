@@ -5,16 +5,16 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 import uuid
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import MutableMapping, Optional, Tuple
 
 import aiohttp
-import requests
 from PIL import Image
 
 from modules.file_uploader import upload_to_file_bed
@@ -45,7 +45,17 @@ def calculate_image_hash(base64_data: str) -> str:
 
 
 async def save_image_data(image_data, url, request_id, CONFIG):
-    """保存图片数据到文件（异步）"""
+    """保存图片数据到文件（异步接口）。
+
+    🔧 性能修复：PIL 的解码/重编码（尤其 optimize=True）是 CPU 密集操作，
+    旧版直接跑在事件循环里（只有最轻的 write_bytes 进了线程池，顺序弄反了），
+    大图会卡住所有并发流式请求。现在整体丢进线程池执行。
+    """
+    await asyncio.to_thread(_save_image_data_sync, image_data, url, request_id, CONFIG)
+
+
+def _save_image_data_sync(image_data, url, request_id, CONFIG):
+    """保存图片数据到文件（同步实现，在线程池中运行）"""
     try:
         original_size_kb = len(image_data) / 1024
         
@@ -153,8 +163,8 @@ async def save_image_data(image_data, url, request_id, CONFIG):
         filename = f"{timestamp}_{request_id[:8]}.{target_ext}"
         filepath = date_path / filename  # 使用日期文件夹路径
         
-        # 异步保存文件
-        await asyncio.get_event_loop().run_in_executor(None, filepath.write_bytes, image_data)
+        # 保存文件（已在线程池线程中，直接同步写盘）
+        filepath.write_bytes(image_data)
         
         # 计算文件大小
         size_kb = len(image_data) / 1024
@@ -172,8 +182,9 @@ async def save_image_data(image_data, url, request_id, CONFIG):
         logger.error(f"❌ 保存图片失败: {e}")
 
 
-async def save_downloaded_image_async(image_data, url, request_id, downloaded_urls_set, CONFIG):
-    """保存已下载的图片数据到本地（避免重复下载）"""
+async def save_downloaded_image_async(image_data, url, request_id, downloaded_urls_set, CONFIG,
+                                      downloaded_image_urls=None):
+    """保存已下载的图片数据到本地（避免重复保存）"""
     # 避免重复保存
     if url in downloaded_urls_set:
         show_full_urls = CONFIG.get("debug_show_full_urls", False)
@@ -185,156 +196,171 @@ async def save_downloaded_image_async(image_data, url, request_id, downloaded_ur
         # 直接使用已下载的数据保存，避免重复下载
         await save_image_data(image_data, url, request_id, CONFIG)
         
-        # 更新已下载记录（由调用方处理）
+        # 🔧 修复：写入去重记录。旧版注释称"由调用方处理"但没有任何调用方处理，
+        # 去重集合永远为空，图片反复重复落盘，内存监视器也在清理空集合
+        downloaded_urls_set.add(url)
+        if downloaded_image_urls is not None:
+            downloaded_image_urls.append(url)
         
     except Exception as e:
         logger.error(f"❌ 保存图片失败: {type(e).__name__}: {e}")
 
 
 async def download_image_data_with_retry(
-    url: str, 
+    url: str,
     aiohttp_session: Optional[aiohttp.ClientSession],
     DOWNLOAD_SEMAPHORE: Optional[asyncio.Semaphore],
     MAX_CONCURRENT_DOWNLOADS: int,
     CONFIG: dict
-) -> Tuple[Optional[bytes], Optional[str]]:
-    """优化的异步图片下载器，带重试和并发控制"""
+) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """优化的异步图片下载器，带重试和并发控制。
+
+    返回值: (image_data, error, content_type)
+
+    🔧 修复说明（相对旧版）：
+    - 紧急会话泄漏：旧版在全局 session 缺失时新建 ClientSession 赋给参数
+      变量后从不关闭，每次触发都泄漏连接池与 socket；现在由本函数管理
+      生命周期，用完即关。
+    - UnboundLocalError 隐患：start_time/timeout_config 在异常分支被引用，
+      但旧版在循环体中途才赋值；现在提前初始化。
+    - retry_delays 越界：max_retries 配置大于 3 时旧版 retry_delays[retry_count]
+      直接 IndexError；现在用末尾值兜底。
+    - 热路径逐次十几条 INFO 诊断日志降级为 debug，保留关键告警。
+    """
     if not DOWNLOAD_SEMAPHORE:
         DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-    
+
+    import time as time_module
+
     last_error = None
-    max_retries = CONFIG.get("download_timeout", {}).get("max_retries", 2)
-    retry_delays = [1, 2]  # 减少重试延迟
-    
-    # 🔍 诊断日志：并发控制状态
-    semaphore_available = DOWNLOAD_SEMAPHORE._value if DOWNLOAD_SEMAPHORE else 0
-    logger.info(f"[DOWNLOAD_DEBUG] 准备下载图片")
-    logger.info(f"  - 可用下载槽: {semaphore_available}/{MAX_CONCURRENT_DOWNLOADS}")
-    logger.info(f"  - 活跃下载: {MAX_CONCURRENT_DOWNLOADS - semaphore_available}")
-    logger.info(f"  - 最大重试: {max_retries}")
-    logger.info(f"  - URL前100字符: {url[:100]}...")
-    
+    timeout_config = CONFIG.get("download_timeout", {})
+    max_retries = timeout_config.get("max_retries", 2)
+    retry_delays = [1, 2]
+
+    semaphore_available = DOWNLOAD_SEMAPHORE._value
+    logger.debug(
+        f"[DOWNLOAD] 准备下载图片: 可用槽 {semaphore_available}/{MAX_CONCURRENT_DOWNLOADS}, "
+        f"最大重试 {max_retries}, URL: {url[:100]}...")
+
     # 🔧 下载延迟机制（避免TCP端口耗尽）
     delay_config = CONFIG.get("download_delay", {})
     if delay_config.get("enabled", False):
-        delay_seconds = delay_config.get("delay_seconds", 0.5)
-        logger.info(f"[DOWNLOAD_DEBUG] ⏱️ 延迟 {delay_seconds} 秒后开始（避免并发冲突）")
-        await asyncio.sleep(delay_seconds)
-    
-    # 记录等待信号量的时间
-    import time as time_module
-    wait_start = time_module.time()
-    
-    # 使用信号量控制并发
-    async with DOWNLOAD_SEMAPHORE:
-        wait_time = time_module.time() - wait_start
-        if wait_time > 1:
-            logger.warning(f"[DOWNLOAD_DEBUG] ⚠️ 等待下载槽耗时: {wait_time:.2f}秒（并发阻塞！）")
-        for retry_count in range(max_retries):
-            try:
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Referer': 'https://lmarena.ai/'
-                }
-                
-                if not aiohttp_session:
-                    # 🔧 创建紧急会话（使用相同的SSL配置）
-                    import ssl
-                    ssl_context = ssl.create_default_context()
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-                    connector = aiohttp.TCPConnector(ssl=ssl_context, limit=100, limit_per_host=30)
-                    aiohttp_session = aiohttp.ClientSession(connector=connector)
-                    logger.warning("[DOWNLOAD_DEBUG] 创建了紧急aiohttp会话（使用自定义SSL上下文）")
-                
-                # 优化的超时设置（从配置读取）
-                timeout_config = CONFIG.get("download_timeout", {})
-                timeout = aiohttp.ClientTimeout(
-                    total=timeout_config.get("total", 30),
-                    connect=timeout_config.get("connect", 5),
-                    sock_read=timeout_config.get("sock_read", 10)
-                )
-                
-                # 🔍 诊断日志：超时配置
-                logger.info(f"[DOWNLOAD_DEBUG] 重试 #{retry_count + 1}/{max_retries}")
-                logger.info(f"  - 连接超时: {timeout_config.get('connect', 5)}秒")
-                logger.info(f"  - 读取超时: {timeout_config.get('sock_read', 10)}秒")
-                logger.info(f"  - 总超时: {timeout_config.get('total', 30)}秒")
-                
-                # 添加性能日志
-                import time as time_module
-                start_time = time_module.time()
-                
-                # 🔍 诊断日志：连接开始
-                logger.info(f"[DOWNLOAD_DEBUG] 开始建立连接...")
+        await asyncio.sleep(delay_config.get("delay_seconds", 0.5))
 
-                assert aiohttp_session is not None  # 上方已创建紧急会话兜底
-                async with aiohttp_session.get(
-                    url,
-                    timeout=timeout,
-                    headers=headers,
-                    allow_redirects=True
-                ) as response:
-                    connect_time = time_module.time() - start_time
-                    logger.info(f"[DOWNLOAD_DEBUG] 连接建立成功，耗时: {connect_time:.2f}秒")
-                    
-                    if response.status == 200:
-                        logger.info(f"[DOWNLOAD_DEBUG] HTTP 200 OK，开始读取数据...")
-                        read_start = time_module.time()
-                        data = await response.read()
-                        read_time = time_module.time() - read_start
-                        download_time = time_module.time() - start_time
-                        
-                        # 🔍 详细性能分析
-                        logger.info(f"[DOWNLOAD_DEBUG] 下载完成")
-                        logger.info(f"  - 连接时间: {connect_time:.2f}秒")
-                        logger.info(f"  - 读取时间: {read_time:.2f}秒")
-                        logger.info(f"  - 总时间: {download_time:.2f}秒")
-                        logger.info(f"  - 数据大小: {len(data) / 1024:.1f}KB")
-                        logger.info(f"  - 下载速度: {(len(data) / 1024) / download_time:.1f}KB/s")
-                        
-                        # 记录慢速下载
-                        slow_threshold = CONFIG.get("performance_monitoring", {}).get("slow_threshold_seconds", 10)
-                        if download_time > slow_threshold:
-                            logger.warning(f"[DOWNLOAD] ⚠️ 下载耗时较长: {download_time:.2f}秒 (阈值: {slow_threshold}秒)")
-                        
-                        return data, None
-                    else:
+    timeout = aiohttp.ClientTimeout(
+        total=timeout_config.get("total", 30),
+        connect=timeout_config.get("connect", 5),
+        sock_read=timeout_config.get("sock_read", 10)
+    )
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Referer': 'https://lmarena.ai/'
+    }
+
+    wait_start = time_module.time()
+    temp_session: Optional[aiohttp.ClientSession] = None
+    try:
+        # 使用信号量控制并发
+        async with DOWNLOAD_SEMAPHORE:
+            wait_time = time_module.time() - wait_start
+            if wait_time > 1:
+                logger.warning(f"[DOWNLOAD] ⚠️ 等待下载槽耗时: {wait_time:.2f}秒（并发阻塞）")
+
+            session = aiohttp_session
+            if session is None or session.closed:
+                # 全局会话不可用：创建临时会话（finally 中关闭，不再泄漏）
+                # 🔧 旧版这里 check_hostname=False + CERT_NONE 关掉了证书校验，
+                # 降级路径反而比正常路径更不安全；保持默认校验即可
+                temp_session = aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(limit=100, limit_per_host=30))
+                session = temp_session
+                logger.warning("[DOWNLOAD] 全局aiohttp会话不可用，已创建临时会话（下载结束后关闭）")
+
+            for retry_count in range(max_retries):
+                start_time = time_module.time()
+                try:
+                    logger.debug(f"[DOWNLOAD] 尝试 #{retry_count + 1}/{max_retries}")
+                    async with session.get(
+                        url,
+                        timeout=timeout,
+                        headers=headers,
+                        allow_redirects=True
+                    ) as response:
+                        if response.status == 200:
+                            # 🔧 下载硬上限：防止超大文件撑爆内存
+                            max_bytes = CONFIG.get("max_image_download_bytes", 20 * 1024 * 1024)
+                            content_length = response.headers.get("Content-Length")
+                            if content_length and int(content_length) > max_bytes:
+                                last_error = f"图片过大 ({int(content_length)} bytes, 上限 {max_bytes})"
+                                logger.error(f"[DOWNLOAD] ❌ {last_error}")
+                                return None, last_error, None
+
+                            content_type = response.headers.get("Content-Type", "").split(";")[0].strip()
+                            # 🔧 Content-Type 校验：不是图片类型直接拒绝
+                            if content_type and not content_type.startswith("image/"):
+                                last_error = f"非图片 Content-Type: {content_type}"
+                                logger.error(f"[DOWNLOAD] ❌ {last_error}")
+                                return None, last_error, None
+
+                            # 🔧 分块读取控制：避免无 Content-Length 的流式响应无限膨胀
+                            chunks = []
+                            total = 0
+                            async for chunk in response.content.iter_chunked(65536):
+                                total += len(chunk)
+                                if total > max_bytes:
+                                    last_error = f"图片过大 (已读取 {total} bytes, 上限 {max_bytes})"
+                                    logger.error(f"[DOWNLOAD] ❌ {last_error}")
+                                    return None, last_error, None
+                                chunks.append(chunk)
+                            data = b"".join(chunks)
+                            download_time = time_module.time() - start_time
+                            logger.debug(
+                                f"[DOWNLOAD] 完成: {len(data) / 1024:.1f}KB, "
+                                f"{download_time:.2f}秒")
+
+                            # 记录慢速下载
+                            slow_threshold = CONFIG.get("performance_monitoring", {}).get("slow_threshold_seconds", 10)
+                            if download_time > slow_threshold:
+                                logger.warning(f"[DOWNLOAD] ⚠️ 下载耗时较长: {download_time:.2f}秒 (阈值: {slow_threshold}秒)")
+
+                            return data, None, content_type
                         last_error = f"HTTP {response.status}"
-                        logger.error(f"[DOWNLOAD_DEBUG] ❌ HTTP错误: {response.status}")
-                        
-            except asyncio.TimeoutError as e:
-                elapsed = time_module.time() - start_time
-                last_error = f"超时（第{retry_count+1}次尝试）"
-                logger.error(f"[DOWNLOAD_DEBUG] ❌ 超时")
-                logger.error(f"  - 已等待: {elapsed:.2f}秒")
-                logger.error(f"  - 配置总超时: {timeout_config.get('total', 30)}秒")
-                logger.error(f"  - 可能原因: 网络慢、服务器响应慢、或数据量大")
-            except aiohttp.ClientError as e:
-                elapsed = time_module.time() - start_time
-                last_error = f"网络错误: {str(e)}"
-                logger.error(f"[DOWNLOAD_DEBUG] ❌ 网络错误: {e.__class__.__name__}")
-                logger.error(f"  - 错误详情: {str(e)[:200]}")
-                logger.error(f"  - 发生时间: {elapsed:.2f}秒后")
-                # 🔍 诊断SSL错误
-                if "SSL" in str(e) or "ssl" in str(e).lower():
-                    logger.error(f"  - 💡 检测到SSL错误，可能是证书问题或防火墙拦截")
-            except Exception as e:
-                elapsed = time_module.time() - start_time
-                last_error = str(e)
-                logger.error(f"[DOWNLOAD_DEBUG] ❌ 未知错误: {e}")
-                logger.error(f"  - 错误类型: {type(e).__name__}")
-                logger.error(f"  - 发生时间: {elapsed:.2f}秒后")
-            
-            # 重试延迟
-            if retry_count < max_retries - 1:
-                delay = retry_delays[retry_count]
-                logger.info(f"[DOWNLOAD_DEBUG] 等待{delay}秒后重试...")
-                await asyncio.sleep(delay)
-    
-    return None, last_error
+                        logger.error(f"[DOWNLOAD] ❌ HTTP错误: {response.status}")
+
+                except asyncio.TimeoutError:
+                    elapsed = time_module.time() - start_time
+                    last_error = f"超时（第{retry_count+1}次尝试）"
+                    logger.error(
+                        f"[DOWNLOAD] ❌ 超时: 已等待 {elapsed:.2f}秒 "
+                        f"(配置总超时 {timeout_config.get('total', 30)}秒)")
+                except aiohttp.ClientError as e:
+                    elapsed = time_module.time() - start_time
+                    last_error = f"网络错误: {str(e)}"
+                    logger.error(
+                        f"[DOWNLOAD] ❌ 网络错误: {e.__class__.__name__}: {str(e)[:200]} "
+                        f"(发生于 {elapsed:.2f}秒后)")
+                    if "ssl" in str(e).lower():
+                        logger.error("  - 💡 检测到SSL错误，可能是证书问题或防火墙拦截")
+                except Exception as e:
+                    elapsed = time_module.time() - start_time
+                    last_error = str(e)
+                    logger.error(
+                        f"[DOWNLOAD] ❌ 未知错误: {type(e).__name__}: {e} "
+                        f"(发生于 {elapsed:.2f}秒后)")
+
+                # 重试延迟（超出预设表长度时用末尾值，不再 IndexError）
+                if retry_count < max_retries - 1:
+                    delay = retry_delays[min(retry_count, len(retry_delays) - 1)]
+                    logger.debug(f"[DOWNLOAD] 等待{delay}秒后重试...")
+                    await asyncio.sleep(delay)
+    finally:
+        if temp_session is not None:
+            await temp_session.close()
+
+    return None, last_error, None
+
 
 
 async def process_image_data(
@@ -342,10 +368,10 @@ async def process_image_data(
     filename: Optional[str] = None,
     request_id: Optional[str] = None,
     CONFIG: Optional[dict] = None,
-    PROCESSED_IMAGE_CACHE: Optional[dict] = None,
+    PROCESSED_IMAGE_CACHE: Optional[MutableMapping] = None,
     DISABLED_ENDPOINTS: Optional[dict] = None,
     ROUND_ROBIN_INDEX_REF: Optional[list] = None,  # 使用列表作为可变引用
-    FILEBED_RECOVERY_TIME: int = 300,
+    FILEBED_RECOVERY_TIME: Optional[int] = None,
     model_image_config: Optional[dict] = None  # 新增：模型级别的图片压缩配置
 ) -> Tuple[str, Optional[str]]:
     """
@@ -382,6 +408,24 @@ async def process_image_data(
         - 如果成功，返回 (URL或base64字符串, None)
         - 如果失败，返回 (原始数据, 错误消息)
     """
+    # 🔧 修复：现役调用点均未注入这些共享状态，导致图床轮询与故障禁用
+    # 机制被架空（round_robin/failover 永远从 0 开始、失败端点不会被临时
+    # 禁用也无所谓恢复）。未显式传入时回落到 AppState 的全局状态；
+    # 参数保留用于测试注入。
+    from core.app_state import get_app_state
+    _image_state = get_app_state().image
+    if DISABLED_ENDPOINTS is None:
+        DISABLED_ENDPOINTS = _image_state.DISABLED_ENDPOINTS
+    if ROUND_ROBIN_INDEX_REF is None:
+        ROUND_ROBIN_INDEX_REF = _image_state.ROUND_ROBIN_INDEX_REF
+    if FILEBED_RECOVERY_TIME is None:
+        # 🔧 配置接线：filebed_recovery_time_seconds 在 config.jsonc 与管理面板
+        # 都可调，旧版只取 AppState 里的硬编码 300，用户改了不生效
+        from core.config_loader import get_float_setting
+        FILEBED_RECOVERY_TIME = get_float_setting(
+            "filebed_recovery_time_seconds", _image_state.FILEBED_RECOVERY_TIME
+        )
+
     if not filename:
         filename = f"image_{uuid.uuid4()}.png"
     
@@ -408,14 +452,25 @@ async def process_image_data(
     
     # --- 缓存逻辑 ---
     image_hash = None
+    cache_key = None
     if cache_enabled and PROCESSED_IMAGE_CACHE is not None:
         image_hash = calculate_image_hash(base64_data)
         current_time = time.time()
         
+        # 构建 variant key：缓存键必须包含处理配置，否则同一图片
+        # 先后经过 LMArena（产出 URL）和 Direct API（需要 base64）时，
+        # 第二条会命中第一条的缓存拿到错误形态
+        variant_parts = [
+            str(file_bed_enabled),
+            json.dumps(optimization_config, sort_keys=True) if optimization_config else '{}'
+        ]
+        variant_key = hashlib.sha256(':'.join(variant_parts).encode()).hexdigest()[:16]
+        cache_key = f"{image_hash}:{variant_key}"
+        
         # 检查缓存（TTLCache 自动处理过期）
-        cached_data = PROCESSED_IMAGE_CACHE.get(image_hash)
+        cached_data = PROCESSED_IMAGE_CACHE.get(cache_key)
         if cached_data is not None:
-            logger.info(f"{req_log} ⚡ 命中缓存 (hash: {image_hash[:8]}...)")
+            logger.info(f"{req_log} ⚡ 命中缓存 (hash: {image_hash[:8]}..., variant: {variant_key})")
             return cached_data, None
     
     try:
@@ -435,8 +490,11 @@ async def process_image_data(
         # 步骤1: 图片优化（如果启用）
         if optimization_enabled:
             logger.info(f"{req_log} 执行图片优化...")
-            optimized_data, optimized_format, opt_error = optimize_image(
-                image_bytes, 
+            # 🔧 性能修复：optimize_image 内部是 PIL 重编码（CPU 密集），
+            # 丢进线程池执行，避免阻塞事件循环
+            optimized_data, optimized_format, opt_error = await asyncio.to_thread(
+                optimize_image,
+                image_bytes,
                 optimization_config,
                 image_format
             )
@@ -541,9 +599,9 @@ async def process_image_data(
             
             if upload_successful and final_url:
                 # 存入缓存（TTLCache 自动管理大小和过期）
-                if cache_enabled and image_hash and PROCESSED_IMAGE_CACHE is not None:
-                    PROCESSED_IMAGE_CACHE[image_hash] = final_url
-                    logger.info(f"{req_log} 💾 结果已存入缓存 (hash: {image_hash[:8]}...)")
+                if cache_enabled and cache_key and PROCESSED_IMAGE_CACHE is not None:
+                    PROCESSED_IMAGE_CACHE[cache_key] = final_url
+                    logger.info(f"{req_log} 💾 结果已存入缓存 (hash: {image_hash[:8]}..., variant: {cache_key.split(':')[1] if cache_key else 'N/A'})")
                 return final_url, None
             else:
                 error_msg = f"所有图床端点均上传失败。最后错误: {last_error}"
@@ -553,9 +611,9 @@ async def process_image_data(
                 base64_result = image_to_base64(final_image_data, mime_type)
                 
                 # 即使失败也要缓存降级结果（TTLCache 自动管理）
-                if cache_enabled and image_hash and PROCESSED_IMAGE_CACHE is not None:
-                    PROCESSED_IMAGE_CACHE[image_hash] = base64_result
-                    logger.info(f"{req_log} 💾 降级结果已存入缓存 (hash: {image_hash[:8]}...)")
+                if cache_enabled and cache_key and PROCESSED_IMAGE_CACHE is not None:
+                    PROCESSED_IMAGE_CACHE[cache_key] = base64_result
+                    logger.info(f"{req_log} 💾 降级结果已存入缓存 (hash: {image_hash[:8]}..., variant: {cache_key.split(':')[1] if cache_key else 'N/A'})")
 
                 return base64_result, None
         
@@ -567,9 +625,9 @@ async def process_image_data(
             logger.info(f"{req_log} Base64转换完成: {len(base64_result)} 字符")
             
             # 存入缓存（TTLCache 自动管理大小和过期）
-            if cache_enabled and image_hash and PROCESSED_IMAGE_CACHE is not None:
-                PROCESSED_IMAGE_CACHE[image_hash] = base64_result
-                logger.info(f"{req_log} 💾 结果已存入缓存 (hash: {image_hash[:8]}...)")
+            if cache_enabled and cache_key and PROCESSED_IMAGE_CACHE is not None:
+                PROCESSED_IMAGE_CACHE[cache_key] = base64_result
+                logger.info(f"{req_log} 💾 结果已存入缓存 (hash: {image_hash[:8]}..., variant: {cache_key.split(':')[1] if cache_key else 'N/A'})")
 
             return base64_result, None
     
@@ -578,3 +636,99 @@ async def process_image_data(
         logger.error(f"{req_log} {error_msg}", exc_info=True)
         # 降级：返回原始数据
         return base64_data, error_msg
+
+
+async def preprocess_anthropic_images(
+    anthropic_req: dict,
+    CONFIG: dict,
+    model_image_config: Optional[dict] = None,
+    PROCESSED_IMAGE_CACHE: Optional["MutableMapping"] = None,
+    request_id: Optional[str] = None,
+) -> int:
+    """
+    对 Anthropic 原生格式请求中的 base64 图片块执行压缩优化（就地修改）。
+
+    适用于 /v1/messages 的 anthropic_native 透传链路：图片以
+    {"type": "image", "source": {"type": "base64", "media_type": ..., "data": ...}}
+    块存在，与 OpenAI 格式的 image_url 结构不同，需要单独遍历。
+    同时处理 tool_result 块中嵌套的 image 块。
+
+    压缩后同步更新 source.data 与 source.media_type（格式转换后两者必须
+    一致，否则上游会因 media_type 与实际数据不符拒绝请求）。
+    透传模式下上游只接受 base64，图床上传强制禁用（浅拷贝覆盖，不污染全局 CONFIG）。
+
+    Args:
+        anthropic_req: Anthropic 请求体（或透传请求体），messages 将被就地修改
+        CONFIG: 全局配置
+        model_image_config: 模型级别 image_compression 配置（优先级更高）
+        PROCESSED_IMAGE_CACHE: 处理结果缓存
+        request_id: 请求ID（用于日志）
+
+    Returns:
+        处理成功的图片数量
+    """
+    global_enabled = (CONFIG or {}).get("image_optimization", {}).get("enabled", False)
+    model_enabled = model_image_config.get("enabled", False) if model_image_config else False
+    if not (global_enabled or model_enabled):
+        return 0
+
+    img_config = {**(CONFIG or {}), "file_bed_enabled": False}
+    req_id = request_id or str(uuid.uuid4())[:8]
+    req_log = f"[ANTHROPIC_IMG {req_id}]"
+    processed_count = 0
+
+    async def _process_image_block(block: dict) -> None:
+        nonlocal processed_count
+        source = block.get("source")
+        if not isinstance(source, dict) or source.get("type") != "base64":
+            return
+        data = source.get("data")
+        if not data or not isinstance(data, str):
+            return
+
+        media_type = source.get("media_type") or "image/png"
+        data_uri = f"data:{media_type};base64,{data}"
+
+        processed_data, proc_error = await process_image_data(
+            base64_data=data_uri,
+            filename=f"anthropic_{req_id}_{uuid.uuid4()}.png",
+            request_id=req_id,
+            CONFIG=img_config,
+            PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
+            model_image_config=model_image_config,
+        )
+
+        if proc_error:
+            logger.warning(f"{req_log} 图片处理警告: {proc_error}，保留原图")
+            return
+
+        if isinstance(processed_data, str) and processed_data.startswith("data:") and "," in processed_data:
+            header, new_data = processed_data.split(",", 1)
+            # "data:image/jpeg;base64" → "image/jpeg"
+            new_media_type = header[5:].split(";")[0].strip() or media_type
+            source["media_type"] = new_media_type
+            source["data"] = new_data
+            processed_count += 1
+
+    for message in anthropic_req.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "image":
+                await _process_image_block(block)
+            elif block_type == "tool_result":
+                nested_content = block.get("content")
+                if isinstance(nested_content, list):
+                    for nested_block in nested_content:
+                        if isinstance(nested_block, dict) and nested_block.get("type") == "image":
+                            await _process_image_block(nested_block)
+
+    if processed_count:
+        logger.info(f"{req_log} Anthropic 原生请求图片预处理完成: {processed_count} 张")
+    return processed_count

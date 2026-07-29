@@ -100,7 +100,7 @@ def calculate_tokens_for_text(text: str, tokenizers: List[str] = None) -> Dict[s
     if tokenizers is None or 'tiktoken_cl100k' in tokenizers:
         try:
             import tiktoken
-            results['tiktoken_cl100k'] = {'name':'Tiktoken (cl100k_base)','token_count':len(tiktoken.get_encoding('cl100k_base').encode(text)),'model_hint':'GPT-4, GPT-3.5-turbo'}
+            results['tiktoken_cl100k'] = {'name':'Tiktoken (cl100k_base)','token_count':len(tiktoken.get_encoding('cl100k_base').encode(text, allowed_special="all")),'model_hint':'GPT-4, GPT-3.5-turbo'}
         except ImportError:
             results['tiktoken_cl100k'] = {'error':'未安装tiktoken','install_cmd':'pip install tiktoken'}
         except Exception as e:
@@ -108,7 +108,7 @@ def calculate_tokens_for_text(text: str, tokenizers: List[str] = None) -> Dict[s
     if tokenizers is None or 'tiktoken_o200k' in tokenizers:
         try:
             import tiktoken
-            results['tiktoken_o200k'] = {'name':'Tiktoken (o200k_base)','token_count':len(tiktoken.get_encoding('o200k_base').encode(text)),'model_hint':'GPT-4o'}
+            results['tiktoken_o200k'] = {'name':'Tiktoken (o200k_base)','token_count':len(tiktoken.get_encoding('o200k_base').encode(text, allowed_special="all")),'model_hint':'GPT-4o'}
         except ImportError:
             results['tiktoken_o200k'] = {'error':'未安装tiktoken','install_cmd':'pip install tiktoken'}
         except Exception as e:
@@ -122,7 +122,7 @@ def calculate_tokens_for_text(text: str, tokenizers: List[str] = None) -> Dict[s
         except Exception as e:
             try:
                 import tiktoken
-                results['anthropic'] = {'name':'Anthropic (Claude) - 估算','token_count':len(tiktoken.get_encoding('cl100k_base').encode(text)),'model_hint':'Claude-3系列 (使用tiktoken估算)','note':'使用tiktoken cl100k_base作为近似'}
+                results['anthropic'] = {'name':'Anthropic (Claude) - 估算','token_count':len(tiktoken.get_encoding('cl100k_base').encode(text, allowed_special="all")),'model_hint':'Claude-3系列 (使用tiktoken估算)','note':'使用tiktoken cl100k_base作为近似'}
             except:
                 results['anthropic'] = {'error':str(e)}
     if tokenizers is None or 'gemma' in tokenizers:
@@ -176,12 +176,14 @@ def compare_tokenizers(text:str,tokenizer1:str,tokenizer2:str)->Dict[str,Any]:
     return comp
 
 
-def calculate_request_tokens(messages:List[Dict[str,Any]],model:str,monitoring_service=None,request_id:str=None)->int:
+def calculate_request_tokens(messages:List[Dict[str,Any]],model:str)->int:
+    """统计一批消息的请求 token 数。
+
+    🔧 字段修复：RequestInfo 已删除 request_messages（内存里只留 200 字预览，
+    用它反而算不准），此前"从 active_requests 回填"的兜底分支会读一个
+    不存在的属性而抛 AttributeError。这里只认调用方显式传入的 messages。
+    """
     t = 0
-    if not messages and monitoring_service and request_id and hasattr(monitoring_service,'active_requests') and request_id in monitoring_service.active_requests:
-        ri = monitoring_service.active_requests[request_id]
-        if ri.request_messages:
-            messages = ri.request_messages
     if not messages:
         return 0
     try:
@@ -215,7 +217,7 @@ def calculate_full_usage(messages:List[Dict[str,Any]],response_content:str,model
         i = lmarena_usage.get('inputTokens',0) or lmarena_usage.get('prompt_tokens',0)
         o = lmarena_usage.get('outputTokens',0) or lmarena_usage.get('completion_tokens',0)
     else:
-        i = calculate_request_tokens(messages,model,monitoring_service,request_id)
+        i = calculate_request_tokens(messages,model)
         o = calculate_response_tokens(response_content,model)
     return {"prompt_tokens":i,"completion_tokens":o,"total_tokens":i+o}
 

@@ -206,6 +206,21 @@ except ImportError:
     _CUSTOM_TOKENIZERS_MAX_SIZE = 3
     _TIKTOKEN_MODEL_CACHE_MAX_SIZE = 3
 
+
+def get_tokenizer_idle_timeout() -> float:
+    """tokenizer 空闲卸载阈值（秒）。
+
+    🔧 配置接线：config.jsonc 与管理面板暴露 tokenizer_idle_timeout_seconds
+    （实际值 600），但旧版各清理点直接引用 TimeoutDefaults.TOKENIZER_IDLE_TIMEOUT
+    （120 秒）这个模块级常量副本，用户配置完全不生效，tokenizer 被过早卸载
+    又在下次计数时重新加载，白白付出反复加载的内存与耗时代价。
+    """
+    try:
+        from core.config_loader import get_float_setting
+    except ImportError:
+        return _TOKENIZER_IDLE_TIMEOUT
+    return get_float_setting("tokenizer_idle_timeout_seconds", _TOKENIZER_IDLE_TIMEOUT)
+
 DEFAULT_TOKENIZER_CONFIG = {
     "claude": "anthropic",
     "claude-3": "anthropic",

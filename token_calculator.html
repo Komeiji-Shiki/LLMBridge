@@ -497,6 +497,19 @@
     </div>
 
     <script>
+        // HTML转义函数 - 防止XSS攻击
+        function escapeHtml(unsafe) {
+            if (unsafe === null || unsafe === undefined) {
+                return '';
+            }
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
         // 切换标签页
         function switchTab(tabName) {
             // 更新标签按钮状态
@@ -566,19 +579,20 @@
                     if (result.error) {
                         resultsHTML += `
                             <div class="result-card error">
-                                <div class="result-card-title">${result.name || key}</div>
-                                <div class="result-card-error">❌ ${result.error}</div>
-                                ${result.install_cmd ? `<div class="result-card-hint">安装: ${result.install_cmd}</div>` : ''}
-                                ${result.hint ? `<div class="result-card-hint">${result.hint}</div>` : ''}
+                                <div class="result-card-title">${escapeHtml(result.name || key)}</div>
+                                <div class="result-card-error">❌ ${escapeHtml(result.error)}</div>
+                                ${result.install_cmd ? `<div class="result-card-hint">安装: ${escapeHtml(result.install_cmd)}</div>` : ''}
+                                ${result.hint ? `<div class="result-card-hint">${escapeHtml(result.hint)}</div>` : ''}
                             </div>
                         `;
                     } else {
+                        const tc = typeof result.token_count === 'number' ? result.token_count.toLocaleString() : 'N/A';
                         resultsHTML += `
                             <div class="result-card">
-                                <div class="result-card-title">${result.name}</div>
-                                <div class="result-card-value">${result.token_count.toLocaleString()}</div>
-                                <div class="result-card-hint">${result.model_hint || ''}</div>
-                                ${result.method ? `<div class="result-card-hint">${result.method}</div>` : ''}
+                                <div class="result-card-title">${escapeHtml(result.name)}</div>
+                                <div class="result-card-value">${tc}</div>
+                                <div class="result-card-hint">${escapeHtml(result.model_hint || '')}</div>
+                                ${result.method ? `<div class="result-card-hint">${escapeHtml(result.method)}</div>` : ''}
                             </div>
                         `;
                     }
@@ -635,33 +649,35 @@
 
                 // 显示分词器1结果
                 const t1 = data.tokenizer1;
+                const tc1 = typeof t1.token_count === 'number' ? t1.token_count.toLocaleString() : 'N/A';
                 document.getElementById('compare-result-1').innerHTML = `
-                    <h4 style="color: var(--accent); margin-bottom: 15px;">${t1.name || t1.id}</h4>
+                    <h4 style="color: var(--accent); margin-bottom: 15px;">${escapeHtml(t1.name || t1.id)}</h4>
                     ${t1.error ? `
-                        <div style="color: #ef4444;">❌ ${t1.error}</div>
-                        ${t1.hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 5px;">${t1.hint}</div>` : ''}
+                        <div style="color: #ef4444;">❌ ${escapeHtml(t1.error)}</div>
+                        ${t1.hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 5px;">${escapeHtml(t1.hint)}</div>` : ''}
                     ` : `
                         <div style="font-size: 2.5rem; font-weight: bold; color: var(--accent);">
-                            ${t1.token_count.toLocaleString()}
+                            ${tc1}
                         </div>
                         <div style="color: var(--text-dim); margin-top: 5px;">tokens</div>
-                        ${t1.model_hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">${t1.model_hint}</div>` : ''}
+                        ${t1.model_hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">${escapeHtml(t1.model_hint)}</div>` : ''}
                     `}
                 `;
 
                 // 显示分词器2结果
                 const t2 = data.tokenizer2;
+                const tc2 = typeof t2.token_count === 'number' ? t2.token_count.toLocaleString() : 'N/A';
                 document.getElementById('compare-result-2').innerHTML = `
-                    <h4 style="color: var(--accent); margin-bottom: 15px;">${t2.name || t2.id}</h4>
+                    <h4 style="color: var(--accent); margin-bottom: 15px;">${escapeHtml(t2.name || t2.id)}</h4>
                     ${t2.error ? `
-                        <div style="color: #ef4444;">❌ ${t2.error}</div>
-                        ${t2.hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 5px;">${t2.hint}</div>` : ''}
+                        <div style="color: #ef4444;">❌ ${escapeHtml(t2.error)}</div>
+                        ${t2.hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 5px;">${escapeHtml(t2.hint)}</div>` : ''}
                     ` : `
                         <div style="font-size: 2.5rem; font-weight: bold; color: var(--accent);">
-                            ${t2.token_count.toLocaleString()}
+                            ${tc2}
                         </div>
                         <div style="color: var(--text-dim); margin-top: 5px;">tokens</div>
-                        ${t2.model_hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">${t2.model_hint}</div>` : ''}
+                        ${t2.model_hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 10px;">${escapeHtml(t2.model_hint)}</div>` : ''}
                     `}
                 `;
 

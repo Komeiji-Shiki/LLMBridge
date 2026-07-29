@@ -64,6 +64,17 @@ async def process_pending_requests(
             # 将错误设置到 future 中，以便客户端知道请求失败了
             if not future.done():
                 future.set_exception(e)
+            # 若存在原通道，也向其投递错误以避免流式生成器挂死等 3000s 超时
+            if original_request_id:
+                try:
+                    from core.app_state import get_app_state
+                    _state = get_app_state()
+                    queue = _state.response_channels.get(original_request_id)
+                    if queue is not None:
+                        queue.put_nowait({"error": f"Retry failed: {e}"})
+                        queue.put_nowait("[DONE]")
+                except Exception:
+                    pass
 
         # 添加短暂的延迟，避免同时发送过多请求
         await asyncio.sleep(1)
@@ -80,36 +91,79 @@ def restart_server():
     
     # 执行重启
     logger.info("正在重启服务器...")
-    os.execv(sys.executable, ['python'] + sys.argv)
+
+    # 🔧 os._exit / execv 不执行任何清理逻辑：重启前先把 API Key 使用
+    # 统计落盘、冲刷异步日志队列，避免重启丢数据（日志关闭必须最后做）
+    try:
+        from core.api_key_manager import api_key_manager
+        api_key_manager.save_if_dirty()
+    except Exception:
+        pass
+    try:
+        from core.logging_config import shutdown_async_logging
+        shutdown_async_logging()
+    except Exception:
+        pass
+
+    if sys.platform == "win32":
+        # 🔧 Windows 修复：execv 在 Windows 上并非真正替换进程（新旧进程
+        # 短暂并存，端口绑定存在竞争），且 argv 拼接不带引号，解释器路径
+        # 含空格时参数会碎。改用 Popen（正确引用参数）+ 显式退出：
+        # 新进程完成 Python 启动/导入需要数秒，届时旧进程早已退出释放端口。
+        import subprocess
+        subprocess.Popen([sys.executable] + sys.argv, close_fds=True)
+        os._exit(0)
+    # POSIX 上 execv 是原子的进程镜像替换，argv[0] 应为解释器自身路径
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-def idle_monitor(
+CHECK_INTERVAL_SECONDS = 10
+
+
+async def idle_monitor(
     last_activity_time_ref: dict,
     CONFIG: dict,
-    restart_server_func
+    restart_server_func=None
 ):
-    """在后台线程中运行，监控服务器是否空闲。"""
+    """监控服务器是否空闲，超过阈值则触发重启。
+
+    🔧 修复：这个任务此前从未被启动过——config.jsonc 里有
+    enable_idle_restart / idle_restart_timeout_seconds，管理面板的配置表单
+    也把它们做成了可编辑项，但没有任何执行者，改了完全没效果。
+    现在由 lifespan 通过 spawn() 拉起。
+
+    改为协程而非后台线程：原同步版用 time.sleep 独占一个线程，且读
+    CONFIG 时与配置热重载线程无同步；协程版每轮都重新读取配置，
+    运行中改 enable_idle_restart 立即生效。
+    """
+    if restart_server_func is None:
+        restart_server_func = restart_server
+
     # 等待，直到 last_activity_time 被首次设置
     while last_activity_time_ref.get('time') is None:
-        time.sleep(1)
-        
-    logger.info("空闲监控线程已启动。")
-    
+        await asyncio.sleep(1)
+
+    logger.info("[IDLE_MONITOR] 空闲重启监控任务已启动。")
+
     while True:
-        if CONFIG.get("enable_idle_restart", False):
-            timeout = CONFIG.get("idle_restart_timeout_seconds", 300)
-            
-            # 如果超时设置为-1，则禁用重启检查
-            if timeout == -1:
-                time.sleep(10)
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        try:
+            if not CONFIG.get("enable_idle_restart", False):
                 continue
 
-            idle_time = (datetime.now() - last_activity_time_ref['time']).total_seconds()
-            
+            timeout = CONFIG.get("idle_restart_timeout_seconds", 300)
+            # -1 表示禁用重启检查
+            if not isinstance(timeout, (int, float)) or timeout < 0:
+                continue
+
+            last_activity = last_activity_time_ref.get('time')
+            if last_activity is None:
+                continue
+
+            idle_time = (datetime.now() - last_activity).total_seconds()
             if idle_time > timeout:
-                logger.info(f"服务器空闲时间 ({idle_time:.0f}s) 已超过阈值 ({timeout}s)。")
+                logger.info(f"[IDLE_MONITOR] 服务器空闲 {idle_time:.0f}s 已超过阈值 {timeout}s。")
                 restart_server_func()
-                break
-                
-        # 每 10 秒检查一次
-        time.sleep(10)
+                return
+        except Exception as e:
+            logger.error(f"[IDLE_MONITOR] 错误: {e}", exc_info=True)

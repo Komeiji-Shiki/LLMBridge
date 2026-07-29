@@ -41,7 +41,8 @@ async def upload_to_file_bed(
 
     # 从配置中读取API具体要求
     file_field_name = endpoint.get("form_file_field", "file")
-    extra_data_fields = endpoint.get("form_data_fields", {})
+    # 浅拷贝一份，避免后续写入 api_key 时污染配置字典本身
+    extra_data_fields = dict(endpoint.get("form_data_fields") or {})
     response_type = endpoint.get("response_type", "json")  # "json" 或 "text"
     json_url_key = endpoint.get("json_url_key", "url")  # e.g., "data.url" or "image"
     api_key = endpoint.get("api_key")
@@ -59,14 +60,24 @@ async def upload_to_file_bed(
         if api_key:
             extra_data_fields[api_key_field] = api_key
 
-        # 创建一个更宽松的SSL上下文以解决 "sslv3 alert handshake failure" 问题
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        ssl_context.set_ciphers('DEFAULT@SECLEVEL=1')
+        # 🔧 安全修复：旧版无条件 check_hostname=False + CERT_NONE +
+        # SECLEVEL=1，所有图床上传一律不验证证书。注释里的理由是绕开某些
+        # 老图床的 "sslv3 alert handshake failure"，但代价是全部端点都在裸奔。
+        # 现在默认保持完整校验，只有在端点上显式写 "insecure_ssl": true
+        # 时才降级，并打一条告警说明风险范围。
+        if endpoint.get("insecure_ssl", False):
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            ssl_context.set_ciphers('DEFAULT@SECLEVEL=1')
+            verify: Any = ssl_context
+            logger.warning(
+                f"⚠️ 图床 '{endpoint_name}' 已配置 insecure_ssl，本次上传不验证 TLS 证书")
+        else:
+            verify = True
 
         # 允许并处理重定向，以兼容 filepush.co 等端点
-        async with httpx.AsyncClient(timeout=60.0, verify=ssl_context, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=verify, follow_redirects=True) as client:
             response = await client.post(upload_url, data=extra_data_fields, files=files_payload)
             # 对于非200状态码，也尝试处理，因为某些图床在成功时返回非2xx状态码
             # response.raise_for_status() # 暂时注释掉，以处理更多情况

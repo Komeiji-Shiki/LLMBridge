@@ -4,6 +4,7 @@ Token计数模块 - 核心计数功能
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Tuple
 
@@ -133,9 +134,24 @@ def count_messages_tokens(messages: List[Dict[str, Any]], model_name: str = "gpt
         if isinstance(content, str):
             text_content = content
         elif isinstance(content, list):
+            # 图片 token 估算（低细节模式 ~85 tokens/张，高细节 ~170+ tokens/张）
+            _IMAGE_TOKEN_ESTIMATE = 85
             for part in content:
-                if isinstance(part, dict) and part.get('type') == 'text':
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get('type')
+                if ptype == 'text':
                     text_content += part.get('text', '')
+                elif ptype in ('image_url', 'image'):
+                    details['image_count'] = details.get('image_count', 0) + 1
+                elif ptype == 'tool_calls':
+                    # tool_calls 文本化计入（函数名 + 参数 JSON）
+                    for tc in part.get('tool_calls', []) if isinstance(part.get('tool_calls'), list) else []:
+                        if isinstance(tc, dict):
+                            func = tc.get('function', {})
+                            text_content += str(func.get('name', ''))
+                            args = func.get('arguments', '')
+                            text_content += (args if isinstance(args, str) else json.dumps(args))
         content_tokens = count_text_tokens(text_content, model_name)
         overhead_per_message = int(4 * details['multiplier'])
         message_tokens = content_tokens + overhead_per_message

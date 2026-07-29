@@ -14,7 +14,7 @@ import uuid
 from typing import Any, Optional
 
 from fastapi import HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from ._direct_api_utils import (
     get_round_robin_api_key,
@@ -94,6 +94,16 @@ async def handle_direct_api_request(
     pricing_config = endpoint_config.get("pricing", {})
     max_temperature = endpoint_config.get("max_temperature")
 
+    # 强制流式/非流式：不就地改写 openai_req["stream"]。
+    # 🔧 旧版直接 openai_req["stream"] = bool(force_stream)，该 dict 在调用方
+    # （api_routes.py）被多处引用（原始 stream 判断、/v1/messages 分支等），
+    # 一次写入会让后续所有引用点读到错误值。
+    force_stream = endpoint_config.get("force_stream")
+    original_stream = openai_req.get("stream", False)
+    _stream_overridden = force_stream is not None and (original_stream != bool(force_stream))
+    if _stream_overridden:
+        logger.info(f"[DIRECT_API] force_stream={force_stream} 覆盖客户端 stream={original_stream}")
+
     # 图片预处理
     await _preprocess_images(
         openai_req, CONFIG, endpoint_config, PROCESSED_IMAGE_CACHE,
@@ -106,13 +116,19 @@ async def handle_direct_api_request(
             openai_req["temperature"] = max_temperature
             logger.info(f"[TEMP_LIMIT] 模型 '{model_name}' 温度限制: {original_temp} -> {max_temperature}")
 
-    # 应用最大输出Token限制
+    # 应用最大输出Token限制（新版 OpenAI SDK 可能只发 max_completion_tokens，两者都检查）
     max_tokens_limit = endpoint_config.get("max_tokens")
-    if max_tokens_limit is not None and "max_tokens" in openai_req:
-        original_max_tokens = openai_req["max_tokens"]
-        if original_max_tokens > max_tokens_limit:
-            openai_req["max_tokens"] = max_tokens_limit
-            logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' 最大输出Token限制: {original_max_tokens} -> {max_tokens_limit}")
+    if max_tokens_limit is not None:
+        if "max_tokens" in openai_req:
+            original_max_tokens = openai_req["max_tokens"]
+            if original_max_tokens > max_tokens_limit:
+                openai_req["max_tokens"] = max_tokens_limit
+                logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' 最大输出Token限制: {original_max_tokens} -> {max_tokens_limit}")
+        if "max_completion_tokens" in openai_req:
+            original_max_tokens = openai_req["max_completion_tokens"]
+            if original_max_tokens > max_tokens_limit:
+                openai_req["max_completion_tokens"] = max_tokens_limit
+                logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' max_completion_tokens限制: {original_max_tokens} -> {max_tokens_limit}")
 
     # 验证必需配置
     # 本地部署模型（localhost/127.0.0.1/局域网）不需要 API key
@@ -142,13 +158,20 @@ async def handle_direct_api_request(
     if retry_enabled:
         _log_retry_info(model_name, retry_config)
 
-    # 构建单次执行函数
-    async def _execute_single_attempt():
+    # 🔧 构建上游请求体的副本，force_stream 改写只影响副本而非调用方 openai_req。
+    # 这样 api_routes.py 等上层调用者继续读原值做 client stream 判断，
+    # 而三条下游链路读到的是已覆盖的 stream 值。
+    req_for_upstream = openai_req
+    if _stream_overridden:
+        req_for_upstream = {**openai_req, "stream": bool(force_stream)}
+
+    # 构建单次执行函数（🔧 api_key 作为参数传入：重试时可换用轮询到的下一个 key）
+    async def _execute_single_attempt(attempt_api_key):
         if api_type == "gemini_native" or use_native_format:
             return await handle_gemini_native_direct(
-                openai_req=openai_req, model_name=model_name,
+                openai_req=req_for_upstream, model_name=model_name,
                 target_model_id=target_model_id, display_name=display_name,
-                api_key=api_key, api_base_url=api_base_url,
+                api_key=attempt_api_key, api_base_url=api_base_url,
                 endpoint_config=endpoint_config, pricing_config=pricing_config,
                 monitoring_service=monitoring_service,
                 direct_api_service=direct_api_service,
@@ -158,20 +181,22 @@ async def handle_direct_api_request(
 
         if api_type == "anthropic_native":
             return await handle_anthropic_native_from_openai(
-                openai_req=openai_req, model_name=model_name,
+                openai_req=req_for_upstream, model_name=model_name,
                 endpoint_config=endpoint_config,
+                api_key=attempt_api_key,
                 CONFIG=CONFIG,
                 monitoring_service=monitoring_service,
                 direct_api_service=direct_api_service,
                 estimate_message_tokens_func=estimate_message_tokens_func,
                 estimate_tokens_func=estimate_tokens_func,
-                full_messages=full_messages)
+                full_messages=full_messages,
+                thinking_separator=thinking_separator)
 
         if passthrough_mode:
             return await handle_passthrough_direct(
-                openai_req=openai_req, model_name=model_name,
+                openai_req=req_for_upstream, model_name=model_name,
                 target_model_id=target_model_id, display_name=display_name,
-                api_base_url=api_base_url, api_key=api_key,
+                api_base_url=api_base_url, api_key=attempt_api_key,
                 endpoint_config=endpoint_config, pricing_config=pricing_config,
                 thinking_separator=thinking_separator,
                 monitoring_service=monitoring_service,
@@ -190,7 +215,12 @@ async def handle_direct_api_request(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await _execute_single_attempt()
+            if attempt > 1:
+                # 🔧 重试前重新轮询 API key：多 key 配置下 429 重试不再打同一个
+                # 刚被限流的 key（单 key 配置行为不变）。anthropic_native 分支同样
+                # 使用此处传入的 attempt_api_key，不再在 handler 内部二次轮询。
+                api_key = await get_round_robin_api_key(model_name, raw_api_key) or api_key
+            response = await _execute_single_attempt(api_key)
 
             if retry_enabled and attempt < max_attempts and isinstance(response, Response):
                 should_retry, retry_reason = should_retry_response(response, retry_config)
@@ -201,6 +231,28 @@ async def handle_direct_api_request(
                     if retry_delay_seconds > 0:
                         await asyncio.sleep(retry_delay_seconds)
                     continue
+
+            # 强制非流式时客户端期望 SSE → 将非流式 JSON 转为流式 chunk 再包装
+            # 🔧 错误响应不应被改写——上游 4xx/5xx 的 JSONResponse 若被包成 SSE 流，
+            # 客户端读到的是 HTTP 200 text/event-stream 包裹的错误，语义完全错。
+            if (_stream_overridden and original_stream
+                    and isinstance(response, Response)
+                    and type(response) is not StreamingResponse):
+                resp_status = getattr(response, "status_code", 200)
+                if resp_status >= 400:
+                    return response
+                try:
+                    resp_body = response.body
+                except Exception:
+                    resp_body = b""
+                    logger.warning(f"[DIRECT_API] 强制非流式：无法读取 response.body")
+                if resp_body:
+                    sse_data = _convert_non_stream_to_sse(resp_body)
+                    logger.info(f"[DIRECT_API] 强制非流式：已将 JSON ({len(resp_body)} bytes) 转为流式 SSE")
+                else:
+                    logger.warning(f"[DIRECT_API] 强制非流式：response.body 为空，仅发送 [DONE]")
+                    sse_data = "data: [DONE]\n\n"
+                response = Response(content=sse_data, media_type="text/event-stream", status_code=resp_status)
 
             return response
 
@@ -243,71 +295,87 @@ async def _preprocess_images(openai_req, CONFIG, endpoint_config,
         return
 
     # 🔧 Direct API 透传模式下强制禁用图床上传
-    # process_image_data 会读取全局 file_bed_enabled，如果为 true 会把
+    # process_image_data 会读取 file_bed_enabled，如果为 true 会把
     # base64 图片上传到图床并替换为 HTTP URL，但上游 API 只接受 base64。
-    original_file_bed = CONFIG.get("file_bed_enabled", False)
-    CONFIG["file_bed_enabled"] = False
+    # 使用浅拷贝覆盖该字段，避免修改全局 CONFIG 引发并发竞态与配置污染。
+    img_config = {**CONFIG, "file_bed_enabled": False}
 
-    try:
-        logger.info(f"[DIRECT_API] 开始图片预处理...")
-        if model_image_config:
-            logger.info(f"[DIRECT_API] 使用模型级别图片配置: {model_image_config}")
+    logger.info(f"[DIRECT_API] 开始图片预处理...")
+    if model_image_config:
+        logger.info(f"[DIRECT_API] 使用模型级别图片配置: {model_image_config}")
 
-        import re
-        request_id_for_img = str(uuid.uuid4())[:8]
-        messages_to_process = openai_req.get("messages", [])
-        image_processed_count = 0
+    import re
+    request_id_for_img = str(uuid.uuid4())[:8]
+    messages_to_process = openai_req.get("messages", [])
+    image_processed_count = 0
 
-        for msg_index, message in enumerate(messages_to_process):
-            role = message.get("role", "unknown")
-            content = message.get("content")
+    for msg_index, message in enumerate(messages_to_process):
+        if not isinstance(message, dict):
+            # 🔧 类型防护：messages 元素可能是非 dict（脏数据），跳过交给上游报错
+            continue
+        role = message.get("role", "unknown")
+        content = message.get("content")
 
-            if isinstance(content, str):
-                markdown_image_pattern = r'!\[([^\]]*)\]\((data:[^)]+)\)'
-                markdown_matches = re.findall(markdown_image_pattern, content)
+        if isinstance(content, str):
+            markdown_image_pattern = r'!\[([^\]]*)\]\((data:[^)]+)\)'
+            # 🔧 性能：先异步处理所有图片建立 base64→结果映射，再用 re.sub 回调
+            # 一次性替换。旧版每张图 content.replace 全量复制字符串，
+            # 多张大 base64 图时退化为 O(n·m)；重复图片也不再重复处理
+            replacements = {}
+            for match_index, match in enumerate(re.finditer(markdown_image_pattern, content)):
+                base64_url = match.group(2)
+                if base64_url in replacements:
+                    continue
+                processed_data, proc_error = await process_image_data_func(
+                    base64_data=base64_url,
+                    filename=f"direct_{role}_{msg_index}_{match_index}_{uuid.uuid4()}.png",
+                    request_id=request_id_for_img,
+                    CONFIG=img_config,
+                    PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
+                    model_image_config=model_image_config)
 
-                for match_index, (alt_text, base64_url) in enumerate(markdown_matches):
+                if proc_error:
+                    logger.warning(f"[DIRECT_API] 图片处理警告: {proc_error}")
+
+                replacements[base64_url] = processed_data
+                image_processed_count += 1
+
+            if replacements:
+                content = re.sub(
+                    markdown_image_pattern,
+                    lambda m: f"![{m.group(1)}]({replacements.get(m.group(2), m.group(2))})",
+                    content)
+                message["content"] = content
+
+        elif isinstance(content, list):
+            for part_index, part in enumerate(content):
+                # 🔧 类型防护：part 可能是非 dict，image_url 也可能是字符串
+                if not isinstance(part, dict) or part.get("type") != "image_url":
+                    continue
+                img = part.get("image_url")
+                url_content = img.get("url") if isinstance(img, dict) else (img if isinstance(img, str) else None)
+
+                if url_content and url_content.startswith("data:"):
                     processed_data, proc_error = await process_image_data_func(
-                        base64_data=base64_url,
-                        filename=f"direct_{role}_{msg_index}_{match_index}_{uuid.uuid4()}.png",
+                        base64_data=url_content,
+                        filename=f"direct_{role}_{msg_index}_{part_index}_{uuid.uuid4()}.png",
                         request_id=request_id_for_img,
-                        CONFIG=CONFIG,
+                        CONFIG=img_config,
                         PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
                         model_image_config=model_image_config)
 
                     if proc_error:
                         logger.warning(f"[DIRECT_API] 图片处理警告: {proc_error}")
 
-                    old_markdown = f"![{alt_text}]({base64_url})"
-                    new_markdown = f"![{alt_text}]({processed_data})"
-                    content = content.replace(old_markdown, new_markdown)
-                    message["content"] = content
+                    # 按 image_url 的实际类型分别写回（dict 写 .url，str 写整个字段）
+                    if isinstance(img, dict):
+                        img["url"] = processed_data
+                    else:
+                        part["image_url"] = {"url": processed_data}
                     image_processed_count += 1
 
-            elif isinstance(content, list):
-                for part_index, part in enumerate(content):
-                    if part.get("type") == "image_url":
-                        url_content = part.get("image_url", {}).get("url")
-
-                        if url_content and url_content.startswith("data:"):
-                            processed_data, proc_error = await process_image_data_func(
-                                base64_data=url_content,
-                                filename=f"direct_{role}_{msg_index}_{part_index}_{uuid.uuid4()}.png",
-                                request_id=request_id_for_img,
-                                CONFIG=CONFIG,
-                                PROCESSED_IMAGE_CACHE=PROCESSED_IMAGE_CACHE,
-                                model_image_config=model_image_config)
-
-                            if proc_error:
-                                logger.warning(f"[DIRECT_API] 图片处理警告: {proc_error}")
-
-                            part["image_url"]["url"] = processed_data
-                            image_processed_count += 1
-
-        if image_processed_count > 0:
-            logger.info(f"[DIRECT_API] 图片预处理完成: 处理了 {image_processed_count} 张图片")
-    finally:
-        CONFIG["file_bed_enabled"] = original_file_bed
+    if image_processed_count > 0:
+        logger.info(f"[DIRECT_API] 图片预处理完成: 处理了 {image_processed_count} 张图片")
 
 
 def _log_config_info(api_type, api_base_url, target_model_id, display_name,
@@ -344,25 +412,111 @@ def _log_retry_info(model_name, retry_config):
 
 
 def _is_local_api_base(url: Optional[str]) -> bool:
-    """判断 api_base_url 是否指向本地/局域网地址（无需 API key）"""
+    """判断 api_base_url 是否指向本地/局域网地址（无需 API key）。
+
+    🔧 修复：旧版用子串匹配（'localhost' in url 等），
+    https://localhost.evil.com 或路径中含私网 IP 的公网 URL 会被误判为
+    本地地址而跳过 API key 必填校验。现在用 urlparse 提取 hostname
+    后精确判断（ipaddress 覆盖 loopback/私网/链路本地/0.0.0.0）。
+    """
     if not url:
         return False
-    url_lower = url.lower()
-    # localhost / 127.0.0.1 / [::1]
-    local_hosts = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]']
-    for host in local_hosts:
-        if host in url_lower:
-            return True
-    # 私有网络段: 192.168.x.x, 10.x.x.x, 172.16-31.x.x
-    import re
-    private_patterns = [
-        r'://192\.168\.',
-        r'://10\.',
-        r'://172\.(1[6-9]|2[0-9]|3[01])\.',
-        r'://169\.254\.',  # link-local
-    ]
-    for pat in private_patterns:
-        if re.search(pat, url_lower):
-            return True
-    return False
+    import ipaddress
+    from urllib.parse import urlparse
+    candidate = url if "://" in url else f"http://{url}"
+    try:
+        host = (urlparse(candidate).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # 非 IP 的域名一律视为非本地
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified
 
+
+
+def _convert_non_stream_to_sse(resp_body: bytes) -> str:
+    """将上游非流式 JSON 响应转为 OpenAI 流式 SSE chunk 格式。
+
+    客户端发 stream=true 但 force_stream=false 时，上游返回的是完整
+    chat.completion 对象（message 字段），而客户端按 delta 解析。
+    此处拆成 delta chunk + finish chunk + usage chunk + [DONE]。
+    """
+    import json as _json
+    import time as _time
+
+    try:
+        data = _json.loads(resp_body.decode("utf-8"))
+    except Exception:
+        return f"data: {resp_body.decode('utf-8', errors='replace')}\n\ndata: [DONE]\n\n"
+
+    if not isinstance(data, dict):
+        return f"data: {resp_body.decode('utf-8', errors='replace')}\n\ndata: [DONE]\n\n"
+
+    # 如果已经是流式格式（chunk），直接透传
+    if data.get("object") == "chat.completion.chunk":
+        return f"data: {resp_body.decode('utf-8')}\n\ndata: [DONE]\n\n"
+
+    rid = data.get("id", "")
+    model = data.get("model", "")
+    created = data.get("created", int(_time.time()))
+    usage = data.get("usage")
+    choices = data.get("choices", [])
+
+    chunks: list[str] = []
+
+    if choices and len(choices) > 0:
+        choice = choices[0]
+        message = choice.get("message", {})
+        finish_reason = choice.get("finish_reason", "stop")
+
+        # 构建 delta（内容块）
+        delta: dict = {}
+        content = message.get("content")
+        if content:
+            delta["content"] = content
+        reasoning = message.get("reasoning_content") or message.get("reasoning")
+        if reasoning:
+            delta["reasoning_content"] = reasoning
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            delta["tool_calls"] = tool_calls
+
+        delta_chunk = {
+            "id": rid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+        }
+        chunks.append(f"data: {_json.dumps(delta_chunk, ensure_ascii=False)}\n\n")
+
+        # finish chunk
+        finish_chunk = {
+            "id": rid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
+        }
+        chunks.append(f"data: {_json.dumps(finish_chunk, ensure_ascii=False)}\n\n")
+
+    # usage chunk
+    if usage:
+        usage_chunk = {
+            "id": rid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [],
+            "usage": usage
+        }
+        chunks.append(f"data: {_json.dumps(usage_chunk, ensure_ascii=False)}\n\n")
+
+    chunks.append("data: [DONE]\n\n")
+    return "".join(chunks)

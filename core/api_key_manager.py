@@ -12,7 +12,6 @@ import logging
 import os
 import secrets
 import time
-from collections import defaultdict
 from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional, Any, Tuple
@@ -27,7 +26,8 @@ class RateLimiter:
     """滑动窗口速率限制器"""
 
     def __init__(self):
-        self._windows: Dict[str, list] = defaultdict(list)
+        # 🔧 普通 dict 而非 defaultdict：避免为从未限流过的 key 惰性创建空条目
+        self._windows: Dict[str, list] = {}
         self._lock = Lock()
 
     def check_and_consume(self, key_id: str, rpm_limit: int) -> Tuple[bool, int]:
@@ -48,20 +48,17 @@ class RateLimiter:
         window_start = now - 60.0  # 60 秒滑动窗口
 
         with self._lock:
-            # 清理过期记录
-            timestamps = self._windows[key_id]
-            self._windows[key_id] = [t for t in timestamps if t > window_start]
-            timestamps = self._windows[key_id]
+            # 清理过期记录（.get 取值，不为陈旧/陌生 key 创建条目）
+            timestamps = [t for t in self._windows.get(key_id, ()) if t > window_start]
 
-            current_count = len(timestamps)
-            remaining = rpm_limit - current_count
-
-            if current_count >= rpm_limit:
+            if len(timestamps) >= rpm_limit:
+                self._windows[key_id] = timestamps
                 return False, 0
 
             # 消费一个配额
             timestamps.append(now)
-            return True, remaining - 1
+            self._windows[key_id] = timestamps
+            return True, rpm_limit - len(timestamps)
 
     def get_usage(self, key_id: str) -> int:
         """获取当前窗口内的请求数"""
@@ -95,9 +92,14 @@ class APIKeyManager:
         self._initialized = True
         self._keys: Dict[str, Dict[str, Any]] = {}
         self._lock = Lock()
+        # 🔧 磁盘写入专用锁：写盘已移出 _lock（validate_request 热路径与管理
+        # 操作共享 _lock，锁内写盘会把所有请求的鉴权卡在磁盘 IO 上）
+        self._save_lock = Lock()
         self._rate_limiter = RateLimiter()
         # 建立 secret -> key_id 的快速查找索引
         self._secret_index: Dict[str, str] = {}
+        # 热路径只更新内存统计，脏标记 + 后台任务周期性落盘
+        self._dirty = False
         self._load()
 
     def _load(self):
@@ -128,14 +130,39 @@ class APIKeyManager:
         except Exception as e:
             logger.error(f"[APIKeyManager] ❌ 加载 '{API_KEYS_FILE}' 失败: {e}")
 
-    def _save(self):
-        """保存 API Key 配置到文件"""
+    def _serialize_unsafe(self) -> Tuple[str, int]:
+        """锁内调用：序列化当前 keys 并清除脏标记，返回 (JSON文本, key数量)。
+
+        序列化是纯内存操作（微秒级），放在锁内保证快照一致；
+        真正的磁盘写入由锁外的 _write_to_disk 完成。
+        """
+        self._dirty = False
+        return json.dumps(self._keys, ensure_ascii=False, indent=2), len(self._keys)
+
+    def _write_to_disk(self, payload: str, count: int):
+        """锁外调用：原子写盘（临时文件 + os.replace，_save_lock 串行化）。
+
+        🔧 修复：写盘不再持有 _lock。旧版管理操作在锁内同步写盘，
+        validate_request 热路径抢同一把锁时会被磁盘 IO 卡住（事件循环
+        线程直接调用鉴权，等锁即阻塞所有并发请求）。
+        写盘失败时重新置脏，等待后台任务下次重试。
+        """
+        tmp_path = API_KEYS_FILE + ".tmp"
         try:
-            with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._keys, f, ensure_ascii=False, indent=2)
-            logger.info(f"[APIKeyManager] ✅ 已保存 {len(self._keys)} 个 API Key")
+            with self._save_lock:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(payload)
+                os.replace(tmp_path, API_KEYS_FILE)
+            logger.info(f"[APIKeyManager] ✅ 已保存 {count} 个 API Key")
         except Exception as e:
             logger.error(f"[APIKeyManager] ❌ 保存 '{API_KEYS_FILE}' 失败: {e}")
+            with self._lock:
+                self._dirty = True
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
 
     def reload(self):
         """重新加载配置"""
@@ -185,7 +212,8 @@ class APIKeyManager:
         with self._lock:
             self._keys[key_id] = key_data
             self._secret_index[secret] = key_id
-            self._save()
+            payload, count = self._serialize_unsafe()
+        self._write_to_disk(payload, count)
 
         logger.info(f"[APIKeyManager] 🔑 创建新 API Key: name='{name}', id={key_id}")
 
@@ -197,16 +225,20 @@ class APIKeyManager:
 
     def delete_key(self, key_id: str) -> bool:
         """删除一个 API Key"""
+        payload = None
+        count = 0
         with self._lock:
             key_data = self._keys.pop(key_id, None)
             if key_data:
                 secret = key_data.get("secret", "")
                 self._secret_index.pop(secret, None)
                 self._rate_limiter.reset(key_id)
-                self._save()
-                logger.info(f"[APIKeyManager] 🗑️ 删除 API Key: id={key_id}")
-                return True
+                payload, count = self._serialize_unsafe()
+        if payload is None:
             return False
+        self._write_to_disk(payload, count)
+        logger.info(f"[APIKeyManager] 🗑️ 删除 API Key: id={key_id}")
+        return True
 
     def update_key(self, key_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -224,10 +256,12 @@ class APIKeyManager:
                 if field in allowed_fields:
                     self._keys[key_id][field] = value
 
-            self._save()
+            payload, count = self._serialize_unsafe()
+            # 返回脱敏信息（锁内快照，写盘在锁外）
+            info = self._get_key_info_unsafe(key_id)
 
-            # 返回脱敏信息
-            return self._get_key_info_unsafe(key_id)
+        self._write_to_disk(payload, count)
+        return info
 
     def get_key_info(self, key_id: str) -> Optional[Dict[str, Any]]:
         """获取 API Key 的信息（不包含 secret）"""
@@ -261,8 +295,8 @@ class APIKeyManager:
         """列出所有 API Key（不包含 secret）"""
         with self._lock:
             return [
-                self._get_key_info_unsafe(key_id)
-                for key_id in self._keys
+                info for key_id in self._keys
+                if (info := self._get_key_info_unsafe(key_id)) is not None
             ]
 
     def validate_request(
@@ -304,8 +338,10 @@ class APIKeyManager:
                         f"此 API Key 无权访问模型 '{model_name}'。允许的模型: {', '.join(allowed_models)}",
                     )
 
+            # 🔧 在锁内读取 rpm_limit，避免与 update_key/delete_key 的锁外读竞态
+            rpm_limit = key_data.get("rpm_limit", 0)
+
         # RPM 检查（在锁外进行，因为 rate_limiter 有自己的锁）
-        rpm_limit = key_data.get("rpm_limit", 0)
         allowed, remaining = self._rate_limiter.check_and_consume(key_id, rpm_limit)
         if not allowed:
             return (
@@ -315,13 +351,15 @@ class APIKeyManager:
             )
 
         # 更新使用统计
-        # 热路径不做同步文件落盘，否则每个新请求都会阻塞事件循环并拖慢其他流式请求
+        # 热路径不做同步文件落盘，否则每个新请求都会阻塞事件循环并拖慢其他流式请求；
+        # 标记为脏，由后台任务（background_tasks.monitors.api_key_stats_saver）周期性落盘
         with self._lock:
             if key_id in self._keys:
                 self._keys[key_id]["last_used_at"] = time.time()
                 self._keys[key_id]["total_requests"] = (
                     self._keys[key_id].get("total_requests", 0) + 1
                 )
+                self._dirty = True
 
         return True, key_id, None
 
@@ -354,7 +392,19 @@ class APIKeyManager:
     def save_now(self):
         """立即保存（用于关闭前保存统计数据）"""
         with self._lock:
-            self._save()
+            payload, count = self._serialize_unsafe()
+        self._write_to_disk(payload, count)
+
+    def save_if_dirty(self):
+        """仅在有未落盘变更时保存（供后台周期任务在线程池中调用）。
+
+        🔧 修复：旧版只在优雅关闭时 save_now()，进程被强杀会丢失全部使用统计。
+        """
+        with self._lock:
+            if not self._dirty:
+                return
+            payload, count = self._serialize_unsafe()
+        self._write_to_disk(payload, count)
 
 
 # 全局单例

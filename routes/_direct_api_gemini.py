@@ -54,6 +54,14 @@ async def handle_gemini_native_direct(
         for key, value in custom_params.items():
             logger.info(f"  - {key}: {value}")
 
+    # 合并附加主体参数（在自定义参数之后，同名键优先）
+    extra_body_params = endpoint_config.get("extra_body_params", {})
+    if extra_body_params and isinstance(extra_body_params, dict):
+        extra_kwargs.update(extra_body_params)
+        logger.info(f"[GEMINI_NATIVE] 已添加附加主体参数:")
+        for key, value in extra_body_params.items():
+            logger.info(f"  - {key}: {value}")
+
     thinking_config = None
     enable_thinking = endpoint_config.get("enable_thinking")
     if enable_thinking is True:
@@ -80,9 +88,20 @@ async def handle_gemini_native_direct(
         logger.info(f"[GEMINI_NATIVE] 已显式关闭思维链模式")
     # enable_thinking 为 None/缺失时不发送 thinking_config
 
-    monitor_extra_params = {"upstream_model": target_model_id, **extra_kwargs}
+    # 自定义参数/附加主体参数以独立字段记录到监控日志，避免平铺覆盖监控字段
+    # （显式 dict 注解：后续会塞入 dict 类型的值，与 _direct_api_passthrough 写法对齐）
+    monitor_extra_params: dict = {"upstream_model": target_model_id}
+    if isinstance(custom_params, dict) and custom_params:
+        monitor_extra_params["custom_params"] = custom_params
+    if isinstance(extra_body_params, dict) and extra_body_params:
+        monitor_extra_params["extra_body_params"] = extra_body_params
     if thinking_config:
         monitor_extra_params["thinking_config"] = thinking_config
+    # 记录思考相关配置到监控日志
+    for key in ("enable_thinking", "reasoning_effort", "thinking_budget", "force_stream"):
+        val = endpoint_config.get(key)
+        if val is not None and val != "":
+            monitor_extra_params[key] = val
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -117,7 +136,7 @@ async def handle_gemini_native_direct(
             thinking_config=thinking_config,
             tools=openai_req.get("tools"),
             tool_choice=openai_req.get("tool_choice"),
-            **extra_kwargs
+            extra_body=extra_kwargs if extra_kwargs else None,
         )
 
         first_chunk_timeout = TimeoutDefaults.FIRST_CHUNK_TIMEOUT
@@ -132,13 +151,20 @@ async def handle_gemini_native_direct(
                 input_tokens = 0
                 output_tokens = 0
                 total_tokens = 0
+                upstream_usage = None  # Gemini 原生 usageMetadata（原样保留，供日志记录）
                 request_success = False
                 stream_completed = False
                 error_msg = None
+                # 客户端已消失时 finally 不能再 yield（见下方 GeneratorExit 处理）
+                client_gone = False
+                # 首块超时/空响应/预读错误时，已在分支中 yield 了 error 事件；
+                # 设此标志阻止 finally 再补发空的 usage/[DONE] 尾部块
+                tail_suppressed = False
 
                 try:
                     api_task = asyncio.create_task(anext(gemini_generator))
-                    heartbeat_interval = min(endpoint_config.get("client_disconnect_probe_interval", 30), 30)
+                    # 下限 1 秒：避免配置为 0/负数时 busy-loop 狂发 keep-alive（与透传链路对齐）
+                    heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
                     first_chunk_wait_start = time.time()
 
                     while not api_task.done():
@@ -168,6 +194,9 @@ async def handle_gemini_native_direct(
                                 cost_info=cost_info, full_messages=full_messages)
                             await monitoring_service.broadcast_to_monitors(
                                 {"type": "request_end", "request_id": request_id, "success": False})
+                            # 向客户端发送错误事件，避免客户端看到空 SSE 流以为成功
+                            yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
+                            tail_suppressed = True
                             return
                         try:
                             await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
@@ -196,6 +225,8 @@ async def handle_gemini_native_direct(
                             cost_info=cost_info, full_messages=full_messages)
                         await monitoring_service.broadcast_to_monitors(
                             {"type": "request_end", "request_id": request_id, "success": False})
+                        yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'empty_response'}}, ensure_ascii=False)}\n\n"
+                        tail_suppressed = True
                         return
 
                     if "error" in first_gemini_chunk:
@@ -220,10 +251,14 @@ async def handle_gemini_native_direct(
                             {"type": "request_end", "request_id": request_id, "success": False})
                         yield f"data: {json.dumps({'error': first_gemini_chunk['error']}, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
+                        tail_suppressed = True
                         return
 
                     # 处理预读的第一个块
                     for gemini_chunk in [first_gemini_chunk]:
+                        _meta = gemini_chunk.get("usageMetadata")
+                        if isinstance(_meta, dict) and _meta:
+                            upstream_usage = _meta
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
                             gemini_chunk, display_name, request_id, is_stream_chunk=True)
 
@@ -255,6 +290,10 @@ async def handle_gemini_native_direct(
                             yield f"data: {json.dumps(openai_error, ensure_ascii=False)}\n\n"
                             break
 
+                        _meta = gemini_chunk.get("usageMetadata")
+                        if isinstance(_meta, dict) and _meta:
+                            upstream_usage = _meta
+
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
                             gemini_chunk, display_name, request_id, is_stream_chunk=True)
 
@@ -282,28 +321,48 @@ async def handle_gemini_native_direct(
                     request_success = (error_msg is None)
 
                 except GeneratorExit:
+                    # 🔧 GeneratorExit 必须重新抛出，否则 Python 在生成器结束时
+                    # 会报 "async generator ignored GeneratorExit"
+                    client_gone = True
                     if stream_completed or (content_parts and not error_msg):
                         request_success = True
                         logger.info(f"[GEMINI_NATIVE] 生成器被关闭，但流已完成或有有效输出，标记为成功")
                     else:
                         logger.warning(f"[GEMINI_NATIVE] 生成器被提前关闭")
+                    raise
+                except asyncio.CancelledError:
+                    # 🔧 客户端断开时 asyncio 向生成器注入 CancelledError（BaseException），
+                    # 不会被 except Exception 捕获，必须显式处理以防 request_end 丢失
+                    client_gone = True
+                    if stream_completed or (content_parts and not error_msg):
+                        request_success = True
+                        logger.info(f"[GEMINI_NATIVE] 请求被取消，但流已完成或有有效输出，标记为成功")
+                    else:
+                        logger.warning(f"[GEMINI_NATIVE] 请求被取消，客户端断开")
+                    raise
                 except Exception as e:
                     error_msg = str(e)
                     logger.error(f"[GEMINI_NATIVE] 流式处理失败: {e}", exc_info=True)
                 finally:
                     if input_tokens == 0 or output_tokens == 0:
+                        # 🔧 修复：旧版这里硬编码模型名 "gemma"，绕过了
+                        # config.jsonc 中 tokenizer_config 的按模型映射，
+                        # 与同文件非流式分支（用 display_name）结果不一致
                         try:
                             if input_tokens == 0:
-                                input_tokens = await estimate_message_tokens_non_blocking(
+                                input_tokens = await asyncio.shield(estimate_message_tokens_non_blocking(
                                     estimate_message_tokens_func,
-                                    openai_req.get('messages', []), "gemma")
+                                    openai_req.get('messages', []), display_name))
                             if output_tokens == 0:
                                 accumulated_content = ''.join(content_parts)
                                 accumulated_reasoning = ''.join(reasoning_parts)
                                 total_output_text = accumulated_reasoning + accumulated_content
                                 if total_output_text:
-                                    output_tokens = await estimate_text_tokens_non_blocking(
-                                        estimate_tokens_func, total_output_text, "gemma")
+                                    output_tokens = await asyncio.shield(estimate_text_tokens_non_blocking(
+                                        estimate_tokens_func, total_output_text, display_name))
+                        except asyncio.CancelledError:
+                            # shield 也会在取消态下抛出 CancelledError，此时保持 0 值
+                            logger.warning(f"[GEMINI_NATIVE] Token 估算被取消，使用上游返回的 usage 值")
                         except Exception as token_error:
                             logger.error(f"[GEMINI_NATIVE] Token计算失败: {token_error}")
 
@@ -323,7 +382,8 @@ async def handle_gemini_native_direct(
                         reasoning_content=final_reasoning,
                         cost_info=cost_info, full_messages=full_messages,
                         response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
-                        response_tool_calls=final_tool_calls)
+                        response_tool_calls=final_tool_calls,
+                        upstream_usage=upstream_usage)
 
                     await monitoring_service.broadcast_to_monitors({
                         "type": "request_end", "request_id": request_id,
@@ -334,24 +394,25 @@ async def handle_gemini_native_direct(
                     if cost_info.get("total_cost"):
                         logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
 
-                    try:
-                        final_total_tokens = total_tokens if total_tokens > 0 else (input_tokens + output_tokens)
-                        usage_final_chunk = {
-                            "id": f"chatcmpl-{request_id}",
-                            "object": "chat.completion.chunk",
-                            "created": int(time.time()),
-                            "model": display_name,
-                            "choices": [],
-                            "usage": {
-                                "prompt_tokens": input_tokens,
-                                "completion_tokens": output_tokens,
-                                "total_tokens": final_total_tokens
+                    if not client_gone and not tail_suppressed:
+                        try:
+                            final_total_tokens = total_tokens if total_tokens > 0 else (input_tokens + output_tokens)
+                            usage_final_chunk = {
+                                "id": f"chatcmpl-{request_id}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": display_name,
+                                "choices": [],
+                                "usage": {
+                                    "prompt_tokens": input_tokens,
+                                    "completion_tokens": output_tokens,
+                                    "total_tokens": final_total_tokens
+                                }
                             }
-                        }
-                        yield f"data: {json.dumps(usage_final_chunk, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                    except (GeneratorExit, Exception) as yield_err:
-                        logger.debug(f"[GEMINI_NATIVE] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
+                            yield f"data: {json.dumps(usage_final_chunk, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                        except Exception as yield_err:
+                            logger.debug(f"[GEMINI_NATIVE] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
 
             return StreamingResponse(
                 gemini_stream_generator(),
@@ -406,6 +467,9 @@ async def handle_gemini_native_direct(
                 reasoning_content = message.get("reasoning_content", "")
                 response_tool_calls = message.get("tool_calls")
 
+            _meta = gemini_response.get("usageMetadata")
+            upstream_usage = _meta if isinstance(_meta, dict) and _meta else None
+
             usage = openai_response.get("usage", {})
             input_tokens = usage.get("prompt_tokens", 0)
             output_tokens = usage.get("completion_tokens", 0)
@@ -434,7 +498,8 @@ async def handle_gemini_native_direct(
                 reasoning_content=reasoning_content,
                 cost_info=cost_info, full_messages=full_messages,
                 response_message=build_response_message(response_content, reasoning_content, response_tool_calls),
-                response_tool_calls=response_tool_calls)
+                response_tool_calls=response_tool_calls,
+                upstream_usage=upstream_usage)
 
             await monitoring_service.broadcast_to_monitors({
                 "type": "request_end", "request_id": request_id, "success": True})

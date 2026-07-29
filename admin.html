@@ -13,6 +13,7 @@
     </style>
     <script defer src="js/vendor/chart.umd.min.js"></script>
     <script defer src="js/vendor/Sortable.min.js"></script>
+    <link rel="stylesheet" href="css/admin.css">
     
     <!-- 拆分后的管理面板JS文件 -->
     <script defer src="js/admin-core.js"></script>
@@ -1500,7 +1501,7 @@
                     
                     <div class="form-group">
                         <label class="form-label">API类型</label>
-                        <select id="api-type" class="form-select">
+                        <select id="api-type" class="form-select" onchange="toggleThinkingOptions()">
                             <option value="direct_api">OpenAI兼容 (推荐)</option>
                             <option value="gemini_native">Gemini原生格式</option>
                             <option value="anthropic_native">Anthropic原生格式</option>
@@ -1584,6 +1585,30 @@
                             完全透传请求和响应，零延迟。适用于 OpenAI 兼容 API
                         </small>
                     </div>
+
+                    <div class="form-group">
+                        <label class="form-label">流式模式控制</label>
+                        <select id="force-stream" class="form-input">
+                            <option value="">不强制（透传客户端参数）</option>
+                            <option value="true">强制流式（Stream）</option>
+                            <option value="false">强制非流式（Non-Stream）</option>
+                        </select>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            覆盖客户端传入的 stream 参数。适用于需要固定流式/非流式行为的 API（如某些反代仅支持流式）
+                        </small>
+                    </div>
+
+                    <div id="anthropic-auto-cache-config" class="form-group" style="display: none;">
+                        <label class="form-label">
+                            <input type="checkbox" id="anthropic-auto-cache" style="margin-right: 8px;">
+                            自动提示词缓存（Prompt Caching）
+                        </label>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            自动为 tools / system / 最后两条 user 消息注入 <code>cache_control: ephemeral</code> 断点，
+                            多轮对话可命中上游缓存大幅降低成本（缓存读取约为原价 10%，写入约 1.25 倍）。
+                            客户端已自带 cache_control 时不重复注入。仅 Anthropic 原生格式生效
+                        </small>
+                    </div>
                     
                     <!-- ===== 消息转换配置（可折叠） ===== -->
                     <div class="collapsible-section collapsed" style="margin-top: 15px;">
@@ -1665,6 +1690,19 @@
                                 </small>
                             </div>
 
+                            <div id="verbosity-config" class="form-group" style="display: none;">
+                                <label class="form-label">输出详细度（Verbosity，OAI 兼容）</label>
+                                <select id="oai-verbosity" class="form-input">
+                                    <option value="">不注入（透传客户端参数）</option>
+                                    <option value="low">low（简短）</option>
+                                    <option value="medium">medium（中等）</option>
+                                    <option value="high">high（详细）</option>
+                                </select>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    GPT-5 系列 Chat Completions 顶层 verbosity 参数，控制回复长度，与是否启用思考无关。客户端已传时不覆盖；不支持该参数的上游可能报错，请留空
+                                </small>
+                            </div>
+
                             <div id="thinking-options" style="display: none;">
                                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
                                     <div id="thinking-control-config" class="form-group" style="margin-bottom: 0; display: none;">
@@ -1690,6 +1728,7 @@
                                         <label class="form-label">思考强度（Effort）</label>
                                         <select id="thinking-effort" class="form-input">
                                             <option value="">留空（让模型自行决定）</option>
+                                            <option value="none">none（不思考，GPT-5.1+ / OAI 兼容）</option>
                                             <option value="minimal">minimal（最少思考，OpenAI 风格）</option>
                                             <option value="low">low（低，简单问题可能跳过）</option>
                                             <option value="medium">medium（中等）</option>
@@ -1709,7 +1748,7 @@
                                             <option value="omitted">omitted（不返回思维链，仅签名）</option>
                                         </select>
                                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            Opus 4.7+ 默认 omitted（不返回思维链），设为 summarized 可看到思考内容
+                                            仅 Anthropic 原生格式生效（thinking.display 为 Messages API 专有字段）。Opus 4.7+ 默认 omitted（不返回思维链），设为 summarized 可看到思考内容
                                         </small>
                                     </div>
 
@@ -1718,6 +1757,36 @@
                                         <input type="text" id="thinking-separator" class="form-input" placeholder="例如: 【思考结束】">
                                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                             分隔思考与正文，留空不分隔
+                                        </small>
+                                    </div>
+
+                                    <!-- OAI 兼容 Anthropic thinking 参数（仅 OpenAI 兼容上游显示） -->
+                                    <div id="oai-thinking-type-config" class="form-group" style="margin-bottom: 0;">
+                                        <label class="form-label">🧩 OAI 兼容 thinking.type（Anthropic 格式）</label>
+                                        <select id="oai-thinking-type" class="form-input">
+                                            <option value="">不注入</option>
+                                            <option value="enabled">enabled（启用思考 + budget_tokens）</option>
+                                            <option value="adaptive">adaptive（自适应思考，Claude Opus 4.7+）</option>
+                                            <option value="disabled">disabled（显式禁用）</option>
+                                        </select>
+                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            注入 <code>thinking.type</code>（Anthropic Messages API 格式）。通过 OAI 兼容端点调用 Claude 时使用；与上方 enable_thinking 顶层字段独立
+                                        </small>
+                                    </div>
+
+                                    <div id="oai-thinking-effort-config" class="form-group" style="margin-bottom: 0;">
+                                        <label class="form-label">🧩 OAI 兼容 output_config.effort</label>
+                                        <select id="oai-thinking-effort" class="form-input">
+                                            <option value="">不注入</option>
+                                            <option value="minimal">minimal</option>
+                                            <option value="low">low</option>
+                                            <option value="medium">medium</option>
+                                            <option value="high">high</option>
+                                            <option value="xhigh">xhigh（Opus 4.7+）</option>
+                                            <option value="max">max（Opus 4.6+）</option>
+                                        </select>
+                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            注入 <code>output_config.effort</code>，配合 thinking.type 使用。与上方 reasoning_effort 顶层字段独立
                                         </small>
                                     </div>
                                 </div>
@@ -1788,7 +1857,7 @@
                             <div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
                                 <span>ℹ️</span>
                                 <div>
-                                    遇到 <code>429/503</code> 或其他错误时自动重试。<strong>每次重试失败都会计入错误统计</strong>。
+                                    遇到 <code>429/503</code> 或其他错误时自动重试。<strong>注意：仅对非流式请求生效；流式请求已返回 200 后无法触发重试。</strong>
                                 </div>
                             </div>
 
@@ -1796,6 +1865,7 @@
                                 <label style="display: flex; align-items: center;">
                                     <input type="checkbox" id="auto-retry-enabled" onchange="toggleAutoRetryOptions()" style="margin-right: 8px;">
                                     <span>启用模型级自动重试</span>
+                                    <small style="color: var(--text-dim); display: block; margin-top: 2px; font-size: 0.75rem;">⚠️ 仅对非流式（stream=false）请求生效</small>
                                 </label>
                             </div>
 
@@ -1841,6 +1911,13 @@
                                 <textarea id="custom-params" class="form-input" rows="3" placeholder='例如: {"chat_template_kwargs": {"thinking": true}}'></textarea>
                                 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     输入JSON格式的额外参数，这些参数将直接传递给API
+                                </small>
+                            </div>
+                            <div class="form-group" style="margin-bottom: 0; margin-top: 10px;">
+                                <label class="form-label">附加主体参数（JSON格式）</label>
+                                <textarea id="extra-body-params" class="form-input" rows="3" placeholder='例如: {"top_p": 0.9, "provider": {"order": ["DeepInfra"]}}'></textarea>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    附加到请求主体的参数（如 top_p、OpenRouter provider 指定提供商等），在自定义参数之后合并，同名键优先
                                 </small>
                             </div>
                         </div>

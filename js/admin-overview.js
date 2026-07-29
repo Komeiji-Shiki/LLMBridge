@@ -77,86 +77,9 @@ function switchRatePeriod(period) {
     refreshTokenStats();
 }
 
-// 刷新总体速率统计
-async function refreshOverallRates() {
-    try {
-        // 计算时间范围
-        const now = new Date();
-        const minutes = currentRatePeriod === 'day' ? 1440 : 60; // 一天1440分钟，一小时60分钟
-        const startTime = new Date(now.getTime() - minutes * 60 * 1000);
-        
-        // 使用精确的时间范围查询 (ISO 8601 格式)
-        let url = '/api/admin/token_stats';
-        const params = new URLSearchParams();
-        params.append('start_time', startTime.toISOString());
-        params.append('end_time', now.toISOString());
-        url += '?' + params.toString();
-        
-        const response = await fetch(url);
-        
-        // 检查HTTP状态
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
-        
-        const data = await response.json();
-        
-        if (!data.model_stats || data.model_stats.length === 0) {
-            document.getElementById('overall-rpm-value').textContent = '-';
-            document.getElementById('overall-tpm-value').textContent = '-';
-            document.getElementById('rate-total-requests').textContent = '0';
-            document.getElementById('rate-period-display').textContent =
-                currentRatePeriod === 'day' ? '24小时' : '1小时';
-            document.getElementById('rate-period-range').textContent = '暂无数据';
-            return;
-        }
-        
-        // 计算总体统计（这是时间段内的总数）
-        let totalRequests = 0;
-        let totalTokens = 0;
-        
-        data.model_stats.forEach(stat => {
-            totalRequests += stat.request_count || 0;
-            totalTokens += stat.total_tokens || 0;
-        });
-        
-        // 根据周期计算RPM和TPM
-        const actualMinutes = (now.getTime() - startTime.getTime()) / (1000 * 60);
-        const rpm = totalRequests > 0 && actualMinutes > 0 ? (totalRequests / actualMinutes) : 0;
-        const tpm = totalTokens > 0 && actualMinutes > 0 ? (totalTokens / actualMinutes) : 0;
-        
-        // 更新显示
-        document.getElementById('overall-rpm-value').textContent = rpm.toFixed(2);
-        document.getElementById('overall-tpm-value').textContent =
-            tpm >= 1000 ? (tpm / 1000).toFixed(2) + 'K' : tpm.toFixed(0);
-        document.getElementById('rate-total-requests').textContent = formatNumber(totalRequests);
-        document.getElementById('rate-period-display').textContent =
-            currentRatePeriod === 'day' ? '24小时' : '1小时';
-        
-        // 更新详细信息
-        const timeRange = `${startTime.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })} - ${now.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
-        document.getElementById('rate-period-range').textContent = timeRange;
-        
-    } catch (error) {
-        console.error('❌ 刷新总体速率统计失败:', error);
-        console.error('错误详情:', error.message);
-        // 显示错误状态
-        document.getElementById('overall-rpm-value').textContent = '错误';
-        document.getElementById('overall-tpm-value').textContent = '错误';
-        document.getElementById('rate-period-range').textContent = `错误: ${error.message}`;
-    }
-}
-
-// 🔧 优化：从缓存的 Token 统计数据中刷新总体速率卡片
-// 避免重复发起 /api/admin/token_stats 请求
+// 从缓存的 Token 统计数据中刷新总体速率卡片
+// （旧的 refreshOverallRates 会为同一份数据再发一次 /api/admin/token_stats，
+//  自被本函数取代后已无调用方，故删除）
 function updateOverallRatesFromCachedData() {
     try {
         const data = latestTokenStatsData;
@@ -238,8 +161,8 @@ async function refreshOverview(options = {}) {
         const statusHtml = `
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; color: var(--text-main);">
                 <div>
-                    <strong>运行模式:</strong> ${data.mode.mode}
-                    ${data.mode.mode === 'battle' ? ` (Target: ${data.mode.target})` : ''}
+                    <strong>运行模式:</strong> ${escapeHtml(data.mode.mode)}
+                    ${data.mode.mode === 'battle' ? ` (Target: ${escapeHtml(data.mode.target)})` : ''}
                 </div>
                 <div><strong>浏览器状态:</strong> <span class="badge ${data.browser_connected ? 'badge-success' : 'badge-danger'}">${data.browser_connected ? '在线' : '离线'}</span></div>
                 <div><strong>标签页数量:</strong> ${data.total_tabs}</div>
@@ -261,8 +184,8 @@ async function refreshOverview(options = {}) {
                 <tbody>
                     ${data.active_requests.map(req => `
                         <tr>
-                            <td style="font-family: monospace; font-size: 12px;">${req.request_id}</td>
-                            <td>${req.model}</td>
+                            <td style="font-family: monospace; font-size: 12px;">${escapeHtml(req.request_id)}</td>
+                            <td>${escapeHtml(req.model)}</td>
                             <td><span class="badge badge-info">处理中</span></td>
                             <td>${new Date(req.timestamp * 1000).toLocaleString()}</td>
                         </tr>

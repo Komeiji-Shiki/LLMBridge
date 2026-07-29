@@ -17,10 +17,15 @@ process_sse_chunk 闭包，约 30 个闭包变量通过 nonlocal 共享，完全
 2. 删除了声明但从未使用的 decode_buffer 变量。
 """
 import codecs
+import copy
 import json
 import logging
 import time
 
+from ._direct_api_reasoning_cache import (
+    merge_reasoning_detail_chunks,
+    store_reasoning_details,
+)
 from ._direct_api_utils import (
     append_tool_call_delta,
     build_response_message,
@@ -29,7 +34,9 @@ from ._direct_api_utils import (
     estimate_text_tokens_non_blocking,
     extract_tool_calls_from_message,
     finalize_tool_calls,
+    _enrich_error_message,
 )
+from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +82,15 @@ class PassthroughStreamSession:
         self.upstream_done_received = False
         self.content_parts = []
         self.reasoning_parts = []
+        # OpenRouter reasoning_details 增量分片（Anthropic thinking 签名在其中）
+        self.reasoning_detail_chunks = []
         self.tool_call_accumulator = {}
         self.input_tokens = 0
         self.output_tokens = 0
         self.total_tokens = 0
         self.reasoning_tokens = 0
         self.cached_tokens = 0
+        self.upstream_usage = None  # 上游返回的原生 usage 对象（原样保留，供日志记录）
         self.separator_found = False
         self.repetition_detected = False  # 预留：回放检测
         self.request_end_called = False
@@ -95,6 +105,9 @@ class PassthroughStreamSession:
         self._utf8_decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         self._pending_line = ""
 
+        # ---- tool args unicode 转义流式解码状态（tool index → 解码器）----
+        self._tool_args_unescapers = {}
+
     # ================= 断连处理 =================
 
     def mark_client_disconnect(self, reason: str) -> None:
@@ -106,6 +119,7 @@ class PassthroughStreamSession:
         self.request_success = False
         self.error_msg = reason
 
+        self._flush_tool_args_tails()
         partial_content = ''.join(self.content_parts)
         partial_reasoning = ''.join(self.reasoning_parts)
         local_input_tokens = self.input_tokens or 0
@@ -121,7 +135,8 @@ class PassthroughStreamSession:
             response_content=partial_content, reasoning_content=partial_reasoning,
             full_messages=self.full_messages,
             response_message=build_response_message(partial_content, partial_reasoning, partial_tool_calls),
-            response_tool_calls=partial_tool_calls)
+            response_tool_calls=partial_tool_calls,
+            upstream_usage=self.upstream_usage)
         self.request_end_called = True
 
     async def handle_client_disconnect(self) -> None:
@@ -145,7 +160,7 @@ class PassthroughStreamSession:
         if not chunk_str:
             return b''
 
-        lines, self._pending_line, buffered_incomplete_line = extract_complete_sse_lines(
+        lines, self._pending_line, needs_reassembly = extract_complete_sse_lines(
             chunk_str, self._pending_line)
         result_lines = []
         modified = False
@@ -163,95 +178,118 @@ class PassthroughStreamSession:
                     lines_skipped = True
                     logger.debug(f"[SSE_FILTER] 过滤掉上游 [DONE]")
                     continue
-                line_modified = False
-                try:
-                    chunk_json = json.loads(data_content)
-                except json.JSONDecodeError as json_err:
-                    chunk_json, fixed = self._try_fix_broken_json(data_content, json_err)
-                    if not fixed:
-                        logger.debug(f"[JSON_PARSE_FAIL] 位置: {json_err.pos if hasattr(json_err, 'pos') else 'N/A'}, 数据前100字符: {data_content[:100]}")
-                        result_lines.append(line_stripped)
-                        continue
+                events, remainder = self._extract_json_objects(data_content)
+                if not events:
+                    # 整行无法解析：原样透传，不做任何“修复”（下游自行处理）
+                    logger.debug(
+                        "[JSON_PARSE_FAIL] 无法解析 data 行, 长度=%d, 前100字符: %s",
+                        len(data_content), data_content[:100])
+                    result_lines.append(line)
+                    continue
+
+                glued = len(events) > 1 or bool(remainder)
+                if glued:
                     modified = True
-                    line_modified = True
+                    logger.warning(
+                        "[SSE_GLUED_EVENTS] 检测到粘连的 SSE 事件行: %d 个对象, 残余 %d 字符",
+                        len(events), len(remainder))
 
-                try:
-                    line_modified = self._check_error_event(chunk_json) or line_modified
-                    if line_modified and self.upstream_error_detected:
-                        modified = True
-
-                    delta = {}
-                    skip_line = False
-
-                    if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
-                        delta_modified, skip_line, delta = self._process_choices(chunk_json)
-                        if delta_modified:
-                            line_modified = True
-                        if skip_line:
-                            lines_skipped = True
-                            continue
-
-                    if self._process_usage(chunk_json):
-                        line_modified = True
-
-                    # reasoning 字段名归一化（reasoning → reasoning_content）
-                    if 'reasoning' in delta and 'reasoning_content' not in delta:
-                        delta['reasoning_content'] = delta.pop('reasoning')
-                        chunk_json['choices'][0]['delta'] = delta
-                        line_modified = True
-                        logger.debug(f"[REASONING_FIELD_CONVERT] 将 reasoning 转换为 reasoning_content")
-
-                    if line_modified:
-                        modified = True
-                        result_lines.append(SSE_DATA_PREFIX + json.dumps(chunk_json, ensure_ascii=False))
+                forwarded_any = False
+                for chunk_json in events:
+                    event_modified, skip_event = self._process_event_json(chunk_json)
+                    if skip_event:
+                        lines_skipped = True
                         continue
-
-                except Exception as process_err:
-                    logger.debug(f"[PROCESS_SSE] 处理行时出错: {process_err}")
-                    if line_modified:
+                    if event_modified or glued:
+                        modified = True
+                        if forwarded_any:
+                            # SSE 规范：独立事件之间必须用空行分隔，
+                            # 否则相邻 data 行会被客户端拼成同一个事件
+                            result_lines.append('')
                         result_lines.append(SSE_DATA_PREFIX + json.dumps(chunk_json, ensure_ascii=False))
-                        continue
+                    else:
+                        result_lines.append(line)
+                    forwarded_any = True
+
+                if remainder:
+                    # 行内残余无法恢复（行已完整，不存在跨 chunk 补全的可能），
+                    # 不再静默丢弃：完整记录供排查
+                    logger.warning(
+                        "[SSE_TAIL_REMAINDER] 丢弃无法解析的行内残余 %d 字符, 前200字符: %s",
+                        len(remainder), remainder[:200])
+                continue
 
             result_lines.append(line)
 
-        if modified or lines_skipped or buffered_incomplete_line:
-            return '\n'.join(result_lines).encode('utf-8')
+        if modified or lines_skipped or needs_reassembly:
+            # 🔧 每行补回换行符重组。不能用 '\n'.join：跨 chunk 拼接场景下
+            # 事件终止空行的换行数会因 split/join 的边界语义少一个，
+            # 相邻事件会被下游客户端拼成同一个事件
+            return ''.join(line + '\n' for line in result_lines).encode('utf-8')
         else:
             return chunk_bytes
 
-    # ---- JSON 修复启发式 ----
+    # ---- SSE 事件 JSON 提取与处理 ----
 
     @staticmethod
-    def _try_fix_broken_json(data_content: str, json_err) -> tuple:
-        """尝试修复截断/拼接的 JSON 行，返回 (chunk_json, fixed)。"""
-        # 1) 截断修复：JSON 后面跟了垃圾数据
-        if hasattr(json_err, 'pos') and json_err.pos > 1 and json_err.pos < len(data_content):
+    def _extract_json_objects(data_content: str) -> tuple:
+        """用标准 JSON 解析器从一行 data 内容中依次提取所有 JSON 对象。
+
+        返回 (objects, remainder)：
+        - objects: 依次解析出的 JSON 值列表（正常情况恰好一个）
+        - remainder: 尾部无法解析的残余字符串（空串表示全部解析成功）
+
+        raw_decode 是真正的 JSON 解析器，能正确跳过字符串值内部的
+        花括号等内容，不会像子串启发式那样误切；粘连的多个事件全部保留。
+        """
+        decoder = json.JSONDecoder()
+        objects = []
+        idx = 0
+        length = len(data_content)
+        while idx < length:
+            while idx < length and data_content[idx].isspace():
+                idx += 1
+            if idx >= length:
+                break
             try:
-                truncated_json = json.loads(data_content[:json_err.pos])
-                if isinstance(truncated_json, dict) and (
-                        'choices' in truncated_json or 'error' in truncated_json or 'usage' in truncated_json):
-                    logger.warning(f"[JSON_TRUNCATE_FIX] 截取前 {json_err.pos}/{len(data_content)} 字符修复成功")
-                    return truncated_json, True
-            except json.JSONDecodeError:
-                pass
+                obj, end = decoder.raw_decode(data_content, idx)
+            except (json.JSONDecodeError, ValueError):
+                return objects, data_content[idx:]
+            objects.append(obj)
+            idx = end
+        return objects, ""
 
-        # 2) 拼接修复：两个 JSON 对象连在同一行
-        concat_patterns = ['}{', '}\n{', '}\r\n{']
-        for pattern in concat_patterns:
-            if pattern in data_content:
-                split_pos = data_content.find(pattern) + 1
-                first_json_str = data_content[:split_pos]
-                second_json_str = data_content[split_pos:].lstrip('\n\r')
-                for json_str in [second_json_str, first_json_str]:
-                    try:
-                        chunk_json = json.loads(json_str)
-                        if 'choices' in chunk_json or 'error' in chunk_json:
-                            logger.warning(f"[JSON_CONCAT_FIX] 检测到拼接JSON，已修复。模式: '{pattern}'")
-                            return chunk_json, True
-                    except json.JSONDecodeError:
-                        continue
+    def _process_event_json(self, chunk_json) -> tuple:
+        """处理单个 SSE 事件 JSON（错误检测/choices/usage/reasoning 归一化）。
 
-        return None, False
+        返回 (event_modified, skip_event)。
+        """
+        event_modified = False
+        try:
+            event_modified = self._check_error_event(chunk_json)
+
+            delta = {}
+
+            if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
+                delta_modified, skip_event, delta = self._process_choices(chunk_json)
+                if delta_modified:
+                    event_modified = True
+                if skip_event:
+                    return event_modified, True
+
+            if self._process_usage(chunk_json):
+                event_modified = True
+
+            # reasoning 字段名归一化（reasoning → reasoning_content）
+            if 'reasoning' in delta and 'reasoning_content' not in delta:
+                delta['reasoning_content'] = delta.pop('reasoning')
+                chunk_json['choices'][0]['delta'] = delta
+                event_modified = True
+                logger.debug("[REASONING_FIELD_CONVERT] 将 reasoning 转换为 reasoning_content")
+        except Exception as process_err:
+            logger.debug("[PROCESS_SSE] 处理事件时出错: %s", process_err)
+        return event_modified, False
+
 
     # ---- 错误事件检测 ----
 
@@ -262,7 +300,13 @@ class PassthroughStreamSession:
 
         self.upstream_error_detected = True
         error_val = chunk_json['error']
-        self.error_msg = str(error_val)
+
+        # 提取友好的错误消息（合并 metadata 中的详细信息）
+        if isinstance(error_val, dict):
+            self.error_msg = _enrich_error_message(error_val)
+        else:
+            self.error_msg = str(error_val)
+
         logger.error(f"[DIRECT_API_PASSTHROUGH] 流式上游返回错误事件: {chunk_json}")
 
         # 归一化：如果 error 是字符串而非对象，包装成 OpenAI 兼容格式
@@ -273,7 +317,12 @@ class PassthroughStreamSession:
                 "code": "unknown"
             }
             return True
-        return False
+
+        # error 是 dict：把丰富后的 message 写回（保留其他字段如 code、metadata）
+        enriched_error = dict(error_val)
+        enriched_error['message'] = self.error_msg
+        chunk_json['error'] = enriched_error
+        return True
 
     # ---- choices/delta 处理（含 thinking 分离） ----
 
@@ -287,6 +336,7 @@ class PassthroughStreamSession:
         raw_content = delta.get('content', '')
         raw_reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
         raw_tool_calls = delta.get('tool_calls')
+        tool_calls_from_delta = bool(raw_tool_calls)
 
         message = chunk_json['choices'][0].get('message', {}) if isinstance(chunk_json['choices'][0], dict) else {}
         if isinstance(message, dict):
@@ -295,7 +345,25 @@ class PassthroughStreamSession:
             raw_tool_calls = raw_tool_calls or extract_tool_calls_from_message(message)
 
         if raw_tool_calls:
+            # 提前把参数中的 \uXXXX 转义解码为明文再转发下游（跨 chunk 安全）
+            if tool_calls_from_delta:
+                if self._decode_tool_args_inplace(raw_tool_calls, streaming=True):
+                    line_modified = True
+            else:
+                # message 整体形式：raw_tool_calls 是重建的副本，两份都规范化
+                # （副本进监控累积器，message 原件转发给下游）
+                self._decode_tool_args_inplace(raw_tool_calls, streaming=False)
+                if isinstance(message, dict) and isinstance(message.get('tool_calls'), list):
+                    if self._decode_tool_args_inplace(message['tool_calls'], streaming=False):
+                        line_modified = True
             append_tool_call_delta(self.tool_call_accumulator, raw_tool_calls)
+
+        # 收集 OpenRouter reasoning_details 增量分片（含 thinking 签名，供下一轮回传恢复）
+        raw_details = delta.get('reasoning_details')
+        if not raw_details and isinstance(message, dict):
+            raw_details = message.get('reasoning_details')
+        if isinstance(raw_details, list) and raw_details:
+            self.reasoning_detail_chunks.extend(raw_details)
 
         # thinking_separator 流式切分
         if self.thinking_separator and not self._split_done and raw_content:
@@ -351,6 +419,71 @@ class PassthroughStreamSession:
 
         return line_modified, False, delta
 
+    def _decode_tool_args_inplace(self, tool_calls, streaming: bool) -> bool:
+        """把 tool_calls 参数中的 \\uXXXX 转义提前解码为明文（原地修改）。
+
+        streaming=True（delta 增量形式）时按 index 维护跨 chunk 解码状态；
+        False（message 整体形式）时对完整 arguments 一次性规范化。
+        返回是否有修改（触发 SSE 行重编码转发给下游）。
+        """
+        modified = False
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            func = tc.get("function")
+            if not isinstance(func, dict):
+                continue
+            args = func.get("arguments")
+            if not isinstance(args, str) or not args:
+                continue
+            if streaming:
+                idx = tc.get("index", 0)
+                unescaper = self._tool_args_unescapers.get(idx)
+                if unescaper is None:
+                    unescaper = self._tool_args_unescapers[idx] = StreamingUnicodeUnescaper()
+                if "\\" not in args and not unescaper.pending:
+                    continue
+                decoded = unescaper.feed(args)
+            else:
+                decoded = normalize_tool_args_json(args)
+            if decoded != args:
+                func["arguments"] = decoded
+                modified = True
+        return modified
+
+    def _flush_tool_args_tails(self) -> list:
+        """冲刷各解码器的残留尾部，并入累积器保证监控记录字节完整。
+
+        残留只在流于转义序列中间截断时出现；flush 幂等，可安全多次调用。
+        返回应补发给下游客户端的 SSE delta 字节块列表（可能为空）。
+        """
+        filler_chunks = []
+        for idx, unescaper in self._tool_args_unescapers.items():
+            tail = unescaper.flush()
+            if tail:
+                append_tool_call_delta(
+                    self.tool_call_accumulator,
+                    [{"index": idx, "function": {"arguments": tail}}])
+                # 构造 SSE delta 块补发给客户端
+                filler_chunk = {
+                    "id": f"chatcmpl-{self.request_id}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": self.display_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": idx,
+                                "function": {"arguments": tail}
+                            }]
+                        }
+                    }]
+                }
+                filler_chunks.append(
+                    (SSE_DATA_PREFIX + json.dumps(filler_chunk, ensure_ascii=False) + "\n\n").encode('utf-8'))
+        return filler_chunks
+
     # ---- usage 处理 ----
 
     def _process_usage(self, chunk_json) -> bool:
@@ -360,6 +493,18 @@ class PassthroughStreamSession:
 
         line_modified = False
         usage = chunk_json['usage']
+
+        # 原样保留上游返回的原生 usage（必须在本地修正之前深拷贝；部分上游分批下发时增量合并）
+        if isinstance(usage, dict) and usage:
+            try:
+                native_usage = copy.deepcopy(usage)
+                if isinstance(self.upstream_usage, dict):
+                    self.upstream_usage.update(native_usage)
+                else:
+                    self.upstream_usage = native_usage
+            except Exception:
+                pass
+
         base_prompt = usage.get('prompt_tokens', 0) or usage.get('input_tokens', 0)
         base_output = usage.get('completion_tokens', 0) or usage.get('output_tokens', 0)
 
@@ -411,6 +556,17 @@ class PassthroughStreamSession:
                 final_content = main_part
                 logger.info(f"[THINKING_SPLIT] 检测到思考内容分隔符，分离出 {len(reasoning_part)} 字符的思考内容")
 
+        # 缓存 OpenRouter reasoning_details（含 Anthropic thinking 签名），供下一轮回传恢复
+        if self.reasoning_detail_chunks:
+            try:
+                merged_details = merge_reasoning_detail_chunks(self.reasoning_detail_chunks)
+                store_reasoning_details(final_reasoning, merged_details)
+                logger.info(
+                    f"[DIRECT_API_REASONING] 已缓存 reasoning_details: "
+                    f"{len(merged_details)} 块, 思考文本 {len(final_reasoning)} 字符")
+            except Exception as cache_err:
+                logger.warning(f"[DIRECT_API_REASONING] reasoning_details 缓存失败: {cache_err}")
+
         # Token 计算
         local_stats = self.endpoint_config.get("token_stats_mode") == "local"
         if self.input_tokens == 0 or local_stats:
@@ -429,13 +585,18 @@ class PassthroughStreamSession:
 
         total_output_text = (final_reasoning or "") + (final_content or "")
         content_char_count = len(total_output_text) if total_output_text else 0
-        min_expected_tokens = content_char_count // 3 if content_char_count > 0 else 0
 
+        # 🔧 高并发优化：默认信任上游返回的 usage，移除旧版"上游值偏小"的
+        # 字符数启发式重算（代码/高压缩内容极易误触发，高并发下每个请求都
+        # 多跑一次本地 tokenizer，会灌满默认线程池并加剧 GIL 争抢）。
+        # 仅以下三种情况才调用本地 tokenizer：
+        # - local 统计模式（endpoint 显式配置忽略上游值）
+        # - 上游未返回有效 output_tokens
+        # - 回放检测生效（内容已被本地截断，上游值失真）
         should_recalculate = (
             local_stats
             or self.output_tokens <= 1
             or self.repetition_detected
-            or (content_char_count > 100 and self.output_tokens < min_expected_tokens * 0.5)
         )
 
         if should_recalculate and total_output_text:
@@ -444,8 +605,7 @@ class PassthroughStreamSession:
                     self.estimate_tokens_func, total_output_text, self.display_name)
                 if local_stats or calculated_output_tokens >= 10:
                     reason = "local统计模式" if local_stats else (
-                        "回放检测" if self.repetition_detected else (
-                            "上游值偏小" if self.output_tokens > 1 else "上游未返回"))
+                        "回放检测" if self.repetition_detected else "上游未返回")
                     logger.info(f"[DIRECT_API_PASSTHROUGH] Token修正({reason}): 上游={self.output_tokens}, 计算={calculated_output_tokens}, 内容={content_char_count}字符")
                     self.output_tokens = calculated_output_tokens
             except Exception as token_error:
@@ -460,6 +620,7 @@ class PassthroughStreamSession:
             input_tokens=self.input_tokens, output_tokens=self.output_tokens,
             cached_tokens=self.cached_tokens,
             pricing=self.pricing_config) if self.pricing_config else {}
+        filler_chunks = self._flush_tool_args_tails()
         final_tool_calls = finalize_tool_calls(self.tool_call_accumulator)
 
         self.monitoring_service.request_end(
@@ -470,7 +631,8 @@ class PassthroughStreamSession:
             reasoning_content=final_reasoning,
             cost_info=cost_info, full_messages=self.full_messages,
             response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
-            response_tool_calls=final_tool_calls)
+            response_tool_calls=final_tool_calls,
+            upstream_usage=self.upstream_usage)
         self.request_end_called = True
         await self.monitoring_service.broadcast_to_monitors({
             "type": "request_end", "request_id": self.request_id,
@@ -493,6 +655,10 @@ class PassthroughStreamSession:
 
         # 组装最后的 usage chunk 和 [DONE]
         tail_chunks = []
+        # 补发 unicode 转义解码尾部残留 delta（此前只补进累积器，客户端缺少这几个字符）
+        if filler_chunks:
+            tail_chunks.extend(filler_chunks)
+            logger.debug(f"[SSE_TAIL_FILLER] 补发 {len(filler_chunks)} 个 tool_args 尾部 delta")
         if self.input_tokens > 0 or self.output_tokens > 0:
             final_total_tokens = self.total_tokens if self.total_tokens > 0 else (self.input_tokens + self.output_tokens)
             usage_final_chunk = {
@@ -504,7 +670,11 @@ class PassthroughStreamSession:
                 "usage": {
                     "prompt_tokens": self.input_tokens,
                     "completion_tokens": self.output_tokens,
-                    "total_tokens": final_total_tokens
+                    "total_tokens": final_total_tokens,
+                    **({"prompt_tokens_details": {"cached_tokens": self.cached_tokens}}
+                       if self.cached_tokens else {}),
+                    **({"completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens}}
+                       if self.reasoning_tokens else {})
                 }
             }
             tail_chunks.append(

@@ -1,16 +1,20 @@
 """
 后台监控任务
-包含内存监控、配置文件监控、活跃请求清理等
+包含内存监控、配置文件监控、活跃请求清理、日志保留清理等
 """
 import asyncio
 import gc
 import logging
 import os
 import psutil
+import re
+import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
+from core.config_loader import get_float_setting
 from core.constants import (
     TimeoutDefaults,
     CacheDefaults,
@@ -20,8 +24,90 @@ from core.constants import (
 
 logger = logging.getLogger(__name__)
 
+# 🔧 配置接线：管理面板（js/admin-config.js）会把这三个轮询间隔写入
+# config.jsonc 的 background_tasks 段，但此前三个任务都直接用 ServerDefaults
+# 里的常量，用户调完保存后毫无效果。改为每轮循环读取，同时跟随热重载生效。
+_INTERVAL_KEYS = {
+    "config_monitor": ("background_tasks.config_monitor_interval", ServerDefaults.CONFIG_MONITOR_INTERVAL),
+    "memory_monitor": ("background_tasks.memory_monitor_interval", ServerDefaults.MEMORY_MONITOR_INTERVAL),
+    "stale_cleaner": ("background_tasks.stale_cleaner_interval", ServerDefaults.STALE_CLEANER_INTERVAL),
+}
 
-async def stale_request_cleaner(monitoring_service, response_channels: dict = None, request_metadata: dict = None):
+
+def _interval(task: str) -> float:
+    """读取指定后台任务的轮询间隔（秒），非法值回退到默认常量。"""
+    path, default = _INTERVAL_KEYS[task]
+    return get_float_setting(path, default)
+
+
+def _purge_expired_logs(monitoring_service) -> None:
+    """同步清理逻辑（在线程池中执行，不阻塞事件循环）：
+    - 删除 logs/ 下超过 MAX_LOG_DAYS 的日期目录（YYYYMMDD 命名，分层 JSON 日志）
+    - 删除 SQLite 中超过 MAX_DB_DAYS 的请求记录（保留期更长，避免长期费用统计缩水）
+    """
+    from modules.monitoring import MonitorConfig
+
+    cutoff_str = (datetime.now() - timedelta(days=MonitorConfig.MAX_LOG_DAYS)).strftime("%Y%m%d")
+    log_dir = Path(MonitorConfig.LOG_DIR)
+    removed_dirs = 0
+
+    if log_dir.exists():
+        for entry in log_dir.iterdir():
+            # 只碰 8 位数字命名的日期目录，requests.db / stats.json 等文件不受影响
+            if entry.is_dir() and re.fullmatch(r"\d{8}", entry.name) and entry.name < cutoff_str:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed_dirs += 1
+
+    deleted_rows = 0
+    sqlite_logger = getattr(monitoring_service.log_manager, "sqlite_logger", None)
+    if sqlite_logger is not None:
+        deleted_rows = sqlite_logger.purge_old_records(MonitorConfig.MAX_DB_DAYS)
+
+    if removed_dirs or deleted_rows:
+        logger.info(f"[LOG_CLEANER] 🧹 清理完成: 删除 {removed_dirs} 个过期日期目录, "
+                    f"{deleted_rows} 条过期 SQLite 记录")
+    else:
+        logger.debug("[LOG_CLEANER] 无过期日志需要清理")
+
+
+async def log_retention_cleaner(monitoring_service):
+    """每日日志保留清理任务。
+
+    MonitorConfig 中的 MAX_LOG_DAYS/MAX_DB_DAYS 此前只是定义了策略而没有执行者，
+    logs 目录会无限增长（每请求一个 JSON 文件 + SQLite 行）。
+    """
+    from modules.monitoring import MonitorConfig
+
+    logger.info(f"[LOG_CLEANER] 日志保留清理任务已启动"
+                f"（日志文件保留 {MonitorConfig.MAX_LOG_DAYS} 天, SQLite 保留 {MonitorConfig.MAX_DB_DAYS} 天）")
+
+    # 启动后延迟 5 分钟执行首轮，避免与启动期任务（费用重算、缓存预热）抓 IO
+    await asyncio.sleep(300)
+    while True:
+        try:
+            await asyncio.to_thread(_purge_expired_logs, monitoring_service)
+        except Exception as e:
+            logger.error(f"[LOG_CLEANER] 错误: {e}", exc_info=True)
+        await asyncio.sleep(24 * 3600)
+
+
+async def api_key_stats_saver(interval_seconds: int = 300):
+    """周期性把 API Key 使用统计落盘。
+
+    validate_request 属于热路径，只更新内存统计不写盘；
+    旧版只在优雅关闭时 save_now()，强杀进程会丢失全部统计。
+    """
+    from core.api_key_manager import api_key_manager
+    logger.info("[APIKEY_SAVER] API Key 统计落盘任务已启动")
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await asyncio.to_thread(api_key_manager.save_if_dirty)
+        except Exception as e:
+            logger.error(f"[APIKEY_SAVER] 落盘失败: {e}", exc_info=True)
+
+
+async def stale_request_cleaner(monitoring_service, response_channels: Optional[dict] = None, request_metadata: Optional[dict] = None):
     """
     核心修复：定期清理超时的活跃请求
     防止请求因异常而永久卡在"处理中"状态
@@ -30,17 +116,32 @@ async def stale_request_cleaner(monitoring_service, response_channels: dict = No
     
     while True:
         try:
-            await asyncio.sleep(ServerDefaults.STALE_CLEANER_INTERVAL)
+            await asyncio.sleep(_interval("stale_cleaner"))
             
             cleaned_count, stale_request_ids = monitoring_service.cleanup_stale_requests()
             
             if stale_request_ids and (response_channels is not None or request_metadata is not None):
                 for req_id in stale_request_ids:
                     if response_channels is not None:
+                        # 先向队列投递错误，避免消费者永久挂起
+                        queue = response_channels.get(req_id)
+                        if queue is not None:
+                            try:
+                                queue.put_nowait({"error": "Request cleaned up by stale request cleaner (timeout)"})
+                            except Exception:
+                                pass
                         response_channels.pop(req_id, None)
                         logger.debug(f"[STALE_CLEANER] 已清理响应通道: {req_id[:8]}")
                     if request_metadata is not None:
+                        # 释放标签页计数
+                        from core.load_balancer import release_tab
+                        tab_id = request_metadata[req_id].get("tab_id") if req_id in request_metadata else None
                         request_metadata.pop(req_id, None)
+                        if tab_id:
+                            try:
+                                await release_tab(tab_id)
+                            except Exception as e:
+                                logger.debug(f"[STALE_CLEANER] release_tab 失败 (tab={tab_id}): {e}")
                         logger.debug(f"[STALE_CLEANER] 已清理请求元数据: {req_id[:8]}")
             
             if cleaned_count > 0:
@@ -63,15 +164,16 @@ async def config_monitor(CONFIG, CONFIG_FILE_MTIMES, load_config_func, load_mode
     
     while True:
         try:
-            await asyncio.sleep(ServerDefaults.CONFIG_MONITOR_INTERVAL)
+            await asyncio.sleep(_interval("config_monitor"))
             
             current_time = time.time()
             config_changes = []
             
+            # 🔧 配置重载是同步文件 IO + threading.Lock，移入线程池避免卡事件循环
             try:
                 config_mtime = os.path.getmtime('config.jsonc')
                 if config_mtime != CONFIG_FILE_MTIMES.get('config.jsonc', 0):
-                    load_config_func()
+                    await asyncio.to_thread(load_config_func)
                     config_changes.append(f"config.jsonc (修改于 {datetime.fromtimestamp(config_mtime).strftime('%H:%M:%S')})")
             except FileNotFoundError:
                 pass
@@ -79,7 +181,7 @@ async def config_monitor(CONFIG, CONFIG_FILE_MTIMES, load_config_func, load_mode
             try:
                 map_mtime = os.path.getmtime('model_endpoint_map.json')
                 if map_mtime != CONFIG_FILE_MTIMES.get('model_endpoint_map.json', 0):
-                    load_model_endpoint_map_func()
+                    await asyncio.to_thread(load_model_endpoint_map_func)
                     config_changes.append(f"model_endpoint_map.json (修改于 {datetime.fromtimestamp(map_mtime).strftime('%H:%M:%S')})")
             except FileNotFoundError:
                 pass
@@ -87,7 +189,7 @@ async def config_monitor(CONFIG, CONFIG_FILE_MTIMES, load_config_func, load_mode
             try:
                 models_mtime = os.path.getmtime('models.json')
                 if models_mtime != CONFIG_FILE_MTIMES.get('models.json', 0):
-                    load_model_map_func()
+                    await asyncio.to_thread(load_model_map_func)
                     CONFIG_FILE_MTIMES['models.json'] = models_mtime
                     config_changes.append(f"models.json (修改于 {datetime.fromtimestamp(models_mtime).strftime('%H:%M:%S')})")
             except FileNotFoundError:
@@ -128,11 +230,13 @@ async def memory_monitor(
     
     while True:
         try:
-            await asyncio.sleep(ServerDefaults.MEMORY_MONITOR_INTERVAL)
-            
-            memory_info = process.memory_info()
+            await asyncio.sleep(_interval("memory_monitor"))
+
+            # psutil 在 Windows 上单次 memory_info() 可能耗时 10-50ms，
+            # 与 monitor_routes.get_memory_info 保持一致丢线程池，不占事件循环
+            memory_info = await asyncio.to_thread(process.memory_info)
             memory_mb = memory_info.rss / (1024 * 1024)
-            
+
             active_downloads = MAX_CONCURRENT_DOWNLOADS - DOWNLOAD_SEMAPHORE._value if DOWNLOAD_SEMAPHORE else 0
             
             logger.info(f"[MEM_MONITOR] 内存: {memory_mb:.2f}MB | "
@@ -214,11 +318,11 @@ async def memory_monitor(
                         logger.info(f"[MEM_MONITOR] 🧹 图片缓存仍较大: {len(IMAGE_BASE64_CACHE)} 条")
                     
                     # 执行GC
-                    gc.collect()
+                    await asyncio.to_thread(gc.collect)
                     last_gc_time = current_time
-                    
-                    fresh_process = psutil.Process(os.getpid())
-                    new_memory_mb = fresh_process.memory_info().rss / (1024 * 1024)
+
+                    new_info = await asyncio.to_thread(psutil.Process(os.getpid()).memory_info)
+                    new_memory_mb = new_info.rss / (1024 * 1024)
                     freed_mb = memory_mb - new_memory_mb
                     
                     logger.info(f"[MEM_MONITOR] GC后内存: {memory_mb:.2f}MB -> {new_memory_mb:.2f}MB "
@@ -227,4 +331,4 @@ async def memory_monitor(
                         logger.warning(f"[MEM_MONITOR] ⚠️ 内存仍高 ({new_memory_mb:.2f}MB)，可能有大对象泄漏")
                     
         except Exception as e:
-            logger.error(f"[MEM_MONITOR] 错误: {e}")
+            logger.error(f"[MEM_MONITOR] 错误: {e}", exc_info=True)

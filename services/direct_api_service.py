@@ -12,14 +12,51 @@ import asyncio
 import aiohttp
 import json
 import logging
+import mimetypes
+import re
 import time
 import uuid
 import base64
-from typing import AsyncGenerator, Optional, Dict, Any, List
+from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
+from urllib.parse import quote
 
 from core.config_loader import CONFIG
 
 logger = logging.getLogger(__name__)
+
+
+_SSE_EVENT_SEPARATOR = re.compile(rb"\r?\n\r?\n")
+
+
+def _extract_complete_sse_events(buffer: bytes, search_start: int = 0) -> Tuple[List[bytes], bytes]:
+    """从字节缓冲中提取所有完整的 SSE 事件（以空行分隔）。
+
+    SSE 规范中事件之间以空行（LF 或 CRLF）分隔；上游分包可能把一个事件
+    从中间切断（例如携带签名的 signature_delta），因此这里只输出已收到
+    完整终止符的事件，剩余不完整数据留给后续分包拼全。
+
+    返回 (完整事件列表, 剩余不完整数据)。事件内容原样保留（含 event: 行），
+    分隔符统一为 LF 空行。
+
+    search_start: 分隔符扫描起点。🔧 性能修复：调用方持续追加数据时，
+    已确认无分隔符的前缀无需重复扫描（旧版每个 TCP 分包都对整个缓冲
+    全量正则扫描，超大单事件下退化为 O(n²)）；分隔符最长 4 字节，
+    调用方应从剩余缓冲末尾回退 3 字节作为下次起点。
+    """
+    events: List[bytes] = []
+    pos = 0
+    for match in _SSE_EVENT_SEPARATOR.finditer(buffer, search_start):
+        # bytes() 拷贝：兼容 bytearray 缓冲，事件对外始终是不可变 bytes
+        event_bytes = bytes(buffer[pos:match.start()]) + b"\n\n"
+        if event_bytes.strip():
+            events.append(event_bytes)
+        pos = match.end()
+    if pos == 0:
+        # 🔧 无完整事件：原对象直接返回，不做切片拷贝。调用方用 bytearray
+        # 原地追加时，这里的 buffer[0:] 切片会把整个缓冲复制一遍，
+        # 大事件（base64 图片）下每个 TCP 分包都全量复制，退化为 O(n²)
+        return events, buffer
+    return events, buffer[pos:]
 
 
 def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> dict:
@@ -107,12 +144,13 @@ async def _iter_sse_json_events(
 
     async for raw_chunk in response.content.iter_any():
         buffer += decoder.decode(raw_chunk)
-        while True:
-            newline_pos = buffer.find('\n')
-            if newline_pos < 0:
-                break
-            line = buffer[:newline_pos].strip()
-            buffer = buffer[newline_pos + 1:]
+        if '\n' not in buffer:
+            continue
+        # 🔧 性能：一次 split 处理本批所有完整行（旧版逐行 find+切片，
+        # 单批行数多时 O(n²)）；最后一段是未完成行，保留到下一批
+        *complete_lines, buffer = buffer.split('\n')
+        for raw_line in complete_lines:
+            line = raw_line.strip()
             if not line:
                 continue
             event = _parse_line(line)
@@ -175,7 +213,7 @@ class DirectAPIService:
     def _convert_schema_for_gemini(schema: Dict[str, Any]) -> Dict[str, Any]:
         """
         将 OAI JSON Schema 转换为 Gemini 支持的格式。
-        主要是移除 Gemini 不支持的字段。
+        主要是移除 Gemini 不支持的字段，以及补齐 Gemini 严格要求但 OAI schema 可能省略的字段。
         """
         result = {}
         for key, value in schema.items():
@@ -183,10 +221,27 @@ class DirectAPIService:
                 continue  # Gemini 不支持
             elif key == "properties" and isinstance(value, dict):
                 result[key] = {k: DirectAPIService._convert_schema_for_gemini(v) for k, v in value.items()}
-            elif key == "items" and isinstance(value, dict):
-                result[key] = DirectAPIService._convert_schema_for_gemini(value)
+            elif key == "items":
+                # Gemini 严格要求 array 类型必须有 items 字段。
+                # OAI schema 中 items 常见形式：
+                #   - dict:  {"type": "string", ...}  → 递归转换
+                #   - str:   "string"                    → 包装为 {"type": "string"}
+                #   - list:  [{...}, ...]               → 取首元素（tuple validation 降级）
+                if isinstance(value, dict):
+                    result[key] = DirectAPIService._convert_schema_for_gemini(value)
+                elif isinstance(value, str):
+                    result[key] = {"type": value}
+                elif isinstance(value, list):
+                    # JSON Schema 支持 tuple validation（items 是数组），但 Gemini 只接受对象形式。
+                    # 取第一个元素的 schema 作为降级处理（大多数 case 全元素同构）。
+                    result[key] = DirectAPIService._convert_schema_for_gemini(value[0]) if value else {"type": "string"}
+                else:
+                    result[key] = value
             else:
                 result[key] = value
+        # 安全兜底：如果 type 是 array 但没有 items，补齐默认 items
+        if result.get("type") == "array" and "items" not in result:
+            result["items"] = {"type": "string"}
         return result
     
     @staticmethod
@@ -392,7 +447,7 @@ class DirectAPIService:
                 timeout=aiohttp.ClientTimeout(
                     total=CONFIG.get("api_call_timeout_seconds", 3000),
                     sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 30)
+                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
                 )
             ) as response:
                 # 检查响应状态
@@ -569,11 +624,11 @@ class DirectAPIService:
         thinking_config: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
-        **kwargs
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         调用Gemini原生API（非OpenAI兼容格式）
-        
+
         Args:
             api_key: Google API密钥
             model: 模型名称（如gemini-2.5-pro）
@@ -586,8 +641,9 @@ class DirectAPIService:
             thinking_config: 思维链配置（可选）
             tools: OpenAI 格式的 tools 列表（将转换为 Gemini functionDeclarations）
             tool_choice: OAI tool_choice（将转换为 Gemini toolConfig）
-            **kwargs: 其他参数
-        
+            extra_body: 额外的 Gemini 原生请求体键值对（直接合并到 request_body）。
+                使用显式参数而非 **kwargs，消除配置键与命名形参碰撞导致 TypeError 的风险。
+
         Yields:
             响应数据块（Gemini原生格式）
         """
@@ -596,17 +652,31 @@ class DirectAPIService:
         
         # 修复：流式请求必须添加 alt=sse 参数，让 Gemini 返回标准 SSE 格式
         sse_param = "&alt=sse" if stream else ""
-        
+
+        # 🔧 key 拼接进查询串前做 URL 编码，防特殊字符破坏 URL
+        key_param = quote(api_key or "", safe="")
+
+        def _redact(text: str) -> str:
+            """脱敏：key 以明文与 URL 编码两种形态出现在 URL/异常消息中"""
+            if api_key:
+                text = text.replace(api_key, '***')
+                if key_param != api_key:
+                    text = text.replace(key_param, '***')
+            return text
+
         if base_url:
             # 使用自定义地址（如本地反代）
-            endpoint = f"{base_url.rstrip('/')}/v1beta/models/{model}:{method}?key={api_key}{sse_param}"
+            endpoint = f"{base_url.rstrip('/')}/v1beta/models/{model}:{method}?key={key_param}{sse_param}"
         else:
             # 使用Google官方地址
-            endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={api_key}{sse_param}"
+            endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={key_param}{sse_param}"
         
         # 转换OpenAI格式消息为Gemini格式
         gemini_contents = []
         system_instruction_parts = []
+        # tool_call id → 函数名映射（assistant 消息先于对应 tool 结果出现，
+        # 单遍遍历即可建立；旧版从 id 字符串猜函数名，call_xxx 会猜出错误名字）
+        tool_id_to_name: Dict[str, str] = {}
         
         for msg in messages:
             role = msg.get("role")
@@ -616,19 +686,36 @@ class DirectAPIService:
             if role == "tool":
                 tool_call_id = msg.get("tool_call_id", "")
                 
-                # 根据 tool_call_id 推断函数名
-                func_name = tool_call_id.split("_", 1)[-1] if "_" in tool_call_id else "_unknown"
+                # 优先用 assistant tool_calls 建立的映射；未命中时回退到旧版推断
+                func_name = tool_id_to_name.get(tool_call_id) or (
+                    tool_call_id.split("_", 1)[-1] if "_" in tool_call_id else "_unknown")
+                
+                # content 可能是 str / dict / list（OpenAI 允许 content parts 数组）
+                if isinstance(content, dict):
+                    response_payload = content
+                elif isinstance(content, list):
+                    # 旧版直接 str(content) 会产生 Python repr 污染工具结果，
+                    # 改为拼接全部文本块
+                    text_parts = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            if item.get("type") == "text" and item.get("text"):
+                                text_parts.append(item["text"])
+                        elif isinstance(item, str):
+                            text_parts.append(item)
+                    response_payload = {"content": "".join(text_parts)}
+                else:
+                    response_payload = {"content": content if isinstance(content, str) else str(content)}
                 
                 function_response_part = {
                     "functionResponse": {
                         "name": func_name,
-                        "response": {"content": content if isinstance(content, str) else str(content)},
-                        "id": tool_call_id  # Gemini 3 要求的 id 字段
+                        "response": response_payload
                     }
                 }
-                
-                if isinstance(content, dict):
-                    function_response_part["functionResponse"]["response"] = content
+                # Gemini 3 系列要求携带 id 关联调用；为空时不携带，兼容旧版 API
+                if tool_call_id:
+                    function_response_part["functionResponse"]["id"] = tool_call_id
                 
                 gemini_contents.append({
                     "role": "user",  # Gemini 的工具结果使用 user 角色
@@ -646,6 +733,11 @@ class DirectAPIService:
                     for item in content:
                         if isinstance(item, dict) and item.get("type") == "text":
                             text_content += item.get("text", "")
+                        elif isinstance(item, str):
+                            text_content += item
+                        else:
+                            # Gemini systemInstruction 仅支持文本，非文本块无法表达
+                            logger.debug("[GEMINI_NATIVE] systemInstruction 仅支持文本，已忽略非文本块")
                 
                 if text_content:
                     system_instruction_parts.append({"text": text_content})
@@ -656,6 +748,13 @@ class DirectAPIService:
                 # 检查content是否为列表（多模态格式）
                 if isinstance(content, list):
                     for item in content:
+                        # content parts 允许裸字符串项
+                        if isinstance(item, str):
+                            if item:
+                                parts.append({"text": item})
+                            continue
+                        if not isinstance(item, dict):
+                            continue
                         item_type = item.get("type")
                         
                         if item_type == "text":
@@ -688,13 +787,26 @@ class DirectAPIService:
                             
                             elif url.startswith("http://") or url.startswith("https://"):
                                 # HTTP URL格式图片
+                                # 🔧 按 URL 扩展名推断 MIME（旧版硬编码 image/jpeg，
+                                # PNG/WebP 图片会 mime 不匹配被上游拒收/误解析）
+                                guessed_mime, _ = mimetypes.guess_type(url.split("?", 1)[0])
+                                image_mime = guessed_mime if (guessed_mime or "").startswith("image/") else "image/jpeg"
                                 parts.append({
                                     "fileData": {
-                                        "mimeType": "image/jpeg",
+                                        "mimeType": image_mime,
                                         "fileUri": url
                                     }
                                 })
-                                logger.debug(f"[GEMINI_NATIVE] 添加URL图片: {url[:50]}...")
+                                logger.debug(f"[GEMINI_NATIVE] 添加URL图片: {url[:50]}... ({image_mime})")
+                        
+                        else:
+                            # 未知类型块：能提取文本则保留，否则记录警告后丢弃
+                            # （旧版静默丢弃，排查无从下手）
+                            fallback_text = item.get("text")
+                            if isinstance(fallback_text, str) and fallback_text:
+                                parts.append({"text": fallback_text})
+                            else:
+                                logger.warning(f"[GEMINI_NATIVE] 跳过不支持的内容块类型: {item_type}")
                 
                 elif isinstance(content, str):
                     # 纯文本格式
@@ -716,7 +828,39 @@ class DirectAPIService:
                 
                 if isinstance(content, str) and content:
                     parts.append({"text": content})
-                elif not content:
+                elif isinstance(content, list):
+                    # 多模态列表：提取文本部分（旧版直接丢弃）
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                            parts.append({"text": item["text"]})
+                
+                # 🔧 tool_calls 历史 → functionCall parts
+                # （旧版完全不转换，多轮工具调用时 Gemini 看不到自己
+                # 之前调过什么工具，上下文丢失）
+                tool_calls = msg.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for tc in tool_calls:
+                        if not isinstance(tc, dict):
+                            continue
+                        func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                        fc_name = func.get("name", "")
+                        args_raw = func.get("arguments", "{}")
+                        try:
+                            fc_args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                        except json.JSONDecodeError:
+                            fc_args = {}
+                        function_call: Dict[str, Any] = {
+                            "name": fc_name,
+                            "args": fc_args if isinstance(fc_args, dict) else {}
+                        }
+                        tc_id = tc.get("id")
+                        if tc_id:
+                            function_call["id"] = tc_id
+                            if fc_name:
+                                tool_id_to_name[tc_id] = fc_name
+                        parts.append({"functionCall": function_call})
+                
+                if not parts:
                     parts.append({"text": " "})
                 
                 gemini_contents.append({
@@ -765,12 +909,13 @@ class DirectAPIService:
         if generation_config:
             request_body["generationConfig"] = generation_config
         
-        # 合并额外的参数（如custom_params中的其他参数）
-        if kwargs:
-            request_body.update(kwargs)
-            logger.info(f"[GEMINI_NATIVE] 已添加额外参数: {kwargs}")
+        # 合并额外的 Gemini 原生请求体字段（如 custom_params/extra_body_params）。
+        # 🔧 安全性：以显式 extra_body 参数传入，避免配置键与命名形参碰撞导致 TypeError 500
+        if extra_body:
+            request_body.update(extra_body)
+            logger.info(f"[GEMINI_NATIVE] 已添加额外请求体字段: {list(extra_body.keys())}")
         
-        logger.info(f"[GEMINI_NATIVE] 调用Gemini原生API: {endpoint.replace(api_key, '***')}")
+        logger.info(f"[GEMINI_NATIVE] 调用Gemini原生API: {_redact(endpoint)}")
         logger.info(f"[GEMINI_NATIVE] 模型: {model}, 流式: {stream}")
         if temperature is not None:
             logger.info(f"[GEMINI_NATIVE] temperature: {temperature}")
@@ -795,7 +940,7 @@ class DirectAPIService:
                 timeout=aiohttp.ClientTimeout(
                     total=CONFIG.get("api_call_timeout_seconds", 3000),
                     sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 30)
+                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
                 )
             ) as response:
                 # 检查响应状态
@@ -834,18 +979,23 @@ class DirectAPIService:
                 }
             }
         except aiohttp.ClientError as e:
-            logger.error(f"[GEMINI_NATIVE] 网络请求失败: {e}")
+            # 🔧 脱敏：Gemini 的 key 拼在 URL 查询串里，部分 aiohttp 异常
+            # （InvalidURL 等）的 str() 会携带完整 URL，不脱敏就直接把 key
+            # 泄漏进日志和客户端错误响应
+            safe_err = _redact(str(e))
+            logger.error(f"[GEMINI_NATIVE] 网络请求失败: {safe_err}")
             yield {
                 "error": {
-                    "message": f"Network error: {str(e)}",
+                    "message": f"Network error: {safe_err}",
                     "type": "network_error"
                 }
             }
         except Exception as e:
-            logger.error(f"[GEMINI_NATIVE] 未知错误: {e}", exc_info=True)
+            safe_err = _redact(str(e))
+            logger.error(f"[GEMINI_NATIVE] 未知错误: {safe_err}", exc_info=True)
             yield {
                 "error": {
-                    "message": f"Unexpected error: {str(e)}",
+                    "message": f"Unexpected error: {safe_err}",
                     "type": "internal_error"
                 }
             }
@@ -877,14 +1027,19 @@ class DirectAPIService:
                 
                 if "content" in candidate and "parts" in candidate["content"]:
                     parts = candidate["content"]["parts"]
-                    for i, part in enumerate(parts):
+                    for part in parts:
                         # 处理函数调用
                         if "functionCall" in part:
                             fc = part["functionCall"]
                             if tool_calls is None:
                                 tool_calls = []
+                            # 🔧 修复：index 必须是 tool_calls 内部的连续序号。
+                            # 旧版用 parts 的下标，parts 里混有 text 块时会得到
+                            # 不连续的 index（如 [text, functionCall] → index=1），
+                            # 客户端按 index 聚合流式工具调用时直接错位。
                             tool_calls.append(
-                                DirectAPIService._gemini_function_call_to_oai_tool_call(fc, index=i)
+                                DirectAPIService._gemini_function_call_to_oai_tool_call(
+                                    fc, index=len(tool_calls))
                             )
                         # 处理文本
                         elif "text" in part:
@@ -912,26 +1067,15 @@ class DirectAPIService:
             if "usageMetadata" in gemini_response:
                 metadata = gemini_response["usageMetadata"]
                 thoughts_tokens = metadata.get("thoughtsTokenCount", 0)
-                
-                if is_stream_chunk:
-                    return {
-                        "id": request_id,
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "reasoning_content": reasoning_content if reasoning_content else None,
-                                "content": content if content else None,
-                                "tool_calls": tool_calls  # 可能为 None
-                            },
-                            "finish_reason": finish_reason
-                        }],
-                        "usage": None
-                    }
 
-                if thoughts_tokens == 0 and reasoning_content:
+                # 🔧 修复：旧版流式 chunk 在此提前 return "usage": None，把上游
+                # 给的精确 token 计数整个丢弃，下游只能退化为本地 tokenizer
+                # 估算。现在流式 chunk 与非流式共用下方的 usage 计算逻辑
+                # （Gemini 流式分块中的 usageMetadata 是累积快照，
+                # 下游以最后一个值为准）。
+                if thoughts_tokens == 0 and reasoning_content and not is_stream_chunk:
+                    # 仅非流式做估算兜底：流式 chunk 的 reasoning_content
+                    # 是增量，按增量估算会严重低估
                     thoughts_tokens = len(reasoning_content) // 4
                 
                 prompt_tokens = metadata.get("promptTokenCount", 0)
@@ -997,6 +1141,18 @@ class DirectAPIService:
                 "usage": usage
             }
     
+    @staticmethod
+    def _format_error_bytes(error_response: dict, is_stream: bool) -> bytes:
+        """将错误响应格式化为合适的字节输出。
+        流式模式：包装为 SSE 格式（data: + [DONE]），确保流式处理器能正确转发。
+        非流式模式：纯 JSON，调用方直接拼接后解析。
+        """
+        error_json_str = json.dumps(error_response, ensure_ascii=False)
+        if is_stream:
+            return f"data: {error_json_str}\n\ndata: [DONE]\n\n".encode('utf-8')
+        else:
+            return error_json_str.encode('utf-8')
+
     async def call_api_passthrough(
         self,
         base_url: str,
@@ -1047,7 +1203,24 @@ class DirectAPIService:
         
         logger.info(f"[DIRECT_API_PASSTHROUGH] 透传模式调用API: {endpoint}")
         logger.info(f"[DIRECT_API_PASSTHROUGH] 模型: {request_body.get('model')}, 流式: {is_stream}")
-        
+
+        # ── 诊断：检查图片 media_type ──
+        for msg_idx, msg in enumerate(request_body.get("messages", [])):
+            content = msg.get("content")
+            if isinstance(content, list):
+                for blk_idx, block in enumerate(content):
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        src = block.get("source", {})
+                        mt = src.get("media_type", "N/A")
+                        dl = len(src.get("data", ""))
+                        logger.info(
+                            f"[DIRECT_API_PASSTHROUGH] 消息[{msg_idx}] 图片块[{blk_idx}]: "
+                            f"source.type={src.get('type')!r}, media_type={mt!r}, data_len={dl}")
+                        if ";" in str(mt):
+                            logger.error(
+                                f"[DIRECT_API_PASSTHROUGH] ❌ 检测到异常的 media_type: {mt!r} "
+                                f"(包含分号，将导致上游400错误)")
+
         try:
             request_body_json = await asyncio.to_thread(
                 json.dumps,
@@ -1062,7 +1235,7 @@ class DirectAPIService:
                 timeout=aiohttp.ClientTimeout(
                     total=CONFIG.get("api_call_timeout_seconds", 3000),
                     sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 30)
+                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
                 )
             ) as response:
                 # 检查响应状态
@@ -1076,8 +1249,7 @@ class DirectAPIService:
                         error_json = json.loads(error_text)
                         normalized = _normalize_error_for_passthrough(
                             error_json, response.status)
-                        yield json.dumps(
-                            normalized, ensure_ascii=False).encode('utf-8')
+                        yield self._format_error_bytes(normalized, is_stream)
                     except json.JSONDecodeError:
                         # 如果不是JSON，则封装成OpenAI兼容的错误格式
                         error_response = {
@@ -1087,7 +1259,7 @@ class DirectAPIService:
                                 "code": response.status
                             }
                         }
-                        yield json.dumps(error_response).encode('utf-8')
+                        yield self._format_error_bytes(error_response, is_stream)
                     return
                 
                 # 🔧 关键修复：检查Content-Type，防止Cloudflare等返回HTML被当作JSON/SSE透传
@@ -1103,78 +1275,41 @@ class DirectAPIService:
                             "code": 502
                         }
                     }
-                    yield json.dumps(error_response).encode('utf-8')
+                    yield self._format_error_bytes(error_response, is_stream)
                     return
-                
-                # 关键修复：按 SSE 行边界读取和转发，正确处理粘包问题
-                partial_line = b""
-                async for chunk, _ in response.content.iter_chunks():
-                    if not chunk:
-                        continue
-                    
-                    # 合并之前的残留数据
-                    data = partial_line + chunk
-                    
-                    # 找到最后一个 \n 的位置，之后的部分可能是不完整的行
-                    last_newline_pos = data.rfind(b'\n')
-                    
-                    if last_newline_pos == -1:
-                        # 这一整段都没有换行，可能是被分割的不完整行
-                        partial_line = data
-                        continue
-                    
-                    # 保留最后一部分作为下一次的残留
-                    partial_line = data[last_newline_pos + 1:]
-                    # 处理完整的行
-                    lines_data = data[:last_newline_pos + 1]
-                    
-                    # 按 \n\n (SSE事件分隔符) 分割
-                    events = lines_data.split(b'\n\n')
-                    
-                    for i, event in enumerate(events):
-                        if not event.strip():
+                if is_stream:
+                    # 按 SSE 事件边界（空行）缓冲转发：一个事件必须完整送达。
+                    # 旧实现按"最后一个换行符"切分并给每个片段强补 \n\n 终止符，
+                    # 会把被 TCP 分包切断的事件拆成两个残缺事件。携带思维链
+                    # 签名的 signature_delta 一旦被切断，客户端便拿不到完整签名，
+                    # 下一轮回传历史时会被上游 400 拒绝（signature: undefined）。
+                    # 🔧 bytearray 缓冲：bytes 的 += 每次全量复制（CPython 仅对
+                    # str 有原地优化），bytearray 的 += 是真正的原地追加
+                    buffer = bytearray()
+                    scan_start = 0
+                    async for chunk, _ in response.content.iter_chunks():
+                        if not chunk:
                             continue
-                        
-                        # 确保事件以 data: 开头
-                        event_str = event.decode('utf-8', errors='replace')
-                        
-                        # 处理事件中可能的多个 data: 行被粘在一起的情况
-                        lines = event_str.split('\n')
-                        processed_lines = []
-                        
-                        for line in lines:
-                            line = line.rstrip('\r')
-                            # 如果一行里有多个 data: ，需要分割
-                            if line.startswith('data:') and 'data:' in line[5:]:
-                                pos = 5
-                                while True:
-                                    next_data_pos = line.find('data:', pos)
-                                    if next_data_pos == -1:
-                                        break
-                                    first_part = line[:next_data_pos].rstrip()
-                                    if first_part:
-                                        processed_lines.append(first_part)
-                                    line = line[next_data_pos:]
-                                    pos = 5
-                            
-                            if line.strip():
-                                processed_lines.append(line)
-                        
-                        # 重建事件
-                        if processed_lines:
-                            processed_event = '\n'.join(processed_lines)
-                            # 确保每个事件以 \n\n 结尾
-                            yield (processed_event + '\n\n').encode('utf-8')
-                
-                # 处理最后残留的数据
-                if partial_line.strip():
-                    try:
-                        final_line = partial_line.decode('utf-8', errors='replace').strip()
-                        if final_line:
-                            yield (final_line + '\n\n').encode('utf-8')
-                    except:
-                        pass
-        
+                        buffer += chunk
+                        events, buffer = _extract_complete_sse_events(buffer, scan_start)
+                        # 剩余缓冲已确认无完整分隔符；下次从末尾回退 3 字节
+                        # 开始扫（分隔符最长 \r\n\r\n = 4 字节，防跨包切断）
+                        scan_start = max(0, len(buffer) - 3)
+                        for event_bytes in events:
+                            yield event_bytes
+
+                    # 流结束后输出残留数据（上游未按规范以空行收尾的最后一段）
+                    if buffer.strip():
+                        yield bytes(buffer.rstrip(b"\r\n")) + b"\n\n"
+                else:
+                    # 🔧 非流式 JSON：原样透传字节，不做 SSE 事件切分。
+                    # 旧版非流式也走事件切分：大 JSON 在 buffer 中 O(n²) 拼接，
+                    # 还会被追加 \n\n、CRLF 被改写 —— 正是下游
+                    # json.loads(text[:e.pos]) 截断 hack 存在的根源。
+                    async for chunk, _ in response.content.iter_chunks():
+                        if chunk:
+                            yield chunk
+
         except asyncio.TimeoutError:
             logger.error(f"[DIRECT_API_PASSTHROUGH] 请求超时 (模型: {request_body.get('model')})")
             error_response = {
@@ -1183,7 +1318,7 @@ class DirectAPIService:
                     "type": "timeout_error"
                 }
             }
-            yield json.dumps(error_response).encode('utf-8')
+            yield self._format_error_bytes(error_response, is_stream)
         except aiohttp.ClientError as e:
             logger.error(f"[DIRECT_API_PASSTHROUGH] 网络请求失败: {e}")
             error_response = {
@@ -1192,7 +1327,7 @@ class DirectAPIService:
                     "type": "network_error"
                 }
             }
-            yield json.dumps(error_response).encode('utf-8')
+            yield self._format_error_bytes(error_response, is_stream)
         except Exception as e:
             logger.error(f"[DIRECT_API_PASSTHROUGH] 未知错误: {e}", exc_info=True)
             error_response = {
@@ -1201,7 +1336,7 @@ class DirectAPIService:
                     "type": "internal_error"
                 }
             }
-            yield json.dumps(error_response).encode('utf-8')
+            yield self._format_error_bytes(error_response, is_stream)
     
     def calculate_cost(
         self,
@@ -1270,9 +1405,9 @@ def get_direct_api_service(aiohttp_session: aiohttp.ClientSession = None) -> Dir
     global direct_api_service
     if direct_api_service is None:
         direct_api_service = DirectAPIService(aiohttp_session=aiohttp_session)
-    elif aiohttp_session is not None and direct_api_service.session != aiohttp_session:
-        if direct_api_service._own_session:
-            pass
+    elif aiohttp_session is not None and direct_api_service.session is not aiohttp_session:
+        # 注意：同步函数无法 await 关闭旧的自建 session，直接切换为共享连接池；
+        # 正常启动流程会先调 init_direct_api_service，不会走到这个分支
         direct_api_service.session = aiohttp_session
         direct_api_service._own_session = False
     return direct_api_service

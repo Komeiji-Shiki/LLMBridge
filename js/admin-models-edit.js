@@ -78,13 +78,8 @@ function getApiKeys() {
     return keys;
 }
 
-/**
- * HTML 属性转义
- */
-function escapeHtmlForAttr(str) {
-    if (!str) return '';
-    return String(str).replace(/&/g, '&').replace(/"/g, '"').replace(/</g, '<').replace(/>/g, '>');
-}
+// escapeHtmlForAttr 已上移到 admin-core.js（被本文件与 admin-apikeys.js 共用），
+// 顺带补上单引号转义 —— 旧实现不转 ' ，属性用单引号包裹时可被闭合。
 
 // 折叠面板切换函数
 function toggleCollapsible(headerElement) {
@@ -112,21 +107,30 @@ function showAddModelModal() {
     document.getElementById('model-id').value = '';
     document.getElementById('display-name').value = '';
     document.getElementById('passthrough').checked = true;
+    document.getElementById('force-stream').value = '';
     document.getElementById('convert-system-to-user').checked = false;
     document.getElementById('enable-prefix').checked = false;
     document.getElementById('enable-partial').checked = false;
     document.getElementById('prefill-content').value = '';
     document.getElementById('enable-thinking').value = '';
+    document.getElementById('thinking-control').value = 'budget';
     document.getElementById('thinking-budget').value = '20000';
     document.getElementById('thinking-effort').value = '';
     document.getElementById('thinking-display').value = 'summarized';
+    document.getElementById('oai-verbosity').value = '';
+    document.getElementById('oai-thinking-type').value = '';
+    document.getElementById('oai-thinking-effort').value = '';
     document.getElementById('thinking-separator').value = '';
+    document.getElementById('anthropic-auto-cache').checked = false;
     toggleThinkingOptions();
     document.getElementById('pricing-input').value = '';
     document.getElementById('pricing-output').value = '';
     document.getElementById('pricing-unit').value = '1000000';
     document.getElementById('pricing-currency').value = 'USD';
+    document.getElementById('pricing-cached-input').value = '';
+    document.getElementById('token-stats-mode').value = 'api';
     document.getElementById('custom-params').value = '';
+    document.getElementById('extra-body-params').value = '';
     document.getElementById('max-temperature').value = '';
     document.getElementById('lmarena-max-temperature').value = '';
     document.getElementById('max-tokens').value = '';
@@ -423,6 +427,7 @@ function fillModelForm(config) {
         document.getElementById('display-name').value = config.display_name || '';
         document.getElementById('endpoint-path').value = config.endpoint_path || '/chat/completions';
         document.getElementById('passthrough').checked = config.passthrough !== false;
+        document.getElementById('force-stream').value = config.force_stream !== undefined ? String(config.force_stream) : '';
         document.getElementById('convert-system-to-user').checked = config.convert_system_to_user || false;
         document.getElementById('enable-prefix').checked = config.enable_prefix || false;
         document.getElementById('enable-partial').checked = config.enable_partial || false;
@@ -445,6 +450,11 @@ function fillModelForm(config) {
         // thinking_effort（adaptive 模式）/ reasoning_effort（启用思考模式）共用同一个下拉框
         document.getElementById('thinking-effort').value = config.reasoning_effort || config.thinking_effort || '';
         document.getElementById('thinking-display').value = config.thinking_display || 'summarized';
+        document.getElementById('oai-verbosity').value = config.verbosity || '';
+        document.getElementById('oai-thinking-type').value = config.oai_thinking_type || '';
+        document.getElementById('oai-thinking-effort').value = config.oai_thinking_effort || '';
+        // 自动提示词缓存（仅 Anthropic 原生格式消费）
+        document.getElementById('anthropic-auto-cache').checked = config.auto_cache === true;
         toggleThinkingOptions();
         document.getElementById('thinking-separator').value = config.thinking_separator || '';
         
@@ -453,6 +463,13 @@ function fillModelForm(config) {
             document.getElementById('custom-params').value = JSON.stringify(config.custom_params, null, 2);
         } else {
             document.getElementById('custom-params').value = '';
+        }
+        
+        // 加载附加主体参数
+        if (config.extra_body_params) {
+            document.getElementById('extra-body-params').value = JSON.stringify(config.extra_body_params, null, 2);
+        } else {
+            document.getElementById('extra-body-params').value = '';
         }
         
         if (config.pricing) {
@@ -477,7 +494,7 @@ function fillModelForm(config) {
         document.getElementById('max-tokens').value = config.max_tokens || '';
         
         // 加载缓存Token统计模式
-        document.getElementById('cached-tokens-mode').value = config.cached_tokens_mode || 'off';
+        document.getElementById('cached-tokens-mode').value = config.cached_tokens_mode || 'reverse';
         
         // 加载Token统计来源
         document.getElementById('token-stats-mode').value = config.token_stats_mode || 'api';
@@ -583,6 +600,14 @@ async function saveModel() {
             enable_partial: document.getElementById('enable-partial').checked,
         };
 
+        // 强制流式/非流式：仅在非空时写入配置
+        const forceStreamVal = document.getElementById('force-stream').value;
+        if (forceStreamVal === 'true') {
+            config.force_stream = true;
+        } else if (forceStreamVal === 'false') {
+            config.force_stream = false;
+        }
+
         // 思维链模式：四态处理
         // true/false 保存为布尔值（兼容 OpenRouter/OpenAI 模式），adaptive 保存为字符串
         const etVal = document.getElementById('enable-thinking').value;
@@ -609,11 +634,34 @@ async function saveModel() {
         }
         // etVal === '' 时不设置 enable_thinking 字段（透传客户端参数）
 
-        // thinking_display 在启用思考（true/adaptive）时生效
-        if (etVal === 'true' || etVal === 'adaptive') {
+        // thinking_display 仅 Anthropic 原生上游消费（thinking.display 为 Messages API 专有字段）
+        if ((etVal === 'true' || etVal === 'adaptive') && apiType === 'anthropic_native') {
             const displayVal = document.getElementById('thinking-display').value;
             if (displayVal) {
                 config.thinking_display = displayVal;
+            }
+        }
+
+        // 自动提示词缓存：仅 Anthropic 原生格式生效
+        if (apiType === 'anthropic_native' && document.getElementById('anthropic-auto-cache').checked) {
+            config.auto_cache = true;
+        }
+
+        // verbosity 仅 OpenAI 兼容上游生效（GPT-5 系列 Chat Completions 顶层参数）
+        if (apiType === 'direct_api') {
+            const verbosityVal = document.getElementById('oai-verbosity').value;
+            if (verbosityVal) {
+                config.verbosity = verbosityVal;
+            }
+
+            // OAI 兼容 Anthropic thinking 参数
+            const oaiThinkingType = document.getElementById('oai-thinking-type').value;
+            if (oaiThinkingType) {
+                config.oai_thinking_type = oaiThinkingType;
+            }
+            const oaiThinkingEffort = document.getElementById('oai-thinking-effort').value;
+            if (oaiThinkingEffort) {
+                config.oai_thinking_effort = oaiThinkingEffort;
             }
         }
 
@@ -666,6 +714,18 @@ async function saveModel() {
             }
         }
         
+        // 处理附加主体参数
+        const extraBodyParamsStr = document.getElementById('extra-body-params').value.trim();
+        if (extraBodyParamsStr) {
+            try {
+                const extraBodyParams = JSON.parse(extraBodyParamsStr);
+                config.extra_body_params = extraBodyParams;
+            } catch (e) {
+                alert('附加主体参数格式错误，请输入有效的JSON格式\n错误: ' + e.message);
+                return;
+            }
+        }
+        
         const pricingInput = document.getElementById('pricing-input').value;
         const pricingOutput = document.getElementById('pricing-output').value;
         
@@ -694,7 +754,7 @@ async function saveModel() {
         
         // 保存缓存Token统计模式
         const cachedTokensMode = document.getElementById('cached-tokens-mode').value;
-        if (cachedTokensMode && cachedTokensMode !== 'off') {
+        if (cachedTokensMode && cachedTokensMode !== 'reverse') {
             config.cached_tokens_mode = cachedTokensMode;
         }
         
@@ -769,10 +829,17 @@ async function saveModel() {
     }
     
     try {
+        // 🔧 修复：编辑模式下改名时传 old_model_name，让后端做重命名而非新增。
+        // 旧版不论修改与否都发同名 POST，改名=新增重复模型，旧配置继续存活。
+        const body = { model_name: modelName, config: config };
+        if (currentEditingModel && currentEditingModel !== modelName) {
+            body.old_model_name = currentEditingModel;
+        }
+
         const response = await fetch('/api/admin/models', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model_name: modelName, config: config })
+            body: JSON.stringify(body)
         });
         
         if (!response.ok) {
@@ -809,9 +876,22 @@ function toggleThinkingOptions() {
     const displayDiv = document.getElementById('thinking-display-config');
     if (!select || !optionsDiv) return;
     const val = select.value;
+    const apiType = document.getElementById('api-type')?.value || 'direct_api';
     // 启用思考或自适应思考时显示子选项区域
     const showOptions = (val === 'true' || val === 'adaptive');
     optionsDiv.style.display = showOptions ? 'block' : 'none';
+    // verbosity 仅对 OpenAI 兼容上游显示（GPT-5 系列顶层参数），与是否启用思考无关
+    const verbosityDiv = document.getElementById('verbosity-config');
+    if (verbosityDiv) verbosityDiv.style.display = (apiType === 'direct_api') ? 'block' : 'none';
+    // OAI 兼容 thinking.type / output_config.effort 仅对 OpenAI 兼容上游显示，
+    // Anthropic 原生格式下由顶层 enable_thinking 控制，显示这两项只会误导
+    const oaiThinkingTypeDiv = document.getElementById('oai-thinking-type-config');
+    const oaiThinkingEffortDiv = document.getElementById('oai-thinking-effort-config');
+    if (oaiThinkingTypeDiv) oaiThinkingTypeDiv.style.display = (apiType === 'direct_api') ? 'block' : 'none';
+    if (oaiThinkingEffortDiv) oaiThinkingEffortDiv.style.display = (apiType === 'direct_api') ? 'block' : 'none';
+    // 自动提示词缓存仅对 Anthropic 原生上游显示
+    const autoCacheDiv = document.getElementById('anthropic-auto-cache-config');
+    if (autoCacheDiv) autoCacheDiv.style.display = (apiType === 'anthropic_native') ? 'block' : 'none';
     if (val === 'true') {
         // 启用思考：显示控制方式选择器，按控制方式切换 budget / effort
         const controlMode = document.getElementById('thinking-control')?.value || 'budget';
@@ -824,5 +904,6 @@ function toggleThinkingOptions() {
         if (budgetDiv) budgetDiv.style.display = 'none';
         if (effortDiv) effortDiv.style.display = (val === 'adaptive') ? 'block' : 'none';
     }
-    if (displayDiv) displayDiv.style.display = showOptions ? 'block' : 'none';
+    // thinking.display 为 Anthropic Messages API 专有字段，仅 anthropic_native 上游显示
+    if (displayDiv) displayDiv.style.display = (showOptions && apiType === 'anthropic_native') ? 'block' : 'none';
 }

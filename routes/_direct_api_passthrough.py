@@ -3,6 +3,7 @@ Direct API - 透传模式处理
 支持 OpenAI/Anthropic 兼容 API 的流式与非流式透传
 """
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -13,10 +14,13 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from core.constants import TimeoutDefaults
+from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
+from ._direct_api_reasoning_cache import lookup_reasoning_details, store_reasoning_details
 from ._direct_api_stream_session import PassthroughStreamSession, SSE_DATA_PREFIX
 from ._direct_api_utils import (
     build_response_message,
+    detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     extract_tool_calls_from_message,
@@ -26,6 +30,9 @@ from ._direct_api_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 超过该大小的响应体才丢线程池解析/序列化（小 body 的线程切换开销比解析本身还大）
+_JSON_OFFLOAD_THRESHOLD_BYTES = 64 * 1024
 
 
 async def handle_passthrough_direct(
@@ -56,13 +63,20 @@ async def handle_passthrough_direct(
     if not endpoint_path.startswith("/"):
         endpoint_path = "/" + endpoint_path
 
-    monitor_extra_params = {"upstream_model": target_model_id, "endpoint_path": endpoint_path}
-    custom_params = endpoint_config.get("custom_params", {})
-    if isinstance(custom_params, dict):
-        monitor_extra_params.update(custom_params)
-    enable_thinking = endpoint_config.get("enable_thinking")
-    if enable_thinking is not None:
-        monitor_extra_params["enable_thinking"] = enable_thinking
+    monitor_extra_params: dict = {"upstream_model": target_model_id, "endpoint_path": endpoint_path}
+    # 自定义参数/附加主体参数以独立字段记录到监控日志，避免平铺覆盖监控字段
+    custom_params = endpoint_config.get("custom_params")
+    if isinstance(custom_params, dict) and custom_params:
+        monitor_extra_params["custom_params"] = custom_params
+    extra_body_params = endpoint_config.get("extra_body_params")
+    if isinstance(extra_body_params, dict) and extra_body_params:
+        monitor_extra_params["extra_body_params"] = extra_body_params
+    # 记录思考相关配置到监控日志（便于排查注入是否生效）
+    for key in ("enable_thinking", "reasoning_effort", "thinking_budget", "thinking_effort",
+                "oai_thinking_type", "oai_thinking_effort", "force_stream", "verbosity"):
+        val = endpoint_config.get(key)
+        if val is not None and val != "":
+            monitor_extra_params[key] = val
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -129,6 +143,16 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
     passthrough_request = openai_req.copy()
     passthrough_request["model"] = target_model_id
 
+    # 🔧 写时复制：后续会直接修改消息 dict（空文本过滤/system转user/
+    # prefix/partial/reasoning 占位）。openai_req.copy() 是浅拷贝，
+    # 消息 dict 与监控记录的 full_messages 共享引用，不复制会污染
+    # 监控日志中的原始请求消息。逐条 dict() 浅复制字段引用，开销极小。
+    if isinstance(passthrough_request.get("messages"), list):
+        passthrough_request["messages"] = [
+            dict(m) if isinstance(m, dict) else m
+            for m in passthrough_request["messages"]
+        ]
+
     # 🔍 诊断：打印实际发送的图片 URL 格式
     if "messages" in passthrough_request:
         for msg in passthrough_request["messages"]:
@@ -158,12 +182,21 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                     filtered_content = [{"type": "text", "text": " "}]
                 msg["content"] = filtered_content
 
-    # 合并自定义参数
+    # 合并自定义参数（deepcopy：后续可能在合并进来的嵌套对象上原地
+    # 写入字段，如 setdefault("reasoning")，直接引用会污染内存配置）
     custom_params = endpoint_config.get("custom_params", {})
     if custom_params and isinstance(custom_params, dict):
-        passthrough_request.update(custom_params)
+        passthrough_request.update(copy.deepcopy(custom_params))
         logger.info(f"[DIRECT_API_CUSTOM] 已添加自定义参数:")
         for key, value in custom_params.items():
+            logger.info(f"  - {key}: {value}")
+
+    # 合并附加主体参数（在自定义参数之后，同名键优先）
+    extra_body_params = endpoint_config.get("extra_body_params", {})
+    if extra_body_params and isinstance(extra_body_params, dict):
+        passthrough_request.update(copy.deepcopy(extra_body_params))
+        logger.info(f"[DIRECT_API_CUSTOM] 已添加附加主体参数:")
+        for key, value in extra_body_params.items():
             logger.info(f"  - {key}: {value}")
 
     # System转User模式
@@ -241,47 +274,100 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
             logger.info(f"[DIRECT_API_THINKING] OpenRouter reasoning 已显式关闭")
         # enable_thinking 为 None/缺失时不发送任何 reasoning 字段
 
-        # OpenRouter：assistant 消息回传时，reasoning_content → reasoning
-        # OpenRouter 文档要求用 message.reasoning 保留上一轮思考链，否则模型无法延续推理
+        # OpenRouter：assistant 消息思考链回传
+        # - 消息自带 reasoning_details（含签名）时原样透传；
+        # - 否则用思考文本查询本进程缓存（响应侧记录），命中则恢复原始 reasoning_details。
+        #   Anthropic 系模型的 thinking 块带加密签名，必须原样回传 reasoning_details
+        #   才能通过校验；纯文本 reasoning 会被 OpenRouter 重建为无签名 thinking 块，
+        #   触发 "thinking blocks cannot be modified" 400 错误，
+        #   因此未命中缓存时对 Anthropic 系模型剥离思考字段。
+        # - 非 Anthropic 模型维持 reasoning_content → reasoning 文本回传
+        #   （OpenRouter 文档要求用 message.reasoning 保留 Qwen/DeepSeek 等模型的思考链）。
         # 注意：openai_req.copy() 是浅拷贝，messages 内的 dict 是同一引用。
         # 不能直接修改原 dict（会污染监控记录的 full_messages），只能对需要改的消息创建副本。
+        is_anthropic_model = any(
+            kw in (target_model_id or "").lower() for kw in ("claude", "anthropic"))
         if "messages" in passthrough_request:
             new_messages = []
+            restored_count = 0
+            stripped_count = 0
             for msg in passthrough_request["messages"]:
-                if isinstance(msg, dict) and msg.get("role") == "assistant":
-                    rc = msg.get("reasoning_content")
-                    if rc and "reasoning" not in msg:
-                        # 需要重命名：创建消息副本，带上 reasoning 字段，不带 reasoning_content
+                if not (isinstance(msg, dict) and msg.get("role") == "assistant"):
+                    new_messages.append(msg)
+                    continue
+                if msg.get("reasoning_details"):
+                    # 客户端完整保留了 reasoning_details（含签名），原样透传
+                    new_messages.append(msg)
+                    continue
+                rc = msg.get("reasoning_content") or msg.get("reasoning")
+                if not rc or not isinstance(rc, str):
+                    new_messages.append(msg)
+                    continue
+                cached_details = lookup_reasoning_details(rc)
+                if cached_details:
+                    # 命中缓存：恢复原始 reasoning_details。
+                    # Anthropic 只认带签名的原始块，去掉纯文本思考字段；
+                    # 其他模型额外保留 reasoning 文本以兼容
+                    msg_copy = {k: v for k, v in msg.items()
+                                if k not in ("reasoning_content", "reasoning")}
+                    if not is_anthropic_model:
+                        msg_copy["reasoning"] = rc
+                    msg_copy["reasoning_details"] = cached_details
+                    new_messages.append(msg_copy)
+                    restored_count += 1
+                elif is_anthropic_model:
+                    # 未命中：无签名的思考文本发给 Anthropic 必然 400，剥离
+                    msg_copy = {k: v for k, v in msg.items()
+                                if k not in ("reasoning_content", "reasoning")}
+                    new_messages.append(msg_copy)
+                    stripped_count += 1
+                else:
+                    if "reasoning" not in msg:
+                        # 重命名：创建消息副本，带上 reasoning 字段，不带 reasoning_content
                         msg_copy = {k: v for k, v in msg.items() if k != "reasoning_content"}
                         msg_copy["reasoning"] = rc
                         new_messages.append(msg_copy)
                     else:
                         new_messages.append(msg)
-                else:
-                    new_messages.append(msg)
             passthrough_request["messages"] = new_messages
-            # DEBUG: 临时调试日志，确认 reasoning 字段是否被正确转换
-            for i, m in enumerate(new_messages):
-                if isinstance(m, dict) and m.get("role") == "assistant":
-                    rc_val = m.get("reasoning") or ""
-                    logger.info(
-                        f"[DEBUG_OR_CONVERT] msg[{i}] assistant keys={list(m.keys())} "
-                        f"reasoning_len={len(rc_val) if isinstance(rc_val, str) else 'N/A'} "
-                        f"reasoning[:50]={repr(rc_val[:50]) if isinstance(rc_val, str) else rc_val}")
+            if restored_count or stripped_count:
+                logger.info(
+                    f"[DIRECT_API_REASONING] assistant 思考链回传处理: "
+                    f"恢复签名 {restored_count} 条, 剥离无签名思考 {stripped_count} 条 "
+                    f"(anthropic={is_anthropic_model})")
     else:
-        # 非 OpenRouter：将 enable_thinking 作为顶层字段注入请求体
+        # 非 OpenRouter：enable_thinking 和 reasoning_effort 独立注入
         # 仅处理布尔值，字符串值（adaptive/strip）由 Anthropic 原生模式处理
         enable_thinking = endpoint_config.get("enable_thinking")
         if enable_thinking is True or enable_thinking is False:
             passthrough_request["enable_thinking"] = enable_thinking
             logger.info(f"[DIRECT_API_THINKING] enable_thinking={enable_thinking}（已注入请求体顶层）")
-        # 思考强度等级（OpenAI 风格 reasoning_effort：minimal/low/medium/high 等）
-        # 大部分 OAI 兼容上游识别顶层 reasoning_effort 字段
-        if enable_thinking is True:
-            reasoning_effort = endpoint_config.get("reasoning_effort")
-            if reasoning_effort:
-                passthrough_request["reasoning_effort"] = reasoning_effort
-                logger.info(f"[DIRECT_API_THINKING] reasoning_effort={reasoning_effort}（已注入请求体顶层）")
+
+        # 思考强度等级（OpenAI 风格 reasoning_effort），独立于 enable_thinking
+        reasoning_effort = endpoint_config.get("reasoning_effort")
+        if reasoning_effort:
+            passthrough_request["reasoning_effort"] = reasoning_effort
+            logger.info(f"[DIRECT_API_THINKING] reasoning_effort={reasoning_effort}（已注入请求体顶层）")
+
+        # OAI 兼容 Anthropic thinking 参数：thinking.type + output_config.effort
+        # 适用于通过 OpenAI 兼容端点调用 Claude 模型的场景（如 LiteLLM / 官方 Anthropic OAI 端点）
+        oai_thinking_type = endpoint_config.get("oai_thinking_type")
+        if oai_thinking_type and oai_thinking_type in ("enabled", "adaptive", "disabled"):
+            passthrough_request.setdefault("thinking", {})
+            passthrough_request["thinking"]["type"] = oai_thinking_type
+            logger.info(f"[DIRECT_API_THINKING] thinking.type={oai_thinking_type}（OAI兼容Anthropic格式）")
+
+        oai_thinking_effort = endpoint_config.get("oai_thinking_effort")
+        if oai_thinking_effort:
+            passthrough_request["output_config"] = {"effort": oai_thinking_effort}
+            logger.info(f"[DIRECT_API_THINKING] output_config.effort={oai_thinking_effort}（OAI兼容Anthropic格式）")
+
+    # verbosity 注入（GPT-5 系列 Chat Completions 顶层参数：low/medium/high）
+    # 独立于 enable_thinking；客户端已显式传入时不覆盖
+    verbosity = endpoint_config.get("verbosity")
+    if verbosity and "verbosity" not in passthrough_request:
+        passthrough_request["verbosity"] = verbosity
+        logger.info(f"[DIRECT_API_VERBOSITY] verbosity={verbosity}（已注入请求体顶层）")
 
     return passthrough_request
 
@@ -328,10 +414,15 @@ async def _handle_passthrough_stream(
     )
 
     async def combined_stream_generator():
+        api_task = None
+        # 客户端已消失（生成器被 aclose）时，finally 里绝不能再 yield：
+        # 那会让 Python 抛 "async generator ignored GeneratorExit"
+        client_gone = False
         try:
             # === 预读第一个块（期间向客户端发送心跳） ===
             api_task = asyncio.create_task(anext(api_iterator))
-            heartbeat_interval = min(endpoint_config.get("client_disconnect_probe_interval", 30), 30)
+            # 下限 1 秒，避免配置为 0/负数时 busy-loop 狂发 keep-alive
+            heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
             first_chunk_wait_start = time.time()
 
             while not api_task.done():
@@ -351,9 +442,14 @@ async def _handle_passthrough_stream(
                         estimate_message_tokens_func, full_messages)
                     return
                 try:
-                    await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
+                    first_chunk = await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
+                    break  # 任务正常完成，交给循环外 await api_task 取结果
                 except asyncio.TimeoutError:
                     continue
+                except BaseException:
+                    # StopAsyncIteration（上游空响应）或上游异常：跳出等待循环，
+                    # 统一交给循环外的 await api_task 处理（此处会重新抛出）
+                    break
 
             try:
                 first_chunk_bytes = await api_task
@@ -368,7 +464,7 @@ async def _handle_passthrough_stream(
                 return
 
             # === 检查第一个块是否为 JSON 错误 ===
-            is_err, error_json = _detect_first_chunk_error(first_chunk_bytes)
+            is_err, error_json = detect_first_chunk_error(first_chunk_bytes)
             if is_err:
                 await _handle_first_chunk_error(
                     error_json, monitoring_service, request_id, display_name,
@@ -387,12 +483,19 @@ async def _handle_passthrough_stream(
 
             yield processed_first
 
-            # 继续处理剩余流
-            heartbeat_interval = endpoint_config.get("client_disconnect_probe_interval", 180)
+            # 继续处理剩余流（下限 1 秒，避免配置异常时 busy-loop）
+            heartbeat_interval = max(1, endpoint_config.get("client_disconnect_probe_interval", 180) or 180)
             while True:
+                # 🔧 取消泄漏修复：复用 api_task 持有 pending 的 anext，wait_for 超时
+                # 只取消 shield 的等待而不取消底层 anext——否则超时的 CancelledError
+                # 会被抛进上游生成器，响应被静默截断并标记为成功
+                if api_task is None or api_task.done():
+                    api_task = asyncio.create_task(anext(api_iterator))
                 try:
-                    chunk_bytes = await asyncio.wait_for(anext(api_iterator), timeout=heartbeat_interval)
+                    chunk_bytes = await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
+                    api_task = None  # 成功取到值，任务已完成
                 except StopAsyncIteration:
+                    api_task = None
                     break
                 except asyncio.TimeoutError:
                     try:
@@ -438,14 +541,30 @@ async def _handle_passthrough_stream(
 
         except asyncio.CancelledError:
             logger.warning(f"[DIRECT_API_PASSTHROUGH] 流式任务被取消: {request_id[:8]}")
+            client_gone = True
             await session.handle_client_disconnect()
         except GeneratorExit:
+            # 🔧 GeneratorExit 必须重新抛出：吞掉它再往下走，Python 会在
+            # 生成器结束时报 "async generator ignored GeneratorExit"
             logger.warning(f"[DIRECT_API_PASSTHROUGH] 生成器被提前关闭: {request_id[:8]}")
+            client_gone = True
             session.mark_client_disconnect("Client disconnected (GeneratorExit)")
+            raise
         except Exception as e:
             session.error_msg = str(e)
             logger.error(f"[DIRECT_API_PASSTHROUGH] 流式处理中发生异常: {e}", exc_info=True)
         finally:
+            # 🔧 回收首块预读任务：客户端在预读阶段断开时 anext 任务可能仍在
+            # 运行，直接 aclose 会因 "generator already running" 失败被吞，
+            # 任务成为孤儿（上游连接挂到超时 + Task exception never retrieved）
+            if api_task is not None and not api_task.done():
+                api_task.cancel()
+                try:
+                    await api_task
+                except (asyncio.CancelledError, StopAsyncIteration):
+                    pass
+                except Exception:
+                    pass
             try:
                 await api_iterator.aclose()
             except Exception:
@@ -453,11 +572,13 @@ async def _handle_passthrough_stream(
 
             # 收尾统计与监控上报（断连路径已上报时返回空列表，不再补发）
             tail_chunks = await session.finalize()
-            try:
-                for tail_chunk in tail_chunks:
-                    yield tail_chunk
-            except (GeneratorExit, Exception) as yield_err:
-                logger.debug(f"[SSE_USAGE] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
+            # 客户端已经走了就只做统计、不再产出数据；否则补发 usage + [DONE]
+            if not client_gone:
+                try:
+                    for tail_chunk in tail_chunks:
+                        yield tail_chunk
+                except Exception as yield_err:
+                    logger.debug(f"[SSE_USAGE] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
 
     return StreamingResponse(
         combined_stream_generator(),
@@ -487,32 +608,25 @@ async def _handle_passthrough_non_stream(
 ):
     """处理非流式透传请求"""
     try:
-        response_bytes = b""
+        response_buf = bytearray()
         async for chunk in direct_api_service.call_api_passthrough(
             base_url=api_base_url, api_key=api_key,
             request_body=passthrough_request, endpoint_path=endpoint_path
         ):
-            response_bytes += chunk
+            response_buf.extend(chunk)
 
-        response_text = response_bytes.decode('utf-8')
-        try:
-            response_json = json.loads(response_text)
-        except json.JSONDecodeError as e:
-            if hasattr(e, 'pos') and e.pos > 1 and e.pos < len(response_text):
-                try:
-                    response_json = json.loads(response_text[:e.pos])
-                    logger.warning(f"[DIRECT_API_PASSTHROUGH] 非流式响应包含额外数据（pos={e.pos}/{len(response_text)}），已截取修复")
-                    response_bytes = json.dumps(response_json, ensure_ascii=False).encode('utf-8')
-                except json.JSONDecodeError:
-                    raise e
-            else:
-                raise
+        response_bytes = bytes(response_buf)
+        # 🔧 大响应的 JSON 解析移入线程池，避免卡住事件循环上其他并发流
+        if len(response_bytes) > _JSON_OFFLOAD_THRESHOLD_BYTES:
+            response_json = await asyncio.to_thread(json.loads, response_bytes)
+        else:
+            response_json = json.loads(response_bytes.decode('utf-8'))
 
         if is_error_json(response_json):
             normalized_error = normalize_to_openai_error(response_json)
             error_details = normalized_error.get('error', {})
             status_code = map_upstream_error_to_status_code(normalized_error, default_status_code=500)
-            error_message = str(error_details)
+            error_message = error_details.get('message', '') if isinstance(error_details, dict) else str(error_details)
             logger.error(f"[DIRECT_API_PASSTHROUGH] 非流式请求失败: {status_code} - {error_message}")
 
             partial_input_tokens = 0
@@ -532,14 +646,22 @@ async def _handle_passthrough_non_stream(
             monitoring_service.request_end(
                 request_id=request_id, success=False, error=error_message,
                 input_tokens=partial_input_tokens, output_tokens=0,
-                cost_info=cost_info, full_messages=full_messages)
+                cost_info=cost_info, full_messages=full_messages,
+                upstream_usage=response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None)
             await monitoring_service.broadcast_to_monitors({
                 "type": "request_end", "request_id": request_id, "success": False})
             return JSONResponse(status_code=status_code, content=normalized_error)
 
+        # 原样保留上游返回的原生 usage（在任何本地统计加工之前）
+        upstream_usage = response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None
+
         # 提取 token 统计
         input_tokens, output_tokens, reasoning_tokens, total_tokens, cached_tokens = \
             _extract_tokens_from_response(response_json, endpoint_config)
+
+        # 把 tool_calls arguments 中的 \uXXXX 转义规范化为明文
+        # （下方会重新编码 response_bytes，客户端拿到的即为规范化结果）
+        normalize_response_tool_args(response_json)
 
         # 提取内容并应用思考分隔
         content, reasoning_content, response_tool_calls, response_message, response_json = _extract_and_split_content(
@@ -566,7 +688,12 @@ async def _handle_passthrough_non_stream(
 
         # 🔧 关键修复：_extract_and_split_content 可能修改了 response_json
         # （如添加 reasoning_content、字段转换等），必须重新编码以确保客户端收到修改后的数据
-        response_bytes = json.dumps(response_json, ensure_ascii=False).encode('utf-8')
+        # （大响应的序列化同样移入线程池；用解析前的字节数估计序列化后量级）
+        if len(response_bytes) > _JSON_OFFLOAD_THRESHOLD_BYTES:
+            response_bytes = (await asyncio.to_thread(
+                json.dumps, response_json, ensure_ascii=False)).encode('utf-8')
+        else:
+            response_bytes = json.dumps(response_json, ensure_ascii=False).encode('utf-8')
 
         cost_info = direct_api_service.calculate_cost(
             input_tokens=input_tokens, output_tokens=output_tokens,
@@ -581,7 +708,8 @@ async def _handle_passthrough_non_stream(
             reasoning_content=reasoning_content,
             cost_info=cost_info, full_messages=full_messages,
             response_message=response_message,
-            response_tool_calls=response_tool_calls)
+            response_tool_calls=response_tool_calls,
+            upstream_usage=upstream_usage)
 
         await monitoring_service.broadcast_to_monitors({
             "type": "request_end", "request_id": request_id, "success": True})
@@ -610,38 +738,6 @@ async def _handle_passthrough_non_stream(
 # 辅助函数
 # ============================================================
 
-def _detect_first_chunk_error(first_chunk_bytes) -> tuple:
-    """检查第一个块是否为JSON错误"""
-    is_error = False
-    error_json = None
-    try:
-        decoded_chunk = first_chunk_bytes.decode('utf-8')
-        try:
-            maybe_json = json.loads(decoded_chunk)
-            if is_error_json(maybe_json):
-                error_json = normalize_to_openai_error(maybe_json)
-                is_error = True
-        except json.JSONDecodeError:
-            for line in decoded_chunk.splitlines():
-                line = line.strip()
-                if not line.startswith('data:'):
-                    continue
-                data = line[5:].strip()
-                if not data or data == '[DONE]':
-                    continue
-                try:
-                    maybe_json = json.loads(data)
-                    if is_error_json(maybe_json):
-                        error_json = normalize_to_openai_error(maybe_json)
-                        is_error = True
-                        break
-                except json.JSONDecodeError:
-                    continue
-    except UnicodeDecodeError:
-        is_error = False
-    return is_error, error_json
-
-
 async def _record_failed_request(monitoring_service, request_id, display_name,
                                   error_msg, openai_req, pricing_config,
                                   direct_api_service, estimate_message_tokens_func,
@@ -649,8 +745,9 @@ async def _record_failed_request(monitoring_service, request_id, display_name,
     """记录失败请求的token和成本"""
     partial_input_tokens = 0
     try:
-        partial_input_tokens = estimate_message_tokens_func(
-            openai_req.get('messages', []), model=display_name)
+        partial_input_tokens = await estimate_message_tokens_non_blocking(
+            estimate_message_tokens_func,
+            openai_req.get('messages', []), display_name)
     except Exception as token_err:
         logger.warning(f"[DIRECT_API_PASSTHROUGH] 输入token计算失败: {token_err}")
 
@@ -674,7 +771,7 @@ async def _handle_first_chunk_error(error_json, monitoring_service, request_id,
                                      full_messages):
     """处理第一个块中的错误"""
     error_details = error_json.get('error', {})
-    error_message = str(error_details) if error_details else str(error_json)
+    error_message = error_details.get('message', '') if isinstance(error_details, dict) else str(error_details)
     logger.error(f"[DIRECT_API_PASSTHROUGH] 请求失败，上游返回错误: {error_json}")
     await _record_failed_request(
         monitoring_service, request_id, display_name, error_message,
@@ -740,6 +837,11 @@ def _extract_and_split_content(response_json, thinking_separator, direct_api_ser
         content = message.get("content", "")
         reasoning_content = message.get("reasoning_content", "") or message.get("reasoning", "")
         tool_calls = extract_tool_calls_from_message(message)
+
+        # 缓存 OpenRouter reasoning_details（含 Anthropic thinking 签名），供下一轮回传恢复
+        reasoning_details = message.get("reasoning_details")
+        if isinstance(reasoning_details, list) and reasoning_details and reasoning_content:
+            store_reasoning_details(reasoning_content, reasoning_details)
 
         if "reasoning" in message and "reasoning_content" not in message and reasoning_content:
             message["reasoning_content"] = message.pop("reasoning")

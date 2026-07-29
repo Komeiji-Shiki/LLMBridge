@@ -83,22 +83,43 @@ class ImageProcessor:
         """保存到缓存（TTLCache 自动管理大小和过期）"""
         self.image_cache[image_url] = markdown_image
     
-    async def _download_image(self, image_url: str) -> Tuple[Optional[bytes], Optional[str]]:
-        """下载图片"""
+    async def _download_image(self, image_url: str) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+        """下载图片，返回 (data, error, content_type)"""
         if not self.download_func:
-            return None, "Download function not configured"
-        return await self.download_func(image_url)
+            return None, "Download function not configured", None
+        result = await self.download_func(image_url)
+        if isinstance(result, tuple):
+            if len(result) == 3:
+                return result
+            # 兼容旧版 2-tuple
+            return result[0], result[1], None
+        return result, None, None
     
     async def _save_image(self, image_data: bytes, image_url: str, request_id: str) -> None:
         """保存图片到本地"""
         if self.save_func:
             await self.save_func(image_data, image_url, request_id)
     
-    def _convert_to_base64(self, image_data: bytes, image_url: str) -> str:
-        """转换为Base64格式的Markdown图片"""
-        content_type = mimetypes.guess_type(image_url)[0] or 'image/png'
+    def _convert_to_base64(self, image_data: bytes, image_url: str, content_type: Optional[str] = None) -> str:
+        """转换为Base64格式的Markdown图片。
+
+        优先使用传入的 content_type（来自 HTTP Content-Type 响应头），
+        其次用 PIL 魔数嗅探，最后回退到 URL 扩展名或 image/png。
+        """
+        ct = content_type or ""
+        if not ct or not ct.startswith("image/"):
+            # 尝试用 PIL 从字节数据嗅探真实格式
+            try:
+                from io import BytesIO
+                from PIL import Image as PILImage
+                img = PILImage.open(BytesIO(image_data))
+                fmt = (img.format or "PNG").upper()
+                fmt_map = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp", "GIF": "image/gif", "BMP": "image/bmp"}
+                ct = fmt_map.get(fmt, f"image/{fmt.lower()}")
+            except Exception:
+                ct = mimetypes.guess_type(image_url)[0] or "image/png"
         image_base64 = base64.b64encode(image_data).decode('ascii')
-        data_url = f"data:{content_type};base64,{image_base64}"
+        data_url = f"data:{ct};base64,{image_base64}"
         return f"![Image]({data_url})"
     
     async def process_image_url(
@@ -149,7 +170,7 @@ class ImageProcessor:
             async def async_download_and_save():
                 try:
                     download_start = time.time()
-                    img_data, err = await self._download_image(image_url)
+                    img_data, err, _ = await self._download_image(image_url)
                     download_time = time.time() - download_start
                     
                     if img_data:
@@ -185,7 +206,7 @@ class ImageProcessor:
         
         # 下载图片
         download_start_time = time.time()
-        image_data, download_error = await self._download_image(image_url)
+        image_data, download_error, content_type = await self._download_image(image_url)
         download_time = time.time() - download_start_time
         logger.info(f"[IMG_PROCESS] 图片下载完成，耗时: {download_time:.2f}秒")
         
@@ -198,7 +219,7 @@ class ImageProcessor:
         
         # Base64转换
         if image_data:
-            markdown_image = self._convert_to_base64(image_data, image_url)
+            markdown_image = self._convert_to_base64(image_data, image_url, content_type)
             self._save_to_cache(image_url, markdown_image)
             
             total_time = time.time() - process_start_time
@@ -270,26 +291,34 @@ class CloudflareHandler:
             返回给客户端的消息
         """
         import json
-        
+        from core.config_loader import get_float_setting
+        from core.constants import ServerDefaults
+
+        # 🔧 配置接线：config.jsonc / 管理面板暴露了 verification_cooldown_seconds，
+        # 但此前冷却时长在三处硬编码为 25（设置、sleep、提示文案），改配置不生效
+        cooldown_seconds = get_float_setting(
+            "verification_cooldown_seconds", ServerDefaults.VERIFICATION_COOLDOWN_SECONDS
+        )
+
         if not self.is_refreshing:
-            logger.warning(f"PROCESSOR [ID: {request_id[:8]}]: 首次检测到人机验证，将发送刷新指令并启动25秒冷却。")
+            logger.warning(f"PROCESSOR [ID: {request_id[:8]}]: 首次检测到人机验证，将发送刷新指令并启动{cooldown_seconds:g}秒冷却。")
             self.is_refreshing = True
-            self.cooldown_until = time.time() + 25
-            
+            self.cooldown_until = time.time() + cooldown_seconds
+
             # 发送刷新指令
             if self.browser_connections:
                 first_ws = list(self.browser_connections.values())[0]
                 spawn(first_ws.send_text(json.dumps({"command": "refresh"}, ensure_ascii=False)), name="cf-refresh")
-            
+
             # 启动冷却重置任务
             async def reset_status():
-                await asyncio.sleep(25)
+                await asyncio.sleep(cooldown_seconds)
                 self.is_refreshing = False
                 self.cooldown_until = None
                 logger.info("⏰ 人机验证冷却期已结束，系统已恢复正常。")
-            
+
             spawn(reset_status(), name="cf-cooldown-reset")
-            return "检测到人机验证，已发送刷新指令。系统将冷却25秒，请稍后重试。"
+            return f"检测到人机验证，已发送刷新指令。系统将冷却{cooldown_seconds:g}秒，请稍后重试。"
         else:
             # 计算剩余冷却时间
             if self.cooldown_until:

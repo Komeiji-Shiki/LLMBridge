@@ -10,6 +10,17 @@ function switchConfigMode(mode) {
     
     // 切换编辑器显示
     if (mode === 'jsonc') {
+        // 从表单模式切换过来时，先收集表单当前值并回写 textarea，
+        // 防止用户在表单中的未保存修改因切换模式而丢失
+        if (currentConfigMode === 'form') {
+            try {
+                currentConfigData = formToConfig();
+                document.getElementById('config-editor').value = JSON.stringify(currentConfigData, null, 4);
+            } catch (e) {
+                // 收集失败时用已有 currentConfigData 兜底
+                document.getElementById('config-editor').value = JSON.stringify(currentConfigData, null, 4);
+            }
+        }
         document.getElementById('config-jsonc-editor').style.display = 'block';
         document.getElementById('config-form-editor').style.display = 'none';
     } else {
@@ -109,13 +120,13 @@ function buildCompactFormGroup(label, inputHtml, hint = '') {
 function buildBasicConfig() {
     const content = buildFormRow(
         buildCompactFormGroup('版本号',
-            `<input type="text" class="form-input" id="form-version" value="${currentConfigData.version || ''}" readonly style="padding: 6px 8px; font-size: 0.85rem;">`,
+            `<input type="text" class="form-input" id="form-version" value="${escapeHtml(currentConfigData.version || '')}" readonly style="padding: 6px 8px; font-size: 0.85rem;">`,
             '请不要手动修改'),
         buildCompactFormGroup('服务器端口号',
             `<input type="number" class="form-input" id="form-server_port" value="${currentConfigData.server_port || 5102}" min="1" max="65535" style="padding: 6px 8px; font-size: 0.85rem;">`,
             '修改后需重启'),
         buildCompactFormGroup('Session ID',
-            `<input type="text" class="form-input" id="form-session_id" value="${currentConfigData.session_id || ''}" style="padding: 6px 8px; font-size: 0.85rem;">`,
+            `<input type="text" class="form-input" id="form-session_id" value="${escapeHtml(currentConfigData.session_id || '')}" style="padding: 6px 8px; font-size: 0.85rem;">`,
             'LMArena 页面的会话 ID')
     );
     return buildCollapsibleSection('📋 基础配置', content, false); // 基础配置默认展开
@@ -149,7 +160,7 @@ function buildRetryConfig() {
         <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 15px;">
             <label style="display: flex; align-items: center; font-size: 0.85rem;">
                 <input type="checkbox" id="form-enable_auto_retry" ${currentConfigData.enable_auto_retry ? 'checked' : ''} style="margin-right: 6px;">
-                启用自动重试
+                启用自动重试 <small style="color: var(--text-dim); font-size: 0.7rem;">（仅非流式请求）</small>
             </label>
             <label style="display: flex; align-items: center; font-size: 0.85rem;">
                 <input type="checkbox" id="form-empty_response_retry_enabled" ${retryConfig.enabled ? 'checked' : ''} style="margin-right: 6px;">
@@ -431,7 +442,7 @@ function buildOtherConfig() {
             </div>
         </div>
         <div style="margin-top: 10px;">
-            ${buildCompactFormGroup('API Key', `<input type="password" class="form-input" id="form-api_key" value="${currentConfigData.api_key || ''}" placeholder="留空则不启用认证" style="padding: 6px 8px; font-size: 0.85rem;">`, 'Tokenizer 配置请在专门的 Tokenizer 页面配置')}
+            ${buildCompactFormGroup('API Key', `<input type="password" class="form-input" id="form-api_key" value="${escapeHtml(currentConfigData.api_key || '')}" placeholder="留空则不启用认证" style="padding: 6px 8px; font-size: 0.85rem;">`, 'Tokenizer 配置请在专门的 Tokenizer 页面配置')}
         </div>
     `;
     return buildCollapsibleSection('🔧 其他设置', content);
@@ -442,10 +453,25 @@ function formToConfig() {
     // 这个函数需要从所有表单字段收集数据
     // 由于字段太多，这里使用简化版本，保留原配置并更新表单字段
     const config = Object.assign({}, currentConfigData);
-    
+
+    // 🔧 数值安全解析：空输入框 parseFloat/parseInt 产出 NaN，
+    // 旧版直接 assign 会写进 config.jsonc 并序列化成 null，打崩服务端 JSONC 解析。
+    function safeInt(id, fallback) {
+        var v = parseInt(document.getElementById(id).value);
+        return Number.isFinite(v) ? v : fallback;
+    }
+    function safeFloat(id, fallback) {
+        var v = parseFloat(document.getElementById(id).value);
+        return Number.isFinite(v) ? v : fallback;
+    }
+    // 从 currentConfigData 按点分路径取值作为回退
+    function fallback(config, path, dfault) {
+        return path.split('.').reduce(function(c, k) { return c && c[k] != null ? c[k] : undefined; }, config) ?? dfault;
+    }
+
     // 基础配置
     config.version = document.getElementById('form-version').value;
-    config.server_port = parseInt(document.getElementById('form-server_port').value) || 5102;
+    config.server_port = safeInt('form-server_port', 5102);
     config.session_id = document.getElementById('form-session_id').value;
     
     // ID更新器配置
@@ -455,13 +481,13 @@ function formToConfig() {
     
     // 重试配置
     config.enable_auto_retry = document.getElementById('form-enable_auto_retry').checked;
-    config.retry_timeout_seconds = parseInt(document.getElementById('form-retry_timeout_seconds').value);
+    config.retry_timeout_seconds = safeInt('form-retry_timeout_seconds', fallback(config, 'retry_timeout_seconds', 120));
     
     config.empty_response_retry = config.empty_response_retry || {};
     config.empty_response_retry.enabled = document.getElementById('form-empty_response_retry_enabled').checked;
-    config.empty_response_retry.max_retries = parseInt(document.getElementById('form-empty_response_retry_max_retries').value);
-    config.empty_response_retry.base_delay_ms = parseInt(document.getElementById('form-empty_response_retry_base_delay_ms').value);
-    config.empty_response_retry.max_delay_ms = parseInt(document.getElementById('form-empty_response_retry_max_delay_ms').value);
+    config.empty_response_retry.max_retries = safeInt('form-empty_response_retry_max_retries', 5);
+    config.empty_response_retry.base_delay_ms = safeInt('form-empty_response_retry_base_delay_ms', 100);
+    config.empty_response_retry.max_delay_ms = safeInt('form-empty_response_retry_max_delay_ms', 3000);
     config.empty_response_retry.show_retry_info_to_client = document.getElementById('form-empty_response_retry_show_retry_info_to_client').checked;
     
     // Bypass配置
@@ -489,57 +515,57 @@ function formToConfig() {
     config.file_bed_selection_strategy = document.getElementById('form-file_bed_selection_strategy').value;
     
     // 超时配置
-    config.stream_response_timeout_seconds = parseInt(document.getElementById('form-stream_response_timeout_seconds').value);
-    config.api_call_timeout_seconds = parseInt(document.getElementById('form-api_call_timeout_seconds').value);
-    config.first_chunk_timeout_seconds = parseInt(document.getElementById('form-first_chunk_timeout_seconds').value);
-    config.websocket_send_timeout_seconds = parseFloat(document.getElementById('form-websocket_send_timeout_seconds').value);
-    config.metadata_timeout_minutes = parseInt(document.getElementById('form-metadata_timeout_minutes').value);
-    config.active_request_timeout_minutes = parseInt(document.getElementById('form-active_request_timeout_minutes').value);
-    config.tokenizer_idle_timeout_seconds = parseInt(document.getElementById('form-tokenizer_idle_timeout_seconds').value);
+    config.stream_response_timeout_seconds = safeInt('form-stream_response_timeout_seconds', 3000);
+    config.api_call_timeout_seconds = safeInt('form-api_call_timeout_seconds', 3000);
+    config.first_chunk_timeout_seconds = safeInt('form-first_chunk_timeout_seconds', 600);
+    config.websocket_send_timeout_seconds = safeFloat('form-websocket_send_timeout_seconds', 10.0);
+    config.metadata_timeout_minutes = safeInt('form-metadata_timeout_minutes', 60);
+    config.active_request_timeout_minutes = safeInt('form-active_request_timeout_minutes', 60);
+    config.tokenizer_idle_timeout_seconds = safeInt('form-tokenizer_idle_timeout_seconds', 600);
     
     // 服务器配置
     config.use_default_ids_if_mapping_not_found = document.getElementById('form-use_default_ids_if_mapping_not_found').checked;
-    config.verification_cooldown_seconds = parseInt(document.getElementById('form-verification_cooldown_seconds').value);
-    config.stream_end_wait_delay_seconds = parseFloat(document.getElementById('form-stream_end_wait_delay_seconds').value);
-    config.max_request_transfers = parseInt(document.getElementById('form-max_request_transfers').value);
-    config.load_balancer_lock_timeout_seconds = parseFloat(document.getElementById('form-load_balancer_lock_timeout_seconds').value);
+    config.verification_cooldown_seconds = safeInt('form-verification_cooldown_seconds', 25);
+    config.stream_end_wait_delay_seconds = safeFloat('form-stream_end_wait_delay_seconds', 1.0);
+    config.max_request_transfers = safeInt('form-max_request_transfers', 3);
+    config.load_balancer_lock_timeout_seconds = safeFloat('form-load_balancer_lock_timeout_seconds', 5.0);
     
     // 后台任务配置
     config.background_tasks = config.background_tasks || {};
-    config.background_tasks.config_monitor_interval = parseInt(document.getElementById('form-config_monitor_interval').value);
-    config.background_tasks.memory_monitor_interval = parseInt(document.getElementById('form-memory_monitor_interval').value);
-    config.background_tasks.stale_cleaner_interval = parseInt(document.getElementById('form-stale_cleaner_interval').value);
+    config.background_tasks.config_monitor_interval = safeInt('form-config_monitor_interval', 30);
+    config.background_tasks.memory_monitor_interval = safeInt('form-memory_monitor_interval', 60);
+    config.background_tasks.stale_cleaner_interval = safeInt('form-stale_cleaner_interval', 60);
     
     // 下载和连接配置
-    config.max_concurrent_downloads = parseInt(document.getElementById('form-max_concurrent_downloads').value);
+    config.max_concurrent_downloads = safeInt('form-max_concurrent_downloads', 50);
     config.download_timeout = config.download_timeout || {};
-    config.download_timeout.connect = parseInt(document.getElementById('form-download_timeout_connect').value);
-    config.download_timeout.sock_read = parseInt(document.getElementById('form-download_timeout_sock_read').value);
-    config.download_timeout.total = parseInt(document.getElementById('form-download_timeout_total').value);
-    config.download_timeout.max_retries = parseInt(document.getElementById('form-download_timeout_max_retries').value);
-    config.filebed_recovery_time_seconds = parseInt(document.getElementById('form-filebed_recovery_time_seconds').value);
+    config.download_timeout.connect = safeInt('form-download_timeout_connect', 5);
+    config.download_timeout.sock_read = safeInt('form-download_timeout_sock_read', 10);
+    config.download_timeout.total = safeInt('form-download_timeout_total', 30);
+    config.download_timeout.max_retries = safeInt('form-download_timeout_max_retries', 3);
+    config.filebed_recovery_time_seconds = safeInt('form-filebed_recovery_time_seconds', 300);
     
     // 连接池配置
     config.connection_pool = config.connection_pool || {};
-    config.connection_pool.total_limit = parseInt(document.getElementById('form-connection_pool_total_limit').value);
-    config.connection_pool.per_host_limit = parseInt(document.getElementById('form-connection_pool_per_host_limit').value);
-    config.connection_pool.keepalive_timeout = parseInt(document.getElementById('form-connection_pool_keepalive_timeout').value);
-    config.connection_pool.dns_cache_ttl = parseInt(document.getElementById('form-connection_pool_dns_cache_ttl').value);
+    config.connection_pool.total_limit = safeInt('form-connection_pool_total_limit', 200);
+    config.connection_pool.per_host_limit = safeInt('form-connection_pool_per_host_limit', 128);
+    config.connection_pool.keepalive_timeout = safeInt('form-connection_pool_keepalive_timeout', 30);
+    config.connection_pool.dns_cache_ttl = safeInt('form-connection_pool_dns_cache_ttl', 300);
     
     // 内存管理
     config.memory_management = config.memory_management || {};
-    config.memory_management.gc_threshold_mb = parseInt(document.getElementById('form-memory_management_gc_threshold_mb').value);
-    config.memory_management.image_cache_max_size = parseInt(document.getElementById('form-memory_management_image_cache_max_size').value);
-    config.memory_management.image_cache_ttl_seconds = parseInt(document.getElementById('form-memory_management_image_cache_ttl_seconds').value);
-    config.memory_management.image_cache_keep_size = parseInt(document.getElementById('form-memory_management_image_cache_keep_size').value);
+    config.memory_management.gc_threshold_mb = safeInt('form-memory_management_gc_threshold_mb', 150);
+    config.memory_management.image_cache_max_size = safeInt('form-memory_management_image_cache_max_size', 50);
+    config.memory_management.image_cache_ttl_seconds = safeInt('form-memory_management_image_cache_ttl_seconds', 600);
+    config.memory_management.image_cache_keep_size = safeInt('form-memory_management_image_cache_keep_size', 20);
     
     // 缓存配置
     config.cache_settings = config.cache_settings || {};
-    config.cache_settings.filebed_url_cache_ttl = parseInt(document.getElementById('form-cache_settings_filebed_url_cache_ttl').value);
-    config.cache_settings.filebed_url_cache_max_size = parseInt(document.getElementById('form-cache_settings_filebed_url_cache_max_size').value);
-    config.cache_settings.processed_image_cache_max_size = parseInt(document.getElementById('form-cache_settings_processed_image_cache_max_size').value);
-    config.cache_settings.tiktoken_cache_max_size = parseInt(document.getElementById('form-cache_settings_tiktoken_cache_max_size').value);
-    config.cache_settings.downloaded_urls_max_size = parseInt(document.getElementById('form-cache_settings_downloaded_urls_max_size').value);
+    config.cache_settings.filebed_url_cache_ttl = safeInt('form-cache_settings_filebed_url_cache_ttl', 300);
+    config.cache_settings.filebed_url_cache_max_size = safeInt('form-cache_settings_filebed_url_cache_max_size', 50);
+    config.cache_settings.processed_image_cache_max_size = safeInt('form-cache_settings_processed_image_cache_max_size', 30);
+    config.cache_settings.tiktoken_cache_max_size = safeInt('form-cache_settings_tiktoken_cache_max_size', 5);
+    config.cache_settings.downloaded_urls_max_size = safeInt('form-cache_settings_downloaded_urls_max_size', 1000);
     
     // Reasoning
     config.enable_lmarena_reasoning = document.getElementById('form-enable_lmarena_reasoning').checked;
@@ -549,9 +575,9 @@ function formToConfig() {
     
     // 其他
     config.debug_show_full_urls = document.getElementById('form-debug_show_full_urls').checked;
-    config.url_display_length = parseInt(document.getElementById('form-url_display_length').value);
+    config.url_display_length = safeInt('form-url_display_length', 200);
     config.enable_idle_restart = document.getElementById('form-enable_idle_restart').checked;
-    config.idle_restart_timeout_seconds = parseInt(document.getElementById('form-idle_restart_timeout_seconds').value);
+    config.idle_restart_timeout_seconds = safeInt('form-idle_restart_timeout_seconds', 7200);
     config.api_key = document.getElementById('form-api_key').value;
     
     return config;
@@ -595,20 +621,24 @@ async function loadConfig() {
 }
 
 async function saveConfig() {
-    let content;
-    
     try {
+        let payload;
         if (currentConfigMode === 'jsonc') {
-            content = document.getElementById('config-editor').value;
+            // 源码模式：用户直接编辑文本，原样提交
+            payload = { content: document.getElementById('config-editor').value };
         } else {
-            const configObj = formToConfig();
-            content = JSON.stringify(configObj, null, 2);
+            // 表单模式：提交解析后的对象，由服务端在原 config.jsonc 文本上
+            // 定点替换对应的键。
+            // 🔧 旧版这里 JSON.stringify(configObj) 后当 content 提交，等于用
+            // 无注释的纯 JSON 覆盖整个 config.jsonc —— 在配置页点一次保存，
+            // 全部说明性注释就永久丢失了。
+            payload = { config: formToConfig() };
         }
-        
+
         const response = await fetch('/api/admin/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content })
+            body: JSON.stringify(payload)
         });
         
         if (!response.ok) {

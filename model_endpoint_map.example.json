@@ -50,7 +50,8 @@
     "endpoint_path": "/messages",
     "model_id": "claude-sonnet-4-5",
     "display_name": "Claude Sonnet (Anthropic原生)",
-    "// 说明": "用于对接Anthropic原生 /v1/messages 接口。以Anthropic格式原样透传，不走OpenAI转换。建议配合本项目的 /v1/messages 入口使用"
+    "auto_cache": true,
+    "// 说明": "用于对接Anthropic原生 /v1/messages 接口。以Anthropic格式原样透传，不走OpenAI转换。建议配合本项目的 /v1/messages 入口使用。auto_cache=true 时自动注入 prompt caching 断点"
   },
 
   "// ==================== 模式3.6: Claude新模型 adaptive thinking ====================": "",
@@ -152,7 +153,11 @@
     "enable_thinking": "思维链模式。空/不设置=透传客户端参数不修改；true=启用思考(配合thinking_budget)；false=显式禁用；\"adaptive\"=自适应思考，将客户端 thinking.type=enabled 转为 adaptive(适用于Claude Opus 4.7等新模型)，thinking_effort 可选",
     "thinking_budget": "启用思考时的Token预算，默认20000",
     "thinking_effort": "自适应思考的力度（low/medium/high/xhigh/max），可选，留空时不注入 output_config 让模型自行决定。xhigh 需 Opus 4.7+，max 需 Opus 4.6+",
-    "thinking_display": "思考内容显示模式（summarized/omitted），默认 summarized。Opus 4.7+ 默认 omitted 不返回思维链，设为 summarized 可看到思考内容",
+    "thinking_display": "思考内容显示模式（summarized/omitted），默认 summarized，仅 anthropic_native 上游消费。Opus 4.7+ 默认 omitted 不返回思维链，设为 summarized 可看到思考内容",
+    "verbosity": "输出详细度（low/medium/high），仅 direct_api（OpenAI 兼容）上游生效，注入 Chat Completions 顶层 verbosity 参数（GPT-5 系列），客户端已传时不覆盖",
+    "auto_cache": "自动提示词缓存（true/false），仅 anthropic_native 上游生效。自动为 tools/system/最后两条 user 消息注入 cache_control ephemeral 断点（上限 4 个），多轮对话命中上游缓存可大幅降低成本；客户端已自带 cache_control 时不重复注入",
+    "custom_params": "自定义参数（JSON对象），直接合并到上游请求体，适合 chat_template_kwargs、thinking 等模型行为参数",
+    "extra_body_params": "附加主体参数（JSON对象），在 custom_params 之后合并到请求体（同名键优先），适合 top_p、OpenRouter provider 指定提供商等请求级参数",
     
     "cached_tokens_mode": "缓存token处理模式（off/forward/reverse）",
     "// cached_tokens_mode说明": {

@@ -7,6 +7,7 @@ import json
 import time
 import sqlite3
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -23,15 +24,38 @@ class SQLiteLogger:
         self._init_database()
     
     def _get_connection(self) -> sqlite3.Connection:
-        """获取持久连接（复用），启用 WAL 模式实现读写并发"""
+        """获取写路径持久连接（仅供持有 _write_lock 的写操作与初始化使用）。
+
+        🔧 并发修复说明：WAL 的读写并发只在**不同连接**之间成立。
+        旧版读写共用这一个连接，读仍会被写事务阻塞，且多线程交错使用
+        同一连接存在语句/事务状态互相污染的风险。现在读路径改用
+        _read_connection() 的独立短连接，真正实现读写并发。
+        """
         if self._conn is None:
             self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-            # 🔧 核心修复：WAL 模式允许读写并发，不再互斥
+            # WAL 模式：写连接与读连接（其他连接）之间不再互斥
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA cache_size=-8000")  # 8MB 缓存
             self._conn.execute("PRAGMA busy_timeout=5000")  # 5秒忙等待，避免立即SQLITE_BUSY
+            self._conn.row_factory = sqlite3.Row
         return self._conn
+
+    @contextmanager
+    def _read_connection(self):
+        """读路径独立短连接（用完即关）。
+
+        WAL 模式下不同连接之间读写真正并发：读不阻塞写、写不阻塞读。
+        本地文件建连开销微小，监控查询频率低，每次新建比跨线程复用
+        更简单可靠（sqlite3 连接对象本身不保证多线程安全）。
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.row_factory = sqlite3.Row
+            yield conn
+        finally:
+            conn.close()
     
     def _init_database(self):
         """初始化SQLite数据库结构"""
@@ -79,6 +103,7 @@ class SQLiteLogger:
                     ('currency', 'ALTER TABLE requests ADD COLUMN currency TEXT DEFAULT "USD"'),
                     ('cached_tokens', 'ALTER TABLE requests ADD COLUMN cached_tokens INTEGER DEFAULT 0'),
                     ('cached_cost', 'ALTER TABLE requests ADD COLUMN cached_cost REAL DEFAULT 0'),
+                    ('upstream_usage', 'ALTER TABLE requests ADD COLUMN upstream_usage TEXT'),
                 ]
                 for col_name, ddl in migrations:
                     if col_name not in columns:
@@ -113,15 +138,39 @@ class SQLiteLogger:
                 pass
             self._conn = None
     
+    def purge_old_records(self, max_days: int) -> int:
+        """删除 timestamp 早于 max_days 天前的请求记录，返回删除行数。
+
+        由每日日志保留清理任务调用（background_tasks.monitors.log_retention_cleaner）。
+        """
+        if not max_days or max_days <= 0:
+            return 0
+        try:
+            cutoff_ts = time.time() - max_days * 86400
+            with self._write_lock:
+                conn = self._get_connection()
+                cursor = conn.execute("DELETE FROM requests WHERE timestamp < ?", (cutoff_ts,))
+                conn.commit()
+                deleted = cursor.rowcount or 0
+                if deleted:
+                    # 🔧 批量删除后截断 WAL，避免 -wal 文件随每日清理持续膨胀
+                    try:
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    except Exception as ckpt_err:
+                        logger.debug(f"[SQLITE] WAL checkpoint 失败（不影响功能）: {ckpt_err}")
+            if deleted:
+                logger.info(f"[SQLITE] 🧹 已清理 {deleted} 条超过 {max_days} 天的历史记录")
+            return deleted
+        except Exception as e:
+            logger.error(f"[SQLITE] 清理过期记录失败: {e}")
+            return 0
+    
     def write_request(self, log_entry: dict):
         """写入请求到SQLite数据库"""
         if log_entry.get('type') != 'request_end':
             return
         
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
             request_id = log_entry.get('request_id')
             timestamp = log_entry.get('timestamp', time.time())
             date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
@@ -138,6 +187,15 @@ class SQLiteLogger:
             output_tokens = log_entry.get('output_tokens') or 0
             total_tokens = input_tokens + output_tokens
             cached_tokens = log_entry.get('cached_tokens') or 0
+
+            # 上游返回的原生 usage（原样序列化为 JSON 字符串存储）
+            upstream_usage = log_entry.get('upstream_usage')
+            upstream_usage_json = None
+            if isinstance(upstream_usage, dict) and upstream_usage:
+                try:
+                    upstream_usage_json = json.dumps(upstream_usage, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    upstream_usage_json = None
             
             cost_info = log_entry.get('cost_info') or {}
             input_cost = cost_info.get('input_cost', 0.0)
@@ -146,20 +204,24 @@ class SQLiteLogger:
             total_cost = cost_info.get('total_cost', 0.0)
             currency = cost_info.get('currency') or None  # 失败请求不写货币，避免污染统计
             
-            # 🔧 用写锁串行化 SQLite 写操作（WAL 模式下写之间仍需互斥，但不阻塞读）
+            # 🔧 用写锁串行化 SQLite 写操作（连接获取也在锁内，避免首次建连竞态）
             with self._write_lock:
+                conn = self._get_connection()
+                cursor = conn.cursor()
                 cursor.execute('''
                     INSERT OR REPLACE INTO requests (
                         request_id, timestamp, date, model, status, success,
                         duration, error, mode, session_id, messages_count,
                         input_tokens, output_tokens, total_tokens, cached_tokens,
-                        input_cost, output_cost, cached_cost, total_cost, currency
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        input_cost, output_cost, cached_cost, total_cost, currency,
+                        upstream_usage
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     request_id, timestamp, date, model, status, success,
                     duration, error, mode, session_id, messages_count,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
-                    input_cost, output_cost, cached_cost, total_cost, currency
+                    input_cost, output_cost, cached_cost, total_cost, currency,
+                    upstream_usage_json
                 ))
                 conn.commit()
             
@@ -170,26 +232,25 @@ class SQLiteLogger:
     
     
     def get_request_details(self, request_id: str) -> Optional[Dict]:
-        """从SQLite数据库获取请求详情"""
+        """从SQLite数据库获取请求详情（独立读连接，不与写路径互斥）"""
         try:
-            conn = self._get_connection()
-            conn.row_factory = sqlite3.Row  # 使结果可以用列名访问
-            cursor = conn.cursor()
-            
-            cursor.execute('''
+            with self._read_connection() as conn:
+                cursor = conn.cursor()
+
+                cursor.execute('''
                 SELECT
                     request_id, timestamp, date, model, status, success,
                     duration, error, mode, session_id, messages_count,
                     input_tokens, output_tokens, total_tokens,
                     cached_tokens, cached_cost,
                     input_cost, output_cost, total_cost, currency,
-                    created_at
-                FROM requests
-                WHERE request_id = ?
-            ''', (request_id,))
-            
-            row = cursor.fetchone()
-            
+                    created_at, upstream_usage
+                    FROM requests
+                    WHERE request_id = ?
+                ''', (request_id,))
+
+                row = cursor.fetchone()
+
             if row:
                 return {
                     'request_id': row['request_id'],
@@ -211,7 +272,8 @@ class SQLiteLogger:
                     'input_cost': row['input_cost'],
                     'output_cost': row['output_cost'],
                     'total_cost': row['total_cost'],
-                    'currency': row['currency']
+                    'currency': row['currency'],
+                    'upstream_usage': self._parse_upstream_usage(row['upstream_usage'])
                 }
             
             return None
@@ -224,6 +286,17 @@ class SQLiteLogger:
         """从SQLite快速获取最近的N条请求摘要（走timestamp索引，O(log n + limit)）"""
         result = self.query_requests(limit=limit, offset=0)
         return result.get('items', [])
+
+    @staticmethod
+    def _parse_upstream_usage(raw) -> Optional[Dict]:
+        """反序列化 upstream_usage 列（存储为 JSON 字符串，旧数据为 NULL）"""
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _row_to_request_dict(row) -> Dict:
@@ -249,6 +322,7 @@ class SQLiteLogger:
             'output_cost': row['output_cost'],
             'total_cost': row['total_cost'],
             'currency': row['currency'],
+            'upstream_usage': SQLiteLogger._parse_upstream_usage(row['upstream_usage']),
         }
 
     def query_requests(self, limit: int = 50, offset: int = 0,
@@ -266,10 +340,6 @@ class SQLiteLogger:
             {'total': 总条数, 'items': 日志列表}
         """
         try:
-            conn = self._get_connection()
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
             where_clauses = []
             params: list = []
             if model:
@@ -280,28 +350,36 @@ class SQLiteLogger:
             elif status == 'failed':
                 where_clauses.append("success = 0")
             if search:
-                like = f"%{search}%"
-                where_clauses.append("(request_id LIKE ? OR model LIKE ? OR error LIKE ?)")
+                # 🔧 转义 LIKE 通配符，避免搜索 % / _ 时匹配全表
+                escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                like = f"%{escaped}%"
+                where_clauses.append(
+                    "(request_id LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' OR error LIKE ? ESCAPE '\\')"
+                )
                 params.extend([like, like, like])
 
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-            cursor.execute(f"SELECT COUNT(*) FROM requests{where_sql}", params)
-            total = cursor.fetchone()[0]
+            with self._read_connection() as conn:
+                cursor = conn.cursor()
 
-            cursor.execute(f'''
-                SELECT
-                    request_id, timestamp, date, model, status, success,
-                    duration, error, mode, session_id, messages_count,
-                    input_tokens, output_tokens, total_tokens,
-                    cached_tokens, cached_cost,
-                    input_cost, output_cost, total_cost, currency
-                FROM requests{where_sql}
-                ORDER BY timestamp DESC
-                LIMIT ? OFFSET ?
-            ''', params + [limit, offset])
+                cursor.execute(f"SELECT COUNT(*) FROM requests{where_sql}", params)
+                total = cursor.fetchone()[0]
 
-            items = [self._row_to_request_dict(row) for row in cursor.fetchall()]
+                cursor.execute(f'''
+                    SELECT
+                        request_id, timestamp, date, model, status, success,
+                        duration, error, mode, session_id, messages_count,
+                        input_tokens, output_tokens, total_tokens,
+                        cached_tokens, cached_cost,
+                        input_cost, output_cost, total_cost, currency,
+                        upstream_usage
+                    FROM requests{where_sql}
+                    ORDER BY timestamp DESC
+                    LIMIT ? OFFSET ?
+                ''', params + [limit, offset])
+
+                items = [self._row_to_request_dict(row) for row in cursor.fetchall()]
             return {'total': total, 'items': items}
 
         except Exception as e:
@@ -311,10 +389,9 @@ class SQLiteLogger:
     def get_distinct_models(self) -> List[str]:
         """获取日志中出现过的所有模型名（用于前端筛选下拉）"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT model FROM requests ORDER BY model")
-            return [row[0] for row in cursor.fetchall() if row[0]]
+            with self._read_connection() as conn:
+                cursor = conn.execute("SELECT DISTINCT model FROM requests ORDER BY model")
+                return [row[0] for row in cursor.fetchall() if row[0]]
         except Exception as e:
             logger.error(f"获取模型列表失败: {e}", exc_info=True)
             return []

@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import os
 import time
 import threading
 import gzip
@@ -49,8 +50,9 @@ class MonitorConfig:
     ENABLE_LEGACY_LOGS = False  # 🔧 禁用JSONL日志（已使用SQLite和分层JSON）
     USE_COMPRESSION = False  # 是否使用gzip压缩（.json.gz）
     
-    # 日志保留策略
-    MAX_LOG_DAYS = 30  # 保留最近N天的日志
+    # 日志保留策略（由 background_tasks.monitors.log_retention_cleaner 每日执行）
+    MAX_LOG_DAYS = 30  # 保留最近N天的分层日志文件（每请求一个 JSON，是磁盘占用大头）
+    MAX_DB_DAYS = 365  # SQLite 请求记录保留天数（行很小，保留更久以支撑长期费用/token统计）
     MAX_LOGS_PER_HOUR = 10000  # 每小时最多保留的日志文件数
     
     # 其他配置
@@ -59,12 +61,12 @@ class MonitorConfig:
     MAX_RECENT_REQUESTS = 2000   # 降低以减少内存占用（每秒1个请求也够存半小时）
     MAX_RECENT_ERRORS = 50
     STATS_UPDATE_INTERVAL = 5  # 秒
-    MONITOR_SEND_TIMEOUT_SECONDS = 0.2  # 监控WS发送超时，避免拖慢主请求链路
+    MONITOR_SEND_TIMEOUT_SECONDS = 2.0  # 监控WS发送超时（秒），过短会在网络抖动时误剔除客户端
 
 # 确保日志目录存在
 MonitorConfig.LOG_DIR.mkdir(exist_ok=True)
 
-@dataclass
+@dataclass(slots=True)
 class RequestInfo:
     """
     请求信息 (内存轻量版)
@@ -208,9 +210,12 @@ class LogManager:
                 new_content = []
                 for part in content:
                     if isinstance(part, dict):
-                        part_copy = copy.deepcopy(part)
+                        # 🔧 msg_copy 已是深拷贝，content 里的 part 本身就是私有
+                        # 副本；旧版这里再 deepcopy 一次是纯粹的 CPU 浪费
+                        part_copy = part
+                        part_type = part_copy.get('type')
                         
-                        if part_copy.get('type') == 'image_url':
+                        if part_type == 'image_url':
                             image_url = part_copy.get('image_url', {})
                             url = image_url.get('url', '')
                             
@@ -223,7 +228,18 @@ class LogManager:
                                 image_url['url'] = f"[BASE64_IMAGE_FILTERED: ~{original_size // 1024}KB, {mime_type[5:-8]}]"
                                 part_copy['image_url'] = image_url
                         
-                        elif part_copy.get('type') == 'text':
+                        elif part_type == 'image':
+                            # Anthropic 原生 image 块：过滤 source.data 中的 base64
+                            source = part_copy.get('source', {})
+                            if isinstance(source, dict) and source.get('type') == 'base64':
+                                data = source.get('data', '')
+                                media_type = source.get('media_type', 'unknown')
+                                if isinstance(data, str) and data:
+                                    original_size = len(data) * 3 // 4
+                                    source['data'] = f"[BASE64_IMAGE_FILTERED: ~{original_size // 1024}KB, {media_type}]"
+                                    part_copy['source'] = source
+                        
+                        elif part_type == 'text':
                             text = part_copy.get('text', '')
                             if isinstance(text, str) and 'data:image' in text and 'base64' in text:
                                 part_copy['text'] = base64_pattern.sub('[BASE64_IMAGE_FILTERED]', text)
@@ -259,6 +275,15 @@ class LogManager:
                 log_entry_filtered['request_messages'] = self._filter_base64_from_messages(
                     log_entry_filtered['request_messages']
                 )
+            # 也过滤 response_content 中可能包含的 base64 图片（部分模型返回图片）
+            if 'response_content' in log_entry_filtered and log_entry_filtered['response_content']:
+                rc = log_entry_filtered['response_content']
+                if isinstance(rc, str) and 'data:image' in rc and 'base64' in rc:
+                    import re as _re
+                    log_entry_filtered['response_content'] = _re.sub(
+                        r'data:image/[^;]+;base64,[A-Za-z0-9+/=]{100,}',
+                        '[BASE64_IMAGE_FILTERED]', rc
+                    )
             
             # 写入文件
             # 紧凑序列化，减少大响应日志写盘时的 CPU/GIL 占用
@@ -522,18 +547,23 @@ class MonitoringService:
         # WebSocket客户端管理
         self.monitor_clients = set()
         
-        # 活跃请求超时配置（与流响应超时保持一致）
-        from core.constants import TimeoutDefaults
-        self.active_request_timeout = TimeoutDefaults.STREAM_RESPONSE_TIMEOUT  # 与流超时同步，当前2000秒
-        
         # 统计持久化节流，避免每个请求结束都同步写 stats.json
         self._last_persist_time = 0.0
         self._persist_interval_seconds = MonitorConfig.STATS_UPDATE_INTERVAL
         
-        # 🔧 性能修复：线程池用于offload request_start/request_end的阻塞操作
+        # 🔧 性能修复：线程池用于offload监控查询的阻塞操作
         # 避免 threading.Lock + asdict + logger.info 等阻塞 asyncio 事件循环
         self._monitor_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=8, thread_name_prefix="monitor-ops"
+        )
+        # 🔧 竞态修复：request_start/request_end 必须串行执行。
+        # 旧版两者都提交到 8-worker 池，不保证顺序：快速失败的请求
+        # end 可能先于 start 执行，导致"未找到请求"直接丢失整条日志。
+        # 单 worker FIFO 队列天然保证同一请求的 start 先于 end 执行；
+        # 两个回调都很轻（锁内更新 + 入队，写盘在另一条后台线程），
+        # 单线程吞吐完全够用。
+        self._event_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="monitor-events"
         )
         
         # 加载持久化的统计数据
@@ -541,12 +571,28 @@ class MonitoringService:
         
         logger.info("监控服务已初始化")
         logger.info(f"  专用线程池: {self._monitor_pool._max_workers} workers (隔离于默认asyncio线程池)")
-    
+
+    @property
+    def active_request_timeout(self) -> float:
+        """活跃请求超时阈值（秒），超过即被 cleanup_stale_requests 判定为僵死请求。
+
+        🔧 配置接线：config.jsonc / 管理面板暴露的是
+        active_request_timeout_minutes（分钟）。旧版 __init__ 里直接取
+        TimeoutDefaults.STREAM_RESPONSE_TIMEOUT（2000 秒 ≈ 33 分钟），
+        与用户配置的 60 分钟对不上且改配置无效。
+        用属性而非 __init__ 赋值，监控服务是长生命周期单例，这样才能跟随热重载。
+        """
+        from core.config_loader import get_float_setting
+        from core.constants import TimeoutDefaults
+        return get_float_setting(
+            "active_request_timeout_minutes", TimeoutDefaults.ACTIVE_REQUEST_TIMEOUT_MINUTES
+        ) * 60
+
     def request_start(self, request_id: str, model: str, messages_count: int = 0,
                      session_id: Optional[str] = None, mode: Optional[str] = None,
                      messages: Optional[List[dict]] = None, params: Optional[dict] = None):
-        """记录请求开始（非阻塞版：提交到线程池，不阻塞事件循环）"""
-        self._monitor_pool.submit(
+        """记录请求开始（非阻塞版：提交到串行事件池，不阻塞事件循环）"""
+        self._event_pool.submit(
             self._request_start_sync,
             request_id, model, messages_count, session_id, mode, messages, params
         )
@@ -604,20 +650,22 @@ class MonitoringService:
                     response_content: Optional[str] = None, reasoning_content: Optional[str] = None,
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
                     cost_info: Optional[dict] = None, full_messages: Optional[List[dict]] = None,
-                    response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None):
-        """记录请求结束（非阻塞版：提交到线程池，不阻塞事件循环）"""
-        self._monitor_pool.submit(
+                    response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None,
+                    upstream_usage: Optional[dict] = None):
+        """记录请求结束（非阻塞版：提交到串行事件池，与 request_start 保持顺序）"""
+        self._event_pool.submit(
             self._request_end_sync,
             request_id, success, error, response_content, reasoning_content,
             input_tokens, output_tokens, cached_tokens, cost_info, full_messages,
-            response_message, response_tool_calls
+            response_message, response_tool_calls, upstream_usage
         )
     
     def _request_end_sync(self, request_id: str, success: bool, error: Optional[str] = None,
                     response_content: Optional[str] = None, reasoning_content: Optional[str] = None,
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
                     cost_info: Optional[dict] = None, full_messages: Optional[List[dict]] = None,
-                    response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None):
+                    response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None,
+                    upstream_usage: Optional[dict] = None):
         """记录请求结束（实际执行，在线程池中运行）"""
         # 🔧 缩锁优化：锁内只做数据更新，asdict/日志构建移到锁外
         current_time = time.time()
@@ -650,10 +698,12 @@ class MonitoringService:
             
             # 🔧 从活跃请求中移除 + 更新详情缓存（必须在锁内）
             del self.active_requests[request_id]
-            self._store_request_details(request_id, request_info)
             
-            # 锁内收集数据（asdict 放锁外太重）
+            # 🔧 asdict 只做一次：旧版这里和 _store_request_details 内部各做
+            # 一次，锁内重复字典化；两处消费均为只读，共享同一份 dict 安全
             request_dict_for_recent = asdict(request_info)
+            self._store_request_details(request_id, request_info,
+                                        request_data=request_dict_for_recent)
             
             _mode = request_info.mode
             _session_id = request_info.session_id
@@ -702,7 +752,8 @@ class MonitoringService:
             'response_content': response_content,
             'response_tool_calls': response_tool_calls,
             'reasoning_content': reasoning_content,
-            'cost_info': cost_info
+            'cost_info': cost_info,
+            'upstream_usage': upstream_usage
         }
         if isinstance(_request_params, dict):
             for param_key, param_value in _request_params.items():
@@ -894,7 +945,7 @@ class MonitoringService:
         }
     
     async def _send_to_monitor_client(self, client, data: dict):
-        """向单个监控客户端发送消息；超时或失败时自动剔除"""
+        """向单个监控客户端发送消息；超时或失败时自动剔除并关闭连接，触发前端重连"""
         try:
             await asyncio.wait_for(
                 client.send_json(data),
@@ -902,6 +953,11 @@ class MonitoringService:
             )
         except Exception:
             self.monitor_clients.discard(client)
+            # 关闭连接让浏览器 onclose 触发，否则前端永远不知道已被剔除
+            try:
+                await asyncio.wait_for(client.close(code=1011), timeout=2)
+            except Exception:
+                pass
 
     async def broadcast_to_monitors(self, data: dict):
         """向所有监控客户端广播数据（非阻塞主请求链路）"""
@@ -922,38 +978,24 @@ class MonitoringService:
         self.monitor_clients.discard(websocket)
         logger.debug(f"监控客户端已断开，当前客户端数: {len(self.monitor_clients)}")
     
-    def _store_request_details(self, request_id: str, request_info: RequestInfo):
-        """存储请求详情到缓存（保持数据完整性）"""
-        import sys
+    def _store_request_details(self, request_id: str, request_info: RequestInfo,
+                               request_data: Optional[dict] = None):
+        """存储请求详情到缓存（FIFO，上限 MAX_DETAILS_CACHE 条）
+
+        request_data 可传入预先 asdict 好的字典，避免锁内重复字典化。
+
+        🔧 旧版用 sys.getsizeof(OrderedDict) 估算缓存大小，但 getsizeof
+        只算容器本身不含内容，该检查从不生效，已移除；实际内存控制
+        靠条数上限（每条仅含截断预览，内存可控）。
+        """
+        if request_data is None:
+            request_data = asdict(request_info)
         
-        # 创建要存储的数据 - 保持完整性，不截断
-        request_data = asdict(request_info)
-        
-        # 检查缓存大小（粗略估算）
-        cache_size_bytes = sys.getsizeof(self.request_details_cache)
-        cache_size_mb = cache_size_bytes / (1024 * 1024)
-        
-        # 如果缓存过大（超过500MB），删除最老的10%项目
-        if cache_size_mb > self.cache_size_limit_mb and len(self.request_details_cache) > 0:
-            # 删除最老的10%项目
-            items_to_remove = max(1, len(self.request_details_cache) // 10)
-            for _ in range(items_to_remove):
-                self.request_details_cache.popitem(last=False)
-            cache_size_bytes = sys.getsizeof(self.request_details_cache)
-            cache_size_mb = cache_size_bytes / (1024 * 1024)
-            logger.info(f"[CACHE] 缓存超过限制，已清理 {items_to_remove} 个旧项，当前大小: ~{cache_size_mb:.2f}MB")
-        
-        # 限制缓存项数
-        if len(self.request_details_cache) >= self.MAX_DETAILS_CACHE:
-            # 删除最老的缓存项（FIFO）
+        # 限制缓存项数（FIFO淘汰）
+        while len(self.request_details_cache) >= self.MAX_DETAILS_CACHE:
             self.request_details_cache.popitem(last=False)
         
-        # 存储新项 - 保持数据完整
         self.request_details_cache[request_id] = request_data
-        
-        # 定期记录缓存状态（每500个请求）
-        if len(self.request_details_cache) % 500 == 0:
-            logger.debug(f"[CACHE] 详情缓存状态 - 项数: {len(self.request_details_cache)}, 大小: ~{cache_size_mb:.2f}MB")
     
     def _ensure_request_params_for_view(self, details: dict) -> dict:
         """
@@ -1183,9 +1225,17 @@ class MonitoringService:
         try:
             stats_path = MonitorConfig.LOG_DIR / MonitorConfig.STATS_FILE
             
-            # 🔧 核心修复：计算每日统计
+            # 🔧 线程安全：持锁快照后再遍历。旧版在锁外直接遍历
+            # self.recent_requests（deque），其他线程并发 append 时会抛
+            # RuntimeError: deque mutated during iteration
+            with self._lock:
+                recent_snapshot = list(self.recent_requests)
+                recent_errors_snapshot = list(self.recent_errors)
+                model_stats_snapshot = {k: dict(v) for k, v in self.model_stats.items()}
+            
+            # 计算每日统计
             daily_stats = {}
-            for req in self.recent_requests:
+            for req in recent_snapshot:
                 timestamp = req.get('timestamp', 0)
                 if timestamp:
                     date_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
@@ -1202,23 +1252,34 @@ class MonitoringService:
                     else:
                         daily_stats[date_str]['failed'] += 1
             
-            # 准备要保存的数据
+            # 准备要保存的数据（全部基于快照，不再碰共享对象）
             stats_data = {
                 'last_update': time.time(),
                 'startup_time': self.startup_time,
-                'model_stats': dict(self.model_stats),
+                'model_stats': model_stats_snapshot,
                 # 保存总体统计
-                'total_requests_all_time': sum(s['total'] for s in self.model_stats.values()),
-                'total_success_all_time': sum(s['success'] for s in self.model_stats.values()),
-                'total_failed_all_time': sum(s['failed'] for s in self.model_stats.values()),
+                'total_requests_all_time': sum(s['total'] for s in model_stats_snapshot.values()),
+                'total_success_all_time': sum(s['success'] for s in model_stats_snapshot.values()),
+                'total_failed_all_time': sum(s['failed'] for s in model_stats_snapshot.values()),
                 # 🔧 新增：保存每日统计
-                'daily_stats': daily_stats
+                'daily_stats': daily_stats,
+                # 🔧 持久化最近请求/错误列表（_load_persisted_stats 会恢复，
+                # 重启后监控面板仍能看到最近请求）；只存最近 500 条控制文件体积
+                'recent_requests': recent_snapshot[-500:],
+                'recent_errors': recent_errors_snapshot
             }
             
-            # 写入文件
-            with open(stats_path, 'w', encoding='utf-8') as f:
-                json.dump(stats_data, f, ensure_ascii=False, separators=(',', ':'))
-                
+            # 写入文件（default=str 兜住零散不可序列化字段，避免整体持久化失败）
+            # 🔧 原子写：临时文件 + os.replace。旧版直接覆盖写，进程在写入
+            # 中途被强杀会留下半截 JSON（stats.json 已实际损坏过：启动时报
+            # "Expecting value ... char 19304546"），历史统计全部丢失
+            # 🔧 并发安全：唯一化 tmp 路径避免多写端交错 + threading.Lock 互斥
+            tmp_path = f"{stats_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+            with self._lock:
+                with open(tmp_path, 'w', encoding='utf-8') as f:
+                    json.dump(stats_data, f, ensure_ascii=False, separators=(',', ':'), default=str)
+                os.replace(tmp_path, stats_path)
+
         except Exception as e:
             logger.error(f"持久化统计数据失败: {e}")
     

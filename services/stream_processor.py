@@ -39,6 +39,21 @@ logger = logging.getLogger(__name__)
 _pattern_matcher = StreamPatternMatcher()
 
 
+def _normalize_reasoning_mode(raw_mode: str) -> str:
+    """归一化 reasoning_output_mode，确保流式/非流式语义一致。
+    
+    admin 面板提供的选项可能包含 "anthropic" 等非标准值，
+    归一化为 "openai" 或 "think_tag"。
+    """
+    if not raw_mode:
+        return "openai"
+    mode = raw_mode.strip().lower()
+    if mode in ("think_tag", "think"):
+        return "think_tag"
+    # "openai" / "anthropic" / 其他未知值统一按 openai 处理
+    return "openai"
+
+
 async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict, CONFIG: dict,
                                    browser_connections: dict, response_channels: dict,
                                    IMAGE_BASE64_CACHE: dict, IMAGE_CACHE_MAX_SIZE: int,
@@ -62,11 +77,6 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
     stream_cancelled = False
     logger.info(f"[STREAM_LIFECYCLE] 🚀 _process_lmarena_stream 开始处理: {request_id[:8]}")
     
-    if not queue:
-        logger.error(f"PROCESSOR [ID: {request_id[:8]}]: 无法找到响应通道。")
-        yield 'error', 'Internal server error: response channel not found.'
-        return
-
     timeout = CONFIG.get("stream_response_timeout_seconds", 360)
     has_yielded_content = False
     enable_reasoning_output = CONFIG.get("enable_lmarena_reasoning", False)
@@ -82,13 +92,14 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
     # 🔧 包装下载/保存函数：ImageProcessor 只传核心参数，
     # 其余依赖（session/信号量/去重集合/配置）从 AppState 获取
     async def _download_image_for_processor(url: str):
-        return await download_image_data_with_retry(
+        data, err, ct = await download_image_data_with_retry(
             url,
             _state.server.aiohttp_session,
             _state.server.DOWNLOAD_SEMAPHORE,
             _state.server.MAX_CONCURRENT_DOWNLOADS,
             CONFIG,
         )
+        return data, err, ct
 
     async def _save_image_for_processor(image_data: bytes, url: str, rid: str):
         await save_downloaded_image_async(
@@ -97,6 +108,7 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
             rid,
             _state.image.downloaded_urls_set,
             CONFIG,
+            downloaded_image_urls=_state.image.downloaded_image_urls,
         )
 
     image_processor = ImageProcessor(
@@ -112,6 +124,10 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
     cloudflare_handler = CloudflareHandler(browser_connections=browser_connections)
 
     try:
+        if not queue:
+            logger.error(f"PROCESSOR [ID: {request_id[:8]}]: 无法找到响应通道。")
+            yield 'error', 'Internal server error: response channel not found.'
+            return
         while True:
             # 检查请求通道是否已关闭
             if request_id not in response_channels:
@@ -137,25 +153,44 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
                     if error_result:
                         yield error_result
                         return
+                # 🔧 修复：未识别的 dict 消息直接丢弃。str(dict) 是 Python repr
+                # 而非流数据，混入文本缓冲会被当"异常 buffer 文本"泄进正文
+                logger.warning(f"[STREAM] 忽略未识别的 dict 消息: {str(raw_data)[:100]}")
+                continue
 
             # 检查 [DONE] 信号
             if raw_data == "[DONE]":
                 logger.info(f"[STREAM_END] 收到[DONE]信号 - 请求 {request_id[:8]}")
                 
-                # 🔧 修复：循环等待并收集所有延迟数据（不只是一个）
+                # 🔧 尾延迟优化：先非阻塞排干队列中已到达的乱序数据；
+                # 正常流（队列已空）只用 50ms 短窗口兑底一次，不再固定阻塞 300ms；
+                # 一旦确实排到延迟数据，说明该流存在乱序，恢复原有 300ms 保护窗口
                 delayed_chunks_count = 0
                 while True:
                     try:
-                        extra_data = await asyncio.wait_for(queue.get(), timeout=0.3)  # 增加到 0.3 秒
-                        if extra_data == "[DONE]":
-                            # 再次收到 [DONE]，继续等待可能的延迟数据
-                            continue
-                        stream_buffer.append(extra_data)
-                        delayed_chunks_count += 1
-                        logger.debug(f"[STREAM_END] 收到延迟数据块 #{delayed_chunks_count}，长度: {len(str(extra_data))}")
+                        extra_data = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if extra_data == "[DONE]":
+                        continue
+                    stream_buffer.append(extra_data)
+                    delayed_chunks_count += 1
+                    logger.debug(f"[STREAM_END] 收到延迟数据块 #{delayed_chunks_count}，长度: {len(str(extra_data))}")
+                
+                wait_timeout = 0.3 if delayed_chunks_count > 0 else 0.05
+                while True:
+                    try:
+                        extra_data = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
                     except asyncio.TimeoutError:
                         # 超时，没有更多数据
                         break
+                    if extra_data == "[DONE]":
+                        # 再次收到 [DONE]，继续等待可能的延迟数据
+                        continue
+                    stream_buffer.append(extra_data)
+                    delayed_chunks_count += 1
+                    wait_timeout = 0.3  # 出现过延迟数据的流保持原有保护窗口
+                    logger.debug(f"[STREAM_END] 收到延迟数据块 #{delayed_chunks_count}，长度: {len(str(extra_data))}")
                 
                 if delayed_chunks_count > 0:
                     logger.info(f"[STREAM_END] 共收集了 {delayed_chunks_count} 个延迟数据块")
@@ -164,6 +199,15 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
                 async for event in _flush_remaining_buffer(stream_buffer, enable_reasoning_output, reasoning_buffer, CONFIG):
                     has_yielded_content = True
                     yield event
+                
+                # 兜底：流结束时若 reasoning 从未触发结束信号（短回复中 reasoning 与 content 同批出现会导致 #54），在此补发
+                if has_reasoning and not reasoning_ended and enable_reasoning_output:
+                    reasoning_ended = True
+                    logger.info(f"[REASONING_END] 流结束时补发reasoning结束（共{len(reasoning_buffer)}个片段）")
+                    if CONFIG.get("preserve_streaming", True):
+                        yield 'reasoning_end', None
+                    else:
+                        yield 'reasoning_complete', "".join(reasoning_buffer)
                 
                 if has_yielded_content and cloudflare_handler.is_refreshing:
                     logger.info(f"PROCESSOR [ID: {request_id[:8]}]: 请求成功，人机验证状态将在下次连接时重置。")
@@ -202,7 +246,10 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
                     reasoning_ended = True
                     logger.info(f"[REASONING_END] 检测到reasoning结束（共{len(reasoning_buffer)}个片段）")
                     if enable_reasoning_output:
-                        yield 'reasoning_end', None
+                        if CONFIG.get("preserve_streaming", True):
+                            yield 'reasoning_end', None
+                        else:
+                            yield 'reasoning_complete', "".join(reasoning_buffer)
                 
                 has_yielded_content = True
                 yield 'content', text_content
@@ -210,10 +257,8 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
             
             # 处理图片
             for image_url in parsed.image_urls:
-                image_result, should_continue = await image_processor.process_image_url(image_url, request_id)
+                image_result, _ = await image_processor.process_image_url(image_url, request_id)
                 yield 'content', image_result
-                if should_continue:
-                    continue
             
             # 处理结束信息
             if parsed.finish_reason:
@@ -270,6 +315,14 @@ async def _flush_remaining_buffer(stream_buffer: StreamBuffer, enable_reasoning_
     
     # 尝试提取剩余内容
     parsed = stream_buffer.parse()
+    
+    # 检查排干窗口到达的 error/cloudflare 帧
+    if parsed.error:
+        yield 'error', parsed.error
+        return
+    if parsed.is_cloudflare:
+        yield 'error', 'Cloudflare verification detected in remaining buffer'
+        return
     
     for text in parsed.content_chunks:
         yield 'content', text
@@ -361,8 +414,13 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
     chunks_sent = 0
     
     enable_reasoning_output = CONFIG.get("enable_lmarena_reasoning", False)
-    reasoning_mode = CONFIG.get("reasoning_output_mode", "openai")
+    reasoning_mode = _normalize_reasoning_mode(CONFIG.get("reasoning_output_mode", "openai"))
     preserve_streaming = CONFIG.get("preserve_streaming", True)
+    # 🔧 配置路径修复：该开关在 config.jsonc / 管理面板中位于
+    # empty_response_retry.show_retry_info_to_client（见 js/admin-config.js 与
+    # routes/lmarena_handler.py 的读取方式）。旧版在此按顶层键读取，
+    # 永远取不到用户设置，"向客户端显示重试信息"开关恒为关闭。
+    show_retry_info = CONFIG.get("empty_response_retry", {}).get("show_retry_info_to_client", False)
 
     try:
         async for event_type, data in _process_lmarena_stream_func(request_id):
@@ -377,15 +435,16 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
                 await _handle_client_disconnect(
                     request_id, e, collected_content, reasoning_content, model,
                     monitoring_service, estimate_message_tokens, estimate_tokens,
-                    request_metadata, browser_connections
+                    request_metadata, browser_connections,
+                    full_messages=full_messages
                 )
                 is_cancelled = True
                 request_end_called = True
-                break
+                return
             
             # 处理各种事件类型
             if event_type == 'retry_info':
-                if CONFIG.get("show_retry_info_to_client", False):
+                if show_retry_info:
                     yield chunk_builder.content(f"\n[重试信息] 尝试 {data.get('attempt')}/{data.get('max_attempts')}\n")
             
             elif event_type == 'reasoning':
@@ -427,15 +486,16 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
             elif event_type == 'error':
                 await _handle_stream_error(
                     request_id, data, collected_content, reasoning_content, model,
-                    monitoring_service, estimate_message_tokens, estimate_tokens, chunk_builder
+                    monitoring_service, estimate_message_tokens, estimate_tokens, chunk_builder,
+                    full_messages=full_messages
                 )
                 request_end_called = True
                 yield chunk_builder.error(str(data))
                 yield chunk_builder.finish(reason='stop')
                 return
 
-        # 发送结束块
-        await asyncio.sleep(0.1)
+        # 发送结束块（仅让出事件循环，无需固定等待 100ms）
+        await asyncio.sleep(0)
         
         full_response = "".join(collected_content)
         full_reasoning = "".join(reasoning_content) if reasoning_content else None
@@ -443,27 +503,18 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
         # 计算token
         input_tokens, output_tokens = await _calculate_tokens(
             lmarena_usage, model, full_response, request_id,
-            monitoring_service, estimate_message_tokens, estimate_tokens
+            monitoring_service, estimate_message_tokens, estimate_tokens,
+            full_messages=full_messages
         )
-        
+
         final_usage = {
             "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
         }
         
-        # 发送 OpenAI 规范要求的最后一个包含 usage 的数据包
-        usage_final_chunk = {
-            "id": response_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [],
-            "usage": final_usage
-        }
-        yield f"data: {json.dumps(usage_final_chunk, ensure_ascii=False)}\n\n"
-        
-        yield chunk_builder.finish(reason=finish_reason_to_send)
+        # 发送结束块（附带 usage），符合 OpenAI 规范
+        yield chunk_builder.finish(reason=finish_reason_to_send, usage=final_usage)
         
         # 记录请求成功
         monitoring_service.request_end(
@@ -513,26 +564,27 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
 
 async def _handle_client_disconnect(request_id, exception, collected_content, reasoning_content, model,
                                      monitoring_service, estimate_message_tokens, estimate_tokens,
-                                     request_metadata, browser_connections):
+                                     request_metadata, browser_connections,
+                                     full_messages: Optional[list] = None):
     """处理客户端断开连接"""
     logger.warning(f"[DISCONNECT_DETECT] 🚫 客户端已断开: {request_id[:8]}")
-    
+
     partial_response = "".join(collected_content)
     partial_reasoning = "".join(reasoning_content) if reasoning_content else None
-    
+
+    # 🔧 字段修复：RequestInfo 已删除 request_messages（只留 200 字预览），
+    # 改从调用方作用域的 full_messages 估算输入 token
     input_tokens, output_tokens = 0, 0
-    if hasattr(monitoring_service, 'active_requests') and request_id in monitoring_service.active_requests:
-        request_info = monitoring_service.active_requests[request_id]
-        if request_info.request_messages:
-            try:
-                input_tokens = estimate_message_tokens(request_info.request_messages, model)
-            except:
-                pass
+    if full_messages:
+        try:
+            input_tokens = estimate_message_tokens(full_messages, model)
+        except Exception:
+            pass
     
     if partial_response:
         try:
             output_tokens = estimate_tokens(partial_response, model)
-        except:
+        except Exception:
             output_tokens = len(partial_response) // 4
     
     monitoring_service.request_end(
@@ -546,26 +598,26 @@ async def _handle_client_disconnect(request_id, exception, collected_content, re
 
 
 async def _handle_stream_error(request_id, error_data, collected_content, reasoning_content, model,
-                                monitoring_service, estimate_message_tokens, estimate_tokens, chunk_builder):
+                                monitoring_service, estimate_message_tokens, estimate_tokens, chunk_builder,
+                                full_messages: Optional[list] = None):
     """处理流式错误"""
     logger.error(f"STREAMER [ID: {request_id[:8]}]: 流中发生错误: {error_data}")
-    
+
     error_response = "".join(collected_content) if collected_content else None
     error_reasoning = "".join(reasoning_content) if reasoning_content else None
-    
+
+    # 🔧 字段修复：RequestInfo 已无 request_messages，改用 full_messages
     input_tokens, output_tokens = 0, 0
-    if hasattr(monitoring_service, 'active_requests') and request_id in monitoring_service.active_requests:
-        request_info = monitoring_service.active_requests[request_id]
-        if request_info.request_messages:
-            try:
-                input_tokens = estimate_message_tokens(request_info.request_messages, model)
-            except:
-                pass
+    if full_messages:
+        try:
+            input_tokens = estimate_message_tokens(full_messages, model)
+        except Exception:
+            pass
     
     if error_response:
         try:
             output_tokens = estimate_tokens(error_response, model)
-        except:
+        except Exception:
             output_tokens = len(error_response) // 4
     
     monitoring_service.request_end(
@@ -577,10 +629,11 @@ async def _handle_stream_error(request_id, error_data, collected_content, reason
 
 
 async def _calculate_tokens(lmarena_usage, model, full_response, request_id,
-                             monitoring_service, estimate_message_tokens, estimate_tokens):
+                             monitoring_service, estimate_message_tokens, estimate_tokens,
+                             full_messages: Optional[list] = None):
     """
     计算token数量（异步版本，不阻塞事件循环）
-    
+
     使用 asyncio.to_thread 将同步的token计算放到线程池执行，
     避免阻塞其他请求的处理。
     """
@@ -589,23 +642,19 @@ async def _calculate_tokens(lmarena_usage, model, full_response, request_id,
         estimate_tokens_async,
         estimate_message_tokens_async
     )
-    
+
     if lmarena_usage:
         input_tokens = lmarena_usage.get('inputTokens', 0) or lmarena_usage.get('prompt_tokens', 0)
         output_tokens = lmarena_usage.get('outputTokens', 0) or lmarena_usage.get('completion_tokens', 0)
         logger.info(f"[TOKEN] 使用LMArena实际token数: input={input_tokens}, output={output_tokens}")
         return input_tokens, output_tokens
-    
+
     tokenizer_type = get_tokenizer_for_model(model)
     logger.info(f"[TOKEN] 使用{tokenizer_type}计数（模型: {model}）- 异步执行")
-    
+
     input_tokens = 0
-    request_messages = None
-    
-    if hasattr(monitoring_service, 'active_requests') and request_id in monitoring_service.active_requests:
-        request_info = monitoring_service.active_requests[request_id]
-        if request_info.request_messages:
-            request_messages = request_info.request_messages
+    # 🔧 字段修复：RequestInfo 已无 request_messages，改用调用方传入的 full_messages
+    request_messages = full_messages
     
     async def _zero():
         return 0
@@ -664,93 +713,126 @@ async def non_stream_response(request_id: str, model: str, _process_lmarena_stre
     reasoning_content = []
     finish_reason = "stop"
     lmarena_usage = None
+    request_end_called = False  # 🔧 兜底标志（与 stream_generator 的健壮性对齐）
     
     enable_reasoning_output = CONFIG.get("enable_lmarena_reasoning", False)
-    reasoning_mode = CONFIG.get("reasoning_output_mode", "openai")
+    reasoning_mode = _normalize_reasoning_mode(CONFIG.get("reasoning_output_mode", "openai"))
     
-    async for event_type, data in _process_lmarena_stream_func(request_id):
-        if event_type == 'retry_info':
-            continue
-        elif event_type in ('reasoning', 'reasoning_complete'):
-            reasoning_content.append(data)
-        elif event_type == 'content':
-            full_content.append(data)
-        elif event_type == 'finish':
-            if isinstance(data, dict):
-                finish_reason = data.get('reason', 'stop')
-                lmarena_usage = data.get('usage')
-            else:
-                finish_reason = data
-            if finish_reason == 'content-filter':
-                full_content.append("\n\n响应被终止，可能是上下文超限或者模型内部审查（大概率）的原因")
-        elif event_type == 'error':
-            return await _handle_non_stream_error(
-                request_id, data, full_content, reasoning_content, model,
-                monitoring_service, estimate_message_tokens, estimate_tokens, Response
-            )
+    try:
+        async for event_type, data in _process_lmarena_stream_func(request_id):
+            if event_type == 'retry_info':
+                continue
+            elif event_type in ('reasoning', 'reasoning_complete'):
+                reasoning_content.append(data)
+            elif event_type == 'content':
+                full_content.append(data)
+            elif event_type == 'finish':
+                if isinstance(data, dict):
+                    finish_reason = data.get('reason', 'stop')
+                    lmarena_usage = data.get('usage')
+                else:
+                    finish_reason = data
+                if finish_reason == 'content-filter':
+                    full_content.append("\n\n响应被终止，可能是上下文超限或者模型内部审查（大概率）的原因")
+            elif event_type == 'error':
+                request_end_called = True  # _handle_non_stream_error 内部会调用 request_end
+                return await _handle_non_stream_error(
+                    request_id, data, full_content, reasoning_content, model,
+                    monitoring_service, estimate_message_tokens, estimate_tokens, Response,
+                    full_messages=full_messages
+                )
 
-    # 构建响应
-    if enable_reasoning_output and reasoning_content:
-        full_reasoning = "".join(reasoning_content)
-        if reasoning_mode == "openai":
-            response_data = format_openai_non_stream_response(
-                "".join(full_content), model, response_id,
-                reason=finish_reason, reasoning_content=full_reasoning
+        # 构建响应（统一使用 stream_formatters 版本，避免两套实现不一致）
+        if enable_reasoning_output and reasoning_content:
+            full_reasoning = "".join(reasoning_content)
+            if reasoning_mode == "openai":
+                response_data = format_openai_non_stream_response(
+                    "".join(full_content), model, response_id,
+                    reason=finish_reason, reasoning_content=full_reasoning
+                )
+            else:  # think_tag
+                wrapped = f"<think>{full_reasoning}</think>\n\n" + "".join(full_content)
+                response_data = format_openai_non_stream_response(
+                    wrapped, model, response_id, reason=finish_reason
+                )
+        else:
+            response_data = format_openai_non_stream_response_func("".join(full_content), model, response_id, reason=finish_reason)
+        
+        # 计算token
+        input_tokens, output_tokens = await _calculate_tokens(
+            lmarena_usage, model, "".join(full_content), request_id,
+            monitoring_service, estimate_message_tokens, estimate_tokens,
+            full_messages=full_messages
+        )
+        
+        response_data['usage'] = {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+        
+        monitoring_service.request_end(
+            request_id, success=True, response_content="".join(full_content),
+            reasoning_content="".join(reasoning_content) if reasoning_content else None,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            full_messages=full_messages
+        )
+        request_end_called = True
+        
+        # 释放标签页
+        if request_id in request_metadata:
+            tab_id = request_metadata[request_id].get("tab_id")
+            if tab_id:
+                await release_tab_request(tab_id)
+        
+        return Response(content=json.dumps(response_data, ensure_ascii=False), media_type="application/json")
+    
+    except asyncio.CancelledError:
+        # 🔧 客户端断开：旧版没有任何兜底，请求会在监控里挂成永久 active，
+        # 要等 stale_request_cleaner 在超时后才清理
+        if not request_end_called:
+            monitoring_service.request_end(
+                request_id, success=False,
+                error="Client disconnected (non-stream)",
+                response_content="".join(full_content) or None,
+                reasoning_content="".join(reasoning_content) or None
             )
-        else:  # think_tag
-            wrapped = f"<think>{full_reasoning}</think>\n\n" + "".join(full_content)
-            response_data = format_openai_non_stream_response_func(wrapped, model, response_id, reason=finish_reason)
-    else:
-        response_data = format_openai_non_stream_response_func("".join(full_content), model, response_id, reason=finish_reason)
-    
-    # 计算token
-    input_tokens, output_tokens = await _calculate_tokens(
-        lmarena_usage, model, "".join(full_content), request_id,
-        monitoring_service, estimate_message_tokens, estimate_tokens
-    )
-    
-    response_data['usage'] = {
-        "prompt_tokens": input_tokens,
-        "completion_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
-    }
-    
-    monitoring_service.request_end(
-        request_id, success=True, response_content="".join(full_content),
-        reasoning_content="".join(reasoning_content) if reasoning_content else None,
-        input_tokens=input_tokens, output_tokens=output_tokens,
-        full_messages=full_messages
-    )
-    
-    # 释放标签页
-    if request_id in request_metadata:
-        tab_id = request_metadata[request_id].get("tab_id")
-        if tab_id:
-            await release_tab_request(tab_id)
-    
-    return Response(content=json.dumps(response_data, ensure_ascii=False), media_type="application/json")
+            request_end_called = True
+        raise
+    except Exception as e:
+        # 🔧 意外异常兜底：保证监控记录一定落盘，再向上抛给调用方返回 500
+        if not request_end_called:
+            logger.error(f"NON-STREAM [ID: {request_id[:8]}]: 处理时发生意外异常: {e}", exc_info=True)
+            monitoring_service.request_end(
+                request_id, success=False,
+                error=f"Non-stream processing error: {e}",
+                response_content="".join(full_content) or None,
+                reasoning_content="".join(reasoning_content) or None
+            )
+            request_end_called = True
+        raise
 
 
 async def _handle_non_stream_error(request_id, error_data, full_content, reasoning_content, model,
-                                    monitoring_service, estimate_message_tokens, estimate_tokens, Response):
+                                    monitoring_service, estimate_message_tokens, estimate_tokens, Response,
+                                    full_messages: Optional[list] = None):
     """处理非流式错误"""
     logger.error(f"NON-STREAM [ID: {request_id[:8]}]: 处理时发生错误: {error_data}")
-    
+
     error_content = "".join(full_content) if full_content else None
     input_tokens, output_tokens = 0, 0
-    
-    if hasattr(monitoring_service, 'active_requests') and request_id in monitoring_service.active_requests:
-        request_info = monitoring_service.active_requests[request_id]
-        if request_info.request_messages:
-            try:
-                input_tokens = estimate_message_tokens(request_info.request_messages, model)
-            except:
-                pass
+
+    # 🔧 字段修复：RequestInfo 已无 request_messages，改用 full_messages
+    if full_messages:
+        try:
+            input_tokens = estimate_message_tokens(full_messages, model)
+        except Exception:
+            pass
     
     if error_content:
         try:
             output_tokens = estimate_tokens(error_content, model)
-        except:
+        except Exception:
             output_tokens = len(error_content) // 4
     
     monitoring_service.request_end(

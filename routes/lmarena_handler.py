@@ -1,5 +1,10 @@
 """
 LMArena模式处理模块（已弃用，保留兼容）
+
+⚠️ LMArena 功能已经不再维护，无需考虑本模块及相关链路
+（websocket_routes / load_balancer / message_converter / stream_processor 的
+LMArena 部分）的代码维护。目前项目重点是中转 API（Direct API）。
+
 处理通过浏览器WebSocket转发的LMArena请求。
 新配置请优先使用 Direct API；此模块仅继续服务旧的 LMArena 兼容配置。
 
@@ -240,7 +245,9 @@ async def handle_lmarena_request(
                                 filename=f"{role}_string_{msg_index}_{match_index}_{uuid.uuid4()}.png",
                                 request_id=request_id,
                                 CONFIG=CONFIG,
-                                PROCESSED_IMAGE_CACHE=image_state.IMAGE_BASE64_CACHE,
+                                # 🔧 使用独立的输入图片处理缓存：旧版误传响应图片
+                                # base64 缓存，两种语义的条目互相挤占驱逐
+                                PROCESSED_IMAGE_CACHE=image_state.PROCESSED_IMAGE_CACHE,
                                 model_image_config=model_image_config  # 传递模型配置
                             )
 
@@ -266,7 +273,7 @@ async def handle_lmarena_request(
                                     filename=f"{role}_list_{msg_index}_{part_index}_{uuid.uuid4()}.png",
                                     request_id=request_id,
                                     CONFIG=CONFIG,
-                                    PROCESSED_IMAGE_CACHE=image_state.IMAGE_BASE64_CACHE,
+                                    PROCESSED_IMAGE_CACHE=image_state.PROCESSED_IMAGE_CACHE,
                                     model_image_config=model_image_config  # 传递模型配置
                                 )
 

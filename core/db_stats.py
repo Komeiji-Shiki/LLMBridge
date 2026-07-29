@@ -6,16 +6,20 @@ SQLite数据库统计查询模块
 import asyncio
 import sqlite3
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.config_loader import CONFIG
 
 logger = logging.getLogger(__name__)
 
 
-def _get_exchange_rates():
-    """从全局配置读取汇率，默认 USD_TO_CNY = 7.2"""
+def get_exchange_rates():
+    """从全局配置读取汇率，默认 USD_TO_CNY = 7.2
+
+    返回 (usd_to_cny, cny_to_usd) 元组。
+    """
     rate_config = CONFIG.get("exchange_rate", {}) if CONFIG else {}
     usd_to_cny = float(rate_config.get("USD_TO_CNY", 7.2))
     return usd_to_cny, 1.0 / usd_to_cny
@@ -27,12 +31,29 @@ class StatsDB:
     
     def __init__(self):
         self.db_path = DB_PATH
+        # 🔧 性能：线程本地连接缓存。查询经 asyncio.to_thread 跑在线程池里，
+        # 线程复用则连接复用，避免每次查询新建连接 + 3 条 PRAGMA、
+        # 16MB 页面缓存每次作废的开销
+        self._local = threading.local()
         self.enabled = self.db_path.exists()
         if self.enabled:
             logger.info(f"✅ SQLite数据库已启用: {self.db_path}")
             self._ensure_indexes()
         else:
-            logger.warning(f"⚠️ SQLite数据库不存在，将使用JSON日志")
+            logger.warning(f"⚠️ SQLite数据库不存在，将使用JSON日志（建库后自动启用）")
+
+    def _check_enabled(self) -> bool:
+        """惰性重检数据库是否就绪。
+
+        🔧 修复：首次运行时 requests.db 可能在本模块导入之后才被
+        SQLiteLogger 创建，旧版只在 __init__ 判定一次，会导致统计功能
+        直到重启前一直禁用。
+        """
+        if not self.enabled and self.db_path.exists():
+            self.enabled = True
+            logger.info(f"✅ SQLite数据库已就绪（惰性启用）: {self.db_path}")
+            self._ensure_indexes()
+        return self.enabled
 
     def _ensure_indexes(self):
         """🔧 D11 性能优化：确保复合索引存在，加速 GROUP BY 和范围查询"""
@@ -43,23 +64,53 @@ class StatsDB:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp_success ON requests(timestamp, success)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_currency_cost ON requests(currency, total_cost)')
             conn.commit()
-            conn.close()
             logger.info("🔧 SQLite 复合索引已就绪")
         except Exception as e:
             logger.warning(f"创建复合索引失败（不影响功能）: {e}")
     
     def _get_connection(self):
-        """获取数据库连接（启用 WAL 模式和性能优化）"""
+        """获取当前线程的数据库连接（线程本地复用，启用 WAL 模式和性能优化）"""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
         conn = sqlite3.connect(self.db_path)
         # 🔧 D11 性能优化：WAL 模式允许读写并发，不再互斥
         conn.execute("PRAGMA journal_mode=WAL")
         # NORMAL 同步模式：平衡安全和性能（WAL 模式下足够安全）
         conn.execute("PRAGMA synchronous=NORMAL")
-        # 64MB 页面缓存，减少磁盘 IO
-        conn.execute("PRAGMA cache_size=-16000")  # 16MB 页面缓存（原64MB，降低以减少内存占用）
+        conn.execute("PRAGMA cache_size=-16000")  # 16MB 页面缓存，减少磁盘 IO
+        conn.execute("PRAGMA busy_timeout=5000")  # 5秒忙等待，避免与写连接冲突时立即 SQLITE_BUSY
+        self._local.conn = conn
         return conn
+
+    def _discard_connection(self):
+        """异常后丢弃当前线程的连接（可能已处于不确定状态），下次查询自动重建"""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
     
-    def get_token_stats(self, start_time: str = None, end_time: str = None, model_config: dict = None, rpm_period: str = None) -> Dict:
+    
+    @staticmethod
+    def _parse_time_bound(time_str: str, is_end: bool = False) -> float:
+        """解析时间边界字符串为 Unix 时间戳（秒）。
+        
+        - ISO 8601 格式（如 "2026-07-27T14:30:00"）：直接解析。
+        - 纯日期格式（YYYY-MM-DD）：start 返回当天 00:00:00，end 返回下一天 00:00:00。
+          配合 SQL 的 timestamp < end_ts（半开区间），确保结束日整天数据不丢。
+        """
+        try:
+            return datetime.fromisoformat(time_str.replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError):
+            dt = datetime.strptime(time_str, "%Y-%m-%d")
+            if is_end:
+                dt = dt + timedelta(days=1)
+            return dt.timestamp()
+
+    def get_token_stats(self, start_time: Optional[str] = None, end_time: Optional[str] = None, model_config: Optional[dict] = None, rpm_period: Optional[str] = None) -> Optional[Dict]:
         """
         获取Token统计数据
         
@@ -72,7 +123,7 @@ class StatsDB:
         Returns:
             包含模型统计和每日统计的字典
         """
-        if not self.enabled:
+        if not self._check_enabled():
             return None
         
         try:
@@ -85,27 +136,14 @@ class StatsDB:
             params = []
             
             if start_time:
-                # 尝试解析为ISO 8601时间戳，如果失败则作为日期处理
-                try:
-                    start_ts = datetime.fromisoformat(start_time.replace("Z", "+00:00")).timestamp()
-                except (ValueError, AttributeError):
-                    # 作为日期处理（YYYY-MM-DD），设置为当天00:00:00
-                    start_ts = datetime.strptime(start_time, "%Y-%m-%d").timestamp()
-                
+                start_ts = self._parse_time_bound(start_time, is_end=False)
                 where_clause += " AND timestamp >= ?"
                 params.append(start_ts)
             
             if end_time:
-                # 尝试解析为ISO 8601时间戳，如果失败则作为日期处理
-                try:
-                    end_ts = datetime.fromisoformat(end_time.replace("Z", "+00:00")).timestamp()
-                except (ValueError, AttributeError):
-                    # 作为日期处理（YYYY-MM-DD），设置为当天23:59:59
-                    end_ts = datetime.strptime(end_time, "%Y-%m-%d").replace(
-                        hour=23, minute=59, second=59
-                    ).timestamp()
-                
-                where_clause += " AND timestamp <= ?"
+                # 半开区间：结束日+1天 00:00:00，配合 timestamp < ? 不漏掉结束日数据
+                end_ts = self._parse_time_bound(end_time, is_end=True)
+                where_clause += " AND timestamp < ?"
                 params.append(end_ts)
             
             # RPM/TPM 使用独立的时间范围（不受日期筛选器影响）
@@ -232,7 +270,7 @@ class StatsDB:
             
             # 获取每日统计
             # 汇率（从配置读取，默认 7.2）
-            USD_TO_CNY, CNY_TO_USD = _get_exchange_rates()
+            USD_TO_CNY, CNY_TO_USD = get_exchange_rates()
 
             query = f'''
                 SELECT 
@@ -289,14 +327,8 @@ class StatsDB:
             '''
             cursor.execute(query, params)
             cost_rows = cursor.fetchall()
-            
-            conn.close()
-            
-            # 汇率
-            USD_TO_CNY = 7.2
-            CNY_TO_USD = 1.0 / USD_TO_CNY
 
-            # 按货币整理原始成本
+            # 按货币整理原始成本（汇率沿用上方从配置读取的值，避免硬编码不一致）
             cost_by_currency = {}
             for row in cost_rows:
                 curr = row[0] or 'USD'
@@ -370,9 +402,10 @@ class StatsDB:
             
         except Exception as e:
             logger.error(f"获取Token统计失败: {e}", exc_info=True)
+            self._discard_connection()
             return None
     
-    def get_request_summary(self, start_time: str = None, end_time: str = None) -> Dict:
+    def get_request_summary(self, start_time: Optional[str] = None, end_time: Optional[str] = None) -> Optional[Dict]:
         """
         获取轻量级请求汇总统计（不包含每日聚合）
         
@@ -383,7 +416,7 @@ class StatsDB:
         Returns:
             仅包含总请求/成功/失败的字典
         """
-        if not self.enabled:
+        if not self._check_enabled():
             return None
         
         try:
@@ -394,12 +427,12 @@ class StatsDB:
             params = []
 
             if start_time:
-                start_ts = datetime.fromisoformat(start_time.replace("Z", "+00:00")).timestamp()
+                start_ts = self._parse_time_bound(start_time, is_end=False)
                 where_clause += " AND timestamp >= ?"
                 params.append(start_ts)
             if end_time:
-                end_ts = datetime.fromisoformat(end_time.replace("Z", "+00:00")).timestamp()
-                where_clause += " AND timestamp <= ?"
+                end_ts = self._parse_time_bound(end_time, is_end=True)
+                where_clause += " AND timestamp < ?"
                 params.append(end_ts)
             
             query = f'''
@@ -413,7 +446,6 @@ class StatsDB:
             
             cursor.execute(query, params)
             totals = cursor.fetchone()
-            conn.close()
             
             return {
                 'total_requests': totals[0] or 0,
@@ -423,9 +455,10 @@ class StatsDB:
             
         except Exception as e:
             logger.error(f"获取请求汇总统计失败: {e}", exc_info=True)
+            self._discard_connection()
             return None
 
-    def get_request_stats(self, start_time: str = None, end_time: str = None) -> Dict:
+    def get_request_stats(self, start_time: Optional[str] = None, end_time: Optional[str] = None) -> Optional[Dict]:
         """
         获取请求统计数据
         
@@ -436,7 +469,7 @@ class StatsDB:
         Returns:
             包含请求统计和每日统计的字典
         """
-        if not self.enabled:
+        if not self._check_enabled():
             return None
         
         try:
@@ -452,12 +485,12 @@ class StatsDB:
             params = []
 
             if start_time:
-                start_ts = datetime.fromisoformat(start_time.replace("Z", "+00:00")).timestamp()
+                start_ts = self._parse_time_bound(start_time, is_end=False)
                 where_clause += " AND timestamp >= ?"
                 params.append(start_ts)
             if end_time:
-                end_ts = datetime.fromisoformat(end_time.replace("Z", "+00:00")).timestamp()
-                where_clause += " AND timestamp <= ?"
+                end_ts = self._parse_time_bound(end_time, is_end=True)
+                where_clause += " AND timestamp < ?"
                 params.append(end_ts)
             
             # 获取每日统计
@@ -483,8 +516,6 @@ class StatsDB:
                     'failed': row[3]
                 })
             
-            conn.close()
-            
             return {
                 'total_requests': summary['total_requests'],
                 'success_requests': summary['success_requests'],
@@ -494,9 +525,10 @@ class StatsDB:
             
         except Exception as e:
             logger.error(f"获取请求统计失败: {e}", exc_info=True)
+            self._discard_connection()
             return None
     
-    def merge_models(self, source_models: List[str], target_model: str) -> Dict:
+    def merge_models(self, source_models: List[str], target_model: str) -> Optional[Dict]:
         """
         合并多个模型的统计数据到目标模型
         
@@ -507,7 +539,7 @@ class StatsDB:
         Returns:
             合并结果字典
         """
-        if not self.enabled:
+        if not self._check_enabled():
             return None
         
         try:
@@ -526,7 +558,6 @@ class StatsDB:
             
             # 提交事务
             conn.commit()
-            conn.close()
             
             logger.info(f"✅ 数据库合并完成: 更新了 {updated_count} 条记录")
             
@@ -540,12 +571,12 @@ class StatsDB:
             logger.error(f"合并模型统计失败: {e}", exc_info=True)
             try:
                 conn.rollback()
-                conn.close()
-            except:
+            except Exception:
                 pass  # conn 可能未定义或已关闭
+            self._discard_connection()
             return None
     
-    def delete_models(self, models: List[str]) -> Dict:
+    def delete_models(self, models: List[str]) -> Optional[Dict]:
         """
         删除指定模型的所有统计数据
         
@@ -555,7 +586,7 @@ class StatsDB:
         Returns:
             删除结果字典
         """
-        if not self.enabled:
+        if not self._check_enabled():
             return None
         
         try:
@@ -574,7 +605,6 @@ class StatsDB:
             
             # 提交事务
             conn.commit()
-            conn.close()
             
             logger.info(f"✅ 数据库删除完成: 删除了 {deleted_count} 条记录")
             
@@ -588,12 +618,12 @@ class StatsDB:
             logger.error(f"删除模型统计失败: {e}", exc_info=True)
             try:
                 conn.rollback()
-                conn.close()
-            except:
+            except Exception:
                 pass  # conn 可能未定义或已关闭
+            self._discard_connection()
             return None
 
-    def recalculate_costs(self, model_config: dict) -> Dict:
+    def recalculate_costs(self, model_config: dict) -> Optional[Dict]:
         """
         重新计算所有请求的费用（启动时调用）
         
@@ -603,7 +633,7 @@ class StatsDB:
         Returns:
             重算结果字典
         """
-        if not self.enabled:
+        if not self._check_enabled():
             return None
         
         try:
@@ -612,6 +642,7 @@ class StatsDB:
             
             # 获取所有有计费配置的模型
             pricing_models = {}
+            display_name_pricing = {}
             for model_name, config in model_config.items():
                 # 处理列表配置（取第一个）
                 if isinstance(config, list) and config:
@@ -620,6 +651,16 @@ class StatsDB:
                 # 提取pricing配置
                 if isinstance(config, dict) and 'pricing' in config:
                     pricing_models[model_name] = config['pricing']
+                    # 数据库中的 model 字段可能存的是 display_name（如透传模式），
+                    # 键名匹配不上时会导致该模型费用永远不被重算，这里一并注册
+                    display_name = config.get('display_name')
+                    if display_name and display_name != model_name:
+                        display_name_pricing[display_name] = config['pricing']
+            
+            # display_name 仅在不与任何配置键名冲突时补充注册（键名优先）
+            for display_name, pricing in display_name_pricing.items():
+                if display_name not in pricing_models:
+                    pricing_models[display_name] = pricing
             
             if not pricing_models:
                 logger.info("💰 没有配置计费的模型，跳过费用重算")
@@ -632,7 +673,7 @@ class StatsDB:
             
             updated_count = 0
             total_cost_sum_usd = 0.0  # 🔧 统一换算为USD
-            _, CNY_TO_USD = _get_exchange_rates()
+            _, CNY_TO_USD = get_exchange_rates()
             
             # 逐个模型重算费用
             for model_name, pricing in pricing_models.items():
@@ -705,7 +746,6 @@ class StatsDB:
             
             # 提交事务
             conn.commit()
-            conn.close()
             
             return {
                 "updated_count": updated_count,
@@ -718,9 +758,9 @@ class StatsDB:
             logger.error(f"重算费用失败: {e}", exc_info=True)
             try:
                 conn.rollback()
-                conn.close()
-            except:
+            except Exception:
                 pass  # conn 可能未定义或已关闭
+            self._discard_connection()
             return None
 
     # ==================== Async 包装方法 ====================

@@ -7,13 +7,14 @@ import json
 import logging
 import time
 import uuid
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 from datetime import datetime
 from fastapi import Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from core.config_loader import CONFIG
+from core.config_loader import CONFIG, MODEL_ROUND_ROBIN_INDEX, MODEL_ROUND_ROBIN_LOCK
 from utils.monitor_params import build_monitor_request_params
+from ._direct_api_utils import get_round_robin_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,14 @@ async def gemini_native_api(
     query_params = dict(request.query_params)
     if query_params.get("alt") == "sse":
         is_stream = True
-    
+    # 🔧 修复：流式一律向上游请求 alt=sse（见下方 target_url 构造），所以
+    # 转发给客户端的必然是 SSE 字节。旧版却用 query_params["alt"]=="sse"
+    # 决定响应 Content-Type 与旁路统计的解析分支：客户端调用
+    # :streamGenerateContent 但没带 alt=sse 时，实际收到 SSE 却被标成
+    # application/json，且统计走 JSON 分支解析全部失败 —— 这类请求的
+    # 响应内容和 token 统计整个丢失。统一以 is_stream 为准。
+    forward_as_sse = is_stream
+
     try:
         # 解析Gemini原生格式的请求体
         gemini_req = await request.json()
@@ -66,9 +74,14 @@ async def gemini_native_api(
                 detail=f"模型 '{model_name}' 未在配置中找到"
             )
         
-        # 处理多端点情况
+        # 处理多端点情况（🔧 轮询而非固定取第一个，与 /v1 链路行为一致；
+        # 计数器与 /v1 共享同一 MODEL_ROUND_ROBIN_INDEX，轮询状态统一）
         if isinstance(endpoint_config, list) and endpoint_config:
-            endpoint_config = endpoint_config[0]
+            endpoints = endpoint_config
+            async with MODEL_ROUND_ROBIN_LOCK:
+                current_index = MODEL_ROUND_ROBIN_INDEX.get(model_name, 0) % len(endpoints)
+                MODEL_ROUND_ROBIN_INDEX[model_name] = (current_index + 1) % len(endpoints)
+            endpoint_config = endpoints[current_index]
         
         # 验证是否为gemini_native类型
         api_type = endpoint_config.get("api_type")
@@ -78,9 +91,10 @@ async def gemini_native_api(
                 detail=f"模型 '{model_name}' 不是Gemini原生API类型"
             )
         
-        # 获取配置
+        # 获取配置（🔧 支持 api_keys 列表轮询，与 /v1 链路对齐）
         api_base_url = endpoint_config.get("api_base_url")
-        api_key = endpoint_config.get("api_key")
+        raw_api_key = endpoint_config.get("api_keys") or endpoint_config.get("api_key")
+        api_key = await get_round_robin_api_key(model_name, raw_api_key)
         target_model_id = endpoint_config.get("model_id", model_name)
         display_name = endpoint_config.get("display_name", model_name)
         pricing_config = endpoint_config.get("pricing", {})
@@ -128,18 +142,19 @@ async def gemini_native_api(
             method = "streamGenerateContent" if is_stream else "generateContent"
             target_url = f"{base_url}/models/{target_model_id}:{method}"
             
-            # 添加API key到查询参数
+            # 添加API key到查询参数（🔧 URL 编码，防特殊字符破坏 URL）
+            key_param = quote(api_key or "", safe="")
             if "?" in target_url:
-                target_url += f"&key={api_key}"
+                target_url += f"&key={key_param}"
             else:
-                target_url += f"?key={api_key}"
+                target_url += f"?key={key_param}"
             
             # 🔧 修复：流式请求必须添加 alt=sse 参数，让 Gemini 返回标准 SSE 格式
             # 否则 Gemini 返回多行 JSON 数组格式，逐行/逐块读取会导致 JSON 解析失败
             if is_stream:
                 target_url += "&alt=sse"
             
-            logger.info(f"[GEMINI_V1BETA] 目标URL: {target_url.replace(api_key, '***')}")
+            logger.info(f"[GEMINI_V1BETA] 目标URL: {target_url.replace(key_param, '***') if key_param else target_url}")
             
             # 转发请求 - 使用传入的aiohttp_session或创建临时session
             import aiohttp
@@ -172,7 +187,7 @@ async def gemini_native_api(
                         timeout=aiohttp.ClientTimeout(
                             total=CONFIG.get("api_call_timeout_seconds", 3000),
                             sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                            sock_connect=CONFIG.get("download_timeout", {}).get("connect", 30)
+                            sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
                         )
                     )
                     
@@ -181,14 +196,17 @@ async def gemini_native_api(
                         resp.release()
                         logger.error(f"[GEMINI_V1BETA] 上游API错误: {resp.status} - {error_text}")
                         
-                        # 计算输入tokens（即使请求失败也计算）
+                        # 计算输入tokens（即使请求失败也计算，只累加 text 内容，避免 base64 图片污染）
                         partial_input_tokens = 0
                         try:
-                            from modules.token_counter import estimate_message_tokens
                             contents = gemini_req.get("contents", [])
-                            partial_input_tokens = sum(
-                                len(str(c.get("parts", []))) // 4 for c in contents
-                            ) if contents else 0
+                            text_chars = 0
+                            for c in (contents if isinstance(contents, list) else []):
+                                parts = c.get("parts", []) if isinstance(c, dict) else []
+                                for p in (parts if isinstance(parts, list) else []):
+                                    if isinstance(p, dict) and "text" in p:
+                                        text_chars += len(str(p["text"]))
+                            partial_input_tokens = text_chars // 4
                         except Exception as token_err:
                             logger.warning(f"[GEMINI_V1BETA] 输入token计算失败: {token_err}")
                         
@@ -203,14 +221,20 @@ async def gemini_native_api(
                         if temp_session:
                             await temp_session.close()
                         
+                        # 尝试解析上游错误 JSON，避免双层 JSON 包裹
+                        try:
+                            error_obj = json.loads(error_text)
+                        except (json.JSONDecodeError, TypeError):
+                            error_obj = {"message": error_text}
                         return JSONResponse(
                             status_code=resp.status,
-                            content={"error": error_text}
+                            content=error_obj if isinstance(error_obj, dict) else {"error": error_obj}
                         )
                     
                     # 流式响应 - 真正的流式转发
                     async def stream_generator():
-                        accumulated_text = ""
+                        # 🔧 list+join 累积，避免 str += 的 O(n²) 全量复制
+                        accumulated_parts = []
                         input_tokens = 0
                         output_tokens = 0
                         request_success = False
@@ -230,7 +254,7 @@ async def gemini_native_api(
                                     chunk_str = chunk.decode('utf-8', errors='ignore')
                                     
                                     # 处理SSE格式
-                                    if query_params.get("alt") == "sse":
+                                    if forward_as_sse:
                                         for line in chunk_str.split('\n'):
                                             line = line.strip()
                                             if line.startswith('data: '):
@@ -243,12 +267,12 @@ async def gemini_native_api(
                                                                 if 'content' in candidate and 'parts' in candidate['content']:
                                                                     for part in candidate['content']['parts']:
                                                                         if 'text' in part:
-                                                                            accumulated_text += part['text']
+                                                                            accumulated_parts.append(part['text'])
                                                         
                                                         if 'usageMetadata' in chunk_data:
                                                             usage_meta = chunk_data['usageMetadata']
                                                             input_tokens = usage_meta.get('promptTokenCount', input_tokens)
-                                                            output_tokens = usage_meta.get('candidatesTokenCount', output_tokens)
+                                                            output_tokens = usage_meta.get('candidatesTokenCount', output_tokens) + usage_meta.get('thoughtsTokenCount', 0)
                                                     except json.JSONDecodeError:
                                                         pass
                                     else:
@@ -260,13 +284,13 @@ async def gemini_native_api(
                                                     if 'content' in candidate and 'parts' in candidate['content']:
                                                         for part in candidate['content']['parts']:
                                                             if 'text' in part:
-                                                                accumulated_text += part['text']
+                                                                accumulated_parts.append(part['text'])
                                             
                                             if 'usageMetadata' in chunk_data:
                                                 usage_meta = chunk_data['usageMetadata']
                                                 input_tokens = usage_meta.get('promptTokenCount', input_tokens)
-                                                output_tokens = usage_meta.get('candidatesTokenCount', output_tokens)
-                                        except:
+                                                output_tokens = usage_meta.get('candidatesTokenCount', output_tokens) + usage_meta.get('thoughtsTokenCount', 0)
+                                        except Exception:
                                             pass
                                 except Exception as e:
                                     logger.debug(f"[GEMINI_V1BETA] 解析块统计失败: {e}")
@@ -277,6 +301,7 @@ async def gemini_native_api(
                             logger.error(f"[GEMINI_V1BETA] 流式处理错误: {e}")
                             error_msg = str(e)
                         finally:
+                            accumulated_text = ''.join(accumulated_parts)
                             # 🔧 关键：在生成器结束时释放 response 和临时 session
                             try:
                                 resp.release()
@@ -292,7 +317,8 @@ async def gemini_native_api(
                             if output_tokens == 0 and accumulated_text:
                                 try:
                                     from modules.token_counter import estimate_tokens
-                                    output_tokens = estimate_tokens(accumulated_text, model=display_name)
+                                    output_tokens = await asyncio.to_thread(
+                                        estimate_tokens, accumulated_text, model=display_name)
                                     logger.info(f"[GEMINI_V1BETA] 使用tokenizer计算输出: {output_tokens} tokens")
                                 except Exception as token_err:
                                     logger.warning(f"[GEMINI_V1BETA] Token计算失败: {token_err}")
@@ -314,7 +340,7 @@ async def gemini_native_api(
                                 }
                                 
                                 try:
-                                    if query_params.get("alt") == "sse":
+                                    if forward_as_sse:
                                         yield f"data: {json.dumps(usage_block, ensure_ascii=False)}\n\n".encode('utf-8')
                                         
                                         oai_final_chunk = {
@@ -340,13 +366,15 @@ async def gemini_native_api(
                                 error=error_msg,
                                 response_content=accumulated_text
                             )
+                            await monitoring_service.broadcast_to_monitors(
+                                {"type": "request_end", "request_id": request_id, "success": request_success})
                             
                             logger.info(f"[GEMINI_V1BETA] 流式请求完成: {request_id[:8]}")
                             logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
 
                     return StreamingResponse(
                         stream_generator(),
-                        media_type="text/event-stream" if query_params.get("alt") == "sse" else "application/json",
+                        media_type="text/event-stream" if forward_as_sse else "application/json",
                         headers={
                             'Cache-Control': 'no-cache',
                             'Connection': 'keep-alive',
@@ -370,7 +398,7 @@ async def gemini_native_api(
                         timeout=aiohttp.ClientTimeout(
                             total=CONFIG.get("api_call_timeout_seconds", 3000),
                             sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                            sock_connect=CONFIG.get("download_timeout", {}).get("connect", 30)
+                            sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
                         )
                     ) as resp:
                         if resp.status != 200:
@@ -379,11 +407,14 @@ async def gemini_native_api(
                             
                             partial_input_tokens = 0
                             try:
-                                from modules.token_counter import estimate_message_tokens
                                 contents = gemini_req.get("contents", [])
-                                partial_input_tokens = sum(
-                                    len(str(c.get("parts", []))) // 4 for c in contents
-                                ) if contents else 0
+                                text_chars = 0
+                                for c in (contents if isinstance(contents, list) else []):
+                                    parts = c.get("parts", []) if isinstance(c, dict) else []
+                                    for p in (parts if isinstance(parts, list) else []):
+                                        if isinstance(p, dict) and "text" in p:
+                                            text_chars += len(str(p["text"]))
+                                partial_input_tokens = text_chars // 4
                             except Exception as token_err:
                                 logger.warning(f"[GEMINI_V1BETA] 输入token计算失败: {token_err}")
                             
@@ -394,9 +425,17 @@ async def gemini_native_api(
                                 input_tokens=partial_input_tokens,
                                 output_tokens=0
                             )
+                            await monitoring_service.broadcast_to_monitors(
+                                {"type": "request_end", "request_id": request_id, "success": False})
+                            
+                            # 尝试解析上游错误 JSON，避免双层 JSON 包裹
+                            try:
+                                error_obj = json.loads(error_text)
+                            except (json.JSONDecodeError, TypeError):
+                                error_obj = {"message": error_text}
                             return JSONResponse(
                                 status_code=resp.status,
-                                content={"error": error_text}
+                                content=error_obj if isinstance(error_obj, dict) else {"error": error_obj}
                             )
                         
                         # 非流式响应
@@ -405,7 +444,7 @@ async def gemini_native_api(
                         # 提取token统计
                         usage_metadata = response_data.get('usageMetadata', {})
                         input_tokens = usage_metadata.get('promptTokenCount', 0)
-                        output_tokens = usage_metadata.get('candidatesTokenCount', 0)
+                        output_tokens = usage_metadata.get('candidatesTokenCount', 0) + usage_metadata.get('thoughtsTokenCount', 0)
                         
                         # 提取响应文本
                         response_text = ""
@@ -420,8 +459,9 @@ async def gemini_native_api(
                         if output_tokens == 0 and response_text:
                             try:
                                 from modules.token_counter import estimate_tokens
-                                output_tokens = estimate_tokens(response_text, model=display_name)
-                            except:
+                                output_tokens = await asyncio.to_thread(
+                                    estimate_tokens, response_text, model=display_name)
+                            except Exception:
                                 pass
 
                         # 注入 OpenAI 兼容的 usage 字段
@@ -446,6 +486,8 @@ async def gemini_native_api(
                             output_tokens=output_tokens,
                             response_content=response_text
                         )
+                        await monitoring_service.broadcast_to_monitors(
+                            {"type": "request_end", "request_id": request_id, "success": True})
                         
                         return JSONResponse(content=response_data)
             finally:
@@ -454,9 +496,19 @@ async def gemini_native_api(
                     await temp_session.close()
                     
         except Exception as e:
-            logger.error(f"[GEMINI_V1BETA] 请求处理失败: {e}", exc_info=True)
-            monitoring_service.request_end(request_id=request_id, success=False, error=str(e))
-            raise HTTPException(status_code=500, detail=str(e))
+            # 🔧 脱敏：api_key 拼在 URL 查询串中，aiohttp 异常的 str() 可能携带
+            # 完整 URL，不脱敏会把 key 泄漏进日志与客户端错误响应
+            safe_err = str(e)
+            if api_key:
+                safe_err = safe_err.replace(api_key, '***')
+                quoted_key = quote(api_key, safe="")
+                if quoted_key != api_key:
+                    safe_err = safe_err.replace(quoted_key, '***')
+            logger.error(f"[GEMINI_V1BETA] 请求处理失败: {safe_err}", exc_info=True)
+            monitoring_service.request_end(request_id=request_id, success=False, error=safe_err)
+            await monitoring_service.broadcast_to_monitors(
+                {"type": "request_end", "request_id": request_id, "success": False})
+            raise HTTPException(status_code=500, detail=safe_err)
             
     except HTTPException:
         raise

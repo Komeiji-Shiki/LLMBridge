@@ -6,12 +6,16 @@ Anthropic ↔ OpenAI 协议转换模块
 - OpenAI 响应（流式/非流式）→ Anthropic 响应
 - Anthropic SSE 旁路解析（用于监控记录）
 """
+import codecs
 import json
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi.responses import JSONResponse, StreamingResponse, Response
+
+from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +29,11 @@ __all__ = [
     "convert_anthropic_to_openai_request",
     "build_anthropic_error_payload",
     "extract_anthropic_usage_tokens",
+    "convert_openai_usage_to_anthropic",
+    "sanitize_anthropic_thinking_blocks",
     "extract_anthropic_response_content",
     "extract_anthropic_sse_content",
+    "flush_anthropic_sse_state",
     "read_response_body_bytes",
     "extract_openai_message_text",
     "extract_openai_message_reasoning",
@@ -473,17 +480,62 @@ def extract_anthropic_response_content(response_json: dict) -> tuple:
     return content_text, reasoning_text, tool_calls, input_tokens, output_tokens, cached_tokens
 
 
+def _normalize_tool_args_str(args_str: str) -> str:
+    """规范化工具调用参数字符串（委托 utils.json_unescape）。
+
+    模型在长上下文下有时会用 ASCII 转义风格输出 JSON（中文变成 \\uXXXX），
+    语义合法但完全不可读。合法 JSON 重新序列化为中文明文；非法 JSON
+    （流截断等）退化为字符级安全解码，转义仍被还原。
+    """
+    return normalize_tool_args_json(args_str)
+
+
 def extract_anthropic_sse_content(chunk_bytes: bytes, state: dict) -> None:
     """旁路解析 Anthropic SSE chunk，累积内容到 state dict。
 
-    state 包含: content_parts, reasoning_parts, tool_call_args, input_tokens,
-    output_tokens, cached_tokens
+    state 包含: content_parts, reasoning_parts, tool_calls, input_tokens,
+    output_tokens, cached_tokens；内部使用 _sse_buf 做跨 chunk 行缓冲。
+
+    🔧 修复：SSE 的 data 行经常被 TCP chunk 边界切断，旧版对每个 chunk
+    独立按行解析，被切断的行 json.loads 失败后直接丢弃，导致监控日志中
+    工具调用参数缺失中段。现在把最后一个换行之后的不完整尾部字节缓冲到
+    state["_sse_buf"]，与下一个 chunk 拼接后再解析；UTF-8 多字节序列不含
+    换行字节(0x0A)，因此按最后一个换行切分同时保证字符不会被解码截断。
+    流结束后调用 flush_anthropic_sse_state 冲刷残留。
     """
+    buf = state.get("_sse_buf", b"") + chunk_bytes
+    last_nl = buf.rfind(b"\n")
+    if last_nl < 0:
+        state["_sse_buf"] = buf
+        return
+    state["_sse_buf"] = buf[last_nl + 1:]
     try:
-        chunk_str = chunk_bytes.decode("utf-8", errors="replace")
+        chunk_str = buf[:last_nl + 1].decode("utf-8", errors="replace")
     except Exception:
         return
+    _parse_anthropic_sse_lines(chunk_str, state)
 
+
+def flush_anthropic_sse_state(state: dict) -> None:
+    """流结束时冲刷旁路解析的残留状态。
+
+    1. 处理 _sse_buf 中最后一个不完整行（正常 SSE 流以换行结尾，此时为空操作）；
+    2. 把未收到 content_block_stop 的工具参数落入对应 tool_call（流中断场景）。
+    """
+    buf = state.pop("_sse_buf", b"")
+    if buf:
+        try:
+            _parse_anthropic_sse_lines(buf.decode("utf-8", errors="replace"), state)
+        except Exception:
+            pass
+    pending = state.pop("pending_tool_args", "")
+    tidx = state.pop("current_tool_idx", None)
+    if pending and tidx is not None and tidx < len(state.get("tool_calls", [])):
+        state["tool_calls"][tidx]["function"]["arguments"] = _normalize_tool_args_str(pending)
+
+
+def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
+    """解析若干完整的 SSE 行，累积事件内容到 state（仅供上面两个入口调用）。"""
     for line in chunk_str.splitlines():
         line = line.strip()
         # 🔧 修复：只处理 data: 行；旧版本未检查前缀，会把 event: 行也
@@ -532,13 +584,16 @@ def extract_anthropic_sse_content(chunk_bytes: bytes, state: dict) -> None:
                 state["current_tool_idx"] = len(state["tool_calls"]) - 1
                 state["pending_tool_args"] = ""
         elif etype == "content_block_stop":
-            # 把累积的 tool args 存入对应的 tool_call
+            # 把累积的 tool args 存入对应的 tool_call（顺带把 \uXXXX 转义规范化为明文）
             pending = state.pop("pending_tool_args", "")
             tidx = state.pop("current_tool_idx", None)
             if tidx is not None and tidx < len(state.get("tool_calls", [])):
-                state["tool_calls"][tidx]["function"]["arguments"] = pending or "{}"
+                state["tool_calls"][tidx]["function"]["arguments"] = _normalize_tool_args_str(pending) or "{}"
         elif etype == "message_delta":
-            inp, outp, cached = extract_anthropic_usage_tokens(event.get("usage"))
+            raw_usage = event.get("usage")
+            if isinstance(raw_usage, dict) and raw_usage:
+                state.setdefault("upstream_usage", {}).update(raw_usage)
+            inp, outp, cached = extract_anthropic_usage_tokens(raw_usage)
             if inp:
                 state["input_tokens"] = inp
             if outp:
@@ -548,7 +603,10 @@ def extract_anthropic_sse_content(chunk_bytes: bytes, state: dict) -> None:
         elif etype == "message_start":
             msg = event.get("message")
             if isinstance(msg, dict):
-                inp, outp, cached = extract_anthropic_usage_tokens(msg.get("usage"))
+                raw_usage = msg.get("usage")
+                if isinstance(raw_usage, dict) and raw_usage:
+                    state.setdefault("upstream_usage", {}).update(raw_usage)
+                inp, outp, cached = extract_anthropic_usage_tokens(raw_usage)
                 if inp:
                     state["input_tokens"] = inp
                 if outp:
@@ -602,6 +660,83 @@ def extract_openai_message_reasoning(choice: Dict[str, Any]) -> str:
     return reasoning if isinstance(reasoning, str) else ""
 
 
+def convert_openai_usage_to_anthropic(usage: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """OpenAI usage → Anthropic 官方 usage 格式。
+
+    语义差异：内部 OpenAI 格式的 prompt_tokens 是总输入（含缓存命中），
+    缓存命中量在 prompt_tokens_details.cached_tokens；而 Anthropic 官方的
+    input_tokens 仅统计未命中缓存的部分，缓存命中量放 cache_read_input_tokens。
+    统一按官方四字段返回，避免客户端解析不到用量。
+    """
+    if not isinstance(usage, dict):
+        usage = {}
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    details = usage.get("prompt_tokens_details")
+    cached_tokens = int(details.get("cached_tokens", 0) or 0) if isinstance(details, dict) else 0
+    return {
+        "input_tokens": max(0, prompt_tokens - cached_tokens),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cached_tokens,
+        "output_tokens": completion_tokens,
+    }
+
+
+def sanitize_anthropic_thinking_blocks(messages: Any) -> Any:
+    """剔除历史消息中缺失签名的 thinking / redacted_thinking block（透传前清洗）。
+
+    OpenRouter 等上游对 /messages 请求体做严格 schema 校验：thinking block
+    必须携带字符串 signature、redacted_thinking 必须携带 data，否则整个
+    content 的 union 校验直接 400（"signature": expected string, received
+    undefined）。经本服务从 reasoning 拼装的思维链没有签名，客户端下一轮
+    原样回传时就会触发该错误。
+
+    注意：带签名的 thinking 与带 data 的 redacted_thinking 块必须全部
+    原样保留（包括 summarized 摘要块），Anthropic 会逐块校验历史思维链，
+    剔除或修改任意一块都会触发 "thinking blocks cannot be modified"。
+
+    返回新的 messages 列表，不修改传入对象；若某条消息的 content 剔除后
+    为空，则整条消息一并移除（空 content 数组同样无法通过上游校验）。
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    sanitized: List[Dict[str, Any]] = []
+    removed_blocks = 0
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            sanitized.append(msg)
+            continue
+
+        kept_blocks = []
+        for block in content:
+            if isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "thinking" and not block.get("signature"):
+                    removed_blocks += 1
+                    continue
+                if btype == "redacted_thinking" and not block.get("data"):
+                    removed_blocks += 1
+                    continue
+            kept_blocks.append(block)
+
+        if len(kept_blocks) == len(content):
+            sanitized.append(msg)
+        elif kept_blocks:
+            sanitized.append({**msg, "content": kept_blocks})
+        else:
+            # 保留占位块避免破坏角色交替（连续同 role 消息会触发 Anthropic 400）
+            sanitized.append({**msg, "content": [{"type": "text", "text": "[content sanitized]"}]})
+
+    if removed_blocks:
+        logger.info(
+            f"[ANTHROPIC_COMPAT] 已剔除 {removed_blocks} 个缺失签名的 "
+            f"thinking/redacted_thinking block（上游严格校验兼容）"
+        )
+    return sanitized
+
+
 async def convert_openai_non_stream_response_to_anthropic(
     openai_response: Response,
     request_model: str
@@ -621,7 +756,7 @@ async def convert_openai_non_stream_response_to_anthropic(
             })
         )
 
-    if status_code >= 400 or ("error" in data):
+    if status_code >= 400 or (isinstance(data, dict) and data.get("error") is not None):
         return JSONResponse(
             status_code=status_code if status_code >= 400 else 500,
             content=build_anthropic_error_payload(data.get("error", data))
@@ -632,9 +767,7 @@ async def convert_openai_non_stream_response_to_anthropic(
     finish_reason = first_choice.get("finish_reason")
     message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
 
-    usage = data.get("usage", {}) if isinstance(data.get("usage"), dict) else {}
-    input_tokens = int(usage.get("prompt_tokens", 0) or 0)
-    output_tokens = int(usage.get("completion_tokens", 0) or 0)
+    anthropic_usage = convert_openai_usage_to_anthropic(data.get("usage"))
 
     # ── 构建 Anthropic content blocks（多 block 支持）──
     content_blocks: List[Dict[str, Any]] = []
@@ -680,32 +813,45 @@ async def convert_openai_non_stream_response_to_anthropic(
         "content": content_blocks,
         "stop_reason": map_openai_finish_reason_to_anthropic(finish_reason),
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens
-        }
+        "usage": anthropic_usage
     }
 
     return JSONResponse(status_code=200, content=anthropic_response)
 
 
+# SSE 事件分隔符：兼容 LF 空行与 CRLF 空行
+_SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
+
+
 async def iter_openai_sse_payloads(upstream_response: StreamingResponse):
-    """从 OpenAI SSE 流中逐个提取负载字符串"""
+    """从 OpenAI SSE 流中逐个提取负载字符串。
+
+    🔧 修复：
+    - bytes chunk 改用增量 UTF-8 解码器，旧版 errors="ignore" 会在
+      多字节字符被 chunk 边界切断时静默丢字；
+    - 事件分隔符兼容 CRLF，旧版只认 \\n\\n，上游用 CRLF 时缓冲区
+      会无限增长直到流结束才一次性处理。
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buffer = ""
     async for raw_chunk in upstream_response.body_iterator:
         if isinstance(raw_chunk, bytes):
-            chunk_text = raw_chunk.decode("utf-8", errors="ignore")
+            chunk_text = decoder.decode(raw_chunk, final=False)
         else:
             chunk_text = str(raw_chunk)
 
         buffer += chunk_text
-        while "\n\n" in buffer:
-            event_block, buffer = buffer.split("\n\n", 1)
+        while True:
+            m = _SSE_EVENT_SPLIT.search(buffer)
+            if not m:
+                break
+            event_block, buffer = buffer[:m.start()], buffer[m.end():]
             for line in event_block.splitlines():
                 line = line.strip()
                 if line.startswith("data:"):
                     yield line[5:].strip()
 
+    buffer += decoder.decode(b"", final=True)
     if buffer.strip():
         for line in buffer.splitlines():
             line = line.strip()
@@ -733,8 +879,8 @@ def build_anthropic_streaming_response(
         # ── 消息级状态 ──
         sent_message_start = False
         stop_reason = "end_turn"
-        input_tokens = 0
-        output_tokens = 0
+        # 累积上游 usage（OpenAI 流式 usage 为最终累计值而非增量，合并覆盖即可）
+        merged_usage: Dict[str, Any] = {}
 
         # ── content block 状态机 ──
         next_block_idx = 0
@@ -798,7 +944,14 @@ def build_anthropic_streaming_response(
                 active_text_idx = None
             for oai_idx in sorted(active_tool_use.keys()):
                 info = active_tool_use[oai_idx]
-                events.append(_emit_block_stop(info["real_idx"]))
+                # 未发过 content_block_start 的块不能发 block_stop（协议顺序）
+                if info.get("started"):
+                    # 冲刷参数解码器残留（正常完整 JSON 无残留；截断流原样补发）
+                    unescaper = info.get("args_unescaper")
+                    tail = unescaper.flush() if unescaper else ""
+                    if tail:
+                        events.append(_emit_block_delta(info["real_idx"], "input_json_delta", tail))
+                    events.append(_emit_block_stop(info["real_idx"]))
             active_tool_use.clear()
             return events
 
@@ -812,7 +965,7 @@ def build_anthropic_streaming_response(
             except Exception:
                 continue
 
-            if isinstance(chunk, dict) and "error" in chunk:
+            if isinstance(chunk, dict) and chunk.get("error") is not None:
                 yield format_anthropic_sse_event(
                     "error",
                     build_anthropic_error_payload(chunk.get("error"))
@@ -825,9 +978,8 @@ def build_anthropic_streaming_response(
             model_name = chunk.get("model") or model_name
 
             usage = chunk.get("usage")
-            if isinstance(usage, dict):
-                input_tokens = int(usage.get("prompt_tokens", input_tokens) or input_tokens)
-                output_tokens = int(usage.get("completion_tokens", output_tokens) or output_tokens)
+            if isinstance(usage, dict) and usage:
+                merged_usage.update({k: v for k, v in usage.items() if v is not None})
 
             if not sent_message_start:
                 sent_message_start = True
@@ -837,7 +989,7 @@ def build_anthropic_streaming_response(
                         "id": message_id, "type": "message", "role": "assistant",
                         "model": model_name, "content": [],
                         "stop_reason": None, "stop_sequence": None,
-                        "usage": {"input_tokens": input_tokens}
+                        "usage": convert_openai_usage_to_anthropic(merged_usage)
                     }
                 })
 
@@ -898,7 +1050,9 @@ def build_anthropic_streaming_response(
                         active_tool_use[oai_idx] = {
                             "real_idx": real_idx,
                             "id": tc_id or "",
-                            "name": tc_name or ""
+                            "name": tc_name or "",
+                            # 把 arguments 增量中的 \uXXXX 转义提前解码为明文
+                            "args_unescaper": StreamingUnicodeUnescaper()
                         }
                         # 发送 content_block_start（等到有 id/name 或第一个 delta 时）
                         if tc_id or tc_name:
@@ -915,7 +1069,16 @@ def build_anthropic_streaming_response(
 
                     info = active_tool_use.get(oai_idx)
                     if info and tc_args:
-                        yield _emit_block_delta(info["real_idx"], "input_json_delta", tc_args)
+                        if not info.get("started"):
+                            # 上游首个 delta 只有 arguments 没有 id/name：
+                            # 先补发 content_block_start 保证协议顺序，再发 input_json_delta
+                            yield _emit_block_start(info["real_idx"], "tool_use",
+                                                    {"id": info["id"], "name": info["name"]})
+                            info["started"] = True
+                        # 提前把 \uXXXX 转义解码为明文再发给下游（跨 chunk 安全）
+                        decoded = info["args_unescaper"].feed(tc_args)
+                        if decoded:
+                            yield _emit_block_delta(info["real_idx"], "input_json_delta", decoded)
 
             prev_delta_type = current_type
 
@@ -935,14 +1098,16 @@ def build_anthropic_streaming_response(
                     "id": message_id, "type": "message", "role": "assistant",
                     "model": model_name, "content": [],
                     "stop_reason": None, "stop_sequence": None,
-                    "usage": {"input_tokens": input_tokens}
+                    "usage": convert_openai_usage_to_anthropic(merged_usage)
                 }
             })
 
+        # 统一按 Anthropic 官方格式输出最终用量（含缓存字段），
+        # 多数客户端从 message_delta.usage 读取计费数据
         yield format_anthropic_sse_event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": output_tokens}
+            "usage": convert_openai_usage_to_anthropic(merged_usage)
         })
 
         yield format_anthropic_sse_event("message_stop", {"type": "message_stop"})

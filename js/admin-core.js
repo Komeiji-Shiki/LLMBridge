@@ -119,6 +119,30 @@ function generateColors(count) {
 // ==================== 消息提示 ====================
 let _messageCount = 0; // 消息计数器，避免重叠
 
+// HTML转义（防止错误消息/服务端回显内容注入HTML）
+function escapeHtml(unsafe) {
+    if (unsafe === null || unsafe === undefined) return '';
+    return String(unsafe)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+// HTML 属性值转义。
+// 放在 core 里：这个函数被 admin-apikeys.js / admin-models-edit.js 共用，
+// 之前只定义在 admin-models-edit.js 中，能跑通纯粹靠 <script> 的加载顺序。
+function escapeHtmlForAttr(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 function showMessage(type, message) {
     _messageCount++;
     const offset = (_messageCount - 1) * 70; // 每条消息偏移 70px
@@ -127,7 +151,7 @@ function showMessage(type, message) {
     notification.style.cssText = `position: fixed; top: ${20 + offset}px; right: 20px; z-index: 2000; min-width: 300px;`;
     notification.innerHTML = `
         <span>${type === 'success' ? '✅' : '❌'}</span>
-        <div>${message}</div>
+        <div>${escapeHtml(message)}</div>
     `;
     document.body.appendChild(notification);
     setTimeout(() => { notification.remove(); _messageCount = Math.max(0, _messageCount - 1); }, 5000);
@@ -164,7 +188,7 @@ function showConfigMessage(type, message) {
     msgEl.innerHTML = `
         <div class="alert alert-${type}">
             <span>${type === 'success' ? '✅' : '❌'}</span>
-            <div>${message}</div>
+            <div>${escapeHtml(message)}</div>
         </div>
     `;
     setTimeout(() => msgEl.innerHTML = '', 5000);
@@ -240,7 +264,7 @@ async function refreshMemoryInfo() {
         if (data.error) {
             console.error('获取内存信息错误:', data.error);
             if (memoryValueEl) memoryValueEl.textContent = '错误';
-            if (memoryDetailsEl) memoryDetailsEl.innerHTML = `<span style="color: #f87171;">${data.error}</span>`;
+            if (memoryDetailsEl) memoryDetailsEl.innerHTML = `<span style="color: #f87171;">${escapeHtml(data.error)}</span>`;
             return;
         }
         
@@ -289,7 +313,7 @@ async function refreshMemoryInfo() {
                     let html = '';
                     for (const t of loadedTokenizers) {
                         const idleMinutes = t.idle_minutes || 0;
-                        html += `<div>• ${t.name}: ${idleMinutes.toFixed(1)}分钟</div>`;
+                        html += `<div>• ${escapeHtml(t.name)}: ${idleMinutes.toFixed(1)}分钟</div>`;
                     }
                     tokenizerInfoEl.innerHTML = html;
                     tokenizerInfoEl.style.display = 'block';

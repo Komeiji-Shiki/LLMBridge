@@ -180,7 +180,7 @@ async function refreshTokenizerInfo() {
                         </div>
                         <div>
                             <strong>计数方法:</strong>
-                            <span class="badge badge-info">${info.method}</span>
+                            <span class="badge badge-info">${escapeHtml(info.method)}</span>
                         </div>
                         <div>
                             <strong>缓存模型数:</strong> ${info.cached_models.length}
@@ -271,7 +271,7 @@ async function installTokenizer(packageName) {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
                 <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                    ❌ 安装失败: ${result.error || '未知错误'}
+                    ❌ 安装失败: ${escapeHtml(result.error || '未知错误')}
                 </div>
             `;
             showMessage('danger', `安装失败: ${result.error}`);
@@ -287,7 +287,7 @@ async function installTokenizer(packageName) {
         resultDiv.style.display = 'block';
         resultDiv.innerHTML = `
             <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                ❌ 网络错误: ${error.message}
+                ❌ 网络错误: ${escapeHtml(error.message)}
             </div>
         `;
         showMessage('danger', `网络错误: ${error.message}`);
@@ -391,7 +391,7 @@ async function installAllTokenizers() {
         if (r.success) {
             resultHtml += `<li style="color: #10b981;">${r.package}: 成功</li>`;
         } else {
-            resultHtml += `<li style="color: #ef4444;">${r.package}: 失败 - ${r.error}</li>`;
+            resultHtml += `<li style="color: #ef4444;">${r.package}: 失败 - ${escapeHtml(r.error)}</li>`;
         }
     }
     resultHtml += '</ul></div>';
@@ -487,7 +487,7 @@ async function loadTokenizerMappings() {
         // 构建自定义分词器的选项HTML
         const customTokenizerOptions = customTokenizers
             .filter(t => t.available)
-            .map(t => `<option value="custom_${t.name}">🔧 ${t.display_name || t.name}</option>`)
+            .map(t => `<option value="custom_${escapeHtml(t.name)}">🔧 ${escapeHtml(t.display_name || t.name)}</option>`)
             .join('');
         
         // 构建自定义分词器选项组（如果有可用的自定义分词器）
@@ -523,7 +523,7 @@ async function loadTokenizerMappings() {
                         
                         return `
                             <tr>
-                                <td><strong>${modelName}</strong></td>
+                                <td><strong>${escapeHtml(modelName)}</strong></td>
                                 <td>
                                     <span class="badge ${
                                         currentTokenizer === 'anthropic' ? 'badge-info' :
@@ -532,11 +532,11 @@ async function loadTokenizerMappings() {
                                         currentTokenizer === 'deepseek' ? 'badge-success' :
                                         isCustomTokenizer ? 'badge-success' :
                                         'badge-danger'
-                                    }">${tokenizerDisplayName}</span>
+                                    }">${escapeHtml(tokenizerDisplayName)}</span>
                                     ${!hasCustomConfig ? '<span class="badge badge-info" style="margin-left: 5px;">默认</span>' : ''}
                                 </td>
                                 <td>
-                                    <select class="form-select" data-model="${modelName}" style="width: auto; display: inline-block;">
+                                    <select class="form-select" data-model="${escapeHtml(modelName)}" style="width: auto; display: inline-block;">
                                         <optgroup label="── 内置分词器 ──">
                                             <option value="tiktoken" ${currentTokenizer === 'tiktoken' ? 'selected' : ''}>tiktoken (GPT)</option>
                                             <option value="anthropic" ${currentTokenizer === 'anthropic' ? 'selected' : ''}>anthropic (Claude)</option>
@@ -552,7 +552,7 @@ async function loadTokenizerMappings() {
                                 </td>
                                 <td>
                                     ${hasCustomConfig ?
-                                        `<button class="btn btn-danger btn-sm" onclick="deleteTokenizerConfig('${modelName}')">🗑️ 删除</button>` :
+                                        `<button class="btn btn-danger btn-sm" data-model="${escapeHtml(modelName)}" onclick="deleteTokenizerConfig(this.dataset.model)">🗑️ 删除</button>` :
                                         `<span style="color: var(--text-dim); font-size: 0.875rem;">使用默认</span>`
                                     }
                                 </td>
@@ -588,7 +588,7 @@ function getDefaultTokenizer(modelName) {
 
 async function saveAllTokenizerSettings() {
     try {
-        const selects = document.querySelectorAll('[data-model]');
+        const selects = document.querySelectorAll('#tokenizer-mappings-list select[data-model]');
         const newConfig = {};
         
         selects.forEach(select => {
@@ -626,6 +626,47 @@ async function saveAllTokenizerSettings() {
     }
 }
 
+async function deleteTokenizerConfig(modelName) {
+    try {
+        // 收集当前所有映射（排除要删除的）
+        const selects = document.querySelectorAll('#tokenizer-mappings-list select[data-model]');
+        const newConfig = {};
+        selects.forEach(select => {
+            const name = select.getAttribute('data-model');
+            if (name !== modelName) {
+                newConfig[name] = select.value;
+            }
+        });
+        
+        const response = await fetch('/api/admin/tokenizer_mappings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tokenizer_config: newConfig })
+        });
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            let errorDetail;
+            try {
+                const errorJson = JSON.parse(errorText);
+                errorDetail = errorJson.detail || errorJson.message || errorText;
+            } catch {
+                errorDetail = errorText;
+            }
+            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
+        }
+        
+        showMessage('success', `已删除 ${modelName} 的分词器配置`);
+        loadTokenizerMappings();
+        refreshTokenizerInfo();
+        
+    } catch (error) {
+        console.error('删除分词器配置失败:', error);
+        showMessage('danger', '删除失败: ' + error.message);
+    }
+}
+
+
 // ==================== 自定义分词器管理 ====================
 
 // 加载自定义分词器列表
@@ -646,7 +687,7 @@ async function loadCustomTokenizers() {
         if (container) {
             container.innerHTML = `
                 <div style="padding: 15px; text-align: center; color: var(--text-dim);">
-                    加载失败: ${error.message}
+                    加载失败: ${escapeHtml(error.message)}
                 </div>
             `;
         }
@@ -693,19 +734,19 @@ function renderCustomTokenizersList(data) {
         html += `
             <tr>
                 <td>
-                    <strong>${tokenizer.display_name || tokenizer.name}</strong>
-                    <div style="font-size: 0.75rem; color: var(--text-dim);">${tokenizer.description || ''}</div>
+                    <strong>${escapeHtml(tokenizer.display_name || tokenizer.name)}</strong>
+                    <div style="font-size: 0.75rem; color: var(--text-dim);">${escapeHtml(tokenizer.description || '')}</div>
                 </td>
                 <td>
                     <div style="font-size: 0.85rem;">${sourceTypeText}</div>
-                    <code style="font-size: 0.7rem; word-break: break-all;">${tokenizer.source}</code>
+                    <code style="font-size: 0.7rem; word-break: break-all;">${escapeHtml(tokenizer.source)}</code>
                 </td>
                 <td>${statusBadge}</td>
                 <td style="font-size: 0.8rem; color: var(--text-dim);">
-                    ${(tokenizer.supported_models || []).join(', ') || '-'}
+                    ${escapeHtml((tokenizer.supported_models || []).join(', ') || '-')}
                 </td>
                 <td>
-                    <button class="btn btn-danger btn-sm" onclick="deleteCustomTokenizer('${tokenizer.name}')">
+                    <button class="btn btn-danger btn-sm" data-name="${escapeHtml(tokenizer.name)}" onclick="deleteCustomTokenizer(this.dataset.name)">
                         🗑️ 删除
                     </button>
                 </td>
@@ -953,9 +994,9 @@ async function submitCustomTokenizer() {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
                 <div style="padding: 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; color: #10b981;">
-                    ✅ ${result.message}
+                    ✅ ${escapeHtml(result.message)}
                     <div style="font-size: 0.85rem; margin-top: 5px; color: var(--text-dim);">
-                        ${result.test_result || ''}
+                        ${escapeHtml(result.test_result || '')}
                     </div>
                 </div>
             `;
@@ -972,7 +1013,7 @@ async function submitCustomTokenizer() {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
                 <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                    ❌ 添加失败: ${result.error || '未知错误'}
+                    ❌ 添加失败: ${escapeHtml(result.error || '未知错误')}
                 </div>
             `;
             submitBtn.disabled = false;
@@ -984,7 +1025,7 @@ async function submitCustomTokenizer() {
         resultDiv.style.display = 'block';
         resultDiv.innerHTML = `
             <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                ❌ 网络错误: ${error.message}
+                ❌ 网络错误: ${escapeHtml(error.message)}
             </div>
         `;
         submitBtn.disabled = false;
@@ -1196,7 +1237,7 @@ async function quickAddTokenizer(name, displayName, source, description, modelsS
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
                 <div style="padding: 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; color: #10b981;">
-                    ✅ ${displayName} 添加成功！${result.test_result ? '<br><small>' + result.test_result + '</small>' : ''}
+                    ✅ ${escapeHtml(displayName)} 添加成功！${result.test_result ? '<br><small>' + escapeHtml(result.test_result) + '</small>' : ''}
                 </div>
             `;
             showMessage('success', `${displayName} 添加成功！`);
@@ -1211,7 +1252,7 @@ async function quickAddTokenizer(name, displayName, source, description, modelsS
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
                 <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                    ❌ 添加失败: ${result.error || '未知错误'}
+                    ❌ 添加失败: ${escapeHtml(result.error || '未知错误')}
                 </div>
             `;
         }
@@ -1221,7 +1262,7 @@ async function quickAddTokenizer(name, displayName, source, description, modelsS
         resultDiv.style.display = 'block';
         resultDiv.innerHTML = `
             <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                ❌ 网络错误: ${error.message}
+                ❌ 网络错误: ${escapeHtml(error.message)}
             </div>
         `;
     }

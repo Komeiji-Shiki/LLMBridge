@@ -20,7 +20,7 @@ from ._types import (
     _tiktoken_model_cache,
     _tokenizer_last_used,
     _TIKTOKEN_CACHE_MAX_SIZE,
-    _TOKENIZER_IDLE_TIMEOUT,
+    get_tokenizer_idle_timeout,
     _update_tokenizer_last_used,
     TokenCounterInfo,
     load_tokenizer_config,
@@ -114,8 +114,13 @@ def get_tokenizer_for_model(model_name: str) -> str:
     return 'tiktoken'
 
 
-def get_anthropic_count_tokens():
-    """获取Anthropic count_tokens函数"""
+# 探测结果缓存哨兵：区分"尚未探测"与"探测过但不可用"
+_ANTHROPIC_PROBE_UNSET = object()
+_anthropic_count_tokens_cached = _ANTHROPIC_PROBE_UNSET
+
+
+def _probe_anthropic_count_tokens():
+    """实际探测 anthropic 包提供的 count_tokens 实现（只在首次调用时跑一次）。"""
     try:
         from anthropic import count_tokens
         logger.info("[TOKEN_COUNTER] 已加载Anthropic tokenizer (顶层函数)")
@@ -131,18 +136,34 @@ def get_anthropic_count_tokens():
         logger.debug(f"[TOKEN_COUNTER] Anthropic count_tokens导入失败: {e}")
     try:
         import anthropic
+        if hasattr(anthropic, 'count_tokens'):
+            logger.info("[TOKEN_COUNTER] 已加载Anthropic tokenizer (模块函数)")
+            return anthropic.count_tokens
+        # 仅旧版 SDK 的 client.count_tokens 是本地分词；新版同名入口
+        # （client.messages.count_tokens）是网络 API，不能用于本地统计
         client = anthropic.Anthropic(api_key="dummy")
         if hasattr(client, 'count_tokens'):
             logger.info("[TOKEN_COUNTER] 已加载Anthropic tokenizer (客户端方法)")
             return client.count_tokens
-        if hasattr(anthropic, 'count_tokens'):
-            logger.info("[TOKEN_COUNTER] 已加载Anthropic tokenizer (模块函数)")
-            return anthropic.count_tokens
     except ImportError:
         logger.debug("[TOKEN_COUNTER] anthropic未安装，运行: pip install anthropic")
     except Exception as e:
         logger.debug(f"[TOKEN_COUNTER] Anthropic tokenizer初始化失败: {e}")
     return None
+
+
+def get_anthropic_count_tokens():
+    """获取Anthropic count_tokens函数（结果缓存）。
+
+    🔧 旧版每次调用都重跑整套 import 探测，并在最后一步 new 一个
+    anthropic.Anthropic 客户端（会建 httpx 连接池）。而这个函数位于
+    count_text_tokens 的热路径上——配置了 anthropic tokenizer 的模型，
+    每统计一次 token 就白建一个客户端。探测结果只需要算一次。
+    """
+    global _anthropic_count_tokens_cached
+    if _anthropic_count_tokens_cached is _ANTHROPIC_PROBE_UNSET:
+        _anthropic_count_tokens_cached = _probe_anthropic_count_tokens()
+    return _anthropic_count_tokens_cached
 
 
 def get_anthropic_client():
@@ -293,6 +314,7 @@ def clear_tokenizer_cache(tokenizer_name: str = None, force: bool = False) -> Di
     cleared = []
     from ._types import _unmapped_model_warned, _MAX_UNMAPPED_WARNED
     current_time = time.time()
+    idle_timeout = get_tokenizer_idle_timeout()
     if tokenizer_name:
         if tokenizer_name == 'gemma' and _gemma_tokenizer is not None:
             _gemma_tokenizer = None
@@ -309,20 +331,20 @@ def clear_tokenizer_cache(tokenizer_name: str = None, force: bool = False) -> Di
     else:
         if _gemma_tokenizer is not None:
             last_used = _tokenizer_last_used.get('gemma', 0)
-            if force or (current_time - last_used > _TOKENIZER_IDLE_TIMEOUT):
+            if force or (current_time - last_used > idle_timeout):
                 _gemma_tokenizer = None
                 cleared.append('gemma')
                 logger.info("[TOKEN_COUNTER] 🧹 清理空闲的Gemma tokenizer")
         if _deepseek_tokenizer is not None:
             last_used = _tokenizer_last_used.get('deepseek', 0)
-            if force or (current_time - last_used > _TOKENIZER_IDLE_TIMEOUT):
+            if force or (current_time - last_used > idle_timeout):
                 _deepseek_tokenizer = None
                 cleared.append('deepseek')
                 logger.info("[TOKEN_COUNTER] 🧹 清理空闲的DeepSeek tokenizer")
         to_remove = []
         for name in _custom_tokenizers:
             last_used = _tokenizer_last_used.get(f'custom_{name}', 0)
-            if force or (current_time - last_used > _TOKENIZER_IDLE_TIMEOUT):
+            if force or (current_time - last_used > idle_timeout):
                 to_remove.append(name)
         for name in to_remove:
             del _custom_tokenizers[name]
@@ -331,7 +353,7 @@ def clear_tokenizer_cache(tokenizer_name: str = None, force: bool = False) -> Di
         to_remove = []
         for name in _tiktoken_model_cache:
             last_used = _tokenizer_last_used.get(f'tiktoken_model_{name}', 0)
-            if force or (current_time - last_used > _TOKENIZER_IDLE_TIMEOUT):
+            if force or (current_time - last_used > idle_timeout):
                 to_remove.append(name)
         for name in to_remove:
             del _tiktoken_model_cache[name]

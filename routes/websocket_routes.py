@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 import time
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from core.config_loader import CONFIG
 from core.app_state import get_app_state
@@ -19,6 +19,7 @@ from modules.monitoring import monitoring_service
 from utils.task_registry import spawn
 
 logger = logging.getLogger(__name__)
+router = APIRouter(tags=["websocket"])
 
 _app_state = get_app_state()
 
@@ -34,6 +35,7 @@ def _schedule_pending_requests() -> None:
     ), name="pending-requests")
 
 
+@router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """处理来自油猴脚本的 WebSocket 连接（支持多标签页）。"""
     browser_ws_ref = _app_state.connection.browser_ws_ref
@@ -41,11 +43,24 @@ async def websocket_endpoint(websocket: WebSocket):
     browser_connections_lock = _app_state.browser_connections_lock
     tab_connection_times = _app_state.connection.tab_connection_times
     tab_request_counts = _app_state.connection.tab_request_counts
-    tab_request_counts_lock = _app_state.connection.tab_request_counts_lock
     response_channels = _app_state.response_channels
     request_metadata = _app_state.request_metadata
     pending_requests_queue = _app_state.pending_requests_queue
     server_state = _app_state.server
+
+    # 🔧 安全加固：/ws 端点不受 WebAccessKeyMiddleware 保护（PROTECTED_PATHS
+    # 不含 /ws），且浏览器 WebSocket 无法自定义 header，中间件的 cookie/
+    # x-web-access-key 校验对 WebSocket 完全无效，任意远端可注册成"标签页"
+    # 并窃取提示词。修复：通过查询参数 bridge_key 做握手前鉴权，密钥复用
+    # web_access_key（未配置密钥时保持现状放行，避免存量部署直接断线）。
+    bridge_key = websocket.query_params.get("bridge_key", "")
+    web_acc_key = CONFIG.get("web_access_key", "")
+    if web_acc_key:
+        from core.web_session import keys_equal
+        if not keys_equal(bridge_key, web_acc_key):
+            logger.warning(f"[WS_CONN] WebSocket 密钥验证失败，拒绝来自 {getattr(websocket, 'client', 'unknown')} 的连接")
+            await websocket.close(code=1008, reason="需要 WebSocket 访问密钥")
+            return
 
     await websocket.accept()
 
@@ -75,17 +90,25 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.warning(f"[WS_CONN] ⚠️ 无法解析初始化消息，使用默认tab_id")
 
     # 使用锁保护WebSocket连接的修改
+    stale_ws = None
+    had_connections_before = False
     async with browser_connections_lock:
+        had_connections_before = len(browser_connections) > 0
         # 检查是否已有相同tab_id的连接
+        # 🔧 竞态修复：记录被替换的旧连接（锁外显式关闭），配合 finally 中的
+        # 身份校验，防止旧连接协程断开时误删新连接的注册信息
         if tab_id in browser_connections:
+            stale_ws = browser_connections[tab_id]
             logger.warning(f"[WS_CONN] 标签页 {tab_id} 已存在连接，将被新连接替换")
 
         browser_connections[tab_id] = websocket
         # 记录连接时间
         tab_connection_times[tab_id] = time.time()
 
-        # 兼容性：将第一个连接设置为browser_ws
-        if not browser_ws_ref['ws'] or tab_id == "default":
+        # 兼容性：将第一个连接设置为browser_ws；
+        # 旧引用若指向刚被替换的死连接也一并更新
+        if not browser_ws_ref['ws'] or tab_id == "default" \
+                or browser_ws_ref['ws'] is stale_ws:
             browser_ws_ref['ws'] = websocket
 
         # 只要有新的连接建立，就意味着人机验证流程已结束（或从未开始）
@@ -113,6 +136,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
         logger.info("=" * 80)
 
+    # 🔧 锁外关闭被替换的旧连接：让旧协程尽快退出 receive 循环，
+    # 其 finally 会因身份校验不通过而跳过清理
+    if stale_ws is not None:
+        try:
+            await stale_ws.close(code=1001, reason="Replaced by new connection")
+        except Exception:
+            pass
+
     # 广播浏览器连接状态到监控面板
     await monitoring_service.broadcast_to_monitors({
         "type": "browser_status",
@@ -131,19 +162,24 @@ async def websocket_endpoint(websocket: WebSocket):
     # 🔧 启动心跳任务：定期向客户端发送心跳，检测静默断开
     async def _heartbeat_loop():
         """后台心跳：定期发送消息检测客户端是否还活着"""
-        interval = CONFIG.get("websocket_heartbeat_interval", 60)
+        from core.config_loader import get_float_setting
+        from core.constants import TimeoutDefaults
         while True:
             try:
-                await asyncio.sleep(interval)
+                # 间隔与发送超时都在循环内读取，改配置后无需重连即可生效。
+                # 🔧 配置接线：websocket_send_timeout_seconds 此前硬编码为 10.0
+                await asyncio.sleep(get_float_setting("websocket_heartbeat_interval", 60))
                 await asyncio.wait_for(
                     websocket.send_json({
                         "type": "heartbeat",
                         "timestamp": time.time()
                     }),
-                    timeout=10.0
+                    timeout=get_float_setting(
+                        "websocket_send_timeout_seconds", TimeoutDefaults.WEBSOCKET_SEND_TIMEOUT
+                    )
                 )
                 logger.debug(f"[WS_HEARTBEAT] 💓 标签页 '{tab_id}' 心跳正常")
-            except (asyncio.TimeoutError, Exception) as e:
+            except Exception as e:
                 logger.warning(f"[WS_HEARTBEAT] 💔 标签页 '{tab_id}' 心跳失败: {type(e).__name__}: {e}")
                 # 心跳失败 → 客户端已静默断开，关闭 WebSocket 触发 finally 清理
                 try:
@@ -155,7 +191,11 @@ async def websocket_endpoint(websocket: WebSocket):
     heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
     # 处理所有待恢复的请求
-    if CONFIG.get("enable_auto_retry", False):
+    # 🔧 仅当此前无任何连接时（从零恢复）才重发在途请求。
+    # 旧版每个新 /ws 连接都无条件全量重发 response_channels，导致：
+    # - 两个标签页对同一 request_id 同时生成，响应交错
+    # - 旧标签页计数永不释放
+    if CONFIG.get("enable_auto_retry", False) and not had_connections_before:
         # 1. 首先处理pending_requests_queue中的请求
         if not pending_requests_queue.empty():
             logger.info(f"检测到 {pending_requests_queue.qsize()} 个暂存的请求，将在后台自动重试...")
@@ -307,42 +347,54 @@ async def websocket_endpoint(websocket: WebSocket):
         # 核心修复：在标签页断开时执行请求重分配
         logger.info(f"[WS_DISCONNECT] 📋 标签页 '{tab_id}' 开始断连清理流程...")
 
-        # 修复1：立即释放该标签页的所有请求计数
-        async with tab_request_counts_lock:
-            if tab_id in tab_request_counts:
-                pending_count = tab_request_counts[tab_id]
-                if pending_count > 0:
-                    logger.warning(f"[WS_DISCONNECT] ⚠️ 标签页 '{tab_id}' 断开时仍有 {pending_count} 个活跃请求")
-                del tab_request_counts[tab_id]
-                logger.info(f"[WS_DISCONNECT] 已清理标签页 '{tab_id}' 的请求计数")
-
+        # 🔧 竞态修复：同 tab_id 重连时新连接会覆盖注册表条目，旧连接协程随后
+        # 断开进入本 finally 时绝不能按 tab_id 盲删——那会把仍在服务的新连接从
+        # 注册表中移除（负载均衡立刻 503）。只有注册表中仍是本协程的 websocket
+        # 时才执行清理与全部断连善后（重分配/广播/通知）。
+        has_remaining_tabs = False
         async with browser_connections_lock:
-            # 移除断开的标签页连接
-            if tab_id in browser_connections:
+            was_replaced = browser_connections.get(tab_id) is not websocket
+            if not was_replaced:
+                # 释放该标签页的所有请求计数（计数与连接状态统一由 browser_connections_lock 保护）
+                if tab_id in tab_request_counts:
+                    pending_count = tab_request_counts[tab_id]
+                    if pending_count > 0:
+                        logger.warning(f"[WS_DISCONNECT] ⚠️ 标签页 '{tab_id}' 断开时仍有 {pending_count} 个活跃请求")
+                    del tab_request_counts[tab_id]
+                    logger.info(f"[WS_DISCONNECT] 已清理标签页 '{tab_id}' 的请求计数")
+
+                # 移除断开的标签页连接
                 del browser_connections[tab_id]
                 logger.info(f"[WS_CONN] 标签页 '{tab_id}' 已移除")
 
-            # 移除连接时间记录
-            if tab_id in tab_connection_times:
-                del tab_connection_times[tab_id]
+                # 移除连接时间记录
+                if tab_id in tab_connection_times:
+                    del tab_connection_times[tab_id]
 
-            # 更新browser_ws（向后兼容）
-            if browser_connections:
-                # 如果还有其他连接，使用第一个
-                browser_ws_ref['ws'] = list(browser_connections.values())[0]
-                logger.info(f"[WS_CONN] browser_ws已更新为剩余的{len(browser_connections)}个连接中的第一个")
-            else:
-                browser_ws_ref['ws'] = None
-                logger.info(f"[WS_CONN] 所有标签页已断开")
+                # 更新browser_ws（向后兼容）
+                if browser_connections:
+                    # 如果还有其他连接，使用第一个
+                    browser_ws_ref['ws'] = list(browser_connections.values())[0]
+                    logger.info(f"[WS_CONN] browser_ws已更新为剩余的{len(browser_connections)}个连接中的第一个")
+                else:
+                    browser_ws_ref['ws'] = None
+                    logger.info(f"[WS_CONN] 所有标签页已断开")
 
-            # 计算剩余并发能力
-            remaining_capacity = len(browser_connections) * 6
-            logger.info(f"[WS_CONN] 剩余活跃标签页: {len(browser_connections)}")
-            logger.info(f"[WS_CONN] 剩余并发能力: {remaining_capacity} 个请求")
-            logger.info(f"[WS_CONN] 未处理请求数: {len(response_channels)}")
+                # 计算剩余并发能力
+                remaining_capacity = len(browser_connections) * 6
+                logger.info(f"[WS_CONN] 剩余活跃标签页: {len(browser_connections)}")
+                logger.info(f"[WS_CONN] 剩余并发能力: {remaining_capacity} 个请求")
+                logger.info(f"[WS_CONN] 未处理请求数: {len(response_channels)}")
 
-            # 核心修复2：如果还有其他活跃标签页，则重新分配请求
-            if browser_connections:
+                has_remaining_tabs = bool(browser_connections)
+
+        if was_replaced:
+            logger.info(f"[WS_DISCONNECT] 标签页 '{tab_id}' 的旧连接已被新连接替换，跳过断连善后")
+        else:
+            # 🔧 死锁修复：reassign_tab_requests 内部会自行获取 browser_connections_lock
+            # （asyncio.Lock 不可重入），必须在锁外调用。旧版在锁内调用会永久挂起，
+            # 且锁永远不释放，导致后续所有请求 select_best_tab 超时 503。
+            if has_remaining_tabs:
                 logger.info(f"[WS_DISCONNECT] 🔄 检测到 {len(browser_connections)} 个活跃标签页，开始请求重分配...")
                 try:
                     await reassign_tab_requests(tab_id)
@@ -351,47 +403,63 @@ async def websocket_endpoint(websocket: WebSocket):
             else:
                 logger.warning(f"[WS_DISCONNECT] ⚠️ 没有其他活跃标签页，无法重新分配请求")
 
-        # 广播浏览器断开状态到监控面板
-        await monitoring_service.broadcast_to_monitors({
-            "type": "browser_status",
-            "connected": len(browser_connections) > 0
-        })
+            # 广播浏览器断开状态到监控面板
+            await monitoring_service.broadcast_to_monitors({
+                "type": "browser_status",
+                "connected": len(browser_connections) > 0
+            })
 
-        # 广播标签页状态更新
-        await monitoring_service.broadcast_to_monitors({
-            "type": "tab_connection",
-            "action": "disconnected",
-            "tab_id": tab_id,
-            "total_tabs": len(browser_connections),
-            "total_capacity": len(browser_connections) * 6
-        })
+            # 广播标签页状态更新
+            await monitoring_service.broadcast_to_monitors({
+                "type": "tab_connection",
+                "action": "disconnected",
+                "tab_id": tab_id,
+                "total_tabs": len(browser_connections),
+                "total_capacity": len(browser_connections) * 6
+            })
 
-        # 如果禁用了自动重试，则像以前一样清理通道
-        if not CONFIG.get("enable_auto_retry", False):
-            # 清理所有等待的响应通道，以防请求被挂起
-            for queue in response_channels.values():
-                await queue.put({"error": "Browser disconnected during operation"})
-            response_channels.clear()
-            logger.info("WebSocket 连接已清理（自动重试已禁用）。")
-        else:
-            # 🔧 根因3修复：即使启用了自动重试，也要向属于已断开标签页的请求发送信号
-            # 否则这些请求会卡在 queue.get() 直到超时
-            if not browser_connections:
-                # 所有标签页都断了，且自动重试已启用 — 让请求等待重连
-                logger.info("WebSocket 连接已关闭（自动重试已启用，请求将等待重连）。")
+            # 如果禁用了自动重试，通知受影响的请求失败
+            if not CONFIG.get("enable_auto_retry", False):
+                if not browser_connections:
+                    # 所有标签页都断开：通知所有等待中的请求
+                    # 🔧 并发修复：循环体内有 await（挂起点），期间其他协程可能增删
+                    # response_channels，直接迭代 dict 会抛 "dictionary changed size
+                    # during iteration"。先做快照再迭代。
+                    for queue in list(response_channels.values()):
+                        await queue.put({"error": "Browser disconnected during operation"})
+                    response_channels.clear()
+                    logger.info("所有标签页已断开，等待中的请求已全部通知失败（自动重试已禁用）。")
+                else:
+                    # 🔧 误杀修复：还有其他标签页存活时，只通知属于断开标签页的请求，
+                    # 不再 clear() 掉其他健康标签页正在处理的通道
+                    notified_count = 0
+                    for req_id, metadata in list(request_metadata.items()):
+                        if metadata.get("tab_id") == tab_id:
+                            queue = response_channels.get(req_id)
+                            if queue is not None:
+                                await queue.put({"error": f"Tab '{tab_id}' disconnected during operation"})
+                                notified_count += 1
+                    if notified_count > 0:
+                        logger.info(f"已通知 {notified_count} 个属于断开标签页的请求（自动重试已禁用）。")
             else:
-                # 还有其他标签页，只通知属于断开标签页的请求
-                notified_count = 0
-                for req_id, metadata in list(request_metadata.items()):
-                    if metadata.get("tab_id") == tab_id:
-                        queue = response_channels.get(req_id)
-                        if queue is None:
-                            continue
-                        # 如果请求允许转移，跳过（reassign已处理）
-                        if metadata.get("transfer_allowed", True):
-                            continue
-                        # 不允许转移的请求，直接报错
-                        await queue.put({"error": f"Tab '{tab_id}' disconnected and request is not transferable"})
-                        notified_count += 1
-                if notified_count > 0:
-                    logger.warning(f"[WS_DISCONNECT] 🔧 已通知 {notified_count} 个不可转移的请求")
+                # 🔧 根因3修复：即使启用了自动重试，也要向属于已断开标签页的请求发送信号
+                # 否则这些请求会卡在 queue.get() 直到超时
+                if not browser_connections:
+                    # 所有标签页都断了，且自动重试已启用 — 让请求等待重连
+                    logger.info("WebSocket 连接已关闭（自动重试已启用，请求将等待重连）。")
+                else:
+                    # 还有其他标签页，只通知属于断开标签页的请求
+                    notified_count = 0
+                    for req_id, metadata in list(request_metadata.items()):
+                        if metadata.get("tab_id") == tab_id:
+                            queue = response_channels.get(req_id)
+                            if queue is None:
+                                continue
+                            # 如果请求允许转移，跳过（reassign已处理）
+                            if metadata.get("transfer_allowed", True):
+                                continue
+                            # 不允许转移的请求，直接报错
+                            await queue.put({"error": f"Tab '{tab_id}' disconnected and request is not transferable"})
+                            notified_count += 1
+                    if notified_count > 0:
+                        logger.warning(f"[WS_DISCONNECT] 🔧 已通知 {notified_count} 个不可转移的请求")

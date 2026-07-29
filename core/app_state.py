@@ -24,8 +24,9 @@ class ConnectionState:
     browser_connections: Dict[str, WebSocket] = field(default_factory=dict)
     browser_connections_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tab_connection_times: Dict[str, float] = field(default_factory=dict)
+    # 🔒 tab_request_counts 与 browser_connections 统一由 browser_connections_lock
+    # 保护（旧版的独立 tab_request_counts_lock 与其互不排斥，已移除防止误用）
     tab_request_counts: Dict[str, int] = field(default_factory=dict)
-    tab_request_counts_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     
     # 兼容性包装
     browser_ws_ref: Dict[str, Any] = field(default_factory=lambda: {'ws': None})
@@ -53,11 +54,15 @@ class ImageState:
     PROCESSED_IMAGE_CACHE: Any = field(default_factory=lambda: TTLCache(maxsize=30, ttl=600))
     
     # 文件床
+    # 🔧 与 core.constants.CacheDefaults 对齐：旧版此处声明 MAX_SIZE=500，
+    # 但 TTLCache 实际 maxsize=50，两处互相矛盾；以 constants 的 50 为准
     FILEBED_URL_CACHE: Any = field(default_factory=lambda: TTLCache(maxsize=50, ttl=300))
     FILEBED_URL_CACHE_TTL: int = 300
-    FILEBED_URL_CACHE_MAX_SIZE: int = 500
+    FILEBED_URL_CACHE_MAX_SIZE: int = 50
     DISABLED_ENDPOINTS: Dict[str, Any] = field(default_factory=dict)
-    ROUND_ROBIN_INDEX: int = 0
+    # 图床轮询索引：单元素列表作为可变引用，供 process_image_data 就地推进
+    # （旧版的 int 字段无法被调用方就地更新，轮询状态推进不了）
+    ROUND_ROBIN_INDEX_REF: list = field(default_factory=lambda: [0])
     FILEBED_RECOVERY_TIME: int = 300
     
     def __post_init__(self):

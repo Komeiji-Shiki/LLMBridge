@@ -84,6 +84,11 @@ cookies.txt
 *.swo
 Thumbs.db
 Desktop.ini
+.DS_Store
+
+# ==================== 安全审计 & 漏洞报告 ====================
+BUG_AUDIT_REPORT.md
+UNFIXED_ISSUES.md
 
 # ==================== 临时诊断脚本 ====================
 # 根目录下划线开头的临时调试/测试脚本（不影响子目录中的 _ 开头模块）
@@ -99,3 +104,10 @@ organize_images.py
 backfill_tokens.py
 update_stats_with_old_tokens.py
 performance_analysis.md
+
+# ==================== 外部 Tokenizer 数据文件 ====================
+deepseek_v3_tokenizer/tokenizer.json
+deepseek_v3_tokenizer/tokenizer_config.json
+
+# ==================== Claude Code 本地设置 ====================
+.claude/settings.local.json

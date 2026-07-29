@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 # 将上传目录定位到 main.py 文件的同级目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-API_KEY = "your_secret_api_key"  # 简单的认证密钥
+API_KEY = os.environ.get("FILE_BED_API_KEY", "")  # 从环境变量读取，不再硬编码
+# 允许上传的文件扩展名白名单（防止 XSS：禁止 .html/.svg/.xml 等可执行类型）
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".pdf", ".txt", ".json", ".csv", ".zip"}
 CLEANUP_INTERVAL_MINUTES = 1 # 清理任务运行频率（分钟）
 FILE_MAX_AGE_MINUTES = 10 # 文件最大保留时间（分钟）
 
@@ -133,6 +135,13 @@ async def upload_file(request: UploadRequest, http_request: Request):
             mime_type = header.split(';')[0].split(':')[1]
             guessed_extension = mimetypes.guess_extension(mime_type)
             file_extension = guessed_extension if guessed_extension else '.bin'
+
+        # 扩展名白名单校验，防止上传 .html/.svg 等可执行文件导致存储型 XSS
+        if file_extension.lower() not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的文件类型 '{file_extension}'。允许的类型: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+            )
 
         # 图片优化（如果启用）
         if OPTIMIZATION_CONFIG.get('enabled') and file_extension.lower() in ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff']:

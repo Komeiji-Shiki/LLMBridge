@@ -6,16 +6,79 @@ import base64
 import io
 import logging
 from typing import Tuple, Optional
-from PIL import Image
+from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
+
+# EXIF Orientation 标签编号
+_EXIF_ORIENTATION_TAG = 0x0112
+
+
+def _normalize_mode_for_format(img: Image.Image, output_format: str) -> Image.Image:
+    """
+    根据输出格式规范化图片模式，避免编码器报错或输出异常
+
+    - JPEG: 不支持透明度，RGBA/LA 合成白色背景；I/F 等特殊模式转 RGB
+    - WEBP: 仅支持 RGB/RGBA，其他模式按是否带透明通道转换
+    """
+    if output_format == 'JPEG':
+        if img.mode in ('RGBA', 'LA'):
+            logger.debug("[IMG_OPT] 转换透明背景为白色（JPEG不支持透明）")
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            background.paste(img, mask=img.getchannel('A'))
+            img = background
+        elif img.mode not in ('RGB', 'L', 'CMYK'):
+            img = img.convert('RGB')
+    elif output_format == 'WEBP':
+        if img.mode not in ('RGB', 'RGBA'):
+            has_alpha = 'A' in img.getbands() or 'transparency' in img.info
+            img = img.convert('RGBA' if has_alpha else 'RGB')
+    return img
+
+
+def _build_save_kwargs(
+    output_format: str,
+    quality: int,
+    config: dict,
+    source_info: Optional[dict] = None
+) -> dict:
+    """
+    构造 PIL save 参数。常规压缩与目标大小压缩共用，保证两条路径行为一致。
+
+    元数据处理说明：
+    - JPEG: Pillow 保存时默认不写 EXIF，仅在保留元数据时显式带回
+    - WEBP: Pillow 保存时会从原图 info 自动继承 EXIF，剥离时必须显式清空
+    """
+    save_kwargs = {}
+    strip_metadata = config.get('strip_metadata', True)
+
+    if output_format == 'JPEG':
+        save_kwargs['quality'] = quality
+        if config.get('optimize_encoding', True):
+            save_kwargs['optimize'] = True
+        if config.get('progressive_encoding', False):
+            save_kwargs['progressive'] = True
+        if not strip_metadata and source_info and source_info.get('exif'):
+            save_kwargs['exif'] = source_info['exif']
+    elif output_format == 'WEBP':
+        save_kwargs['quality'] = quality
+        if config.get('progressive_encoding', False):
+            save_kwargs['method'] = 6  # 最慢但压缩率最高
+        if strip_metadata:
+            save_kwargs['exif'] = b''
+    else:
+        # PNG 等无损格式
+        if config.get('optimize_encoding', True):
+            save_kwargs['optimize'] = True
+
+    return save_kwargs
 
 
 def optimize_image(
     image_data: bytes,
     config: dict,
     original_format: Optional[str] = None
-) -> Tuple[bytes, str, Optional[str]]:
+) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
     """
     优化图片：压缩、调整尺寸、转换格式等
     
@@ -32,7 +95,7 @@ def optimize_image(
             - webp_quality: WEBP质量 (1-100)
             - target_size_kb: 目标文件大小（KB），会自动调整质量
             - optimize_encoding: 是否优化编码
-            - progressive_encoding: 是否渐进式编码
+            - progressive_encoding: 渐进式编码（JPEG progressive / WEBP method=6）
         original_format: 原始图片格式（如'PNG', 'JPEG'等）
         
     Returns:
@@ -48,24 +111,47 @@ def optimize_image(
         
         logger.info(f"[IMG_OPT] 开始优化图片: {img.width}x{img.height}, 格式: {original_format}, 大小: {original_size/1024:.2f}KB")
         
-        # 步骤1: 清除元数据
-        if config.get('strip_metadata', True):
-            logger.debug(f"[IMG_OPT] 清除EXIF元数据")
-            img_data = list(img.getdata())
-            img_clean = Image.new(img.mode, img.size)
-            img_clean.putdata(img_data)
-            img = img_clean
+        # 动图保护：重新编码只会保留第一帧，直接返回原图避免丢帧
+        if getattr(img, 'is_animated', False) and getattr(img, 'n_frames', 1) > 1:
+            logger.info(f"[IMG_OPT] 检测到动图（{getattr(img, 'n_frames', '?')}帧），跳过优化以避免丢帧")
+            return image_data, original_format, None
         
-        # 步骤2: 调整尺寸
+        # 记录原图是否带EXIF、是否需要方向矫正（用于后续判断）
+        original_has_exif = bool(img.info.get('exif'))
+        try:
+            orientation = img.getexif().get(_EXIF_ORIENTATION_TAG, 1)
+        except Exception:
+            orientation = 1
+        needs_orientation_fix = orientation not in (None, 1)
+        
+        # 步骤1: EXIF方向矫正（物理旋转像素）
+        # 必须在剥离元数据前执行，否则带Orientation标签的照片会因标签丢失而方向错误
+        if needs_orientation_fix:
+            img = ImageOps.exif_transpose(img)
+            logger.debug(f"[IMG_OPT] EXIF方向矫正完成 (orientation={orientation})")
+        
+        # 步骤2: 调色板/二值模式提前转换
+        # Pillow 对 P/1 模式缩放会强制退化为 NEAREST 重采样，必须先转换才能获得高质量缩放
+        if img.mode == 'P':
+            has_alpha = 'transparency' in img.info or 'A' in img.getbands()
+            img = img.convert('RGBA' if has_alpha else 'RGB')
+        elif img.mode == '1':
+            img = img.convert('L')
+        
+        # 步骤3: 调整尺寸
         max_w = config.get('max_width', 1920)
         max_h = config.get('max_height', 1080)
+        resized = False
         if img.width > max_w or img.height > max_h:
             old_size = (img.width, img.height)
             img.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+            resized = True
             logger.info(f"[IMG_OPT] 调整尺寸: {old_size[0]}x{old_size[1]} -> {img.width}x{img.height}")
         
-        # 步骤3: 确定输出格式
+        # 步骤4: 确定输出格式
         output_format = original_format.upper()
+        if output_format == 'JPG':
+            output_format = 'JPEG'
         
         # 检查是否要转换PNG到JPG
         if config.get('convert_png_to_jpg', False) and original_format.upper() == 'PNG':
@@ -85,63 +171,50 @@ def optimize_image(
             output_format = 'WEBP'
             logger.debug(f"[IMG_OPT] 转换格式: {original_format} -> WEBP")
         
-        # 步骤4: 处理透明度（JPEG不支持透明）
-        if output_format in ('JPEG', 'JPG') and img.mode in ('RGBA', 'LA', 'P'):
-            logger.debug(f"[IMG_OPT] 转换透明背景为白色（JPEG不支持透明）")
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            if img.mode == 'P':
-                img = img.convert('RGBA')
-            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-            img = background
+        # 步骤5: 按输出格式规范化图片模式（透明度合成、特殊模式转换）
+        img = _normalize_mode_for_format(img, output_format)
         
-        # 步骤5: 获取初始质量参数
-        if output_format in ('JPEG', 'JPG'):
+        # 步骤6: 获取初始质量参数
+        if output_format == 'JPEG':
             quality = config.get('jpeg_quality', 85)
         elif output_format == 'WEBP':
             quality = config.get('webp_quality', 85)
         else:
-            quality = 95  # PNG等无损格式
+            quality = 95  # PNG等无损格式不使用该值
         
-        # 检查是否有目标大小限制
+        # 步骤7: 目标大小压缩
         target_size_kb = config.get('target_size_kb')
-        
-        if target_size_kb and target_size_kb > 0 and output_format in ('JPEG', 'JPG', 'WEBP'):
-            # 使用二分法调整质量以达到目标大小
+        if target_size_kb and target_size_kb > 0 and output_format in ('JPEG', 'WEBP'):
             optimized_data, final_quality = _compress_to_target_size(
                 img, output_format, target_size_kb, quality, config
             )
-            if optimized_data:
-                optimized_size = len(optimized_data)
-                reduction = (1 - optimized_size / original_size) * 100 if original_size > 0 else 0
-                logger.info(f"[IMG_OPT] 目标大小压缩完成: {original_size/1024:.2f}KB -> {optimized_size/1024:.2f}KB ({reduction:.1f}% 压缩, 质量={final_quality})")
-                return optimized_data, output_format, None
-            else:
-                logger.warning(f"[IMG_OPT] 无法达到目标大小 {target_size_kb}KB，使用最低质量")
+            optimized_size = len(optimized_data)
+            if optimized_size > target_size_kb * 1024:
+                logger.warning(f"[IMG_OPT] 即使最低质量也无法达到目标大小 {target_size_kb}KB (当前: {optimized_size/1024:.2f}KB)")
+            reduction = (1 - optimized_size / original_size) * 100 if original_size > 0 else 0
+            logger.info(f"[IMG_OPT] 目标大小压缩完成: {original_size/1024:.2f}KB -> {optimized_size/1024:.2f}KB ({reduction:.1f}% 压缩, 质量={final_quality})")
+            return optimized_data, output_format, None
         
-        # 常规压缩流程
+        # 步骤8: 常规压缩
         output = io.BytesIO()
-        save_kwargs = {}
-        
-        # 设置质量参数
-        if output_format in ('JPEG', 'JPG'):
-            save_kwargs['quality'] = quality
-            logger.debug(f"[IMG_OPT] JPEG质量: {quality}")
-        elif output_format == 'WEBP':
-            save_kwargs['quality'] = quality
-            logger.debug(f"[IMG_OPT] WEBP质量: {quality}")
-        
-        # 编码优化
-        if config.get('optimize_encoding', True):
-            save_kwargs['optimize'] = True
-        
-        # 渐进式编码
-        if output_format == 'WEBP' and config.get('progressive_encoding', False):
-            save_kwargs['method'] = 6  # 最慢但压缩率最高
-        
-        # 保存
+        save_kwargs = _build_save_kwargs(output_format, quality, config, img.info)
         img.save(output, format=output_format, **save_kwargs)
         optimized_data = output.getvalue()
         optimized_size = len(optimized_data)
+        
+        # 负优化保护：没有发生任何有意义的变换（未缩放、未旋转、未转格式、
+        # 无需剥离元数据）且重编码后体积不降反升时，保留原图
+        normalized_original = original_format.upper()
+        if normalized_original == 'JPG':
+            normalized_original = 'JPEG'
+        must_strip = config.get('strip_metadata', True) and original_has_exif
+        if (optimized_size >= original_size
+                and normalized_original == output_format
+                and not resized
+                and not needs_orientation_fix
+                and not must_strip):
+            logger.info(f"[IMG_OPT] 重编码后体积未减小（{original_size/1024:.2f}KB -> {optimized_size/1024:.2f}KB），保留原图")
+            return image_data, original_format, None
         
         # 计算压缩率
         reduction = (1 - optimized_size / original_size) * 100 if original_size > 0 else 0
@@ -163,7 +236,7 @@ def _compress_to_target_size(
     config: dict,
     min_quality: int = 10,
     max_iterations: int = 10
-) -> Tuple[Optional[bytes], int]:
+) -> Tuple[bytes, int]:
     """
     使用二分法压缩图片到目标大小
     
@@ -171,39 +244,43 @@ def _compress_to_target_size(
         img: PIL Image对象
         output_format: 输出格式
         target_size_kb: 目标大小（KB）
-        initial_quality: 初始质量
+        initial_quality: 初始质量（同时作为质量上限）
         config: 配置字典
         min_quality: 最低质量限制
         max_iterations: 最大迭代次数
         
     Returns:
-        (压缩后的数据, 最终质量) 或 (None, 0) 如果无法达到目标
+        (压缩后的数据, 最终质量)。若最低质量仍超出目标，返回最低质量的结果。
     """
     target_size_bytes = target_size_kb * 1024
-    
-    low_quality = min_quality
-    high_quality = initial_quality
-    best_data = None
-    best_quality = initial_quality
-    
+
+    def encode(quality: int) -> bytes:
+        buffer = io.BytesIO()
+        save_kwargs = _build_save_kwargs(output_format, quality, config, img.info)
+        img.save(buffer, format=output_format, **save_kwargs)
+        return buffer.getvalue()
+
     logger.info(f"[IMG_OPT] 开始目标大小压缩: 目标={target_size_kb}KB, 初始质量={initial_quality}")
-    
+
+    # 先尝试初始质量（质量上限），若已满足目标则无需二分
+    initial_data = encode(initial_quality)
+    if len(initial_data) <= target_size_bytes:
+        logger.debug(f"[IMG_OPT] 初始质量 {initial_quality} 已满足目标大小 ({len(initial_data)/1024:.2f}KB)")
+        return initial_data, initial_quality
+
+    low_quality = min_quality
+    high_quality = initial_quality - 1
+    best_data: Optional[bytes] = None
+    best_quality = min_quality
+
     for iteration in range(max_iterations):
+        if low_quality > high_quality:
+            break
         mid_quality = (low_quality + high_quality) // 2
-        
-        output = io.BytesIO()
-        save_kwargs = {'quality': mid_quality}
-        
-        if config.get('optimize_encoding', True):
-            save_kwargs['optimize'] = True
-        
-        img.save(output, format=output_format, **save_kwargs)
-        current_data = output.getvalue()
-        current_size = len(current_data)
-        
-        logger.debug(f"[IMG_OPT] 迭代 {iteration+1}: 质量={mid_quality}, 大小={current_size/1024:.2f}KB")
-        
-        if current_size <= target_size_bytes:
+        current_data = encode(mid_quality)
+        logger.debug(f"[IMG_OPT] 迭代 {iteration+1}: 质量={mid_quality}, 大小={len(current_data)/1024:.2f}KB")
+
+        if len(current_data) <= target_size_bytes:
             # 当前大小符合目标，尝试更高质量
             best_data = current_data
             best_quality = mid_quality
@@ -211,28 +288,12 @@ def _compress_to_target_size(
         else:
             # 当前大小超出目标，降低质量
             high_quality = mid_quality - 1
-        
-        # 如果范围收敛，退出
-        if low_quality > high_quality:
-            break
-    
-    # 如果没有找到合适的，使用最低质量尝试一次
+
     if best_data is None:
-        output = io.BytesIO()
-        save_kwargs = {'quality': min_quality, 'optimize': True}
-        img.save(output, format=output_format, **save_kwargs)
-        current_data = output.getvalue()
-        
-        if len(current_data) <= target_size_bytes:
-            best_data = current_data
-            best_quality = min_quality
-            logger.info(f"[IMG_OPT] 使用最低质量 {min_quality} 达到目标大小")
-        else:
-            logger.warning(f"[IMG_OPT] 即使最低质量 {min_quality} 也无法达到目标大小 {target_size_kb}KB (当前: {len(current_data)/1024:.2f}KB)")
-            # 返回最低质量的结果
-            best_data = current_data
-            best_quality = min_quality
-    
+        # 二分范围内无法满足目标，返回最低质量的结果（可能仍超出目标，由调用方记录警告）
+        best_data = encode(min_quality)
+        best_quality = min_quality
+
     return best_data, best_quality
 
 

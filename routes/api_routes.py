@@ -9,6 +9,7 @@
 - 人机验证状态统一读写 AppState.server（旧版传布尔标量导致状态失效）
 """
 import asyncio
+import copy
 import json
 import logging
 import secrets
@@ -17,7 +18,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 # 拆分的路由模块
@@ -25,6 +26,7 @@ from .models_api import get_models, get_gemini_models
 from .gemini_v1beta_api import gemini_native_api
 from .direct_api_handler import handle_direct_api_request
 from .lmarena_handler import handle_lmarena_request
+from ._direct_api_anthropic import apply_auto_cache_control
 from ._direct_api_utils import (
     get_round_robin_api_key,
     is_error_json,
@@ -39,9 +41,12 @@ from converters.anthropic_openai import (
     build_anthropic_error_payload,
     extract_anthropic_response_content,
     extract_anthropic_sse_content,
+    flush_anthropic_sse_state,
     convert_openai_non_stream_response_to_anthropic,
     build_anthropic_streaming_response,
+    sanitize_anthropic_thinking_blocks,
 )
+from utils.json_unescape import AnthropicSSEToolArgsRewriter
 
 # 全局配置与状态
 from core.config_loader import (
@@ -69,6 +74,7 @@ from utils.monitor_params import build_monitor_request_params
 from utils.task_registry import spawn
 
 logger = logging.getLogger(__name__)
+router = APIRouter(tags=["core-api"])
 
 _app_state = get_app_state()
 
@@ -124,23 +130,45 @@ def _resolve_model_type(model_name: Optional[str]) -> str:
     return MODEL_NAME_TO_ID_MAP.get(model_name, {}).get("type", "text")
 
 
-def _validate_request_api_key(request: Request, model_name: Optional[str]) -> None:
+def _extract_client_api_key(request: Request, allow_gemini_style: bool = False) -> Optional[str]:
+    """从请求中提取客户端提交的 API Key。
+
+    覆盖三种客户端习惯：
+    - OpenAI:    Authorization: Bearer <key>
+    - Anthropic: x-api-key: <key>
+    - Gemini:    x-goog-api-key: <key> 或 ?key=<key>（仅 allow_gemini_style 时）
+    """
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        provided = auth_header.split(" ", 1)[1].strip()
+        if provided:
+            return provided
+
+    x_api_key = request.headers.get("x-api-key")
+    if x_api_key and x_api_key.strip():
+        return x_api_key.strip()
+
+    if allow_gemini_style:
+        goog_key = request.headers.get("x-goog-api-key")
+        if goog_key and goog_key.strip():
+            return goog_key.strip()
+        query_key = request.query_params.get("key")
+        if query_key and query_key.strip():
+            return query_key.strip()
+
+    return None
+
+
+def _validate_request_api_key(request: Request, model_name: Optional[str],
+                              allow_gemini_style: bool = False) -> None:
     """
     统一 API Key 认证逻辑：
     1) 全局 api_key（管理员 key）始终可用（常数时间比较）
     2) 访客 key（api_key_manager）用于模型权限和 RPM 控制
     3) 支持 Anthropic x-api-key 头（与 Bearer 等效）
+    4) allow_gemini_style=True 时额外支持 Gemini 的 x-goog-api-key / ?key=
     """
-    auth_header = request.headers.get("Authorization")
-    provided_key = None
-    if auth_header and auth_header.startswith("Bearer "):
-        provided_key = auth_header.split(" ", 1)[1]
-
-    # ── 同时支持 Anthropic 风格的 x-api-key 头 ──
-    if not provided_key:
-        x_api_key = request.headers.get("x-api-key")
-        if x_api_key:
-            provided_key = x_api_key.strip()
+    provided_key = _extract_client_api_key(request, allow_gemini_style=allow_gemini_style)
 
     global_api_key = CONFIG.get("api_key")
     has_guest_keys = api_key_manager.has_keys()
@@ -148,9 +176,17 @@ def _validate_request_api_key(request: Request, model_name: Optional[str]) -> No
     # 没提供 key：只在配置了任一认证方式时拦截
     if not provided_key:
         if global_api_key or has_guest_keys:
+            hint = "，或使用 x-api-key 头部。"
+            if allow_gemini_style:
+                hint = "，或使用 x-api-key / x-goog-api-key 头部、?key= 查询参数。"
             raise AuthenticationError(
-                "未提供 API Key。请在 Authorization 头部中以 'Bearer YOUR_KEY' 格式提供，"
-                "或使用 x-api-key 头部。"
+                "未提供 API Key。请在 Authorization 头部中以 'Bearer YOUR_KEY' 格式提供" + hint
+            ).to_http_exception()
+        # 未配置任何认证时，仅允许本机访问，防止成为开放代理
+        client_host = request.client.host if request.client else ""
+        if client_host not in ("127.0.0.1", "::1", "localhost"):
+            raise AuthenticationError(
+                "未提供 API Key。请在 Authorization 头部中以 'Bearer YOUR_KEY' 格式提供，或使用 x-api-key 头部。"
             ).to_http_exception()
         return
 
@@ -176,9 +212,16 @@ def _validate_request_api_key(request: Request, model_name: Optional[str]) -> No
         raise AuthenticationError("提供的 API Key 不正确。").to_http_exception()
 
 
+# 超过该大小的请求体才丢线程池解析（小 body 的线程切换开销比解析本身还大）
+_JSON_OFFLOAD_THRESHOLD_BYTES = 64 * 1024
+
+
 async def _read_request_json_non_blocking(request: Request) -> Dict[str, Any]:
+    """读取并解析请求 JSON；大 body（长上下文对话）才移入线程池，避免阻塞事件循环。"""
     body = await request.body()
-    return await asyncio.to_thread(json.loads, body or b"")
+    if len(body) > _JSON_OFFLOAD_THRESHOLD_BYTES:
+        return await asyncio.to_thread(json.loads, body)
+    return json.loads(body or b"")
 
 
 def _check_verification_cooldown() -> None:
@@ -232,10 +275,11 @@ async def _dispatch_chat_completions_core(
             future = asyncio.get_running_loop().create_future()
             pending_queue = _app_state.pending_requests_queue
 
-            await pending_queue.put({
+            item = {
                 "future": future,
                 "request_data": openai_req
-            })
+            }
+            await pending_queue.put(item)
 
             logger.info(f"一个新请求已被放入暂存队列。当前队列大小: {pending_queue.qsize()}")
 
@@ -243,6 +287,7 @@ async def _dispatch_chat_completions_core(
             try:
                 return await asyncio.wait_for(future, timeout=timeout)
             except asyncio.TimeoutError:
+                item["request_data"] = None  # 释放内存，避免无界队列撑爆
                 logger.warning(f"一个暂存的请求等待了 {timeout} 秒后超时。")
                 raise GatewayTimeoutError(
                     f"浏览器与服务器连接断开，并在 {timeout} 秒内未能恢复。请求失败。"
@@ -265,7 +310,7 @@ async def _dispatch_chat_completions_core(
             model_name=model_name,
             endpoint_config=endpoint_config_dict,
             CONFIG=CONFIG,
-            PROCESSED_IMAGE_CACHE=_app_state.IMAGE_BASE64_CACHE,
+            PROCESSED_IMAGE_CACHE=_app_state.image.PROCESSED_IMAGE_CACHE,
             monitoring_service=monitoring_service,
             direct_api_service=_app_state.server.direct_api_service,
             estimate_message_tokens_func=estimate_message_tokens,
@@ -337,6 +382,11 @@ async def handle_single_completion(openai_req: dict, retry_request_id: Optional[
     """
     if retry_request_id and retry_request_id in _app_state.response_channels:
         return await _resend_request_to_browser(openai_req, retry_request_id)
+
+    # 重试 ID 存在但通道已消失：旧客户端已断开，放弃而非走完整分发（避免泄漏新通道/元数据/标签页计数）
+    if retry_request_id:
+        logger.warning(f"[HANDLE_SINGLE] 请求 {retry_request_id[:8]} 的响应通道已消失（客户端断开），放弃重试")
+        return {"request_id": retry_request_id, "status": "abandoned"}
 
     return await _dispatch_chat_completions_core(openai_req, request=None, skip_api_auth=True)
 
@@ -420,12 +470,14 @@ async def anthropic_messages(request: Request):
     except ValueError as e:
         raise BadRequestError(str(e)).to_http_exception()
 
+    # 保存原始 stream 值（_dispatch_chat_completions_core 可能就地修改 openai_req）
+    original_stream = openai_req.get("stream", False)
     openai_response = await _dispatch_chat_completions_core(
         openai_req, request=request, skip_api_auth=True
     )
 
     # 流式：OpenAI SSE -> Anthropic SSE
-    if openai_req.get("stream", False) and isinstance(openai_response, StreamingResponse):
+    if original_stream and isinstance(openai_response, StreamingResponse):
         return build_anthropic_streaming_response(
             openai_streaming_response=openai_response,
             request_model=openai_req.get("model", anthropic_req.get("model", "unknown")),
@@ -495,10 +547,14 @@ def _apply_native_thinking_config(passthrough_body: dict, endpoint_config: dict)
     # Opus 4.7/4.8、Mythos 5、Fable 5 等新模型 thinking.display 默认 omitted（返回空思维链）
     # 显式注入 display=summarized 确保返回思维链内容（可被 thinking_display 配置覆盖）
     # 仅在 thinking 对象存在且未设 display 时注入，尊重客户端显式设置
+    # 🔧 白名单修复：disabled 等不支持 display 的 type 不能注入，否则
+    # enable_thinking=false 的模型每次请求都会被上游 400
     thinking_display = endpoint_config.get("thinking_display", "summarized")
     if thinking_display:
         thinking_obj = passthrough_body.get("thinking")
-        if isinstance(thinking_obj, dict) and "display" not in thinking_obj:
+        if (isinstance(thinking_obj, dict)
+                and thinking_obj.get("type") in ("enabled", "adaptive")
+                and "display" not in thinking_obj):
             thinking_obj["display"] = thinking_display
             logger.info(f"[ANTHROPIC_COMPAT] thinking.display={thinking_display}")
 
@@ -579,6 +635,42 @@ async def _estimate_anthropic_local_usage(
         return fallback_input, fallback_output
 
 
+def _extract_upstream_stream_error(chunk: bytes) -> Optional[Dict[str, Any]]:
+    """从流式首块中提取上游错误对象。
+
+    覆盖两种形态：
+    - 裸 JSON 错误体（上游直接返回 JSON 而非 SSE）
+    - call_api_passthrough 对非 2xx 响应输出的 "data: {错误}" SSE 包装块
+
+    正常 SSE 流（如 event: message_start）返回 None。
+    """
+    try:
+        text = chunk.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    if not text:
+        return None
+
+    candidate = None
+    if text.startswith("{"):
+        candidate = text
+    else:
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                data = line[5:].strip()
+                if data and data != "[DONE]":
+                    candidate = data
+                break
+    if not candidate:
+        return None
+    try:
+        obj = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return obj if is_error_json(obj) else None
+
+
 async def _handle_anthropic_passthrough(
     anthropic_req: Dict[str, Any],
     model_name: str,
@@ -604,18 +696,56 @@ async def _handle_anthropic_passthrough(
 
     is_stream = bool(anthropic_req.get("stream", False))
     token_stats_local = endpoint_config.get("token_stats_mode") == "local"
+    pricing_config = endpoint_config.get("pricing", {})
 
     # 构建透传请求体：复制原始请求并替换 model 为目标模型 ID
     passthrough_body = dict(anthropic_req)
     passthrough_body["model"] = target_model_id
 
+    # 剔除历史中缺失签名的 thinking block（OpenRouter 等上游严格校验会 400）
+    passthrough_body["messages"] = sanitize_anthropic_thinking_blocks(
+        passthrough_body.get("messages")
+    )
+
+    # 图片压缩预处理（Anthropic 原生 image 块，与其他链路共用 optimize_image）
+    from services.image_service import preprocess_anthropic_images
+    await preprocess_anthropic_images(
+        passthrough_body,
+        CONFIG=CONFIG,
+        model_image_config=endpoint_config.get("image_compression"),
+        PROCESSED_IMAGE_CACHE=_app_state.image.PROCESSED_IMAGE_CACHE,
+    )
+
     _apply_native_thinking_config(passthrough_body, endpoint_config)
     _apply_native_system_injection(passthrough_body, endpoint_config)
+
+    # ── 自定义参数 / 附加主体参数合并（provider 路由指定等依赖此注入）──
+    # 与 handle_anthropic_native_from_openai 保持一致：custom 先、extra 后，同名键 extra 优先
+    # deepcopy：后续 apply_auto_cache_control 会在请求体上原地打 cache_control
+    # 断点，直接引用配置对象会把断点永久写进内存配置，造成跨请求污染
+    custom_params = endpoint_config.get("custom_params", {})
+    if isinstance(custom_params, dict) and custom_params:
+        passthrough_body.update(copy.deepcopy(custom_params))
+        logger.info(f"[ANTHROPIC_COMPAT] 已合并自定义参数: {list(custom_params.keys())}")
+
+    extra_body_params = endpoint_config.get("extra_body_params", {})
+    if isinstance(extra_body_params, dict) and extra_body_params:
+        passthrough_body.update(copy.deepcopy(extra_body_params))
+        logger.info(f"[ANTHROPIC_COMPAT] 已合并附加主体参数: {list(extra_body_params.keys())}")
+
+    # 自动提示词缓存：在 custom_params 之后注入，避免断点被顶层字段覆盖丢失
+    apply_auto_cache_control(passthrough_body, endpoint_config, log_tag="ANTHROPIC_COMPAT")
 
     # ── 监控记录 ──
     request_id = str(uuid.uuid4())
     full_messages = anthropic_req.get("messages", [])
     messages_count = len(full_messages)
+
+    monitor_extra = {"upstream_model": target_model_id, "endpoint_path": endpoint_path}
+    if isinstance(custom_params, dict) and custom_params:
+        monitor_extra["custom_params"] = custom_params
+    if isinstance(extra_body_params, dict) and extra_body_params:
+        monitor_extra["extra_body_params"] = extra_body_params
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -624,10 +754,7 @@ async def _handle_anthropic_passthrough(
         session_id=None,
         mode="anthropic_passthrough",
         messages=full_messages,
-        params=build_monitor_request_params(
-            passthrough_body,
-            extra={"upstream_model": target_model_id, "endpoint_path": endpoint_path}
-        )
+        params=build_monitor_request_params(passthrough_body, extra=monitor_extra)
     )
     await monitoring_service.broadcast_to_monitors({
         "type": "request_start",
@@ -645,6 +772,8 @@ async def _handle_anthropic_passthrough(
             success = True
             error_msg = None
             first_chunk = True
+            # 把 input_json_delta 中的 \uXXXX 转义提前解码为明文再透传下游
+            sse_rewriter = AnthropicSSEToolArgsRewriter()
             # 旁路解析状态：累积响应内容用于监控记录
             stream_state = {
                 "content_parts": [],
@@ -653,6 +782,7 @@ async def _handle_anthropic_passthrough(
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cached_tokens": 0,
+                "upstream_usage": {},
             }
             try:
                 api_iter = direct_api_service.call_api_passthrough(
@@ -664,22 +794,36 @@ async def _handle_anthropic_passthrough(
                 async for chunk in api_iter:
                     if first_chunk:
                         first_chunk = False
-                        # 检测首个 chunk 是否为上游错误响应（非 SSE 的 JSON 错误）
-                        try:
-                            decoded = chunk.decode('utf-8')
-                            maybe_error = json.loads(decoded)
-                            if is_error_json(maybe_error):
-                                success = False
-                                # 完整记录原始错误 JSON，方便排查
-                                error_msg = json.dumps(maybe_error, ensure_ascii=False)
-                                logger.warning(
-                                    f"[ANTHROPIC_COMPAT] 流式请求上游返回错误: {error_msg[:300]}")
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            pass  # 正常 SSE 流，非 JSON 错误
-                    # 旁路解析 SSE 内容用于监控记录（不修改透传内容）
-                    if success:
-                        extract_anthropic_sse_content(chunk, stream_state)
-                    yield chunk
+                        # 检测首块是否为上游错误：裸 JSON 错误体，或
+                        # call_api_passthrough 对非 2xx 输出的 "data: {错误}" SSE 块
+                        upstream_error = _extract_upstream_stream_error(chunk)
+                        if upstream_error is not None:
+                            success = False
+                            # 完整记录原始错误 JSON，方便排查
+                            error_msg = json.dumps(upstream_error, ensure_ascii=False)
+                            logger.warning(
+                                f"[ANTHROPIC_COMPAT] 流式请求上游返回错误: {error_msg[:300]}")
+                            # 转为 Anthropic 原生 error 事件，/v1/messages 客户端才能识别
+                            err_obj = upstream_error.get("error")
+                            error_payload = build_anthropic_error_payload(
+                                err_obj if isinstance(err_obj, dict) else upstream_error)
+                            yield (
+                                "event: error\n"
+                                f"data: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
+                            ).encode("utf-8")
+                            return
+                    # 重写工具参数增量中的 unicode 转义（其余字节原样），
+                    # 旁路监控解析与下游转发使用同一份重写后的数据
+                    rewritten = sse_rewriter.feed(chunk)
+                    if not rewritten:
+                        continue
+                    extract_anthropic_sse_content(rewritten, stream_state)
+                    yield rewritten
+                # 转发重写器缓冲中的残留（正常 SSE 流以空行结尾，此处为空操作）
+                tail_bytes = sse_rewriter.flush()
+                if tail_bytes:
+                    extract_anthropic_sse_content(tail_bytes, stream_state)
+                    yield tail_bytes
             except asyncio.CancelledError:
                 success = False
                 error_msg = "客户端断开连接"
@@ -689,6 +833,8 @@ async def _handle_anthropic_passthrough(
                 error_msg = str(e)
                 raise
             finally:
+                # 冲刷旁路解析残留（不完整尾行 + 未收到 stop 的工具参数）
+                flush_anthropic_sse_state(stream_state)
                 # 从旁路累积的 state 中提取内容
                 resp_content = "".join(stream_state["content_parts"]) if success else (error_msg or "")
                 resp_reasoning = "".join(stream_state["reasoning_parts"]) if success else None
@@ -704,6 +850,15 @@ async def _handle_anthropic_passthrough(
                         display_name,
                         fallback_input=final_input_tokens,
                         fallback_output=final_output_tokens)
+                final_cached_tokens = stream_state.get("cached_tokens") or 0
+                cost_info = direct_api_service.calculate_cost(
+                    input_tokens=final_input_tokens,
+                    output_tokens=final_output_tokens,
+                    cached_tokens=final_cached_tokens,
+                    pricing=pricing_config) if pricing_config else None
+                if cost_info and cost_info.get("total_cost"):
+                    logger.info(
+                        f"[ANTHROPIC_COMPAT] 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
                 monitoring_service.request_end(
                     request_id=request_id,
                     success=success,
@@ -713,8 +868,10 @@ async def _handle_anthropic_passthrough(
                     response_tool_calls=resp_tool_calls,
                     input_tokens=final_input_tokens,
                     output_tokens=final_output_tokens,
-                    cached_tokens=stream_state.get("cached_tokens") or 0,
-                    full_messages=full_messages
+                    cached_tokens=final_cached_tokens,
+                    cost_info=cost_info,
+                    full_messages=full_messages,
+                    upstream_usage=stream_state.get("upstream_usage") or None
                 )
                 # 广播使用后台任务避免阻塞生成器退出
                 spawn(
@@ -738,7 +895,9 @@ async def _handle_anthropic_passthrough(
         )
 
     # ── 非流式透传 ──
-    response_bytes = b""
+    # 🔧 bytes 的 += 没有原地扩容优化（CPython 仅对 str 有），大响应下退化为
+    # O(n²) 复制；改用 bytearray 累积（与 _direct_api_passthrough 保持一致）
+    response_buf = bytearray()
     success = True
     error_msg = None
     # 预初始化变量，避免 finally 里未定义
@@ -748,7 +907,10 @@ async def _handle_anthropic_passthrough(
     resp_input_tokens = None
     resp_output_tokens = None
     resp_cached_tokens = 0
+    resp_upstream_usage = None
     error_response_content = None
+    error_response_payload = None
+    error_status_code = 502
     try:
         async for chunk in direct_api_service.call_api_passthrough(
             base_url=api_base_url,
@@ -756,12 +918,17 @@ async def _handle_anthropic_passthrough(
             request_body=passthrough_body,
             endpoint_path=endpoint_path
         ):
-            response_bytes += chunk
+            response_buf.extend(chunk)
 
         # 检测非流式响应是否为错误，同时提取内容用于监控
+        response_bytes = bytes(response_buf)
         response_text = response_bytes.decode('utf-8')
         try:
-            response_json = json.loads(response_text)
+            # 🔧 大响应的 JSON 解析移入线程池，避免阻塞事件循环
+            if len(response_bytes) > _JSON_OFFLOAD_THRESHOLD_BYTES:
+                response_json = await asyncio.to_thread(json.loads, response_text)
+            else:
+                response_json = json.loads(response_text)
             if is_error_json(response_json):
                 success = False
                 # 完整记录原始错误 JSON，方便排查
@@ -769,10 +936,19 @@ async def _handle_anthropic_passthrough(
                 error_response_content = error_msg
                 logger.warning(
                     f"[ANTHROPIC_COMPAT] 非流式请求上游返回错误: {error_msg[:300]}")
+                # 转为 Anthropic 错误格式并保留上游状态码，客户端才能正确识别失败
+                err_obj = response_json.get("error")
+                code = err_obj.get("code") if isinstance(err_obj, dict) else None
+                if isinstance(code, int) and 400 <= code <= 599:
+                    error_status_code = code
+                error_response_payload = build_anthropic_error_payload(
+                    err_obj if isinstance(err_obj, dict) else response_json)
             elif isinstance(response_json, dict):
                 # 成功响应：提取内容用于监控记录
                 resp_content, resp_reasoning, resp_tool_calls, resp_input_tokens, resp_output_tokens, resp_cached_tokens = \
                     extract_anthropic_response_content(response_json)
+                raw_usage = response_json.get("usage")
+                resp_upstream_usage = raw_usage if isinstance(raw_usage, dict) else None
                 if token_stats_local:
                     # local 统计模式：忽略上游 usage，用本地 tokenizer 重算
                     resp_input_tokens, resp_output_tokens = await _estimate_anthropic_local_usage(
@@ -781,11 +957,29 @@ async def _handle_anthropic_passthrough(
                         fallback_output=resp_output_tokens or 0)
         except json.JSONDecodeError:
             pass  # 非 JSON 响应，按成功处理
+    except asyncio.CancelledError:
+        # 🔧 CancelledError 不是 Exception（BaseException 直系）：客户端断开时
+        # 必须显式标记失败，否则 finally 会把被取消的请求连同 token 用量
+        # 记成成功，污染统计与费用数据
+        success = False
+        error_msg = "Client disconnected before non-stream response completed"
+        raise
     except Exception as e:
         success = False
         error_msg = str(e)
         raise
     finally:
+        final_input_tokens = (resp_input_tokens or 0) if success else 0
+        final_output_tokens = (resp_output_tokens or 0) if success else 0
+        final_cached_tokens = (resp_cached_tokens or 0) if success else 0
+        cost_info = direct_api_service.calculate_cost(
+            input_tokens=final_input_tokens,
+            output_tokens=final_output_tokens,
+            cached_tokens=final_cached_tokens,
+            pricing=pricing_config) if pricing_config else None
+        if cost_info and cost_info.get("total_cost"):
+            logger.info(
+                f"[ANTHROPIC_COMPAT] 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
         monitoring_service.request_end(
             request_id=request_id,
             success=success,
@@ -793,18 +987,66 @@ async def _handle_anthropic_passthrough(
             response_content=(error_response_content if not success else resp_content),
             reasoning_content=resp_reasoning if success else None,
             response_tool_calls=resp_tool_calls if success else None,
-            input_tokens=(resp_input_tokens or 0) if success else 0,
-            output_tokens=(resp_output_tokens or 0) if success else 0,
-            cached_tokens=(resp_cached_tokens or 0) if success else 0,
-            full_messages=full_messages
+            input_tokens=final_input_tokens,
+            output_tokens=final_output_tokens,
+            cached_tokens=final_cached_tokens,
+            cost_info=cost_info,
+            full_messages=full_messages,
+            upstream_usage=resp_upstream_usage if success else None
         )
-        try:
-            await monitoring_service.broadcast_to_monitors({
+        # 🔧 用后台任务广播：取消传播路径上的 await 会立刻再抛 CancelledError，
+        # 旧版的 except Exception 拦不住（与流式分支的 spawn 广播保持一致）
+        spawn(
+            monitoring_service.broadcast_to_monitors({
                 "type": "request_end",
                 "request_id": request_id,
                 "success": success
-            })
-        except Exception:
-            pass
+            }),
+            name="anthropic-nonstream-broadcast"
+        )
 
-    return Response(content=response_bytes, media_type="application/json")
+    if error_response_payload is not None:
+        return JSONResponse(status_code=error_status_code, content=error_response_payload)
+    return Response(content=bytes(response_buf), media_type="application/json")
+
+
+# ============================================================================
+# 端点注册
+# ============================================================================
+
+@router.post("/v1/chat/completions")
+async def chat_completions_endpoint(request: Request):
+    """处理聊天补全请求"""
+    return await chat_completions(request)
+
+
+@router.post("/v1/messages")
+async def anthropic_messages_endpoint(request: Request):
+    """处理 Anthropic Claude 兼容消息请求"""
+    return await anthropic_messages(request)
+
+
+@router.post("/v1beta/models/{model_name}:generateContent")
+@router.post("/v1beta/models/{model_name}:streamGenerateContent")
+async def gemini_native_api_endpoint(model_name: str, request: Request):
+    """处理Gemini原生API格式的请求"""
+    _app_state.update_activity()
+    _check_verification_cooldown()
+
+    # 🔒 安全修复：这两个端点此前完全没有做 API Key 校验——/v1/chat/completions、
+    # /v1/messages、/v1/models、/v1beta/models 全都校验，唯独这里漏掉。
+    # 任何人只要知道模型名就能不带 key 直接调用，白嫖服务端配置的上游额度。
+    # Gemini 客户端习惯用 ?key= 或 x-goog-api-key，故一并接受。
+    from urllib.parse import unquote as _unquote
+    _validate_request_api_key(request, _unquote(model_name), allow_gemini_style=True)
+
+    server_state = _app_state.server
+    return await gemini_native_api(
+        model_name=model_name,
+        request=request,
+        MODEL_ENDPOINT_MAP=MODEL_ENDPOINT_MAP,
+        monitoring_service=monitoring_service,
+        direct_api_service=server_state.direct_api_service,
+        last_activity_time_setter=lambda dt: server_state.last_activity_time_ref.update({'time': dt}),
+        aiohttp_session=server_state.aiohttp_session
+    )

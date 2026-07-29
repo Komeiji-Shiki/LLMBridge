@@ -6,6 +6,11 @@
 // ==================== 状态 ====================
 let _apikeyEditingId = null; // 正在编辑的 key ID，null 表示新建模式
 let _allModelsForApiKey = []; // 缓存的模型列表
+// 🔧 权限放大修复：模态框级 Set 作为「已选模型」的唯一真值源。
+// 旧版 getSelectedApiKeyModels() 只读当前 DOM 里渲染出的复选框，
+// 而渲染会按搜索框过滤——搜索态下未渲染的已选模型被静默丢出白名单，
+// 一次编辑就能把受限 Key 变成全模型放行。
+let _apikeySelectedModels = new Set();
 
 // ==================== 加载与渲染 ====================
 
@@ -37,7 +42,7 @@ async function loadApiKeys() {
 
         for (const key of keys) {
             const modelsDisplay = key.allowed_models && key.allowed_models.length > 0
-                ? `<span title="${key.allowed_models.join(', ')}">${key.allowed_models.length} 个模型</span>`
+                ? `<span title="${escapeHtmlForAttr(key.allowed_models.join(', '))}">${key.allowed_models.length} 个模型</span>`
                 : '<span style="color: var(--text-dim);">全部模型</span>';
 
             const rpmDisplay = key.rpm_limit > 0 ? key.rpm_limit : '<span style="color: var(--text-dim);">不限</span>';
@@ -52,7 +57,7 @@ async function loadApiKeys() {
                 ? new Date(key.last_used_at * 1000).toLocaleString('zh-CN')
                 : '<span style="color: var(--text-dim);">从未使用</span>';
 
-            html += `<tr>
+            html += `<tr data-key-name="${escapeHtmlForAttr(key.name || '')}">
                 <td>
                     <div style="font-weight: 600;">${escapeHtml(key.name)}</div>
                     ${key.description ? `<div style="font-size: 0.75rem; color: var(--text-dim);">${escapeHtml(key.description)}</div>` : ''}
@@ -68,7 +73,7 @@ async function loadApiKeys() {
                     <div style="display: flex; gap: 6px;">
                         <button class="btn btn-sm btn-primary" onclick="editApiKey('${key.id}')">✏️</button>
                         <button class="btn btn-sm" onclick="toggleApiKeyEnabled('${key.id}', ${!key.enabled})">${key.enabled ? '⏸️' : '▶️'}</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteApiKey('${key.id}', '${escapeHtml(key.name)}')">🗑️</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteApiKey('${key.id}', this.closest('tr').dataset.keyName)">🗑️</button>
                     </div>
                 </td>
             </tr>`;
@@ -81,12 +86,8 @@ async function loadApiKeys() {
     }
 }
 
-function escapeHtml(str) {
-    if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-}
+// escapeHtml 统一使用 admin-core.js 的全局实现（转义 &<>"'，属性上下文也安全）。
+// 旧版这里用 createTextNode+innerHTML 重复定义，不转义引号且会覆盖正确实现。
 
 // ==================== 创建 / 编辑模态框 ====================
 
@@ -100,6 +101,7 @@ async function showCreateApiKeyModal() {
     document.getElementById('apikey-description').value = '';
     document.getElementById('apikey-rpm').value = '0';
     document.getElementById('apikey-enabled').checked = true;
+    _apikeySelectedModels = new Set();
 
     await loadModelsForApiKeyModal([]);
     document.getElementById('apikey-modal').classList.add('active');
@@ -120,6 +122,7 @@ async function editApiKey(keyId) {
         document.getElementById('apikey-description').value = key.description || '';
         document.getElementById('apikey-rpm').value = key.rpm_limit || 0;
         document.getElementById('apikey-enabled').checked = key.enabled !== false;
+        _apikeySelectedModels = new Set(key.allowed_models || []);
 
         await loadModelsForApiKeyModal(key.allowed_models || []);
         document.getElementById('apikey-modal').classList.add('active');
@@ -131,12 +134,28 @@ async function editApiKey(keyId) {
 function closeApiKeyModal() {
     document.getElementById('apikey-modal').classList.remove('active');
     _apikeyEditingId = null;
+    _apikeySelectedModels = new Set();
 }
 
 // ==================== 模型列表复选框 ====================
 
+// 复选框变化通过事件委托维护 _apikeySelectedModels（唯一真值源）。
+// innerHTML 重渲染会丢逐个绑定的监听，因此只在容器上绑一次委托。
+function bindApiKeyModelDelegation() {
+    const container = document.getElementById('apikey-models-checklist');
+    if (!container || container._apikeyBound) return;
+    container._apikeyBound = true;
+    container.addEventListener('change', (e) => {
+        if (e.target.classList && e.target.classList.contains('apikey-model-cb')) {
+            if (e.target.checked) _apikeySelectedModels.add(e.target.value);
+            else _apikeySelectedModels.delete(e.target.value);
+        }
+    });
+}
+
 async function loadModelsForApiKeyModal(selectedModels) {
     const container = document.getElementById('apikey-models-checklist');
+    bindApiKeyModelDelegation();
     container.innerHTML = '<div style="text-align: center; color: var(--text-dim); padding: 10px;">加载中...</div>';
 
     try {
@@ -155,17 +174,17 @@ async function loadModelsForApiKeyModal(selectedModels) {
             })
             .map(([name]) => name);
 
-        renderApiKeyModelChecklist(selectedModels);
+        renderApiKeyModelChecklist();
     } catch (err) {
-        container.innerHTML = `<div style="color: #ef4444; padding: 10px;">加载模型列表失败: ${err.message}</div>`;
+        container.innerHTML = `<div style="color: #ef4444; padding: 10px;">加载模型列表失败: ${escapeHtml(err.message)}</div>`;
     }
 }
 
-function renderApiKeyModelChecklist(selectedModels) {
+function renderApiKeyModelChecklist() {
     const container = document.getElementById('apikey-models-checklist');
     const searchTerm = (document.getElementById('apikey-model-search')?.value || '').toLowerCase();
 
-    const filtered = _allModelsForApiKey.filter(name => 
+    const filtered = _allModelsForApiKey.filter(name =>
         !searchTerm || name.toLowerCase().includes(searchTerm)
     );
 
@@ -176,7 +195,7 @@ function renderApiKeyModelChecklist(selectedModels) {
 
     let html = '';
     for (const modelName of filtered) {
-        const checked = selectedModels.includes(modelName) ? 'checked' : '';
+        const checked = _apikeySelectedModels.has(modelName) ? 'checked' : '';
         html += `<label style="display: flex; align-items: center; padding: 6px 4px; cursor: pointer; border-radius: 4px; transition: background 0.15s;"
                     onmouseover="this.style.background='rgba(255,255,255,0.03)'" onmouseout="this.style.background='transparent'">
             <input type="checkbox" class="apikey-model-cb" value="${escapeHtml(modelName)}" ${checked} style="margin-right: 10px;">
@@ -187,22 +206,29 @@ function renderApiKeyModelChecklist(selectedModels) {
 }
 
 function filterApiKeyModels() {
-    // 收集当前已选中的模型
-    const selected = getSelectedApiKeyModels();
-    renderApiKeyModelChecklist(selected);
+    // 真值源由事件委托实时维护，搜索过滤只需重新渲染当前可见项
+    renderApiKeyModelChecklist();
 }
 
 function getSelectedApiKeyModels() {
-    const checkboxes = document.querySelectorAll('.apikey-model-cb:checked');
-    return Array.from(checkboxes).map(cb => cb.value);
+    return Array.from(_apikeySelectedModels);
 }
 
+// 全选/取消全选只作用于当前过滤结果，语义与用户看到的一致
 function apiKeySelectAllModels() {
-    document.querySelectorAll('.apikey-model-cb').forEach(cb => cb.checked = true);
+    const searchTerm = (document.getElementById('apikey-model-search')?.value || '').toLowerCase();
+    _allModelsForApiKey.forEach(name => {
+        if (!searchTerm || name.toLowerCase().includes(searchTerm)) _apikeySelectedModels.add(name);
+    });
+    renderApiKeyModelChecklist();
 }
 
 function apiKeyDeselectAllModels() {
-    document.querySelectorAll('.apikey-model-cb').forEach(cb => cb.checked = false);
+    const searchTerm = (document.getElementById('apikey-model-search')?.value || '').toLowerCase();
+    _allModelsForApiKey.forEach(name => {
+        if (!searchTerm || name.toLowerCase().includes(searchTerm)) _apikeySelectedModels.delete(name);
+    });
+    renderApiKeyModelChecklist();
 }
 
 // ==================== 保存 ====================

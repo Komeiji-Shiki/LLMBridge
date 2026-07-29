@@ -41,7 +41,7 @@ async function startIdCapture() {
                     <div>
                         <strong>捕获已启动，等待浏览器响应...</strong><br>
                         模式: ${result.mode === 'battle' ? 'Battle' : 'Direct Chat'}<br>
-                        ${result.mode === 'battle' ? `目标: ${result.battle_target}<br>` : ''}
+                        ${result.mode === 'battle' ? `目标: ${escapeHtml(result.battle_target)}<br>` : ''}
                         <small style="opacity: 0.8; color: var(--accent);">
                             ⚠️ 请在LMArena页面找到已有对话，点击<strong>Retry按钮</strong>（刷新图标）
                         </small>
@@ -59,7 +59,7 @@ async function startIdCapture() {
         statusEl.innerHTML = `
             <div class="alert alert-danger">
                 <span>❌</span>
-                <div>启动失败: ${error.message}</div>
+                <div>启动失败: ${escapeHtml(error.message)}</div>
             </div>
         `;
     }
@@ -112,7 +112,7 @@ function startCapturePolling(statusEl) {
 
 function showCaptureConfigModal(captureStatus) {
     document.getElementById('captured-ids-display').innerHTML = `
-        Session ID: <code style="color: var(--accent);">...${captureStatus.session_id.slice(-8)}</code><br>
+        Session ID: <code style="color: var(--accent);">...${escapeHtml(captureStatus.session_id.slice(-8))}</code><br>
         <span style="color: var(--text-dim);">仅用于已弃用但保留兼容的 LMArena 模式</span>
     `;
     
@@ -121,7 +121,7 @@ function showCaptureConfigModal(captureStatus) {
     
     const targetDisplay = document.getElementById('capture-target-display');
     if (captureStatus.mode === 'battle') {
-        targetDisplay.innerHTML = `目标: ${captureStatus.battle_target} (${captureStatus.battle_target === 'A' ? '左侧' : '右侧'}模型)`;
+        targetDisplay.innerHTML = `目标: ${escapeHtml(captureStatus.battle_target)} (${captureStatus.battle_target === 'A' ? '左侧' : '右侧'}模型)`;
         targetDisplay.style.display = 'block';
     } else {
         targetDisplay.style.display = 'none';
@@ -454,7 +454,7 @@ async function testCurrentModelKeys() {
         const data = await response.json();
         
         // 渲染结果
-        let html = `<div style="font-size: 0.85rem; margin-bottom: 8px; color: var(--text-dim);">${data.message}</div>`;
+        let html = `<div style="font-size: 0.85rem; margin-bottom: 8px; color: var(--text-dim);">${escapeHtml(data.message)}</div>`;
         html += '<div style="display: flex; flex-direction: column; gap: 6px;">';
         
         for (const r of data.results) {
@@ -468,12 +468,12 @@ async function testCurrentModelKeys() {
             }
             
             const timeStr = r.response_time_ms ? `${r.response_time_ms}ms` : '';
-            const errStr = r.error ? ` — ${r.error}` : '';
+            const errStr = r.error ? ` — ${escapeHtml(r.error)}` : '';
             
             html += `
                 <div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: ${bg}; border-radius: 4px; font-size: 0.8rem;">
                     <span>${icon}</span>
-                    <code style="color: ${color}; font-family: monospace;">${r.key_preview}</code>
+                    <code style="color: ${color}; font-family: monospace;">${escapeHtml(r.key_preview)}</code>
                     <span style="color: var(--text-dim);">${timeStr}</span>
                     <span style="color: ${color}; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${errStr}</span>
                 </div>
@@ -483,7 +483,7 @@ async function testCurrentModelKeys() {
         resultsDiv.innerHTML = html;
         
     } catch (error) {
-        resultsDiv.innerHTML = `<div style="color: #ef4444; font-size: 0.85rem;">❌ 测试失败: ${error.message}</div>`;
+        resultsDiv.innerHTML = `<div style="color: #ef4444; font-size: 0.85rem;">❌ 测试失败: ${escapeHtml(error.message)}</div>`;
     } finally {
         btn.disabled = false;
         btn.innerHTML = '🔑 测试所有 Key';

@@ -9,25 +9,76 @@ import time
 import aiohttp
 from datetime import datetime
 from pathlib import Path
-from core.config_loader import CONFIG
+from typing import Optional
+from core.config_loader import (
+    CONFIG, MODEL_ENDPOINT_MAP, MODEL_NAME_TO_ID_MAP,
+    load_config, load_model_endpoint_map, _parse_jsonc,
+)
+from core.app_state import get_app_state
+from core.db_stats import stats_db, get_exchange_rates
+from modules.monitoring import monitoring_service, MonitorConfig
+from modules.token_counter import (
+    estimate_message_tokens, estimate_tokens, get_token_counter_info,
+    get_all_tokenizers_status, calculate_tokens_for_text, compare_tokenizers,
+    install_tokenizer_package, add_custom_tokenizer, delete_custom_tokenizer,
+    list_custom_tokenizers,
+)
+from utils.jsonc_edit import (
+    atomic_write_json, atomic_write_text, set_jsonc_value, set_jsonc_values,
+)
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.responses import Response
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(tags=["admin"])
+
+_app_state = get_app_state()
+
+MODEL_ENDPOINT_MAP_FILE = 'model_endpoint_map.json'
+CONFIG_FILE = 'config.jsonc'
+
+# asyncio.Lock 串行化对 model_endpoint_map.json 的读写（update/delete/reorder 并发调用）
+_MODEL_ENDPOINT_MAP_LOCK = asyncio.Lock()
+
+
+# ============================================================================
+# 配置文件读写（同步 IO 一律走线程池，写入一律原子）
+# ============================================================================
+# 🔧 修复：旧版在 async 端点里直接 open()/json.dump() 读写 model_endpoint_map.json
+# （已 160KB+）与 config.jsonc。两个问题：
+#   1. 同步磁盘 IO 阻塞事件循环，管理面板保存一次配置会卡住所有并发流式请求；
+#   2. 直接覆盖写非原子，进程在写入途中被强杀会留下半截文件，整套模型配置丢失。
+
+def _read_text_sync(path: str) -> str:
+    with open(path, 'r', encoding='utf-8') as f:
+        return f.read()
+
+
+async def read_text_file(path: str) -> str:
+    return await asyncio.to_thread(_read_text_sync, path)
+
+
+async def read_json_file(path: str):
+    return json.loads(await read_text_file(path))
+
+
+async def write_json_file(path: str, data) -> None:
+    await asyncio.to_thread(atomic_write_json, path, data)
+
+
+async def write_text_file(path: str, content: str) -> None:
+    await asyncio.to_thread(atomic_write_text, path, content)
 
 # 🔧 性能修复：改为 asyncio.Lock，避免在 async 函数中阻塞事件循环
 _ADMIN_STATS_CACHE_LOCK = asyncio.Lock()
+
+# 改用 TTLCache 防止缓存无限增长（旧版裸 dict 无上限，换区间永久留一条）
+from cachetools import TTLCache
 _ADMIN_STATS_CACHE = {
-    "overview": {},
-    "request_stats": {},
-    "token_stats": {}
-}
-_ADMIN_STATS_CACHE_TTL_SECONDS = {
-    "overview": 10.0,
-    "request_stats": 15.0,
-    "token_stats": 15.0
+    "overview": TTLCache(maxsize=256, ttl=10),
+    "request_stats": TTLCache(maxsize=256, ttl=15),
+    "token_stats": TTLCache(maxsize=256, ttl=15)
 }
 
 
@@ -36,28 +87,15 @@ def _build_admin_cache_key(*parts) -> str:
 
 
 async def _get_admin_cached_response(cache_name: str, cache_key: str):
-    now = time.time()
-    ttl = _ADMIN_STATS_CACHE_TTL_SECONDS[cache_name]
-
+    # TTLCache 自带 TTL 自动逐出，不需要手动检查时间戳
     async with _ADMIN_STATS_CACHE_LOCK:
         bucket = _ADMIN_STATS_CACHE[cache_name]
-        entry = bucket.get(cache_key)
-        if not entry:
-            return None
-
-        if now - entry["timestamp"] > ttl:
-            del bucket[cache_key]
-            return None
-
-        return entry["value"]
+        return bucket.get(cache_key)
 
 
 async def _set_admin_cached_response(cache_name: str, cache_key: str, value):
     async with _ADMIN_STATS_CACHE_LOCK:
-        _ADMIN_STATS_CACHE[cache_name][cache_key] = {
-            "timestamp": time.time(),
-            "value": value
-        }
+        _ADMIN_STATS_CACHE[cache_name][cache_key] = value
 
 
 async def admin_dashboard():
@@ -99,43 +137,42 @@ async def update_model_config(
         
         if not model_name or config is None:
             raise HTTPException(status_code=400, detail="缺少必要参数")
-        
-        # 读取现有配置
-        with open('model_endpoint_map.json', 'r', encoding='utf-8') as f:
-            current_config = json.load(f)
-        
-        if old_model_name:
-            if old_model_name not in current_config:
-                raise HTTPException(status_code=404, detail=f"原模型 {old_model_name} 不存在")
-            
-            if old_model_name != model_name and model_name in current_config:
-                raise HTTPException(status_code=409, detail=f"模型 {model_name} 已存在，请使用其他名称")
-            
-            if old_model_name != model_name:
-                # 保持原有顺序，在旧位置替换为新名称
-                updated_config = {}
-                for existing_name, existing_config in current_config.items():
-                    if existing_name == old_model_name:
-                        updated_config[model_name] = config
-                    else:
-                        updated_config[existing_name] = existing_config
-                current_config = updated_config
-                message = f"模型 {old_model_name} 已重命名为 {model_name}"
+
+        async with _MODEL_ENDPOINT_MAP_LOCK:
+            # 读取现有配置
+            current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+
+            if old_model_name:
+                if old_model_name not in current_config:
+                    raise HTTPException(status_code=404, detail=f"原模型 {old_model_name} 不存在")
+                
+                if old_model_name != model_name and model_name in current_config:
+                    raise HTTPException(status_code=409, detail=f"模型 {model_name} 已存在，请使用其他名称")
+                
+                if old_model_name != model_name:
+                    # 保持原有顺序，在旧位置替换为新名称
+                    updated_config = {}
+                    for existing_name, existing_config in current_config.items():
+                        if existing_name == old_model_name:
+                            updated_config[model_name] = config
+                        else:
+                            updated_config[existing_name] = existing_config
+                    current_config = updated_config
+                    message = f"模型 {old_model_name} 已重命名为 {model_name}"
+                else:
+                    current_config[model_name] = config
+                    message = f"模型 {model_name} 配置已更新"
             else:
+                # 新增或直接覆盖
                 current_config[model_name] = config
                 message = f"模型 {model_name} 配置已更新"
-        else:
-            # 新增或直接覆盖
-            current_config[model_name] = config
-            message = f"模型 {model_name} 配置已更新"
-        
-        # 写入文件
-        with open('model_endpoint_map.json', 'w', encoding='utf-8') as f:
-            json.dump(current_config, f, indent=2, ensure_ascii=False)
-        
-        # 重新加载配置
-        load_model_endpoint_map_func()
-        
+
+            # 写入文件（原子写，避免半截文件毁掉整套模型配置）
+            await write_json_file(MODEL_ENDPOINT_MAP_FILE, current_config)
+
+            # 重新加载配置
+            await asyncio.to_thread(load_model_endpoint_map_func)
+
         return {"status": "success", "message": message}
     except HTTPException:
         raise
@@ -156,22 +193,20 @@ async def delete_model_config(
             raise HTTPException(status_code=400, detail="缺少 model_name 字段")
 
         # 读取现有配置
-        with open('model_endpoint_map.json', 'r', encoding='utf-8') as f:
-            current_config = json.load(f)
-        
+        current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+
         if model_name not in current_config:
             raise HTTPException(status_code=404, detail=f"模型 {model_name} 不存在")
-        
+
         # 删除配置
         del current_config[model_name]
-        
+
         # 写入文件
-        with open('model_endpoint_map.json', 'w', encoding='utf-8') as f:
-            json.dump(current_config, f, indent=2, ensure_ascii=False)
-        
+        await write_json_file(MODEL_ENDPOINT_MAP_FILE, current_config)
+
         # 重新加载配置
-        load_model_endpoint_map_func()
-        
+        await asyncio.to_thread(load_model_endpoint_map_func)
+
         return {"status": "success", "message": f"模型 {model_name} 已删除"}
     except HTTPException:
         raise
@@ -193,9 +228,8 @@ async def reorder_models(
             raise HTTPException(status_code=400, detail="缺少有效的order参数")
         
         # 读取现有配置
-        with open('model_endpoint_map.json', 'r', encoding='utf-8') as f:
-            current_config = json.load(f)
-        
+        current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+
         # 验证所有模型名称都存在
         for model_name in new_order:
             if model_name not in current_config:
@@ -210,14 +244,13 @@ async def reorder_models(
         reordered_config = {}
         for model_name in new_order:
             reordered_config[model_name] = current_config[model_name]
-        
+
         # 写入文件
-        with open('model_endpoint_map.json', 'w', encoding='utf-8') as f:
-            json.dump(reordered_config, f, indent=2, ensure_ascii=False)
-        
+        await write_json_file(MODEL_ENDPOINT_MAP_FILE, reordered_config)
+
         # 重新加载配置
-        load_model_endpoint_map_func()
-        
+        await asyncio.to_thread(load_model_endpoint_map_func)
+
         logger.info(f"✅ 模型顺序已更新: {' -> '.join(new_order)}")
         
         return {
@@ -235,8 +268,7 @@ async def reorder_models(
 async def get_config(CONFIG: dict):
     """获取config.jsonc配置"""
     try:
-        with open('config.jsonc', 'r', encoding='utf-8') as f:
-            content = f.read()
+        content = await read_text_file(CONFIG_FILE)
         return {"content": content, "config": CONFIG}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -251,23 +283,46 @@ async def update_config(
     try:
         data = await request.json()
         content = data.get("content")
-        
-        if not content:
+        partial = data.get("config")
+
+        if content:
+            # 源码编辑模式：整体覆盖，用户看到什么就写入什么
+            try:
+                _parse_jsonc_func(content)
+            except json.JSONDecodeError as e:
+                raise HTTPException(status_code=400, detail=f"配置格式错误: {e}")
+            new_content = content
+        elif isinstance(partial, dict) and partial:
+            # 🔧 表单模式：只定点替换给出的顶层键。
+            # 旧版前端把表单收集到的对象 JSON.stringify 后当 content 提交，
+            # 等于用一份无注释的纯 JSON 覆盖 config.jsonc —— 在配置页点一次
+            # "保存"，整份配置文件的注释就全部消失了。
+            original = await read_text_file(CONFIG_FILE)
+            # 只替换值真正发生变化的键：表单会回传全部字段，对未改动的键做
+            # 同值替换会白白重排它们的格式（内联对象被展开成多行等）
+            try:
+                current = _parse_jsonc_func(original)
+            except json.JSONDecodeError:
+                current = {}
+            changed = {k: v for k, v in partial.items() if current.get(k) != v}
+            if not changed:
+                return {"status": "success", "message": "配置无变化"}
+            new_content = set_jsonc_values(original, changed)
+            logger.info(f"[CONFIG] 表单模式更新 {len(changed)} 个字段: {', '.join(sorted(changed))}")
+            try:
+                _parse_jsonc_func(new_content)
+            except json.JSONDecodeError as e:
+                logger.error(f"生成的 config.jsonc 非法，已放弃写入: {e}")
+                raise HTTPException(status_code=500, detail=f"配置写入前校验失败: {e}")
+        else:
             raise HTTPException(status_code=400, detail="缺少配置内容")
-        
-        # 验证JSON格式
-        try:
-            _parse_jsonc_func(content)
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail=f"配置格式错误: {e}")
-        
-        # 写入文件
-        with open('config.jsonc', 'w', encoding='utf-8') as f:
-            f.write(content)
-        
+
+        # 写入文件（原子写）
+        await write_text_file(CONFIG_FILE, new_content)
+
         # 重新加载配置
-        load_config_func(force_reload=True)
-        
+        await asyncio.to_thread(load_config_func, True)
+
         return {"status": "success", "message": "配置已更新"}
     except HTTPException:
         raise
@@ -450,12 +505,12 @@ async def install_tokenizer_api(
         if not package_name:
             raise HTTPException(status_code=400, detail="缺少package参数")
         
-        # 执行安装
-        result = install_tokenizer_package_func(package_name)
+        # 执行安装（subprocess.run 最长 120s，必须走线程池）
+        result = await asyncio.to_thread(install_tokenizer_package_func, package_name)
         
         if result['success']:
             # 安装成功后获取最新状态
-            new_status = get_all_tokenizers_status_func()
+            new_status = await asyncio.to_thread(get_all_tokenizers_status_func)
             result['tokenizers_status'] = new_status
             logger.info(f"✅ 分词器 {package_name} 安装成功")
         
@@ -470,17 +525,11 @@ async def install_tokenizer_api(
 async def get_tokenizer_mappings(_parse_jsonc_func):
     """获取所有tokenizer映射配置"""
     try:
-        # 读取config.jsonc
-        with open('config.jsonc', 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # 解析JSONC
+        content = await read_text_file(CONFIG_FILE)
         config = _parse_jsonc_func(content)
-        
+
         # 获取tokenizer_config，如果不存在则返回空字典
-        tokenizer_config = config.get('tokenizer_config', {})
-        
-        return tokenizer_config
+        return config.get('tokenizer_config', {})
     except Exception as e:
         logger.error(f"获取tokenizer映射失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -496,26 +545,30 @@ async def update_all_tokenizer_mappings(
         data = await request.json()
         tokenizer_config = data.get("tokenizer_config")
         
-        if not tokenizer_config or not isinstance(tokenizer_config, dict):
+        if not isinstance(tokenizer_config, dict):
             raise HTTPException(status_code=400, detail="缺少有效的tokenizer_config参数")
-        
+
         # 读取当前配置
-        with open('config.jsonc', 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # 解析JSONC
-        config = _parse_jsonc_func(content)
-        
-        # 更新tokenizer_config
-        config['tokenizer_config'] = tokenizer_config
-        
-        # 写回文件
-        with open('config.jsonc', 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        
+        content = await read_text_file(CONFIG_FILE)
+
+        # 🔧 修复：旧版把 JSONC 解析成 dict 后用 json.dump 覆盖回去，
+        # config.jsonc 里全部说明性注释被一次保存彻底抹掉（这个文件的注释
+        # 就是本项目的配置文档）。改为只在原始文本上替换 tokenizer_config
+        # 这一个键的值，其余字节（含注释、缩进、键序）原样保留。
+        updated = set_jsonc_value(content, 'tokenizer_config', tokenizer_config)
+
+        # 写回前先校验替换结果仍是合法 JSONC，避免写坏运行中的配置
+        try:
+            _parse_jsonc_func(updated)
+        except json.JSONDecodeError as e:
+            logger.error(f"生成的 config.jsonc 非法，已放弃写入: {e}")
+            raise HTTPException(status_code=500, detail=f"配置写入前校验失败: {e}")
+
+        await write_text_file(CONFIG_FILE, updated)
+
         # 重新加载配置
-        load_config_func(force_reload=True)
-        
+        await asyncio.to_thread(load_config_func, True)
+
         logger.info(f"✅ 已批量保存 {len(tokenizer_config)} 个模型的tokenizer配置")
         for model, tokenizer in tokenizer_config.items():
             logger.info(f"  - {model}: {tokenizer}")
@@ -550,7 +603,7 @@ async def merge_model_stats(
         
         # 调用数据库合并函数
         if stats_db.enabled:
-            result = stats_db.merge_models(source_models, target_model)
+            result = await asyncio.to_thread(stats_db.merge_models, source_models, target_model)
             if result:
                 logger.info(f"✅ 成功合并 {len(source_models)} 个模型到 '{target_model}'")
                 return {
@@ -585,7 +638,7 @@ async def delete_model_stats(
         
         # 调用数据库删除函数
         if stats_db.enabled:
-            result = stats_db.delete_models(models)
+            result = await asyncio.to_thread(stats_db.delete_models, models)
             if result:
                 logger.info(f"✅ 成功删除 {len(models)} 个模型的统计数据")
                 return {
@@ -747,53 +800,82 @@ async def get_token_stats(
         logger.debug("[TOKEN_STATS] 命中短时缓存")
         return cached_response
 
-    try:
-        # 优先使用SQLite数据库
-        if stats_db.enabled:
-            db_stats = await stats_db.get_token_stats_async(filter_start, filter_end, MODEL_ENDPOINT_MAP, rpm_period)
+    # 优先使用 SQLite 数据库
+    # 🔧 修复：旧版只在 SQLite 命中时 return，未启用 / 查询为空 / 抛异常时
+    # 分别落到函数末尾隐式返回 None（前端拿到 null 后 data.total_tokens 直接
+    # TypeError，整个统计页白屏）；且 except 分支 return 之后还挂着永不执行的
+    # logger.error + raise。现在所有分支都必然返回结构完整的响应。
+    if stats_db.enabled:
+        try:
+            db_stats = await stats_db.get_token_stats_async(
+                filter_start, filter_end, MODEL_ENDPOINT_MAP, rpm_period)
             if db_stats:
-                logger.info(f"[TOKEN_STATS] ✅ 从SQLite读取统计数据")
+                logger.info("[TOKEN_STATS] ✅ 从SQLite读取统计数据")
                 await _set_admin_cached_response("token_stats", cache_key, db_stats)
                 return db_stats
-            else:
-                logger.warning(f"[TOKEN_STATS] SQLite查询失败，回退到JSON日志")
-        
-    except Exception as e:
-        # 简化回退：只返回内存中的模型统计概览（无详细token聚合）
-        model_stats_list = await monitoring_service.get_model_stats_async()
-        stats_list = []
-        for s in model_stats_list:
-            stats_list.append({
-                'model': s['model'],
-                'display_name': s['model'],
-                'request_count': s['total_requests'],
-                'input_tokens': 0,
-                'output_tokens': 0,
-                'cached_tokens': 0,
-                'cached_cost': 0,
-                'total_tokens': 0,
-                'input_cost': 0,
-                'output_cost': 0,
-                'total_cost': 0,
-                'currency': 'USD',
-                'rpm': 0,
-                'tpm': 0
-            })
-        stats_list.sort(key=lambda x: x['request_count'], reverse=True)
+            logger.warning("[TOKEN_STATS] SQLite 未返回数据，回退到内存统计概览")
+        except Exception as e:
+            logger.error(f"[TOKEN_STATS] SQLite 查询异常，回退到内存统计概览: {e}", exc_info=True)
 
-        result = {
-            "model_stats": stats_list,
-            "total_input_tokens": 0,
-            "total_output_tokens": 0,
-            "total_cached_tokens": 0,
-            "total_tokens": 0,
-            "models_count": len(stats_list),
-            "daily_stats": []
+    # 回退：只返回内存中的模型统计概览（无详细 token 聚合）
+    result = await _build_memory_token_stats(monitoring_service, rpm_period)
+    await _set_admin_cached_response("token_stats", cache_key, result)
+    return result
+
+
+async def _build_memory_token_stats(monitoring_service, rpm_period: Optional[str]) -> dict:
+    """SQLite 不可用时的降级统计：仅有请求数，token/成本聚合置零。
+
+    字段与 StatsDB.get_token_stats 的返回保持一致，保证前端渲染路径统一。
+    """
+    model_stats_list = await monitoring_service.get_model_stats_async()
+    stats_list = [
+        {
+            'model': s['model'],
+            'display_name': s['model'],
+            'request_count': s['total_requests'],
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'cached_tokens': 0,
+            'cached_cost': 0,
+            'total_tokens': 0,
+            'input_cost': 0,
+            'output_cost': 0,
+            'total_cost': 0,
+            'currency': 'USD',
+            'rpm': 0,
+            'tpm': 0,
         }
-        await _set_admin_cached_response("token_stats", cache_key, result)
-        return result
-        logger.error(f"获取token统计失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        for s in model_stats_list
+    ]
+    stats_list.sort(key=lambda x: x['request_count'], reverse=True)
+
+    usd_to_cny, cny_to_usd = get_exchange_rates()
+    zero_cost = {'input_cost': 0, 'output_cost': 0, 'total_cost': 0}
+    return {
+        "model_stats": stats_list,
+        "daily_stats": [],
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_cached_tokens": 0,
+        "total_tokens": 0,
+        "input_cost": 0,
+        "output_cost": 0,
+        "total_cost": 0,
+        "currency": "USD",
+        "cost_usd": dict(zero_cost),
+        "cost_cny": dict(zero_cost),
+        "cost_by_currency": {},
+        "exchange_rate": {"USD_TO_CNY": usd_to_cny, "CNY_TO_USD": cny_to_usd},
+        "rate_stats": {
+            "period": "hour" if rpm_period == "hour" else "day",
+            "minutes": 60.0 if rpm_period == "hour" else 1440.0,
+            "request_count": 0,
+            "total_tokens": 0,
+        },
+        "models_count": len(stats_list),
+        "degraded": True,
+    }
 
 
 
@@ -823,9 +905,6 @@ async def export_report(
                     '货币', '平均Token/请求'
                 ])
                 for stat in model_stats:
-                    cached_cost = 0.0
-                    # 缓存成本 = cached_tokens * cached_input_price / unit
-                    # 这里从后端数据推算（input_cost 已经按新公式计算过）
                     writer.writerow([
                         stat.get('display_name', stat.get('model', '')),
                         stat.get('request_count', 0),
@@ -894,7 +973,8 @@ async def add_custom_tokenizer_api(
         if not name or not source:
             raise HTTPException(status_code=400, detail="缺少必要参数: name, source")
         
-        result = add_custom_tokenizer_func(
+        result = await asyncio.to_thread(
+            add_custom_tokenizer_func,
             name=name,
             source_type=source_type,
             source=source,
@@ -925,7 +1005,7 @@ async def delete_custom_tokenizer_api(
         if not name:
             raise HTTPException(status_code=400, detail="缺少分词器名称")
         
-        result = delete_custom_tokenizer_func(name)
+        result = await asyncio.to_thread(delete_custom_tokenizer_func, name)
         
         if result['success']:
             logger.info(f"✅ 自定义分词器 {name} 删除成功")
@@ -943,7 +1023,7 @@ async def delete_custom_tokenizer_api(
 async def list_custom_tokenizers_api(list_custom_tokenizers_func):
     """列出所有自定义分词器"""
     try:
-        result = list_custom_tokenizers_func()
+        result = await asyncio.to_thread(list_custom_tokenizers_func)
         return result
     except Exception as e:
         logger.error(f"列出自定义分词器失败: {e}", exc_info=True)
@@ -970,10 +1050,17 @@ async def test_model_keys(
         endpoint_path = "/" + endpoint_path
     
     is_gemini = api_type == "gemini_native"
-    
+
     if not api_keys:
         return {"status": "info", "message": "没有配置任何 API Key", "results": []}
-    
+
+    # 🔧 修复：旧版为每个 key 单独 `aiohttp.ClientSession(TCPConnector(ssl=False))`：
+    #   1. ssl=False 关掉了证书校验，测试流量可被中间人静默劫持（测的是 API Key，
+    #      正是最不该裸奔的东西）；
+    #   2. 每个 key 建一个 session，N 个 key 就是 N 套连接池，用完即弃。
+    # 现在复用全局共享连接池（与真实请求同一条链路，测出来的结果也更有代表性）。
+    shared_session = _app_state.server.aiohttp_session
+
     async def _test_one_key(key: str, index: int):
         """测试单个 key"""
         result = {
@@ -1013,26 +1100,41 @@ async def test_model_keys(
                     result["status"] = "error"
                     result["error"] = str(err)[:200]
             else:
+                if not api_base_url:
+                    result["status"] = "error"
+                    result["error"] = "缺少 api_base_url，无法测试"
+                    return result
+                if shared_session is None:
+                    result["status"] = "error"
+                    result["error"] = "HTTP 连接池尚未初始化，请稍后重试"
+                    return result
+
                 url = f"{api_base_url.rstrip('/')}{endpoint_path}"
                 body = {"model": model_id, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 5}
                 headers = {"Content-Type": "application/json"}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
-                
-                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as sess:
-                    async with sess.post(url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=30, connect=10)) as resp:
-                        ms = round((time.time() - t0) * 1000, 1)
-                        result["response_time_ms"] = ms
-                        if resp.status == 200:
-                            result["status"] = "ok"
-                        else:
-                            try:
-                                ed = await resp.json()
-                                em = str(ed.get("error", {}).get("message", ed.get("detail", str(resp.status))))
-                            except:
-                                em = f"HTTP {resp.status}"
-                            result["status"] = "error"
-                            result["error"] = em[:200]
+
+                async with shared_session.post(
+                    url, json=body, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30, connect=10)
+                ) as resp:
+                    ms = round((time.time() - t0) * 1000, 1)
+                    result["response_time_ms"] = ms
+                    if resp.status == 200:
+                        result["status"] = "ok"
+                    else:
+                        try:
+                            ed = await resp.json()
+                            err_obj = ed.get("error")
+                            if isinstance(err_obj, dict):
+                                em = str(err_obj.get("message", resp.status))
+                            else:
+                                em = str(err_obj or ed.get("detail") or resp.status)
+                        except Exception:
+                            em = f"HTTP {resp.status}"
+                        result["status"] = "error"
+                        result["error"] = em[:200]
         except asyncio.TimeoutError:
             result["status"] = "timeout"
             result["error"] = "请求超时（30s）"
@@ -1065,3 +1167,192 @@ async def test_model_keys(
         "results": results,
         "message": f"测试完成: {ok}/{len(results)} 个 Key 有效"
     }
+
+
+# ============================================================================
+# 端点注册（依赖从模块单例 / AppState 自取）
+# ============================================================================
+
+@router.get("/admin", response_class=HTMLResponse)
+async def admin_dashboard_endpoint():
+    return await admin_dashboard()
+
+
+@router.get("/token_calculator", response_class=HTMLResponse)
+async def token_calculator_endpoint():
+    """返回Token计算器页面"""
+    try:
+        with open('token_calculator.html', 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        return HTMLResponse(content=html_content)
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>Token计算器页面未找到</h1><p>请确保 token_calculator.html 文件在正确的位置。</p>",
+            status_code=404
+        )
+
+
+@router.get("/api/admin/models")
+async def get_models_config_endpoint():
+    return await get_models_config(
+        MODEL_ENDPOINT_MAP, MODEL_NAME_TO_ID_MAP, load_model_endpoint_map
+    )
+
+
+@router.post("/api/admin/models")
+async def update_model_config_endpoint(request: Request):
+    return await update_model_config(request, load_model_endpoint_map)
+
+
+@router.post("/api/admin/models/delete")
+async def delete_model_config_endpoint(request: Request):
+    return await delete_model_config(request, load_model_endpoint_map)
+
+
+@router.post("/api/admin/models/reorder")
+async def reorder_models_endpoint(request: Request):
+    return await reorder_models(request, load_model_endpoint_map)
+
+
+@router.get("/api/admin/config")
+async def get_config_endpoint():
+    return await get_config(CONFIG)
+
+
+@router.post("/api/admin/config")
+async def update_config_endpoint(request: Request):
+    return await update_config(request, _parse_jsonc, load_config)
+
+
+@router.get("/api/admin/overview")
+async def get_overview_endpoint():
+    conn = _app_state.connection
+    return await get_overview(
+        monitoring_service, stats_db, MonitorConfig, conn.browser_ws_ref['ws'],
+        conn.browser_connections, conn.browser_connections_lock, conn.tab_connection_times,
+        conn.tab_request_counts, CONFIG, MODEL_ENDPOINT_MAP
+    )
+
+
+@router.get("/api/admin/tokenizer_info")
+async def get_tokenizer_info_endpoint():
+    return await get_tokenizer_info_api(get_token_counter_info)
+
+
+@router.get("/api/admin/tokenizer_mappings")
+async def get_tokenizer_mappings_endpoint():
+    return await get_tokenizer_mappings(_parse_jsonc)
+
+
+@router.post("/api/admin/tokenizer_mappings")
+async def update_tokenizer_mappings_endpoint(request: Request):
+    return await update_all_tokenizer_mappings(request, _parse_jsonc, load_config)
+
+
+@router.get("/api/admin/tokenizers_status")
+async def get_all_tokenizers_status_endpoint():
+    """获取所有分词器的详细状态"""
+    return await get_all_tokenizers_status_api(get_all_tokenizers_status)
+
+
+@router.post("/api/admin/calculate_tokens")
+async def calculate_tokens_endpoint(request: Request):
+    """计算文本的token数量"""
+    return await calculate_tokens_api(request, calculate_tokens_for_text)
+
+
+@router.post("/api/admin/compare_tokenizers")
+async def compare_tokenizers_endpoint(request: Request):
+    """对比两种分词器的结果"""
+    return await compare_tokenizers_api(request, compare_tokenizers)
+
+
+@router.post("/api/admin/install_tokenizer")
+async def install_tokenizer_endpoint(request: Request):
+    """安装分词器包"""
+    return await install_tokenizer_api(
+        request, install_tokenizer_package, get_all_tokenizers_status
+    )
+
+
+@router.post("/api/admin/custom_tokenizers")
+async def add_custom_tokenizer_endpoint(request: Request):
+    """添加自定义分词器"""
+    return await add_custom_tokenizer_api(request, add_custom_tokenizer)
+
+
+@router.delete("/api/admin/custom_tokenizers/{name}")
+async def delete_custom_tokenizer_endpoint(name: str):
+    """删除自定义分词器"""
+    return await delete_custom_tokenizer_api(name, delete_custom_tokenizer)
+
+
+@router.get("/api/admin/custom_tokenizers")
+async def list_custom_tokenizers_endpoint():
+    """列出所有自定义分词器"""
+    return await list_custom_tokenizers_api(list_custom_tokenizers)
+
+
+@router.post("/api/admin/test_model_keys")
+async def test_model_keys_endpoint(request: Request):
+    """测试单个模型配置中的所有 API Key（并行请求）"""
+    return await test_model_keys(request, _app_state.server.direct_api_service)
+
+
+@router.get("/api/admin/token_stats")
+async def get_token_stats_endpoint(start_date: Optional[str] = None, end_date: Optional[str] = None,
+                                   start_time: Optional[str] = None, end_time: Optional[str] = None,
+                                   rpm_period: Optional[str] = None):
+    return await get_token_stats(
+        start_date, end_date, start_time, end_time, rpm_period, stats_db,
+        monitoring_service, MODEL_ENDPOINT_MAP, estimate_message_tokens, estimate_tokens
+    )
+
+
+@router.get("/api/admin/export_report")
+async def export_report_endpoint(start_date: Optional[str] = None, end_date: Optional[str] = None):
+    return await export_report(
+        stats_db, monitoring_service, MODEL_ENDPOINT_MAP, start_date, end_date
+    )
+
+
+@router.get("/api/admin/request_stats")
+async def get_request_stats_endpoint(start_time: Optional[str] = None, end_time: Optional[str] = None,
+                                     start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """请求次数统计。
+
+    🔧 修复：管理面板的日期选择器发送的是 start_date/end_date，而旧版端点
+    只声明了 start_time/end_time，FastAPI 直接把它们丢弃 —— "请求统计"的
+    日期筛选点了完全没反应。这里与 /api/admin/token_stats 端点对齐，
+    两组参数名都接受（date 为兼容前端语义的日期粒度，time 为 ISO 时间戳）。
+    """
+    return await get_request_stats(
+        start_time or start_date, end_time or end_date,
+        stats_db, monitoring_service, MonitorConfig
+    )
+
+
+@router.post("/api/admin/merge_model_stats")
+async def merge_model_stats_endpoint(request: Request):
+    return await merge_model_stats(request, stats_db)
+
+
+@router.post("/api/admin/delete_model_stats")
+async def delete_model_stats_endpoint(request: Request):
+    return await delete_model_stats(request, stats_db)
+
+
+async def warmup_admin_cache():
+    """预热 admin 首屏缓存，消除重启后的冷启动延迟（由 lifespan 后台任务调用）"""
+    await asyncio.sleep(0.5)
+    try:
+        logger.info("🔥 预热 admin 首屏缓存...")
+        # 预热 overview（含 SQLite 汇总查询）
+        await get_overview_endpoint()
+        # 预热 token_stats（最重的查询：多个 GROUP BY + 成本计算）
+        await get_token_stats_endpoint(rpm_period='day')
+        # 预热 request_stats
+        await get_request_stats_endpoint()
+        logger.info("🔥 admin 首屏缓存预热完成")
+    except Exception as e:
+        logger.warning(f"⚠️ admin 缓存预热失败（不影响使用）: {e}")

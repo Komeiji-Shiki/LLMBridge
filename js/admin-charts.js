@@ -506,14 +506,91 @@ function toggleOutputAxis() {
 }
 
 // ==================== 统计表格 ====================
+// 排序状态：当前排序列与方向（null 表示保持后端默认顺序）
+let tokenStatsSortKey = null;
+let tokenStatsSortDir = 'desc';
+// 缓存最近一次的数据，点击表头时直接用它重新渲染
+let latestModelStatsCache = [];
+
+// 可排序列配置：[排序键, 表头文案]
+const TOKEN_STATS_COLUMNS = [
+    ['model', '模型'],
+    ['total_tokens', '总 Tokens'],
+    ['input_tokens', '输入 Tokens'],
+    ['output_tokens', '输出 Tokens'],
+    ['cached_tokens', '命中缓存'],
+    ['request_count', '请求数'],
+    ['avg_tokens', '平均 Token/请求'],
+    ['rpm', 'RPM'],
+    ['tpm', 'TPM'],
+    ['total_cost', '总消耗金额'],
+];
+
+// 提取用于排序的值（计算列和金额列需要特殊处理）
+function getTokenStatSortValue(stat, key) {
+    switch (key) {
+        case 'model':
+            return (stat.display_name || stat.model || '').toLowerCase();
+        case 'avg_tokens':
+            return stat.request_count > 0 ? stat.total_tokens / stat.request_count : 0;
+        case 'total_cost': {
+            // 不同模型可能记录不同货币，统一换算成 USD 后再比较
+            const cost = stat.total_cost || 0;
+            return (stat.currency === 'CNY') ? cost * EXCHANGE_RATE.CNY_TO_USD : cost;
+        }
+        default:
+            return stat[key] || 0;
+    }
+}
+
+// 点击表头排序：同列切换方向，换列时数值列默认倒序、模型列默认正序
+function sortTokenStatsTable(key) {
+    if (tokenStatsSortKey === key) {
+        tokenStatsSortDir = tokenStatsSortDir === 'desc' ? 'asc' : 'desc';
+    } else {
+        tokenStatsSortKey = key;
+        tokenStatsSortDir = key === 'model' ? 'asc' : 'desc';
+    }
+    renderTokenStatsTable(latestModelStatsCache);
+}
+
 function renderTokenStatsTable(modelStats) {
     const container = document.getElementById('token-stats-table');
     if (!container) return;
     
-    if (!modelStats || modelStats.length === 0) {
+    modelStats = Array.isArray(modelStats) ? modelStats : [];
+    latestModelStatsCache = modelStats;
+    
+    if (modelStats.length === 0) {
         container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><p>暂无Token统计数据</p></div>';
         return;
     }
+    
+    // 记录当前勾选状态，重新渲染后恢复（排序/切换货币不丢失选中）
+    const checkedModels = new Set(
+        Array.from(container.querySelectorAll('.model-stat-checkbox:checked')).map(cb => cb.dataset.model)
+    );
+    
+    // 按当前排序状态生成排序副本（不修改原数组）
+    const sortedStats = [...modelStats];
+    if (tokenStatsSortKey) {
+        const dir = tokenStatsSortDir === 'asc' ? 1 : -1;
+        sortedStats.sort((a, b) => {
+            const va = getTokenStatSortValue(a, tokenStatsSortKey);
+            const vb = getTokenStatSortValue(b, tokenStatsSortKey);
+            if (typeof va === 'string' || typeof vb === 'string') {
+                return String(va).localeCompare(String(vb)) * dir;
+            }
+            return (va - vb) * dir;
+        });
+    }
+    
+    // 生成可点击排序的表头
+    const headerCells = TOKEN_STATS_COLUMNS.map(([key, label]) => {
+        const active = tokenStatsSortKey === key;
+        const arrow = active ? (tokenStatsSortDir === 'asc' ? ' ▲' : ' ▼') : '';
+        return `<th class="sortable-th${active ? ' active' : ''}" onclick="sortTokenStatsTable('${key}')" title="点击排序">${label}${arrow}</th>`;
+    }).join('');
     
     container.innerHTML = `
         <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
@@ -534,21 +611,12 @@ function renderTokenStatsTable(modelStats) {
                     <th style="width: 40px;">
                         <input type="checkbox" id="select-all-checkbox" onchange="toggleAllModelStats()" style="cursor: pointer;">
                     </th>
-                    <th>模型</th>
-                    <th>总 Tokens</th>
-                    <th>输入 Tokens</th>
-                    <th>输出 Tokens</th>
-                    <th>命中缓存</th>
-                    <th>请求数</th>
-                    <th>平均 Token/请求</th>
-                    <th>RPM</th>
-                    <th>TPM</th>
-                    <th>总消耗金额</th>
+                    ${headerCells}
                     <th>操作</th>
                 </tr>
             </thead>
             <tbody>
-                ${modelStats.map(stat => {
+                ${sortedStats.map(stat => {
                     // 格式化RPM和TPM
                     const rpmDisplay = stat.rpm !== undefined && stat.rpm > 0
                         ? `<span style="color: #10b981;">${stat.rpm.toFixed(2)}</span>`
@@ -603,11 +671,11 @@ function renderTokenStatsTable(modelStats) {
                     return `
                         <tr>
                             <td>
-                                <input type="checkbox" class="model-stat-checkbox" data-model="${stat.model}" onchange="updateSelectedCount()" style="cursor: pointer;">
+                                <input type="checkbox" class="model-stat-checkbox" data-model="${escapeHtml(stat.model)}" onchange="updateSelectedCount()" style="cursor: pointer;">
                             </td>
                             <td>
-                                <strong>${stat.display_name || stat.model}</strong>
-                                ${stat.display_name && stat.display_name !== stat.model ? `<br><small style="color: var(--text-dim);">(${stat.model})</small>` : ''}
+                                <strong>${escapeHtml(stat.display_name || stat.model)}</strong>
+                                ${stat.display_name && stat.display_name !== stat.model ? `<br><small style="color: var(--text-dim);">(${escapeHtml(stat.model)})</small>` : ''}
                             </td>
                             <td><span style="color: var(--accent);">${formatNumber(stat.total_tokens)}</span></td>
                             <td>${formatNumber(stat.input_tokens)}</td>
@@ -619,7 +687,7 @@ function renderTokenStatsTable(modelStats) {
                             <td>${tpmDisplay}</td>
                             <td${costTooltip ? ` title="${costTooltip}"` : ''}>${costDisplay}</td>
                             <td>
-                                <button class="btn btn-danger btn-sm" onclick="deleteModelStats('${stat.model.replace(/'/g, "\\'")}')">删除</button>
+                                <button class="btn btn-danger btn-sm" data-model="${escapeHtml(stat.model)}" onclick="deleteModelStats(this.dataset.model)">删除</button>
                             </td>
                         </tr>
                     `;
@@ -627,6 +695,12 @@ function renderTokenStatsTable(modelStats) {
             </tbody>
         </table>
     `;
+    // 恢复排序前的勾选状态
+    if (checkedModels.size > 0) {
+        container.querySelectorAll('.model-stat-checkbox').forEach(cb => {
+            if (checkedModels.has(cb.dataset.model)) cb.checked = true;
+        });
+    }
     updateSelectedCount();
 }
 // ==================== 成本趋势图 ====================

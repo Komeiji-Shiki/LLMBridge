@@ -121,9 +121,13 @@
     </div>
     <script>
         // 读取 next 参数并限制为站内路径，防止开放重定向
+        // 必须是单斜杠开头，且第二个字符不能是 / 或 \ ——
+        // 浏览器会把 "/\evil.com" 规范化成 "//evil.com" 当协议相对 URL 处理，
+        // 只挡 "//" 是不够的
         function getNextPath() {
             var next = new URLSearchParams(location.search).get('next') || '/admin';
-            if (next.charAt(0) !== '/' || next.charAt(1) === '/') {
+            var second = next.charAt(1);
+            if (next.charAt(0) !== '/' || second === '/' || second === '\\') {
                 next = '/admin';
             }
             return next;
@@ -154,13 +158,14 @@
                     try {
                         var data = JSON.parse(xhr.responseText);
                         if (data.success) {
-                            document.cookie = "web_access_key=" + encodeURIComponent(key) + "; path=/; max-age=86400";
+                            // 会话 cookie 由服务端通过 Set-Cookie (HttpOnly) 下发，前端不再写入明文密钥
+                            // 验证通过就直接进入；旧版还要用户再点一次"进入管理面板"，
+                            // 多出一步纯粹的无效交互
                             var next = getNextPath();
-                            successDiv.textContent = '✅ 验证成功！点击下方按钮进入';
+                            successDiv.textContent = '✅ 验证成功，正在进入...';
                             successDiv.className = 'success show';
-                            btn.textContent = '👉 进入管理面板';
-                            btn.disabled = false;
-                            btn.onclick = function() { window.location.href = next; return false; };
+                            btn.textContent = '跳转中...';
+                            window.location.replace(next);
                         } else {
                             errorDiv.textContent = data.message || '密钥错误';
                             errorDiv.className = 'error show';

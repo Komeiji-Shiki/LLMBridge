@@ -5,11 +5,12 @@ Direct API 工具函数
 import asyncio
 import json
 import logging
+from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 from fastapi.responses import Response
 
-from core.config_loader import MODEL_ROUND_ROBIN_INDEX, MODEL_ROUND_ROBIN_LOCK
+from core.config_loader import MODEL_ROUND_ROBIN_LOCK
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,7 @@ def extract_tool_calls_from_message(message: dict):
 
 def build_response_message(content, reasoning_content=None, tool_calls=None):
     """构建用于监控面板展示的 assistant 响应消息。"""
-    message = {"role": "assistant"}
+    message: Dict[str, Any] = {"role": "assistant"}
 
     if reasoning_content:
         message["reasoning_content"] = reasoning_content
@@ -128,6 +129,13 @@ def build_response_message(content, reasoning_content=None, tool_calls=None):
 # API Key 轮询
 # ============================================================
 
+# 🔧 修复：API key 轮询使用独立的索引字典。
+# 旧版与 endpoint 轮询共用 MODEL_ROUND_ROBIN_INDEX[model_name]，
+# 同一模型既配置多 endpoint 又配置多 key 时，两种轮询（模数不同）
+# 互相覆盖同一个计数器，轮询顺序被彼此打乱。
+_API_KEY_ROUND_ROBIN_INDEX: dict = {}
+
+
 async def get_round_robin_api_key(model_name: str, api_key_config) -> str:
     """获取轮询后的 API key"""
     if isinstance(api_key_config, str):
@@ -139,9 +147,9 @@ async def get_round_robin_api_key(model_name: str, api_key_config) -> str:
             return ""
 
         async with MODEL_ROUND_ROBIN_LOCK:
-            current_index = MODEL_ROUND_ROBIN_INDEX.get(model_name, 0)
+            current_index = _API_KEY_ROUND_ROBIN_INDEX.get(model_name, 0)
             selected_key = valid_keys[current_index % len(valid_keys)]
-            MODEL_ROUND_ROBIN_INDEX[model_name] = (current_index + 1) % len(valid_keys)
+            _API_KEY_ROUND_ROBIN_INDEX[model_name] = (current_index + 1) % len(valid_keys)
 
         logger.debug(f"[API_ROUND_ROBIN] 模型 '{model_name}' 使用 key 索引 {current_index}/{len(valid_keys)}")
         return selected_key
@@ -225,7 +233,7 @@ def normalize_error_status_code(raw_status) -> int:
     return 0
 
 
-def extract_retry_status_candidates(status_code: int, payload: dict = None) -> set:
+def extract_retry_status_candidates(status_code: int, payload: Optional[dict] = None) -> set:
     """从HTTP状态和错误载荷中提取可用于重试判断的状态码集合"""
     status_candidates = set()
 
@@ -277,7 +285,7 @@ def extract_retry_status_candidates(status_code: int, payload: dict = None) -> s
     return status_candidates
 
 
-def extract_json_from_response(response: Response) -> dict:
+def extract_json_from_response(response: Response) -> Optional[dict]:
     """从FastAPI响应对象中提取JSON载荷"""
     body = getattr(response, "body", None)
     if body is None:
@@ -393,6 +401,42 @@ def is_error_json(obj: dict) -> bool:
     return False
 
 
+def _enrich_error_message(error_obj: dict) -> str:
+    """从错误对象中提取最完整的人类可读消息。
+
+    OpenRouter / 上游 provider 常把详细错误藏在 metadata.raw 中，
+    message 字段只给一句笼统的 "Provider returned error"。这里把 metadata
+    中的关键线索合并进去，让客户端能看到完整的错误原因。
+    """
+    message = error_obj.get('message', '')
+    if not isinstance(message, str):
+        message = str(message)
+
+    metadata = error_obj.get('metadata')
+    if isinstance(metadata, dict):
+        raw = metadata.get('raw')
+        if isinstance(raw, str) and raw.strip():
+            # 把 raw 追加到 message 后面，用分隔符区分
+            message = f"{message} — {raw.strip()}"
+            return message
+
+        # 某些上游（如 Gemini）把详细信息放在 metadata 的其他字段
+        provider_name = metadata.get('provider_name')
+        extra_bits = []
+        if provider_name:
+            extra_bits.append(f"provider: {provider_name}")
+        # 收集其他非空字符串字段
+        for key, val in metadata.items():
+            if key in ('raw', 'provider_name', 'is_byok'):
+                continue
+            if isinstance(val, str) and val.strip():
+                extra_bits.append(f"{key}: {val}")
+        if extra_bits:
+            message = f"{message} ({'; '.join(extra_bits)})"
+
+    return message
+
+
 def normalize_to_openai_error(obj: dict) -> dict:
     """将非标准错误格式转换为 OpenAI 兼容的 {"error": {...}} 格式。
 
@@ -404,8 +448,15 @@ def normalize_to_openai_error(obj: dict) -> dict:
     if 'error' in obj and obj.get('error') is not None:
         error_val = obj['error']
         if isinstance(error_val, dict):
-            # 已是标准 OpenAI 错误格式
-            return obj
+            # 已是标准 OpenAI 错误格式 — 但 message 可能过于笼统，补齐详细信息
+            enriched = dict(error_val)
+            enriched['message'] = _enrich_error_message(error_val)
+            result = dict(obj)
+            result['error'] = enriched
+            # 保留原始错误对象以便调试
+            if '_original_error' not in result:
+                result['_original_error'] = error_val
+            return result
         # error 是字符串或其他非对象类型 → 包装成标准格式
         return {
             "error": {
@@ -424,6 +475,45 @@ def normalize_to_openai_error(obj: dict) -> dict:
         },
         "_original": obj
     }
+
+
+def detect_first_chunk_error(first_chunk_bytes) -> tuple:
+    """检查流式首块是否为上游错误，返回 (is_error, normalized_error_json)。
+
+    覆盖两种形态：
+    - 裸 JSON 错误体（上游直接返回 JSON 而非 SSE）
+    - call_api_passthrough 对非 2xx 响应输出的 "data: {错误}" SSE 包装块
+
+    正常 SSE 流（如 data: {...chunk...} / event: message_start）返回 (False, None)。
+    """
+    is_error = False
+    error_json = None
+    try:
+        decoded_chunk = first_chunk_bytes.decode('utf-8') if isinstance(first_chunk_bytes, bytes) else str(first_chunk_bytes)
+        try:
+            maybe_json = json.loads(decoded_chunk)
+            if is_error_json(maybe_json):
+                error_json = normalize_to_openai_error(maybe_json)
+                is_error = True
+        except json.JSONDecodeError:
+            for line in decoded_chunk.splitlines():
+                line = line.strip()
+                if not line.startswith('data:'):
+                    continue
+                data = line[5:].strip()
+                if not data or data == '[DONE]':
+                    continue
+                try:
+                    maybe_json = json.loads(data)
+                    if is_error_json(maybe_json):
+                        error_json = normalize_to_openai_error(maybe_json)
+                        is_error = True
+                        break
+                except json.JSONDecodeError:
+                    continue
+    except UnicodeDecodeError:
+        is_error = False
+    return is_error, error_json
 
 
 # ============================================================
@@ -445,22 +535,38 @@ async def estimate_text_tokens_non_blocking(estimate_tokens_func, text: str, mod
 # ============================================================
 
 def extract_complete_sse_lines(decoded_chunk: str, pending_line: str) -> tuple:
-    """合并跨 chunk 的尾部残片，只返回完整的 SSE 行。返回 (lines, pending_line, buffered)"""
+    """合并跨 chunk 的尾部残片，只返回完整的 SSE 行。
+
+    返回 (lines, pending_line, needs_reassembly)：
+    - lines: 完整逻辑行列表（不含行尾换行符），重组发送时每行须补 '\\n'
+    - pending_line: 尾部未完成的半行，缓冲到下一个 chunk
+    - needs_reassembly: 本次消费了旧缓冲或产生了新缓冲。为 True 时调用方
+      不得原样转发本次输入字节（输入字节与重组行已不一致），必须由 lines 重组。
+
+    🔧 修复说明：旧版第三个返回值只反映"输出侧是否缓冲了尾部"，漏掉
+    "输入侧消费了 pending"的情况——上一 chunk 被扣下的半行会永久丢失、
+    当前 chunk 的前半段原样转发，SSE 流直接损坏。此前该缺陷被上游
+    call_api_passthrough 按完整事件切块所掩盖，现在不再依赖该隐式契约。
+    """
+    had_pending = bool(pending_line)
     if pending_line:
         decoded_chunk = pending_line + decoded_chunk
         pending_line = ""
 
     if not decoded_chunk:
-        return [], pending_line, False
+        return [], pending_line, had_pending
 
     lines = decoded_chunk.split('\n')
-    buffered_incomplete_line = False
+    needs_reassembly = had_pending
 
-    if not decoded_chunk.endswith('\n'):
-        pending_line = lines.pop() if lines else decoded_chunk
-        buffered_incomplete_line = True
+    if decoded_chunk.endswith('\n'):
+        # split 的尾部空串是切分产物而非逻辑行，丢弃以保证"每行+\n"重组语义
+        lines.pop()
+    else:
+        pending_line = lines.pop()
+        needs_reassembly = True
 
-    return lines, pending_line, buffered_incomplete_line
+    return lines, pending_line, needs_reassembly
 
 
 # ============================================================

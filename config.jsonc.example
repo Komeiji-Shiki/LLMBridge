@@ -7,6 +7,10 @@
   "enable_ipv6": true,
   // Web 管理面板的访问密码
   "web_access_key": "YOUR_PASSWORD_HERE",
+  // 可信反向代理 IP 列表（部署在 nginx/Cloudflare Tunnel 等反代后时填写，
+  // 登录限流会按 X-Forwarded-For 解析真实客户端 IP，避免所有访客被计到同一个代理 IP 上互相误伤；
+  // 直连部署保持空数组即可）
+  "trusted_proxies": [],
   // LMArena 会话 ID（留空则不集成 LMArena）
   "session_id": "",
   "id_updater_last_mode": "battle",
@@ -35,15 +39,14 @@
   "api_call_timeout_seconds": 3000,
   "first_chunk_timeout_seconds": 600,
   "max_concurrent_downloads": 20,
-    "connection_pool": {
-      "total_limit": 50,
-      "per_host_limit": 20
-    },
-    "memory_management": {
-      "gc_threshold_mb": 80,
-      "image_cache_max_size": 100,
-      "image_cache_ttl_seconds": 600
-    },
+  "connection_pool": {
+    "total_limit": 200,
+    "per_host_limit": 128
+  },
+  "memory_management": {
+    "gc_threshold_mb": 80,
+    "image_cache_max_size": 100,
+    "image_cache_ttl_seconds": 600
   },
   "enable_lmarena_reasoning": true,
   "reasoning_output_mode": "openai",
