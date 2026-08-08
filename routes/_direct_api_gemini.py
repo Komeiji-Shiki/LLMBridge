@@ -63,24 +63,61 @@ async def handle_gemini_native_direct(
             logger.info(f"  - {key}: {value}")
 
     thinking_config = None
+    client_reasoning_effort = openai_req.get("reasoning_effort")
     enable_thinking = endpoint_config.get("enable_thinking")
+    if enable_thinking is None and client_reasoning_effort:
+        enable_thinking = True
     if enable_thinking is True:
-        reasoning_effort = endpoint_config.get("reasoning_effort")
-        if reasoning_effort:
-            # Gemini 原生 API 不支持 effort 等级，映射为等效的 thinkingBudget
+        reasoning_effort = client_reasoning_effort or endpoint_config.get("reasoning_effort")
+        is_gemini_3 = "gemini-3" in (target_model_id or model_name or "").lower()
+        if reasoning_effort and is_gemini_3:
+            # Gemini 3 generateContent 使用 thinkingLevel；Responses 的
+            # reasoning.effort 在进入此处前已归一化为 reasoning_effort。
+            level_map = {
+                "none": "MINIMAL",
+                "minimal": "MINIMAL",
+                "low": "LOW",
+                "medium": "MEDIUM",
+                "high": "HIGH",
+                "xhigh": "HIGH",
+                "max": "HIGH",
+            }
+            thinking_config = {
+                "thinkingLevel": level_map.get(str(reasoning_effort).lower(), "MEDIUM"),
+                "includeThoughts": True,
+            }
+            logger.info(
+                f"[GEMINI_NATIVE] reasoning_effort={reasoning_effort} "
+                f"映射为 thinkingLevel={thinking_config['thinkingLevel']}"
+            )
+        elif reasoning_effort:
+            # Gemini 2.5 及旧模型使用 thinkingBudget。
             effort_budget_map = {
                 "minimal": 512, "low": 4096, "medium": 12288,
                 "high": 24576, "xhigh": 32768, "max": 32768,
             }
             thinking_budget = effort_budget_map.get(str(reasoning_effort).lower(), 20000)
+            thinking_config = {
+                "thinkingBudget": thinking_budget,
+                "includeThoughts": True,
+            }
             logger.info(f"[GEMINI_NATIVE] reasoning_effort={reasoning_effort} 映射为 thinkingBudget={thinking_budget}")
         else:
-            thinking_budget = endpoint_config.get("thinking_budget", 20000)
-        thinking_config = {
-            "thinkingBudget": thinking_budget,
-            "includeThoughts": True
-        }
-        logger.info(f"[GEMINI_NATIVE] 已启用思维链模式 (budget={thinking_budget})")
+            if is_gemini_3:
+                thinking_level = str(endpoint_config.get("thinking_level", "MEDIUM")).upper()
+                thinking_config = {
+                    "thinkingLevel": thinking_level,
+                    "includeThoughts": True,
+                }
+            else:
+                thinking_config = {
+                    "thinkingBudget": endpoint_config.get("thinking_budget", 20000),
+                    "includeThoughts": True,
+                }
+        logger.info(
+            f"[GEMINI_NATIVE] 已启用思维链模式 "
+            f"(control={thinking_config.get('thinkingLevel', thinking_config.get('thinkingBudget'))})"
+        )
     elif enable_thinking is False:
         thinking_config = {
             "includeThoughts": False
@@ -131,7 +168,10 @@ async def handle_gemini_native_direct(
             stream=is_stream,
             temperature=openai_req.get("temperature"),
             top_p=openai_req.get("top_p"),
-            max_tokens=openai_req.get("max_tokens"),
+            max_tokens=(
+                openai_req.get("max_tokens")
+                or openai_req.get("max_completion_tokens")
+            ),
             base_url=api_base_url,
             thinking_config=thinking_config,
             tools=openai_req.get("tools"),
