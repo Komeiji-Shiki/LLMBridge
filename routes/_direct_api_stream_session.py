@@ -91,6 +91,7 @@ class PassthroughStreamSession:
         self.reasoning_tokens = 0
         self.cached_tokens = 0
         self.upstream_usage = None  # 上游返回的原生 usage 对象（原样保留，供日志记录）
+        self.system_fingerprint = None  # 上游返回的 system_fingerprint（OpenAI 兼容顶层字段）
         self.separator_found = False
         self.repetition_detected = False  # 预留：回放检测
         self.request_end_called = False
@@ -136,7 +137,8 @@ class PassthroughStreamSession:
             full_messages=self.full_messages,
             response_message=build_response_message(partial_content, partial_reasoning, partial_tool_calls),
             response_tool_calls=partial_tool_calls,
-            upstream_usage=self.upstream_usage)
+            upstream_usage=self.upstream_usage,
+            system_fingerprint=self.system_fingerprint)
         self.request_end_called = True
 
     async def handle_client_disconnect(self) -> None:
@@ -266,6 +268,13 @@ class PassthroughStreamSession:
         """
         event_modified = False
         try:
+            # 提取上游 system_fingerprint（DeepSeek 等 OpenAI 兼容 API 的顶层字段，
+            # 流式 chunk 每个事件都携带，取最后一个非空值即可）
+            if isinstance(chunk_json, dict):
+                fp = chunk_json.get("system_fingerprint")
+                if isinstance(fp, str) and fp:
+                    self.system_fingerprint = fp
+
             event_modified = self._check_error_event(chunk_json)
 
             delta = {}
@@ -632,7 +641,8 @@ class PassthroughStreamSession:
             cost_info=cost_info, full_messages=self.full_messages,
             response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
             response_tool_calls=final_tool_calls,
-            upstream_usage=self.upstream_usage)
+            upstream_usage=self.upstream_usage,
+            system_fingerprint=self.system_fingerprint)
         self.request_end_called = True
         await self.monitoring_service.broadcast_to_monitors({
             "type": "request_end", "request_id": self.request_id,

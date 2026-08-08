@@ -651,13 +651,13 @@ class MonitoringService:
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
                     cost_info: Optional[dict] = None, full_messages: Optional[List[dict]] = None,
                     response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None,
-                    upstream_usage: Optional[dict] = None):
+                    upstream_usage: Optional[dict] = None, system_fingerprint: Optional[str] = None):
         """记录请求结束（非阻塞版：提交到串行事件池，与 request_start 保持顺序）"""
         self._event_pool.submit(
             self._request_end_sync,
             request_id, success, error, response_content, reasoning_content,
             input_tokens, output_tokens, cached_tokens, cost_info, full_messages,
-            response_message, response_tool_calls, upstream_usage
+            response_message, response_tool_calls, upstream_usage, system_fingerprint
         )
     
     def _request_end_sync(self, request_id: str, success: bool, error: Optional[str] = None,
@@ -665,7 +665,7 @@ class MonitoringService:
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
                     cost_info: Optional[dict] = None, full_messages: Optional[List[dict]] = None,
                     response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None,
-                    upstream_usage: Optional[dict] = None):
+                    upstream_usage: Optional[dict] = None, system_fingerprint: Optional[str] = None):
         """记录请求结束（实际执行，在线程池中运行）"""
         # 🔧 缩锁优化：锁内只做数据更新，asdict/日志构建移到锁外
         current_time = time.time()
@@ -753,7 +753,8 @@ class MonitoringService:
             'response_tool_calls': response_tool_calls,
             'reasoning_content': reasoning_content,
             'cost_info': cost_info,
-            'upstream_usage': upstream_usage
+            'upstream_usage': upstream_usage,
+            'system_fingerprint': system_fingerprint
         }
         if isinstance(_request_params, dict):
             for param_key, param_value in _request_params.items():
@@ -1278,7 +1279,29 @@ class MonitoringService:
             with self._lock:
                 with open(tmp_path, 'w', encoding='utf-8') as f:
                     json.dump(stats_data, f, ensure_ascii=False, separators=(',', ':'), default=str)
-                os.replace(tmp_path, stats_path)
+
+                # 🔧 Windows 兼容：os.replace 在目标文件被外部进程（杀软/备份/
+                # 索引服务）持锁时可能抛 PermissionError (WinError 5)。
+                # 加重试（指数退避）+ 最终 fallback 到直接覆写，避免持久化静默失败。
+                replaced = False
+                for attempt in range(3):
+                    try:
+                        os.replace(tmp_path, stats_path)
+                        replaced = True
+                        break
+                    except PermissionError:
+                        if attempt < 2:
+                            time.sleep(0.1 * (attempt + 1))
+                if not replaced:
+                    logger.warning(
+                        "os.replace 重试 3 次均失败，回退到直接覆写: %s", stats_path
+                    )
+                    with open(stats_path, 'w', encoding='utf-8') as f:
+                        json.dump(stats_data, f, ensure_ascii=False, separators=(',', ':'), default=str)
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
         except Exception as e:
             logger.error(f"持久化统计数据失败: {e}")

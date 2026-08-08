@@ -17,7 +17,7 @@ from core.constants import TimeoutDefaults
 from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
 from ._direct_api_reasoning_cache import lookup_reasoning_details, store_reasoning_details
-from ._direct_api_stream_session import PassthroughStreamSession, SSE_DATA_PREFIX
+from ._direct_api_stream_session import PassthroughStreamSession
 from ._direct_api_utils import (
     build_response_message,
     detect_first_chunk_error,
@@ -386,9 +386,8 @@ async def _handle_passthrough_stream(
 ):
     """处理流式透传请求。
 
-    SSE 解析、thinking 分离、token 统计、监控上报全部委托给
-    PassthroughStreamSession（routes/_direct_api_stream_session.py）；
-    本函数只负责心跳、上游迭代与异常边界。
+    首块预读在 StreamingResponse 创建之前完成；若首块为上游错误（402/429/503等），
+    直接抛出 HTTPException，让上层重试循环可以捕获并触发 sticky 冷却。
     """
 
     api_iterator = direct_api_service.call_api_passthrough(
@@ -399,6 +398,51 @@ async def _handle_passthrough_stream(
     if CONFIG:
         first_chunk_timeout = CONFIG.get("first_chunk_timeout_seconds", TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
 
+    # ── 预读首块（在 StreamingResponse 创建之前，错误可被上层重试循环捕获）──
+    try:
+        first_chunk_bytes = await asyncio.wait_for(anext(api_iterator), timeout=first_chunk_timeout)
+    except asyncio.TimeoutError:
+        error_msg = f"上游API在{first_chunk_timeout}秒内未返回第一个数据块"
+        logger.error(f"[DIRECT_API_PASSTHROUGH] {error_msg}")
+        await _record_failed_request(
+            monitoring_service, request_id, display_name, error_msg,
+            openai_req, pricing_config, direct_api_service,
+            estimate_message_tokens_func, full_messages)
+        try:
+            await api_iterator.aclose()
+        except Exception:
+            pass
+        raise HTTPException(status_code=504, detail=error_msg)
+    except StopAsyncIteration:
+        error_msg = "上游API返回空响应"
+        logger.error(f"[DIRECT_API_PASSTHROUGH] {error_msg}")
+        await _record_failed_request(
+            monitoring_service, request_id, display_name, error_msg,
+            openai_req, pricing_config, direct_api_service,
+            estimate_message_tokens_func, full_messages)
+        try:
+            await api_iterator.aclose()
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=error_msg)
+
+    # ── 首块错误检测 → 直接抛 HTTPException，触发上层重试 ──
+    is_err, error_json = detect_first_chunk_error(first_chunk_bytes)
+    if is_err:
+        await _handle_first_chunk_error(
+            error_json, monitoring_service, request_id, display_name,
+            openai_req, pricing_config, direct_api_service,
+            estimate_message_tokens_func, full_messages)
+        try:
+            await api_iterator.aclose()
+        except Exception:
+            pass
+        status_code = map_upstream_error_to_status_code(error_json, default_status_code=500)
+        error_details = error_json.get('error', {})
+        error_message = error_details.get('message', '') if isinstance(error_details, dict) else str(error_details)
+        raise HTTPException(status_code=status_code, detail=error_message or "上游返回错误")
+
+    # ── 首块正常：创建 session 并处理首块 ──
     session = PassthroughStreamSession(
         request_id=request_id,
         display_name=display_name,
@@ -413,82 +457,26 @@ async def _handle_passthrough_stream(
         full_messages=full_messages,
     )
 
+    processed_first = session.process_sse_chunk(first_chunk_bytes)
+
+    if session.upstream_error_detected:
+        try:
+            await api_iterator.aclose()
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail="上游返回错误响应")
+
+    # ── 流式生成器（处理首块之后的剩余流）──
     async def combined_stream_generator():
         api_task = None
-        # 客户端已消失（生成器被 aclose）时，finally 里绝不能再 yield：
-        # 那会让 Python 抛 "async generator ignored GeneratorExit"
         client_gone = False
         try:
-            # === 预读第一个块（期间向客户端发送心跳） ===
-            api_task = asyncio.create_task(anext(api_iterator))
-            # 下限 1 秒，避免配置为 0/负数时 busy-loop 狂发 keep-alive
-            heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
-            first_chunk_wait_start = time.time()
-
-            while not api_task.done():
-                yield f": keep-alive {int(time.time())}\n\n".encode("utf-8")
-                if time.time() - first_chunk_wait_start > first_chunk_timeout:
-                    api_task.cancel()
-                    try:
-                        await api_task
-                    except asyncio.CancelledError:
-                        pass
-                    session.error_msg = (
-                        f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块")
-                    logger.error(f"[DIRECT_API_PASSTHROUGH] {session.error_msg}")
-                    await _record_failed_request(
-                        monitoring_service, request_id, display_name, session.error_msg,
-                        openai_req, pricing_config, direct_api_service,
-                        estimate_message_tokens_func, full_messages)
-                    return
-                try:
-                    first_chunk = await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
-                    break  # 任务正常完成，交给循环外 await api_task 取结果
-                except asyncio.TimeoutError:
-                    continue
-                except BaseException:
-                    # StopAsyncIteration（上游空响应）或上游异常：跳出等待循环，
-                    # 统一交给循环外的 await api_task 处理（此处会重新抛出）
-                    break
-
-            try:
-                first_chunk_bytes = await api_task
-            except StopAsyncIteration:
-                session.error_msg = (
-                    f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块")
-                logger.error(f"[DIRECT_API_PASSTHROUGH] {session.error_msg}")
-                await _record_failed_request(
-                    monitoring_service, request_id, display_name, session.error_msg,
-                    openai_req, pricing_config, direct_api_service,
-                    estimate_message_tokens_func, full_messages)
-                return
-
-            # === 检查第一个块是否为 JSON 错误 ===
-            is_err, error_json = detect_first_chunk_error(first_chunk_bytes)
-            if is_err:
-                await _handle_first_chunk_error(
-                    error_json, monitoring_service, request_id, display_name,
-                    openai_req, pricing_config, direct_api_service,
-                    estimate_message_tokens_func, full_messages)
-                yield (SSE_DATA_PREFIX + json.dumps(error_json, ensure_ascii=False) + "\n\n").encode('utf-8')
-                yield "data: [DONE]\n\n".encode('utf-8')
-                return
-
-            # === SSE 流处理（解析与统计委托给 session） ===
-            processed_first = session.process_sse_chunk(first_chunk_bytes)
-
-            if session.upstream_error_detected:
-                yield processed_first
-                return
-
+            # 先 yield 已处理的首块
             yield processed_first
 
             # 继续处理剩余流（下限 1 秒，避免配置异常时 busy-loop）
             heartbeat_interval = max(1, endpoint_config.get("client_disconnect_probe_interval", 180) or 180)
             while True:
-                # 🔧 取消泄漏修复：复用 api_task 持有 pending 的 anext，wait_for 超时
-                # 只取消 shield 的等待而不取消底层 anext——否则超时的 CancelledError
-                # 会被抛进上游生成器，响应被静默截断并标记为成功
                 if api_task is None or api_task.done():
                     api_task = asyncio.create_task(anext(api_iterator))
                 try:
@@ -544,8 +532,6 @@ async def _handle_passthrough_stream(
             client_gone = True
             await session.handle_client_disconnect()
         except GeneratorExit:
-            # 🔧 GeneratorExit 必须重新抛出：吞掉它再往下走，Python 会在
-            # 生成器结束时报 "async generator ignored GeneratorExit"
             logger.warning(f"[DIRECT_API_PASSTHROUGH] 生成器被提前关闭: {request_id[:8]}")
             client_gone = True
             session.mark_client_disconnect("Client disconnected (GeneratorExit)")
@@ -554,9 +540,6 @@ async def _handle_passthrough_stream(
             session.error_msg = str(e)
             logger.error(f"[DIRECT_API_PASSTHROUGH] 流式处理中发生异常: {e}", exc_info=True)
         finally:
-            # 🔧 回收首块预读任务：客户端在预读阶段断开时 anext 任务可能仍在
-            # 运行，直接 aclose 会因 "generator already running" 失败被吞，
-            # 任务成为孤儿（上游连接挂到超时 + Task exception never retrieved）
             if api_task is not None and not api_task.done():
                 api_task.cancel()
                 try:
@@ -647,13 +630,16 @@ async def _handle_passthrough_non_stream(
                 request_id=request_id, success=False, error=error_message,
                 input_tokens=partial_input_tokens, output_tokens=0,
                 cost_info=cost_info, full_messages=full_messages,
-                upstream_usage=response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None)
+                upstream_usage=response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None,
+                system_fingerprint=response_json.get("system_fingerprint"))
             await monitoring_service.broadcast_to_monitors({
                 "type": "request_end", "request_id": request_id, "success": False})
             return JSONResponse(status_code=status_code, content=normalized_error)
 
         # 原样保留上游返回的原生 usage（在任何本地统计加工之前）
         upstream_usage = response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None
+        # 原样保留上游返回的 system_fingerprint（DeepSeek 等 OpenAI 兼容 API 顶层字段）
+        system_fingerprint = response_json.get("system_fingerprint")
 
         # 提取 token 统计
         input_tokens, output_tokens, reasoning_tokens, total_tokens, cached_tokens = \
@@ -709,7 +695,8 @@ async def _handle_passthrough_non_stream(
             cost_info=cost_info, full_messages=full_messages,
             response_message=response_message,
             response_tool_calls=response_tool_calls,
-            upstream_usage=upstream_usage)
+            upstream_usage=upstream_usage,
+            system_fingerprint=system_fingerprint)
 
         await monitoring_service.broadcast_to_monitors({
             "type": "request_end", "request_id": request_id, "success": True})

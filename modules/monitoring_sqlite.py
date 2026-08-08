@@ -104,6 +104,7 @@ class SQLiteLogger:
                     ('cached_tokens', 'ALTER TABLE requests ADD COLUMN cached_tokens INTEGER DEFAULT 0'),
                     ('cached_cost', 'ALTER TABLE requests ADD COLUMN cached_cost REAL DEFAULT 0'),
                     ('upstream_usage', 'ALTER TABLE requests ADD COLUMN upstream_usage TEXT'),
+                    ('system_fingerprint', 'ALTER TABLE requests ADD COLUMN system_fingerprint TEXT'),
                 ]
                 for col_name, ddl in migrations:
                     if col_name not in columns:
@@ -196,7 +197,10 @@ class SQLiteLogger:
                     upstream_usage_json = json.dumps(upstream_usage, ensure_ascii=False)
                 except (TypeError, ValueError):
                     upstream_usage_json = None
-            
+
+            # 上游返回的 system_fingerprint（DeepSeek 等 OpenAI 兼容 API 的顶层字段）
+            system_fingerprint = log_entry.get('system_fingerprint')
+
             cost_info = log_entry.get('cost_info') or {}
             input_cost = cost_info.get('input_cost', 0.0)
             output_cost = cost_info.get('output_cost', 0.0)
@@ -214,14 +218,14 @@ class SQLiteLogger:
                         duration, error, mode, session_id, messages_count,
                         input_tokens, output_tokens, total_tokens, cached_tokens,
                         input_cost, output_cost, cached_cost, total_cost, currency,
-                        upstream_usage
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        upstream_usage, system_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     request_id, timestamp, date, model, status, success,
                     duration, error, mode, session_id, messages_count,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
                     input_cost, output_cost, cached_cost, total_cost, currency,
-                    upstream_usage_json
+                    upstream_usage_json, system_fingerprint
                 ))
                 conn.commit()
             
@@ -244,7 +248,7 @@ class SQLiteLogger:
                     input_tokens, output_tokens, total_tokens,
                     cached_tokens, cached_cost,
                     input_cost, output_cost, total_cost, currency,
-                    created_at, upstream_usage
+                    created_at, upstream_usage, system_fingerprint
                     FROM requests
                     WHERE request_id = ?
                 ''', (request_id,))
@@ -273,7 +277,8 @@ class SQLiteLogger:
                     'output_cost': row['output_cost'],
                     'total_cost': row['total_cost'],
                     'currency': row['currency'],
-                    'upstream_usage': self._parse_upstream_usage(row['upstream_usage'])
+                    'upstream_usage': self._parse_upstream_usage(row['upstream_usage']),
+                    'system_fingerprint': row['system_fingerprint']
                 }
             
             return None
@@ -323,6 +328,7 @@ class SQLiteLogger:
             'total_cost': row['total_cost'],
             'currency': row['currency'],
             'upstream_usage': SQLiteLogger._parse_upstream_usage(row['upstream_usage']),
+            'system_fingerprint': row['system_fingerprint'],
         }
 
     def query_requests(self, limit: int = 50, offset: int = 0,
@@ -373,7 +379,7 @@ class SQLiteLogger:
                         input_tokens, output_tokens, total_tokens,
                         cached_tokens, cached_cost,
                         input_cost, output_cost, total_cost, currency,
-                        upstream_usage
+                        upstream_usage, system_fingerprint
                     FROM requests{where_sql}
                     ORDER BY timestamp DESC
                     LIMIT ? OFFSET ?
