@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from core.config_loader import CONFIG, MODEL_ROUND_ROBIN_INDEX, MODEL_ROUND_ROBIN_LOCK
 from utils.monitor_params import build_monitor_request_params
-from ._direct_api_utils import get_round_robin_api_key
+from ._direct_api_utils import get_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,11 @@ async def gemini_native_api(
         # 获取配置（🔧 支持 api_keys 列表轮询，与 /v1 链路对齐）
         api_base_url = endpoint_config.get("api_base_url")
         raw_api_key = endpoint_config.get("api_keys") or endpoint_config.get("api_key")
-        api_key = await get_round_robin_api_key(model_name, raw_api_key)
+        api_key_strategy = endpoint_config.get("api_key_strategy", "round_robin")
+        api_key_cooldown = int(endpoint_config.get("api_key_cooldown_seconds", 0) or 0)
+        if api_key_cooldown <= 0:
+            api_key_cooldown = 172800
+        api_key = await get_api_key(model_name, raw_api_key, strategy=api_key_strategy, cooldown_seconds=api_key_cooldown)
         target_model_id = endpoint_config.get("model_id", model_name)
         display_name = endpoint_config.get("display_name", model_name)
         pricing_config = endpoint_config.get("pricing", {})
