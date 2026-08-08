@@ -60,10 +60,10 @@ def _extract_complete_sse_events(buffer: bytes, search_start: int = 0) -> Tuple[
 
 
 def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> dict:
-    """将上游返回的错误 JSON 归一化为 OpenAI 兼容格式。
+    """将上游返回的错误 JSON 归一化为 OpenAI 兼容格式，并保留原始 HTTP 状态码。
 
     处理以下情况：
-    - {"error": {"message": "...", ...}}  → 保持原样
+    - {"error": {"message": "...", ...}}  → 保持原样，注入 _http_status
     - {"error": "some string"}            → 包装为 {"error": {"message": "...", ...}}
     - {"message": "...", "code": ...}    → 包装
     """
@@ -73,20 +73,26 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
                 "message": str(error_json),
                 "type": "api_error",
                 "code": status_code or 500
-            }
+            },
+            "_http_status": status_code if status_code else 500
         }
 
     if 'error' in error_json and error_json.get('error') is not None:
         error_val = error_json['error']
         if isinstance(error_val, dict):
-            return error_json
+            result = dict(error_json)
+            # 保留上游原始 HTTP 状态码，供后续重试/冷却判断使用
+            if status_code and status_code >= 400:
+                result['_http_status'] = status_code
+            return result
         # error 是字符串 → 包装
         return {
             "error": {
                 "message": str(error_val),
                 "type": "api_error",
                 "code": status_code or 500
-            }
+            },
+            "_http_status": status_code if status_code else 500
         }
 
     # 其他格式（如 {"message": "..."}）
@@ -97,7 +103,8 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
             "message": msg,
             "type": "api_error",
             "code": code
-        }
+        },
+        "_http_status": status_code if status_code else 500
     }
 
 

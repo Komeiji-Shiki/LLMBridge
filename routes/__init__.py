@@ -35,6 +35,7 @@ from .lmarena_handler import handle_lmarena_request
 
 # 路由模块（各自携带 APIRouter）
 from . import api_routes
+from . import responses_api
 from . import models_api
 from . import websocket_routes
 from . import internal_routes

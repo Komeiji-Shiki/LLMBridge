@@ -90,7 +90,7 @@ __all__ = [
     "handle_lmarena_request",
 ]
 
-_DIRECT_API_TYPES = ("direct_api", "gemini_native", "anthropic_native")
+_DIRECT_API_TYPES = ("direct_api", "gemini_native", "anthropic_native", "responses_native")
 
 
 # ============================================================================

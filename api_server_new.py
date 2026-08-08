@@ -53,7 +53,7 @@ from services.direct_api_service import DirectAPIService  # noqa: E402
 
 # Routes（每个模块提供自己的 APIRouter）
 from routes import (  # noqa: E402
-    api_routes, models_api, websocket_routes, internal_routes,
+    api_routes, responses_api, models_api, websocket_routes, internal_routes,
     monitor_routes, admin_routes, auth_routes, apikey_routes
 )
 
@@ -214,6 +214,7 @@ app.mount("/css", CachedStaticFiles(directory="css"), name="css")
 # ==================== 路由挂载 ====================
 app.include_router(websocket_routes.router)   # /ws（油猴脚本连接）
 app.include_router(api_routes.router)         # /v1/chat/completions、/v1/messages、Gemini 原生
+app.include_router(responses_api.router)      # /v1/responses
 app.include_router(models_api.router)         # /v1/models、/v1beta/models
 app.include_router(internal_routes.router)    # /internal/*、/update、ID 捕获
 app.include_router(admin_routes.router)       # /admin、/token_calculator、/api/admin/*

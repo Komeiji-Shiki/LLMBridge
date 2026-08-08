@@ -17,7 +17,10 @@ from fastapi import HTTPException
 from fastapi.responses import Response, StreamingResponse
 
 from ._direct_api_utils import (
+    get_api_key,
     get_round_robin_api_key,
+    mark_sticky_key_cooldown,
+    is_quota_exceeded,
     normalize_auto_retry_config,
     should_retry_response,
     should_retry_http_exception,
@@ -25,6 +28,7 @@ from ._direct_api_utils import (
 )
 from ._direct_api_gemini import handle_gemini_native_direct
 from ._direct_api_passthrough import handle_passthrough_direct
+from ._direct_api_responses import handle_responses_native_direct
 from ._direct_api_anthropic import handle_anthropic_native_from_openai
 
 logger = logging.getLogger(__name__)
@@ -34,6 +38,7 @@ __all__ = [
     "handle_direct_api_request",
     "handle_gemini_native_direct",
     "handle_passthrough_direct",
+    "handle_responses_native_direct",
 ]
 
 
@@ -85,7 +90,12 @@ async def handle_direct_api_request(
     # 获取配置
     api_base_url = endpoint_config.get("api_base_url")
     raw_api_key = endpoint_config.get("api_keys") or endpoint_config.get("api_key")
-    api_key = await get_round_robin_api_key(model_name, raw_api_key)
+    # 🔧 支持 api_key_strategy 选择轮询策略：round_robin（默认）或 sticky
+    api_key_strategy = endpoint_config.get("api_key_strategy", "round_robin")
+    api_key_cooldown = int(endpoint_config.get("api_key_cooldown_seconds", 0) or 0)
+    if api_key_cooldown <= 0:
+        api_key_cooldown = 172800  # 默认 48 小时
+    api_key = await get_api_key(model_name, raw_api_key, strategy=api_key_strategy, cooldown_seconds=api_key_cooldown)
     target_model_id = endpoint_config.get("model_id", model_name)
     display_name = endpoint_config.get("display_name", model_name)
     passthrough_mode = endpoint_config.get("passthrough", False)
@@ -141,7 +151,7 @@ async def handle_direct_api_request(
             detail = f"模型 '{model_name}' 的Direct API配置缺少 api_key。"
         raise HTTPException(status_code=500, detail=detail)
 
-    if api_type == "direct_api" and not api_base_url:
+    if api_type in ("direct_api", "responses_native") and not api_base_url:
         raise HTTPException(
             status_code=500,
             detail=f"模型 '{model_name}' 的Direct API配置缺少 api_base_url。")
@@ -152,11 +162,27 @@ async def handle_direct_api_request(
     # 自动重试配置
     retry_config = normalize_auto_retry_config(endpoint_config)
     retry_enabled = retry_config.get("enabled", False) and retry_config.get("max_retries", 0) > 0
-    max_attempts = retry_config.get("max_retries", 0) + 1 if retry_enabled else 1
+    auto_max_attempts = retry_config.get("max_retries", 0) + 1 if retry_enabled else 1
     retry_delay_seconds = retry_config.get("retry_delay_seconds", 0.0) if retry_enabled else 0.0
 
-    if retry_enabled:
-        _log_retry_info(model_name, retry_config)
+    # sticky 策略：确保至少能尝试所有 key（不依赖 auto_retry）
+    if api_key_strategy == "sticky":
+        if isinstance(raw_api_key, list):
+            key_count = len([k for k in raw_api_key if k and k.strip()])
+        elif isinstance(raw_api_key, str) and raw_api_key.strip():
+            key_count = 1
+        else:
+            key_count = 1
+        sticky_max_attempts = max(key_count, 1) + 1  # +1 为降级兜底
+        max_attempts = max(auto_max_attempts, sticky_max_attempts)
+        # sticky 默认至少 1 秒延迟
+        if retry_delay_seconds <= 0:
+            retry_delay_seconds = 1.0
+    else:
+        max_attempts = auto_max_attempts
+
+    if retry_enabled or api_key_strategy == "sticky":
+        _log_retry_info(model_name, retry_config, api_key_strategy, max_attempts)
 
     # 🔧 构建上游请求体的副本，force_stream 改写只影响副本而非调用方 openai_req。
     # 这样 api_routes.py 等上层调用者继续读原值做 client stream 判断，
@@ -178,6 +204,24 @@ async def handle_direct_api_request(
                 estimate_message_tokens_func=estimate_message_tokens_func,
                 estimate_tokens_func=estimate_tokens_func,
                 full_messages=full_messages, CONFIG=CONFIG)
+
+        if api_type == "responses_native":
+            return await handle_responses_native_direct(
+                openai_req=req_for_upstream,
+                model_name=model_name,
+                target_model_id=target_model_id,
+                display_name=display_name,
+                api_base_url=api_base_url,
+                api_key=attempt_api_key,
+                endpoint_config=endpoint_config,
+                pricing_config=pricing_config,
+                monitoring_service=monitoring_service,
+                direct_api_service=direct_api_service,
+                estimate_message_tokens_func=estimate_message_tokens_func,
+                estimate_tokens_func=estimate_tokens_func,
+                full_messages=full_messages,
+                CONFIG=CONFIG,
+            )
 
         if api_type == "anthropic_native":
             return await handle_anthropic_native_from_openai(
@@ -212,18 +256,49 @@ async def handle_direct_api_request(
 
     # 执行带重试的调用
     logger.info(f"[AUTO_RETRY] 模型 '{model_name}' 最大尝试次数: {max_attempts}")
+    if api_key_strategy == "sticky":
+        logger.info(f"[STICKY_KEY] 模型 '{model_name}' 使用粘性轮询（冷却: {api_key_cooldown // 3600}h）")
+
+    # ── sticky 公共辅助：quota exceeded → 冷却 ──
+    async def _sticky_cooldown_if_quota(status_code: int, body_text: str = ""):
+        if api_key_strategy == "sticky" and is_quota_exceeded(status_code, body_text):
+            await mark_sticky_key_cooldown(model_name, raw_api_key, api_key, api_key_cooldown)
+            return True
+        return False
 
     for attempt in range(1, max_attempts + 1):
         try:
             if attempt > 1:
-                # 🔧 重试前重新轮询 API key：多 key 配置下 429 重试不再打同一个
-                # 刚被限流的 key（单 key 配置行为不变）。anthropic_native 分支同样
-                # 使用此处传入的 attempt_api_key，不再在 handler 内部二次轮询。
-                api_key = await get_round_robin_api_key(model_name, raw_api_key) or api_key
+                if api_key_strategy == "sticky":
+                    # sticky 策略：由 mark_sticky_key_cooldown 在上次失败时清空 current，
+                    # 此处 get_sticky_api_key 会自动选下一个不在冷却期的 key
+                    api_key = await get_api_key(model_name, raw_api_key, strategy="sticky", cooldown_seconds=api_key_cooldown) or api_key
+                else:
+                    # round_robin 策略：每次重试轮询到下一个 key
+                    api_key = await get_round_robin_api_key(model_name, raw_api_key) or api_key
             response = await _execute_single_attempt(api_key)
 
-            if retry_enabled and attempt < max_attempts and isinstance(response, Response):
-                should_retry, retry_reason = should_retry_response(response, retry_config)
+            # ── 重试判断（auto_retry + sticky quota）──
+            if attempt < max_attempts and isinstance(response, Response):
+                should_retry = False
+                retry_reason = ""
+
+                # auto_retry 判断
+                if retry_enabled:
+                    should_retry, retry_reason = should_retry_response(response, retry_config)
+
+                # sticky 策略：quota exceeded → 总是冷却 + 重试（不依赖 auto_retry）
+                if not should_retry:
+                    resp_status = getattr(response, "status_code", 0)
+                    try:
+                        resp_body = response.body if hasattr(response, "body") else b""
+                        resp_body_text = resp_body.decode("utf-8", errors="ignore") if resp_body else ""
+                    except Exception:
+                        resp_body_text = ""
+                    if await _sticky_cooldown_if_quota(resp_status, resp_body_text):
+                        should_retry = True
+                        retry_reason = f"Sticky quota exceeded (HTTP {resp_status}，换key重试)"
+
                 if should_retry:
                     logger.warning(
                         f"[AUTO_RETRY] 模型 '{model_name}' 第 {attempt}/{max_attempts} 次尝试失败"
@@ -257,8 +332,20 @@ async def handle_direct_api_request(
             return response
 
         except HTTPException as http_exc:
-            if retry_enabled and attempt < max_attempts:
-                should_retry, retry_reason = should_retry_http_exception(http_exc, retry_config)
+            if attempt < max_attempts:
+                should_retry = False
+                retry_reason = ""
+
+                # auto_retry 判断
+                if retry_enabled:
+                    should_retry, retry_reason = should_retry_http_exception(http_exc, retry_config)
+
+                # sticky 策略：quota exceeded → 总是冷却 + 重试（不依赖 auto_retry）
+                if not should_retry:
+                    if await _sticky_cooldown_if_quota(http_exc.status_code):
+                        should_retry = True
+                        retry_reason = f"Sticky quota exceeded (HTTP {http_exc.status_code}，换key重试)"
+
                 if should_retry:
                     logger.warning(
                         f"[AUTO_RETRY] 模型 '{model_name}' 第 {attempt}/{max_attempts} 次尝试失败"
@@ -395,18 +482,22 @@ def _log_config_info(api_type, api_base_url, target_model_id, display_name,
         logger.info(f"  - API Key轮询: 已启用 ({key_count} 个有效key)")
 
 
-def _log_retry_info(model_name, retry_config):
+def _log_retry_info(model_name, retry_config, api_key_strategy="round_robin", max_attempts=1):
     """输出重试配置信息到日志"""
     retry_targets = []
+    if retry_config.get("retry_on_402", True):
+        retry_targets.append("402")
     if retry_config.get("retry_on_429", True):
         retry_targets.append("429")
     if retry_config.get("retry_on_503", True):
         retry_targets.append("503")
     if retry_config.get("retry_on_other_errors", False):
         retry_targets.append("other_errors")
+    if api_key_strategy == "sticky":
+        retry_targets.append("sticky_quota")
     logger.info(
         f"[AUTO_RETRY] 模型 '{model_name}' 启用自动重试: "
-        f"max_retries={retry_config.get('max_retries', 0)}, "
+        f"strategy={api_key_strategy}, max_attempts={max_attempts}, "
         f"delay={retry_config.get('retry_delay_seconds', 0)}s, "
         f"targets={','.join(retry_targets) if retry_targets else 'none'}")
 
