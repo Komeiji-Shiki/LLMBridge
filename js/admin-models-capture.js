@@ -419,11 +419,14 @@ async function testCurrentModelKeys() {
     const apiBaseUrl = document.getElementById('api-base-url').value.trim();
     const apiType = document.getElementById('api-type').value;
     const modelId = document.getElementById('model-id').value.trim() || document.getElementById('model-name').value.trim();
-    const isAnthropicNative = apiType === 'anthropic_native';
-    const defaultEndpoint = isAnthropicNative ? '/messages' : '/chat/completions';
+    const defaultEndpoints = {
+        responses_native: '/responses',
+        anthropic_native: '/messages',
+    };
+    const defaultEndpoint = defaultEndpoints[apiType] || '/chat/completions';
     const endpointPath = document.getElementById('endpoint-path').value.trim() || defaultEndpoint;
     
-    if (apiType === 'direct_api' && !apiBaseUrl) {
+    if (apiType !== 'gemini_native' && !apiBaseUrl) {
         alert('请先填写 API Base URL');
         return;
     }

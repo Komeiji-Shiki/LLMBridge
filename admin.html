@@ -1503,11 +1503,33 @@
                         <label class="form-label">API类型</label>
                         <select id="api-type" class="form-select" onchange="toggleThinkingOptions()">
                             <option value="direct_api">OpenAI兼容 (推荐)</option>
+                            <option value="responses_native">OpenAI Responses 原生格式（转换兼容）</option>
                             <option value="gemini_native">Gemini原生格式</option>
                             <option value="anthropic_native">Anthropic原生格式</option>
                         </select>
                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            选择API接口格式。Gemini原生使用Google官方API；Anthropic原生以 /messages 格式透传，适用于 Claude 系列模型
+                            选择上游 API 接口格式。Responses 原生格式会把本地 Chat/Anthropic/Responses 请求转换到上游 <code>/responses</code>，再转换回客户端格式；Gemini原生使用Google官方 API；Anthropic原生透传 <code>/messages</code>
+                        </small>
+                    </div>
+
+                    <div id="responses-native-options" class="form-group" style="display: none; padding: 10px; background: var(--surface-2); border-radius: 6px;">
+                        <label style="display: flex; align-items: center; font-size: 0.85rem; margin-bottom: 8px;">
+                            <input type="checkbox" id="responses-store" style="margin-right: 6px;">
+                            允许上游存储 Responses（store）
+                        </label>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                            <div class="form-group" style="margin-bottom: 0;">
+                                <label class="form-label">上游 reasoning.summary</label>
+                                <select id="responses-reasoning-summary" class="form-select">
+                                    <option value="">不指定</option>
+                                    <option value="auto">auto（自动摘要）</option>
+                                    <option value="concise">concise（简洁）</option>
+                                    <option value="detailed">detailed（详细）</option>
+                                </select>
+                            </div>
+                        </div>
+                        <small style="color: var(--text-dim); display: block; margin-top: 7px;">
+                            仅对上游 Responses API 生效。本地请求仍按无状态方式转发，不会自动复用 previous_response_id。
                         </small>
                     </div>
                     
@@ -1523,7 +1545,7 @@
                         <label class="form-label">模型端点（可选）</label>
                         <input type="text" id="endpoint-path" class="form-input" placeholder="/chat/completions">
                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            默认 <code>/chat/completions</code>（OpenAI兼容）。启用 Anthropic 原生模式后默认变为 <code>/messages</code>。
+                            默认 <code>/chat/completions</code>（OpenAI兼容）；Responses 原生格式默认 <code>/responses</code>；Anthropic 原生模式默认 <code>/messages</code>。
                         </small>
                     </div>
                     
@@ -1532,17 +1554,41 @@
                         <div id="model-api-keys-list">
                             <!-- 动态生成的 API Key 输入行 -->
                         </div>
-                        <div style="display: flex; gap: 8px; margin-top: 8px;">
+                        <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
                             <button type="button" class="btn btn-sm" onclick="addApiKeyRow()">
                                 ➕ 添加 API Key
                             </button>
                             <button type="button" class="btn btn-sm btn-success" id="test-keys-btn" onclick="testCurrentModelKeys()">
                                 🔑 测试所有 Key
                             </button>
+                            <button type="button" class="btn btn-sm" id="query-balance-btn" onclick="queryKeyBalances()"
+                                style="background: var(--accent); color: #fff;">
+                                💰 查余额
+                            </button>
                         </div>
                         <div id="key-test-results" style="display: none; margin-top: 10px;"></div>
                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             可添加多个 API Key 实现自动轮询。本地反代等无需认证的场景可留空
+                        </small>
+                    </div>
+
+                    <div class="form-group" id="api-key-strategy-group">
+                        <label class="form-label">轮询策略</label>
+                        <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;">
+                            <select id="api-key-strategy" class="form-input" onchange="toggleApiKeyStrategyOptions()" style="max-width: 200px;">
+                                <option value="round_robin">逐Key轮询 (Round-Robin)</option>
+                                <option value="sticky">粘性轮询 (Sticky)</option>
+                            </select>
+                            <div id="api-key-cooldown-group" style="display: none; align-items: center; gap: 6px;">
+                                <label style="white-space: nowrap; font-size: 0.85rem; color: var(--text-dim);">冷却时长</label>
+                                <input type="number" id="api-key-cooldown" class="form-input"
+                                    placeholder="172800" min="0" step="3600" style="max-width: 110px;">
+                                <span style="font-size: 0.8rem; color: var(--text-dim); white-space: nowrap;">秒（48h=172800）</span>
+                            </div>
+                        </div>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            <strong>逐Key轮询</strong>：每次请求轮流使用下一个 Key。<br>
+                            <strong>粘性轮询</strong>：优先复用同一个 Key，额度不足时自动切换并冷却 48 小时。
                         </small>
                     </div>
                     
@@ -1576,7 +1622,7 @@
                         </small>
                     </div>
                     
-                    <div class="form-group">
+                    <div class="form-group" id="passthrough-config">
                         <label class="form-label">
                             <input type="checkbox" id="passthrough" checked style="margin-right: 8px;">
                             启用透传模式（推荐）
@@ -1712,7 +1758,7 @@
                                             <option value="effort">强度等级（reasoning_effort）</option>
                                         </select>
                                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            Token 预算适用于 Anthropic/Gemini/OpenRouter 等；强度等级（low/medium/high）适用于大部分 OpenAI 兼容上游
+                                            Token 预算适用于 Gemini 2.5/旧模型、Anthropic/OpenRouter；强度等级（low/medium/high）适用于 OpenAI 兼容上游和 Gemini 3（映射为 thinkingLevel）
                                         </small>
                                     </div>
 
@@ -1737,7 +1783,7 @@
                                             <option value="max">max（最大，Opus 4.6+）</option>
                                         </select>
                                         <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            启用思考时注入 reasoning_effort（OAI 兼容）/ reasoning.effort（OpenRouter）/ output_config.effort（Anthropic）；自适应模式下留空则不注入
+                                            启用思考时注入 reasoning_effort（OAI 兼容）/ reasoning.effort（OpenRouter）/ output_config.effort（Anthropic）；Gemini 3 会映射为 generationConfig.thinkingConfig.thinkingLevel；自适应模式下留空则不注入
                                         </small>
                                     </div>
 

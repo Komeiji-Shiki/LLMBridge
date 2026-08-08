@@ -48,7 +48,7 @@ function buildModelsTable(modelEndpointMap) {
         <tbody id="models-tbody">
             ${Object.entries(modelEndpointMap).map(([name, config]) => {
                 const cfg = Array.isArray(config) ? config[0] : config;
-                    const isDirectAPI = cfg.api_type === 'direct_api' || cfg.api_type === 'gemini_native' || cfg.api_type === 'anthropic_native';
+                    const isDirectAPI = ['direct_api', 'responses_native', 'gemini_native', 'anthropic_native'].includes(cfg.api_type);
                     const autoRetryConfig = (cfg && typeof cfg === 'object') ? (cfg.auto_retry || {}) : {};
                     const autoRetryEnabled = !!autoRetryConfig.enabled;
                     
@@ -58,8 +58,17 @@ function buildModelsTable(modelEndpointMap) {
                     if (isDirectAPI) {
                         const baseUrl = cfg.api_base_url || '';
                         const displayUrl = escapeHtml(baseUrl.length > 30 ? baseUrl.substring(0, 30) + '...' : baseUrl);
-                        const apiTypeLabel = cfg.api_type === 'gemini_native' ? 'Gemini原生' : (cfg.api_type === 'anthropic_native' ? 'Anthropic原生' : 'OpenAI兼容');
-                        const endpointPath = escapeHtml(cfg.endpoint_path || '/chat/completions');
+                        const apiTypeLabels = {
+                            direct_api: 'OpenAI兼容',
+                            responses_native: 'Responses原生',
+                            gemini_native: 'Gemini原生',
+                            anthropic_native: 'Anthropic原生',
+                        };
+                        const apiTypeLabel = apiTypeLabels[cfg.api_type] || 'OpenAI兼容';
+                        const defaultEndpoint = cfg.api_type === 'responses_native'
+                            ? '/responses'
+                            : (cfg.api_type === 'anthropic_native' ? '/messages' : '/chat/completions');
+                        const endpointPath = escapeHtml(cfg.endpoint_path || defaultEndpoint);
                         
                         // 🔧 多 API Key 轮询：显示 key 数量
                         let apiKeyDisplay = '';
@@ -87,7 +96,8 @@ function buildModelsTable(modelEndpointMap) {
                         `;
                         modeInfo = `
                             <span class="badge badge-success">Direct API</span>
-                            ${cfg.passthrough ? '<span class="badge badge-info">透传</span>' : ''}
+                            ${cfg.api_type === 'direct_api' && cfg.passthrough ? '<span class="badge badge-info">透传</span>' : ''}
+                            ${cfg.api_type === 'responses_native' ? '<span class="badge badge-info">Responses原生</span>' : ''}
                             ${cfg.api_type === 'anthropic_native' ? '<span class="badge badge-info">Anthropic原生</span>' : ''}
                             ${cfg.api_type === 'gemini_native' ? '<span class="badge badge-info">Gemini原生</span>' : ''}
                             ${autoRetryEnabled ? '<span class="badge" style="background: rgba(249, 115, 22, 0.2); color: #f97316; border-color: rgba(249, 115, 22, 0.3);">🔁重试</span>' : ''}
@@ -261,7 +271,7 @@ async function testAllApiKeys() {
             const cfg = Array.isArray(config) ? config[0] : config;
             if (!cfg || typeof cfg !== 'object') continue;
             const apiType = cfg.api_type || '';
-            if (!['direct_api', 'gemini_native', 'anthropic_native'].includes(apiType)) continue;
+            if (!['direct_api', 'responses_native', 'gemini_native', 'anthropic_native'].includes(apiType)) continue;
             const keys = cfg.api_keys || (cfg.api_key ? [cfg.api_key] : []);
             if (!keys.length) continue;
             candidates.push({
@@ -270,7 +280,11 @@ async function testAllApiKeys() {
                 api_base_url: cfg.api_base_url || '',
                 model_id: cfg.model_id || name,
                 api_type: apiType,
-                endpoint_path: cfg.endpoint_path || '/chat/completions'
+                endpoint_path: cfg.endpoint_path || (
+                    apiType === 'responses_native' ? '/responses' : (
+                        apiType === 'anthropic_native' ? '/messages' : '/chat/completions'
+                    )
+                )
             });
         }
         

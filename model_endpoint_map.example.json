@@ -1,5 +1,5 @@
 {
-  "// 配置说明": "此文件展示了三种模型配置模式的完整示例",
+  "// 配置说明": "此文件展示了多种模型配置模式的完整示例",
   
   "// ==================== 模式1: 标准LMArena模式 ====================": "",
   "claude-sonnet-4": {
@@ -65,6 +65,21 @@
     "enable_thinking": "adaptive",
     "thinking_display": "summarized",
     "// 说明": "Claude Opus 4.7 / Mythos 5 等新模型只支持 adaptive thinking，自动将客户端 thinking.type=enabled 转为 adaptive。thinking_effort 可选（low/medium/high/xhigh/max），留空时不注入 output_config 让模型自行决定。Opus 4.7+ 默认 thinking.display=omitted 不返回思维链，thinking_display=summarized 可看到思考内容"
+  },
+
+  "// ==================== 模式3.7: OpenAI Responses 原生上游 ====================": "",
+  "gpt-responses-native": {
+    "api_type": "responses_native",
+    "api_base_url": "https://api.openai.com/v1",
+    "api_key": "sk-your-openai-key",
+    "endpoint_path": "/responses",
+    "model_id": "gpt-5",
+    "display_name": "GPT Responses Native",
+    "responses_store": false,
+    "responses_reasoning_summary": "auto",
+    "reasoning_effort": "medium",
+    "verbosity": "medium",
+    "// 说明": "上游使用 /responses；本地 /v1/chat/completions、/v1/messages、/v1/responses 均会自动双向转换"
   },
 
   "deepseek-v3": {
@@ -140,10 +155,13 @@
     "battle_target": "Battle模式目标：A或B",
     "type": "模型类型：text或image",
     
-    "api_type": "API类型：direct_api（OpenAI兼容）/ gemini_native / anthropic_native",
+    "api_type": "API类型：direct_api（OpenAI Chat兼容）/ responses_native（OpenAI Responses原生上游）/ gemini_native / anthropic_native",
     "api_base_url": "第三方API的基础URL",
     "api_key": "第三方API的密钥",
-    "endpoint_path": "可选，上游模型端点路径。默认 /chat/completions，anthropic_native 默认 /messages",
+    "api_keys": "第三方API的密钥数组（支持多key轮询）。可配合 api_key_strategy 选择轮询策略",
+    "api_key_strategy": "可选，API Key 轮询策略：round_robin（默认，逐key轮询）或 sticky（粘性轮询：先用第一个key，额度不足时切换并冷却48小时）",
+    "api_key_cooldown_seconds": "可选，sticky 策略的冷却时长（秒），默认 172800（48小时）",
+    "endpoint_path": "可选，上游模型端点路径。默认 /chat/completions，responses_native 默认 /responses，anthropic_native 默认 /messages",
     "model_id": "发送给第三方API的实际模型ID",
     "display_name": "在统计中显示的模型名称",
     
@@ -154,7 +172,9 @@
     "thinking_budget": "启用思考时的Token预算，默认20000",
     "thinking_effort": "自适应思考的力度（low/medium/high/xhigh/max），可选，留空时不注入 output_config 让模型自行决定。xhigh 需 Opus 4.7+，max 需 Opus 4.6+",
     "thinking_display": "思考内容显示模式（summarized/omitted），默认 summarized，仅 anthropic_native 上游消费。Opus 4.7+ 默认 omitted 不返回思维链，设为 summarized 可看到思考内容",
-    "verbosity": "输出详细度（low/medium/high），仅 direct_api（OpenAI 兼容）上游生效，注入 Chat Completions 顶层 verbosity 参数（GPT-5 系列），客户端已传时不覆盖",
+    "verbosity": "输出详细度（low/medium/high），direct_api 注入 Chat Completions 顶层 verbosity；responses_native 转换为 text.verbosity；客户端已传时优先",
+    "responses_store": "仅 responses_native 生效，是否允许上游保存 Response；默认 false",
+    "responses_reasoning_summary": "仅 responses_native 生效，可选 auto/concise/detailed，转换为 reasoning.summary",
     "auto_cache": "自动提示词缓存（true/false），仅 anthropic_native 上游生效。自动为 tools/system/最后两条 user 消息注入 cache_control ephemeral 断点（上限 4 个），多轮对话命中上游缓存可大幅降低成本；客户端已自带 cache_control 时不重复注入",
     "custom_params": "自定义参数（JSON对象），直接合并到上游请求体，适合 chat_template_kwargs、thinking 等模型行为参数",
     "extra_body_params": "附加主体参数（JSON对象），在 custom_params 之后合并到请求体（同名键优先），适合 top_p、OpenRouter provider 指定提供商等请求级参数",

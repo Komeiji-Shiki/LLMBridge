@@ -30,6 +30,7 @@ function addApiKeyRow(value = '') {
         <input type="text" class="api-key-input form-input" value="${escapeHtmlForAttr(value)}"
             placeholder="sk-...（留空表示不使用此Key）"
             style="flex: 1; padding: 8px; font-size: 0.85rem; font-family: monospace;">
+        <span class="key-balance-info" style="display: none; font-size: 0.8rem; white-space: nowrap; min-width: 100px; text-align: right;"></span>
         <button type="button" class="btn btn-sm btn-danger" onclick="removeApiKeyRow('${rowId}')"
             title="删除此 API Key">
             🗑️
@@ -60,6 +61,178 @@ function clearApiKeyRows() {
     }
     container.innerHTML = '';
     _apiKeyRowCounter = 0;
+}
+
+/**
+ * 切换轮询策略选项的显示（sticky 时显示冷却时长）
+ */
+function toggleApiKeyStrategyOptions() {
+    const strategySelect = document.getElementById('api-key-strategy');
+    const cooldownGroup = document.getElementById('api-key-cooldown-group');
+    if (strategySelect && cooldownGroup) {
+        cooldownGroup.style.display = strategySelect.value === 'sticky' ? 'flex' : 'none';
+    }
+}
+
+/**
+ * 查询所有 API Key 的余额（仅 DeepSeek 等支持 /user/balance 的 API）
+ */
+async function queryKeyBalances() {
+    const apiBaseUrl = document.getElementById('api-base-url').value.trim();
+    const keys = getApiKeys();
+    
+    if (!keys.length) {
+        alert('请先添加至少一个 API Key');
+        return;
+    }
+    if (!apiBaseUrl) {
+        alert('请先填写 API Base URL');
+        return;
+    }
+    if (!apiBaseUrl.toLowerCase().includes('deepseek')) {
+        alert('当前仅 DeepSeek API 支持余额查询。\n\n检测到 API Base URL 不含 "deepseek"，无法使用 /user/balance 接口。');
+        return;
+    }
+    
+    // 隐藏之前的余额显示
+    document.querySelectorAll('.key-balance-info').forEach(el => {
+        el.style.display = 'none';
+        el.textContent = '';
+    });
+    
+    const btn = document.getElementById('query-balance-btn');
+    const origText = btn ? btn.textContent : '';
+    if (btn) { btn.textContent = '⏳ 查询中...'; btn.disabled = true; }
+    
+    try {
+        const resp = await fetch('/api/admin/query_key_balance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                api_keys: keys,
+                api_base_url: apiBaseUrl
+            })
+        });
+        const data = await resp.json();
+        
+        if (data.status === 'unsupported') {
+            alert(data.message || '当前 API 不支持余额查询');
+            return;
+        }
+        
+        if (data.status === 'error') {
+            alert('查询失败: ' + (data.message || '未知错误'));
+            return;
+        }
+        
+        // 更新每行的余额显示
+        const rows = document.querySelectorAll('#model-api-keys-list > div');
+        for (const result of (data.results || [])) {
+            const idx = result.index;
+            const row = rows[idx];
+            if (!row) continue;
+            const infoEl = row.querySelector('.key-balance-info');
+            if (!infoEl) continue;
+            
+            if (result.status === 'ok' && result.balance) {
+                const b = result.balance;
+                const avail = b.is_available;
+                const infos = b.infos || [];
+                if (infos.length > 0) {
+                    const main = infos[0];
+                    const total = parseFloat(main.total).toFixed(2);
+                    const color = avail ? '#34d399' : '#f87171';
+                    const icon = avail ? '💰' : '⚠️';
+                    infoEl.innerHTML = `<span style="color:${color}">${icon} ${main.currency} ${total}</span>`;
+                } else {
+                    infoEl.innerHTML = `<span style="color:#f87171">⚠️ 无余额数据</span>`;
+                }
+            } else if (result.status === 'timeout') {
+                infoEl.innerHTML = '<span style="color:#fbbf24">⏱️ 超时</span>';
+            } else {
+                const err = result.error || '查询失败';
+                infoEl.innerHTML = `<span style="color:#f87171" title="${escapeHtmlForAttr(err)}">❌ 失败</span>`;
+            }
+            infoEl.style.display = 'inline';
+        }
+        
+        // 🔧 sticky 策略下：查完余额自动粘性到余额最高的 Key
+        await autoStickyToBestBalanceKey(keys, data.results || [], rows);
+        
+    } catch (e) {
+        alert('查询余额请求失败: ' + e.message);
+    } finally {
+        if (btn) { btn.textContent = origText; btn.disabled = false; }
+    }
+}
+
+/**
+ * 查余额后自动将 sticky 轮询的 current 设为余额最高的 Key（仅 sticky 策略生效）
+ * @param {string[]} keys - 完整 API Key 数组（与 results 的 index 一一对应）
+ * @param {Array} results - 余额查询结果列表
+ * @param {NodeList} rows - #model-api-keys-list 下的 key 行 DOM
+ */
+async function autoStickyToBestBalanceKey(keys, results, rows) {
+    const strategyEl = document.getElementById('api-key-strategy');
+    if (!strategyEl || strategyEl.value !== 'sticky') {
+        return; // 非 sticky 策略不处理
+    }
+    
+    const modelName = (document.getElementById('model-name')?.value || '').trim();
+    if (!modelName) {
+        console.warn('[API-Key] 模型名称为空，跳过自动粘性设置');
+        return;
+    }
+    
+    // 找出余额最高的 key：优先 is_available，同可用性下按 total 比较
+    let bestIdx = -1;
+    let bestTotal = -Infinity;
+    let bestAvail = false;
+    for (const r of (results || [])) {
+        if (r.status !== 'ok' || !r.balance) continue;
+        const infos = r.balance.infos || [];
+        if (!infos.length) continue;
+        const total = parseFloat(infos[0].total);
+        if (isNaN(total)) continue;
+        const avail = !!r.balance.is_available;
+        if (bestIdx === -1 || (avail && !bestAvail) || (avail === bestAvail && total > bestTotal)) {
+            bestIdx = r.index;
+            bestTotal = total;
+            bestAvail = avail;
+        }
+    }
+    
+    if (bestIdx < 0 || bestIdx >= keys.length) {
+        console.warn('[API-Key] 没有可用的余额数据，跳过自动粘性设置');
+        return;
+    }
+    
+    const bestKey = keys[bestIdx];
+    const preview = bestKey.length > 10 ? bestKey.slice(0, 6) + '...' + bestKey.slice(-4) : '***';
+    
+    try {
+        const resp = await fetch('/api/admin/set_sticky_key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model_name: modelName, api_key: bestKey })
+        });
+        const data = await resp.json();
+        
+        if (data.status === 'done') {
+            // 在余额最高的 key 行标记「已粘性」
+            const row = rows && rows[bestIdx];
+            const infoEl = row && row.querySelector('.key-balance-info');
+            if (infoEl && !infoEl.querySelector('.sticky-marker')) {
+                infoEl.insertAdjacentHTML('beforeend',
+                    `<span class="sticky-marker" style="color:#fbbf24; margin-left:6px;" title="已自动粘性到余额最高的 Key">⭐ 已粘性</span>`);
+            }
+            console.log(`[API-Key] 🎯 已自动粘性到余额最高的 Key: ${preview}（余额 ${bestTotal}）`);
+        } else {
+            console.warn('[API-Key] 自动粘性设置未生效: ' + (data.message || '未知原因'));
+        }
+    } catch (e) {
+        console.warn('[API-Key] 自动粘性设置请求失败: ' + e.message);
+    }
 }
 
 /**
@@ -103,7 +276,12 @@ function showAddModelModal() {
     document.getElementById('api-base-url').value = '';
     clearApiKeyRows();
     addApiKeyRow(); // 添加一个空行
+    document.getElementById('api-key-strategy').value = 'round_robin';
+    document.getElementById('api-key-cooldown').value = '';
+    document.getElementById('api-key-cooldown-group').style.display = 'none';
     document.getElementById('endpoint-path').value = '/chat/completions';
+    document.getElementById('responses-store').checked = false;
+    document.getElementById('responses-reasoning-summary').value = '';
     document.getElementById('model-id').value = '';
     document.getElementById('display-name').value = '';
     document.getElementById('passthrough').checked = true;
@@ -405,7 +583,7 @@ function editModel(name, config) {
 // 填充模型表单（editModel和copyModel共用）
 function fillModelForm(config) {
     
-    if (config.api_type === 'direct_api' || config.api_type === 'gemini_native' || config.api_type === 'anthropic_native') {
+    if (config.api_type === 'direct_api' || config.api_type === 'responses_native' || config.api_type === 'gemini_native' || config.api_type === 'anthropic_native') {
         document.getElementById('config-type').value = 'direct_api';
         document.getElementById('api-type').value = config.api_type || 'direct_api';
         document.getElementById('api-base-url').value = config.api_base_url || '';
@@ -422,6 +600,13 @@ function fillModelForm(config) {
             // 空行
             addApiKeyRow();
         }
+        
+        // 🔧 轮询策略
+        const strategy = config.api_key_strategy || 'round_robin';
+        document.getElementById('api-key-strategy').value = strategy;
+        const cooldown = config.api_key_cooldown_seconds;
+        document.getElementById('api-key-cooldown').value = (cooldown && cooldown > 0) ? cooldown : '';
+        toggleApiKeyStrategyOptions();
         
         document.getElementById('model-id').value = config.model_id || '';
         document.getElementById('display-name').value = config.display_name || '';
@@ -449,7 +634,8 @@ function fillModelForm(config) {
         document.getElementById('thinking-control').value = config.reasoning_effort ? 'effort' : 'budget';
         // thinking_effort（adaptive 模式）/ reasoning_effort（启用思考模式）共用同一个下拉框
         document.getElementById('thinking-effort').value = config.reasoning_effort || config.thinking_effort || '';
-        document.getElementById('thinking-display').value = config.thinking_display || 'summarized';
+        document.getElementById('responses-store').checked = config.responses_store === true;
+        document.getElementById('responses-reasoning-summary').value = config.responses_reasoning_summary || '';
         document.getElementById('oai-verbosity').value = config.verbosity || '';
         document.getElementById('oai-thinking-type').value = config.oai_thinking_type || '';
         document.getElementById('oai-thinking-effort').value = config.oai_thinking_effort || '';
@@ -566,10 +752,14 @@ async function saveModel() {
         const endpointPathInput = document.getElementById('endpoint-path').value.trim();
         const apiType = document.getElementById('api-type').value;
         
-        // 🔧 修复：API Key变为可选（支持本地反代等无需认证的场景）
-        // OpenAI 兼容和 Anthropic 原生格式都需要 api_base_url，Gemini 原生可选
-        if ((apiType === 'direct_api' || apiType === 'anthropic_native') && !apiBaseUrl) {
-            alert(apiType === 'anthropic_native' ? 'Anthropic原生格式需要填写 API Base URL' : 'OpenAI兼容格式需要填写 API Base URL');
+        // 🔧 Responses 原生上游需要 URL，与普通 OpenAI/Anthropic 兼容上游一样
+        if (['direct_api', 'responses_native', 'anthropic_native'].includes(apiType) && !apiBaseUrl) {
+            const labels = {
+                direct_api: 'OpenAI兼容格式',
+                responses_native: 'Responses 原生格式',
+                anthropic_native: 'Anthropic原生格式',
+            };
+            alert(`${labels[apiType]}需要填写 API Base URL`);
             return;
         }
         
@@ -594,7 +784,7 @@ async function saveModel() {
             api_type: apiType,
             model_id: document.getElementById('model-id').value.trim() || modelName,
             display_name: document.getElementById('display-name').value.trim() || modelName,
-            passthrough: document.getElementById('passthrough').checked,
+            passthrough: apiType === 'responses_native' ? false : document.getElementById('passthrough').checked,
             convert_system_to_user: document.getElementById('convert-system-to-user').checked,
             enable_prefix: document.getElementById('enable-prefix').checked,
             enable_partial: document.getElementById('enable-partial').checked,
@@ -642,19 +832,30 @@ async function saveModel() {
             }
         }
 
+        // Responses 原生上游专属配置
+        if (apiType === 'responses_native') {
+            config.responses_store = document.getElementById('responses-store').checked;
+            const summary = document.getElementById('responses-reasoning-summary').value;
+            if (summary) {
+                config.responses_reasoning_summary = summary;
+            }
+        }
+
         // 自动提示词缓存：仅 Anthropic 原生格式生效
         if (apiType === 'anthropic_native' && document.getElementById('anthropic-auto-cache').checked) {
             config.auto_cache = true;
         }
 
-        // verbosity 仅 OpenAI 兼容上游生效（GPT-5 系列 Chat Completions 顶层参数）
-        if (apiType === 'direct_api') {
+        // verbosity 对 OpenAI Chat 和 Responses 原生上游均可转换
+        if (apiType === 'direct_api' || apiType === 'responses_native') {
             const verbosityVal = document.getElementById('oai-verbosity').value;
             if (verbosityVal) {
                 config.verbosity = verbosityVal;
             }
+        }
 
-            // OAI 兼容 Anthropic thinking 参数
+        // OAI 兼容 Anthropic thinking 参数仅用于 Chat Completions 上游
+        if (apiType === 'direct_api') {
             const oaiThinkingType = document.getElementById('oai-thinking-type').value;
             if (oaiThinkingType) {
                 config.oai_thinking_type = oaiThinkingType;
@@ -696,6 +897,18 @@ async function saveModel() {
             config.api_key = apiKeys[0];
         }
         // 0 个 key 时不添加任何字段（无认证模式）
+        
+        // 🔧 轮询策略：非默认值时才写入配置
+        const apiKeyStrategy = document.getElementById('api-key-strategy').value;
+        if (apiKeyStrategy && apiKeyStrategy !== 'round_robin') {
+            config.api_key_strategy = apiKeyStrategy;
+        }
+        if (apiKeyStrategy === 'sticky') {
+            const cooldownVal = parseInt(document.getElementById('api-key-cooldown').value, 10);
+            if (cooldownVal > 0) {
+                config.api_key_cooldown_seconds = cooldownVal;
+            }
+        }
         
         // 只在有值时添加thinking_separator字段
         if (thinkingSeparator) {
@@ -866,8 +1079,27 @@ async function saveModel() {
 }
 
 
-// 思维链模式下拉框联动：根据选择动态显示 budget 或 effort
+// Responses 原生上游字段与端点联动
+function syncResponsesApiOptions() {
+    const apiType = document.getElementById('api-type')?.value || 'direct_api';
+    const options = document.getElementById('responses-native-options');
+    if (options) options.style.display = apiType === 'responses_native' ? 'block' : 'none';
+    const passthroughConfig = document.getElementById('passthrough-config');
+    if (passthroughConfig) passthroughConfig.style.display = apiType === 'responses_native' ? 'none' : 'block';
+
+    const endpointInput = document.getElementById('endpoint-path');
+    if (!endpointInput) return;
+    const endpoint = endpointInput.value.trim();
+    if (apiType === 'responses_native' && (!endpoint || endpoint === '/chat/completions')) {
+        endpointInput.value = '/responses';
+    } else if (apiType !== 'responses_native' && endpoint === '/responses') {
+        endpointInput.value = apiType === 'anthropic_native' ? '/messages' : '/chat/completions';
+    }
+}
+
+// 思维链模式下拉框联动：根据选择动态显示 budget或 effort
 function toggleThinkingOptions() {
+    syncResponsesApiOptions();
     const select = document.getElementById('enable-thinking');
     const optionsDiv = document.getElementById('thinking-options');
     const controlDiv = document.getElementById('thinking-control-config');
@@ -880,9 +1112,9 @@ function toggleThinkingOptions() {
     // 启用思考或自适应思考时显示子选项区域
     const showOptions = (val === 'true' || val === 'adaptive');
     optionsDiv.style.display = showOptions ? 'block' : 'none';
-    // verbosity 仅对 OpenAI 兼容上游显示（GPT-5 系列顶层参数），与是否启用思考无关
+    // verbosity 对 OpenAI Chat 和 Responses 原生上游均可转换
     const verbosityDiv = document.getElementById('verbosity-config');
-    if (verbosityDiv) verbosityDiv.style.display = (apiType === 'direct_api') ? 'block' : 'none';
+    if (verbosityDiv) verbosityDiv.style.display = (apiType === 'direct_api' || apiType === 'responses_native') ? 'block' : 'none';
     // OAI 兼容 thinking.type / output_config.effort 仅对 OpenAI 兼容上游显示，
     // Anthropic 原生格式下由顶层 enable_thinking 控制，显示这两项只会误导
     const oaiThinkingTypeDiv = document.getElementById('oai-thinking-type-config');

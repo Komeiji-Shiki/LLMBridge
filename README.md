@@ -17,6 +17,7 @@
   - 透传模式：不修改请求/响应，原样转发到任何 OpenAI 兼容后端
   - 消息角色自动转换（system/user/assistant 重映射）
 - **LMArena 集成（已弃用）**：兼容 LMArena 协议的会话管理和 Battle 模式（新版本不再依赖 LMArena）
+- **OpenAI Responses API 兼容**：`/v1/responses` 支持文本、图片、function tools、reasoning、usage 及 Responses SSE；当前为无状态模式
 - **多 API Key 轮询**：支持配置多个 API Key 并轮询调用，提升并发上限
 
 ### 请求增强
@@ -256,11 +257,46 @@ pip install tiktoken     # GPT tokenizer
 total_cost = (uncached_input × input_price + cached_input × cached_input_price + output × output_price) ÷ unit
 ```
 
-## 🔧 主要 API 端点
+### Responses API 兼容范围
+
+`/v1/responses` 会将 Responses 请求转换到现有 Chat Completions 执行链路，再转换回 Responses JSON 或 SSE 事件。支持 `input`、`instructions`、图片、function tools、`reasoning.effort`、`max_output_tokens`、usage 和流式事件。
+
+当前版本为无状态兼容：`previous_response_id`、`conversation`、`store: true`、`background: true` 以及 OpenAI 内置工具需要响应存储或额外执行环境，暂不支持，收到后会返回 400。
+
+管理面板的模型编辑器已经提供“思维链配置”可视化控件。对 Gemini 3，强度模式会将 `reasoning_effort` 映射为原生 `generationConfig.thinkingConfig.thinkingLevel`；Gemini 2.5 及旧模型继续使用 `thinkingBudget`。
+
+### 使用原生 Responses 上游
+
+在管理面板的模型编辑器中，将“API 类型”选择为“OpenAI Responses 原生格式（转换兼容）”。默认上游端点为 `/responses`，并提供以下专属配置：
+
+- `responses_store`：是否允许上游保存 Response，默认关闭；
+- `responses_reasoning_summary`：可选 `auto`、`concise`、`detailed`；
+- 通用思考强度和 verbosity 控件会转换为 `reasoning.effort` 与 `text.verbosity`。
+
+该模型可以同时从本地 `/v1/chat/completions`、`/v1/messages`、`/v1/responses` 调用。服务会先转换为上游 Responses 请求，再分别转换回 OpenAI Chat、Anthropic Messages 或 Responses 格式，非流式和 SSE 流式均支持。
+
+配置示例：
+
+```json
+{
+  "gpt-responses-native": {
+    "api_type": "responses_native",
+    "api_base_url": "https://api.openai.com/v1",
+    "api_key": "sk-xxx",
+    "endpoint_path": "/responses",
+    "model_id": "gpt-5",
+    "responses_store": false,
+    "responses_reasoning_summary": "auto",
+    "reasoning_effort": "medium"
+  }
+}
+```
+
 
 | 端点 | 方法 | 描述 |
 |-----|------|------|
 | `/v1/chat/completions` | POST | OpenAI 兼容聊天接口 |
+| `/v1/responses` | POST | OpenAI Responses API 无状态兼容接口（文本/图片/工具/流式） |
 | `/v1/messages` | POST | Anthropic Claude 兼容接口 |
 | `/v1beta/models/{model}:generateContent` | POST | Gemini Native API 接口 |
 | `/v1/models` | GET | 模型列表 |
