@@ -26,6 +26,7 @@ from modules.token_counter import (
 from utils.jsonc_edit import (
     atomic_write_json, atomic_write_text, set_jsonc_value, set_jsonc_values,
 )
+from ._direct_api_utils import set_sticky_current_key
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.responses import Response
@@ -1045,11 +1046,15 @@ async def test_model_keys(
     api_base_url = data.get("api_base_url", "").strip()
     model_id = data.get("model_id", "unknown")
     api_type = data.get("api_type", "direct_api")
-    endpoint_path = data.get("endpoint_path", "/chat/completions")
+    default_endpoint = "/responses" if api_type == "responses_native" else (
+        "/messages" if api_type == "anthropic_native" else "/chat/completions"
+    )
+    endpoint_path = data.get("endpoint_path") or default_endpoint
     if endpoint_path and not endpoint_path.startswith("/"):
         endpoint_path = "/" + endpoint_path
     
     is_gemini = api_type == "gemini_native"
+    is_responses = api_type == "responses_native"
 
     if not api_keys:
         return {"status": "info", "message": "没有配置任何 API Key", "results": []}
@@ -1110,7 +1115,20 @@ async def test_model_keys(
                     return result
 
                 url = f"{api_base_url.rstrip('/')}{endpoint_path}"
-                body = {"model": model_id, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 5}
+                body = (
+                    {
+                        "model": model_id,
+                        "input": "Hi",
+                        "max_output_tokens": 5,
+                        "store": False,
+                    }
+                    if is_responses
+                    else {
+                        "model": model_id,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "max_tokens": 5,
+                    }
+                )
                 headers = {"Content-Type": "application/json"}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
@@ -1166,6 +1184,126 @@ async def test_model_keys(
         "timeout": to,
         "results": results,
         "message": f"测试完成: {ok}/{len(results)} 个 Key 有效"
+    }
+
+
+# ============================================================
+# API Key 余额查询（DeepSeek 等支持 /user/balance 的 API）
+# ============================================================
+
+async def query_key_balance(request: Request):
+    """查询 API Key 的余额（目前仅支持 api_base_url 含 deepseek 的配置）
+
+    前端 POST 当前模型的所有 key + api_base_url，后端并行查询余额。
+    """
+    data = await request.json()
+    api_keys = data.get("api_keys", [])
+    api_base_url = data.get("api_base_url", "").strip()
+
+    if not api_keys:
+        return {"status": "info", "message": "没有配置任何 API Key", "results": []}
+
+    if not api_base_url:
+        return {"status": "error", "message": "缺少 api_base_url，无法查询余额。请先在模型配置中填写 API Base URL。", "results": []}
+
+    # 仅 deepseek 系 API 支持余额查询
+    base_lower = api_base_url.lower()
+    if "deepseek" not in base_lower:
+        return {
+            "status": "unsupported",
+            "message": "当前仅 DeepSeek API 支持余额查询。其他 API 暂不支持 /user/balance 接口。",
+            "results": []
+        }
+
+    shared_session = _app_state.server.aiohttp_session
+    if shared_session is None:
+        return {"status": "error", "message": "HTTP 连接池尚未初始化，请稍后重试", "results": []}
+
+    # 🔧 余额接口在 API 根路径下（/user/balance），而非模型端点路径下。
+    # 用户可能配置了 /beta、/v1 等子路径，需提取 origin 后拼接。
+    from urllib.parse import urlparse
+    parsed = urlparse(api_base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    balance_url = f"{origin}/user/balance"
+
+    async def _query_one(key: str, index: int):
+        preview = key[:6] + "..." + key[-4:] if len(key) > 10 else "***"
+        result = {
+            "index": index,
+            "key_preview": preview,
+            "status": "unknown",
+            "balance": None,
+            "error": None,
+        }
+
+        try:
+            headers = {"Authorization": f"Bearer {key}"}
+            async with shared_session.get(
+                balance_url, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10, connect=5)
+            ) as resp:
+                body = await resp.json()
+
+                if resp.status == 200:
+                    is_avail = body.get("is_available", False)
+                    infos = body.get("balance_infos", [])
+                    result["status"] = "ok"
+                    result["balance"] = {
+                        "is_available": is_avail,
+                        "infos": [
+                            {
+                                "currency": info.get("currency", "?"),
+                                "total": info.get("total_balance", "0"),
+                                "granted": info.get("granted_balance", "0"),
+                                "topped_up": info.get("topped_up_balance", "0"),
+                            }
+                            for info in infos
+                        ] if infos else []
+                    }
+                else:
+                    err_obj = body.get("error", {})
+                    if isinstance(err_obj, dict):
+                        em = str(err_obj.get("message", resp.status))
+                    else:
+                        em = str(err_obj or body.get("detail") or f"HTTP {resp.status}")
+                    result["status"] = "error"
+                    result["error"] = em[:200]
+
+        except asyncio.TimeoutError:
+            result["status"] = "timeout"
+            result["error"] = "请求超时（10s）"
+        except aiohttp.ClientError as e:
+            result["status"] = "error"
+            result["error"] = f"连接失败: {str(e)[:150]}"
+        except Exception as e:
+            result["status"] = "error"
+            result["error"] = str(e)[:200]
+
+        return result
+
+    tasks = [_query_one(k, i) for i, k in enumerate(api_keys)]
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    results = []
+    for i, r in enumerate(raw_results):
+        if isinstance(r, Exception):
+            results.append({
+                "index": i, "key_preview": "???", "status": "error",
+                "error": str(r)[:200], "balance": None
+            })
+        else:
+            results.append(r)
+
+    ok = sum(1 for r in results if r["status"] == "ok")
+    has_balance = sum(1 for r in results if r.get("balance"))
+
+    return {
+        "status": "done",
+        "total": len(results),
+        "ok": ok,
+        "has_balance": has_balance,
+        "results": results,
+        "message": f"查询完成: {ok}/{len(results)} 个 Key 有余额信息"
     }
 
 
@@ -1297,6 +1435,31 @@ async def list_custom_tokenizers_endpoint():
 async def test_model_keys_endpoint(request: Request):
     """测试单个模型配置中的所有 API Key（并行请求）"""
     return await test_model_keys(request, _app_state.server.direct_api_service)
+
+
+@router.post("/api/admin/query_key_balance")
+async def query_key_balance_endpoint(request: Request):
+    """查询 API Key 的余额（目前仅 DeepSeek）"""
+    return await query_key_balance(request)
+
+
+@router.post("/api/admin/set_sticky_key")
+async def set_sticky_key_endpoint(request: Request):
+    """将指定 key 设为 sticky 轮询的当前 key（查余额后自动粘性到余额最多的 key）"""
+    data = await request.json()
+    model_name = (data.get("model_name") or "").strip()
+    api_key = (data.get("api_key") or "").strip()
+
+    if not model_name:
+        return {"status": "error", "message": "缺少 model_name，无法设置粘性 Key"}
+    if not api_key:
+        return {"status": "error", "message": "缺少 api_key，无法设置粘性 Key"}
+
+    ok = await set_sticky_current_key(model_name, api_key)
+    if ok:
+        preview = api_key[:6] + "..." + api_key[-4:] if len(api_key) > 10 else "***"
+        return {"status": "done", "message": f"已粘性到 Key: {preview}"}
+    return {"status": "error", "message": "设置粘性 Key 失败"}
 
 
 @router.get("/api/admin/token_stats")

@@ -65,6 +65,9 @@ models.json
 start_tunnel.cmd
 local_settings.py
 secrets.*
+# 运行时状态文件（含 session token / key 信息，不应提交）
+api_key_sticky_state.json
+web_session_state.json
 *.secret.*
 credentials.*
 *credentials*.json

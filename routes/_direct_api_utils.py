@@ -5,6 +5,8 @@ Direct API 工具函数
 import asyncio
 import json
 import logging
+import os
+import time
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
@@ -137,7 +139,7 @@ _API_KEY_ROUND_ROBIN_INDEX: dict = {}
 
 
 async def get_round_robin_api_key(model_name: str, api_key_config) -> str:
-    """获取轮询后的 API key"""
+    """获取轮询后的 API key（逐 key 轮询）"""
     if isinstance(api_key_config, str):
         return api_key_config
 
@@ -155,6 +157,268 @@ async def get_round_robin_api_key(model_name: str, api_key_config) -> str:
         return selected_key
 
     return ""
+
+
+# ============================================================
+# Sticky API Key 轮询（粘性轮询 + 冷却期）
+# ============================================================
+
+_STICKY_STATE_FILE = "api_key_sticky_state.json"
+_STICKY_KEY_STATE: dict = {}          # { model_name: { "current": key_value, "cooldowns": { key_value: cooldown_until_ts } } }
+_STICKY_STATE_LOCK = asyncio.Lock()
+_STICKY_STATE_DIRTY = False
+_STICKY_SAVE_PENDING = False          # 防止并发保存任务堆积
+
+
+def _load_sticky_state():
+    """从文件加载 sticky 轮询状态"""
+    global _STICKY_KEY_STATE
+    if not os.path.exists(_STICKY_STATE_FILE):
+        return
+    try:
+        with open(_STICKY_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            _STICKY_KEY_STATE = data
+            logger.info(f"[STICKY_KEY] ✅ 已加载 sticky 状态 ({len(_STICKY_KEY_STATE)} 个模型)")
+    except Exception as e:
+        logger.error(f"[STICKY_KEY] ❌ 加载 sticky 状态失败: {e}")
+
+
+def _save_sticky_state():
+    """持久化 sticky 轮询状态到文件"""
+    global _STICKY_STATE_DIRTY
+    try:
+        tmp_path = _STICKY_STATE_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(_STICKY_KEY_STATE, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _STICKY_STATE_FILE)
+        _STICKY_STATE_DIRTY = False
+        logger.debug("[STICKY_KEY] 💾 sticky 状态已保存")
+    except Exception as e:
+        logger.error(f"[STICKY_KEY] ❌ 保存 sticky 状态失败: {e}")
+
+
+def _save_sticky_if_dirty():
+    """仅在状态变脏时保存"""
+    if _STICKY_STATE_DIRTY:
+        _save_sticky_state()
+
+
+async def mark_sticky_key_cooldown(model_name: str, api_key_config, key_value: str, cooldown_seconds: int = 172800):
+    """将指定的 key 标记为冷却状态。
+
+    Args:
+        model_name: 模型名称（作为命名空间）
+        api_key_config: api_key 或 api_keys 配置
+        key_value: 被标记冷却的 key 值
+        cooldown_seconds: 冷却时长（秒），默认 172800（48小时）
+    """
+    if not key_value or cooldown_seconds <= 0:
+        return
+
+    valid_keys = _get_valid_keys(api_key_config)
+    if key_value not in valid_keys:
+        return
+
+    cooldown_until = time.time() + cooldown_seconds
+
+    async with _STICKY_STATE_LOCK:
+        state = _STICKY_KEY_STATE.setdefault(model_name, {"current": None, "cooldowns": {}})
+        state["cooldowns"][key_value] = cooldown_until
+        # 如果当前粘住的 key 就是被冷却的 key，清掉 current 让它下次重新选
+        if state.get("current") == key_value:
+            state["current"] = None
+        global _STICKY_STATE_DIRTY
+        _STICKY_STATE_DIRTY = True
+
+    logger.warning(
+        f"[STICKY_KEY] 🔒 模型 '{model_name}' 的 key '{_mask_key(key_value)}' 已进入冷却期 "
+        f"({cooldown_seconds // 3600}小时，至 {time.strftime('%Y-%m-%d %H:%M', time.localtime(cooldown_until))})"
+    )
+    # 异步保存（不阻塞主流程）
+    asyncio.create_task(_async_save_sticky_state())
+
+
+async def set_sticky_current_key(model_name: str, key_value: str) -> bool:
+    """手动将指定 key 设为 sticky 轮询的当前 key（并清除其冷却）。
+
+    用于管理面板「查余额后自动粘性到余额最多的 key」等操作：
+    被指定的 key 即使正处于冷却期也会一并解除冷却，
+    确保下一次请求真正使用它（否则 get_sticky_api_key 会因冷却而重新选 key）。
+
+    Args:
+        model_name: 模型名称（作为命名空间）
+        key_value: 要设为 sticky current 的 key 值
+
+    Returns:
+        是否设置成功
+    """
+    if not key_value:
+        return False
+
+    async with _STICKY_STATE_LOCK:
+        state = _STICKY_KEY_STATE.setdefault(model_name, {"current": None, "cooldowns": {}})
+        cooldowns: dict = state.get("cooldowns", {})
+        if key_value in cooldowns:
+            del cooldowns[key_value]
+            logger.info(f"[STICKY_KEY] ✅ 模型 '{model_name}' 的 key '{_mask_key(key_value)}' 冷却已手动解除")
+        state["current"] = key_value
+        global _STICKY_STATE_DIRTY
+        _STICKY_STATE_DIRTY = True
+
+    logger.info(f"[STICKY_KEY] 🎯 模型 '{model_name}' 的 sticky current 已手动设为 '{_mask_key(key_value)}'")
+    # 异步保存（不阻塞主流程）
+    asyncio.create_task(_async_save_sticky_state())
+    return True
+
+
+async def _async_save_sticky_state():
+    """异步保存 sticky 状态（去重：避免并发保存任务堆积）"""
+    global _STICKY_SAVE_PENDING
+    if _STICKY_SAVE_PENDING:
+        return
+    _STICKY_SAVE_PENDING = True
+    try:
+        await asyncio.to_thread(_save_sticky_state)
+    except Exception:
+        pass
+    finally:
+        _STICKY_SAVE_PENDING = False
+
+
+def _get_valid_keys(api_key_config) -> list:
+    """从配置中提取有效的 key 列表"""
+    if isinstance(api_key_config, str):
+        return [api_key_config] if api_key_config.strip() else []
+    if isinstance(api_key_config, list):
+        return [k for k in api_key_config if k and k.strip()]
+    return []
+
+
+def _mask_key(key: str) -> str:
+    """脱敏显示 key"""
+    if len(key) <= 8:
+        return "***"
+    return key[:4] + "..." + key[-4:]
+
+
+async def get_sticky_api_key(model_name: str, api_key_config, cooldown_seconds: int = 172800) -> str:
+    """粘性轮询：优先使用上一次成功调用的 key，直到它被冷却。
+
+    策略：
+    1. 如果 current key 存在且不在冷却期 → 返回它
+    2. 如果 current key 存在但冷却已过期 → 清除冷却，返回它
+    3. 如果 current key 不存在或处于冷却期 → 找第一个不在冷却期的 key
+    4. 如果所有 key 都在冷却期 → 返回冷却最早到期的 key（降级）
+
+    Args:
+        model_name: 模型名称
+        api_key_config: api_key 或 api_keys 配置
+        cooldown_seconds: 冷却时长（秒）
+
+    Returns:
+        选中的 API key 字符串
+    """
+    valid_keys = _get_valid_keys(api_key_config)
+    if not valid_keys:
+        return ""
+    if len(valid_keys) == 1:
+        return valid_keys[0]
+
+    now = time.time()
+
+    async with _STICKY_STATE_LOCK:
+        state = _STICKY_KEY_STATE.setdefault(model_name, {"current": None, "cooldowns": {}})
+        cooldowns: dict = state.get("cooldowns", {})
+
+        # 清理已过期的冷却
+        expired = [k for k, until in cooldowns.items() if now >= until]
+        for k in expired:
+            del cooldowns[k]
+            logger.info(f"[STICKY_KEY] ✅ 模型 '{model_name}' 的 key '{_mask_key(k)}' 冷却期已过，恢复可用")
+        if expired:
+            global _STICKY_STATE_DIRTY
+            _STICKY_STATE_DIRTY = True
+
+        current_key = state.get("current")
+
+        # 情况 1/2：current key 可用
+        if current_key and current_key in valid_keys:
+            if current_key not in cooldowns:
+                return current_key
+
+        # 情况 3/4：需要选择新 key
+        # 优先选第一个不在冷却期的 key
+        for k in valid_keys:
+            if k not in cooldowns:
+                state["current"] = k
+                _STICKY_STATE_DIRTY = True
+                logger.info(f"[STICKY_KEY] 🔀 模型 '{model_name}' 切换到 key '{_mask_key(k)}'")
+                return k
+
+        # 所有 key 都在冷却期 → 选最早到期的
+        best_key = min(valid_keys, key=lambda k: cooldowns.get(k, 0))
+        best_cooldown = cooldowns.get(best_key, 0)
+        remaining = max(0, best_cooldown - now)
+        logger.warning(
+            f"[STICKY_KEY] ⚠️ 模型 '{model_name}' 所有 {len(valid_keys)} 个 key 均在冷却期，"
+            f"降级使用 '{_mask_key(best_key)}'（剩余冷却 {remaining / 3600:.1f} 小时）"
+        )
+        state["current"] = best_key
+        return best_key
+
+
+async def get_api_key(model_name: str, api_key_config, strategy: str = "round_robin", cooldown_seconds: int = 172800) -> str:
+    """统一的 API key 获取入口，根据策略分发。
+
+    Args:
+        model_name: 模型名称
+        api_key_config: api_key 或 api_keys 配置
+        strategy: "round_robin"（默认）或 "sticky"
+        cooldown_seconds: sticky 策略的冷却时长（秒）
+
+    Returns:
+        选中的 API key 字符串
+    """
+    if strategy == "sticky":
+        return await get_sticky_api_key(model_name, api_key_config, cooldown_seconds)
+    return await get_round_robin_api_key(model_name, api_key_config)
+
+
+def is_quota_exceeded(status_code: int, response_body: Optional[str] = None) -> bool:
+    """判断响应是否表示额度/quota 不足（需要触发 sticky 冷却）。
+
+    检测条件：
+    - HTTP 402 Payment Required（余额不足）
+    - HTTP 429 Too Many Requests（速率限制）
+    - 响应体包含 insufficient balance / quota exceeded 等关键词
+    """
+    # 402 Payment Required：很多 API 用这个表示余额不足/欠费
+    if status_code == 402:
+        return True
+    if status_code == 429:
+        return True
+
+    if response_body:
+        lower_body = response_body.lower()
+        quota_keywords = [
+            "insufficient balance", "insufficient quota",
+            "out of credits", "no credits", "run out of",
+            "quota exceeded", "quota limit", "quota exceeded",
+            "rate limit exceeded", "too many requests", "resource exhausted",
+            "billing account", "payment required",
+            "balance insufficient", "not enough",
+        ]
+        for kw in quota_keywords:
+            if kw in lower_body:
+                return True
+
+    return False
+
+
+# 启动时加载持久化状态
+_load_sticky_state()
 
 
 # ============================================================
@@ -179,6 +443,7 @@ def normalize_auto_retry_config(endpoint_config: dict) -> dict:
         except (TypeError, ValueError):
             return default_value
 
+    retry_on_402 = bool(raw_config.get("retry_on_402", True))
     retry_on_429 = bool(raw_config.get("retry_on_429", True))
     retry_on_503 = bool(raw_config.get("retry_on_503", True))
 
@@ -191,6 +456,7 @@ def normalize_auto_retry_config(endpoint_config: dict) -> dict:
             except (TypeError, ValueError):
                 continue
         if normalized_codes:
+            retry_on_402 = 402 in normalized_codes
             retry_on_429 = 429 in normalized_codes
             retry_on_503 = 503 in normalized_codes
 
@@ -200,6 +466,7 @@ def normalize_auto_retry_config(endpoint_config: dict) -> dict:
         "enabled": bool(raw_config.get("enabled", False)),
         "max_retries": max(0, _to_int(raw_config.get("max_retries", 2), 2)),
         "retry_delay_seconds": max(0.0, _to_float(raw_config.get("retry_delay_seconds", 2), 2.0)),
+        "retry_on_402": retry_on_402,
         "retry_on_429": retry_on_429,
         "retry_on_503": retry_on_503,
         "retry_on_other_errors": retry_on_other_errors
@@ -313,6 +580,9 @@ def should_retry_from_status_codes(status_codes: set, retry_config: dict) -> tup
     if not status_codes:
         return False, ""
 
+    if retry_config.get("retry_on_402", True) and 402 in status_codes:
+        return True, "402 Payment Required (余额/quota不足)"
+
     if retry_config.get("retry_on_429", True) and 429 in status_codes:
         return True, "429 Too Many Requests"
 
@@ -320,7 +590,7 @@ def should_retry_from_status_codes(status_codes: set, retry_config: dict) -> tup
         return True, "503 Service Unavailable"
 
     if retry_config.get("retry_on_other_errors", False):
-        other_codes = sorted(code for code in status_codes if code not in (429, 503))
+        other_codes = sorted(code for code in status_codes if code not in (402, 429, 503))
         if other_codes:
             return True, f"HTTP {other_codes[0]}"
 
@@ -353,6 +623,11 @@ def map_upstream_error_to_status_code(error_payload: dict, default_status_code: 
     """将上游错误对象映射为更准确的HTTP状态码"""
     if not isinstance(error_payload, dict):
         return default_status_code
+
+    # 优先使用上游保留的原始 HTTP 状态码（_normalize_error_for_passthrough 注入）
+    http_status = error_payload.get('_http_status')
+    if isinstance(http_status, int) and 400 <= http_status <= 599:
+        return http_status
 
     payload_status_codes = extract_retry_status_candidates(0, error_payload)
     candidate_codes = sorted(code for code in payload_status_codes if code >= 400)
@@ -388,7 +663,7 @@ def is_error_json(obj: dict) -> bool:
     """判断一个JSON对象是否为错误响应（支持多种格式）"""
     if not isinstance(obj, dict):
         return False
-    if 'error' in obj and obj.get('error') is not None:
+    if 'error' in obj and obj.get('error') not in (None, '', {}):
         return True
     if 'code' in obj and 'choices' not in obj:
         code_val = obj['code']
