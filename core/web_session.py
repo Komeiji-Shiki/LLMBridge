@@ -7,8 +7,11 @@ Web 管理界面会话与防爆破模块
   绕过登录页直接对 /api/admin/* 爆破 x-web-access-key 头同样会被计数拦截。
 - 反向代理感知：配置 trusted_proxies 后按 X-Forwarded-For 解析真实客户端 IP，
   避免所有请求被记到反代 IP 上互相误伤。
+- Session 持久化到 web_session_state.json，服务器重启后登录状态保留。
 """
 import hmac
+import json
+import os
 import secrets
 import threading
 import time
@@ -23,12 +26,55 @@ SESSION_COOKIE_NAME = "web_session"
 SESSION_TTL_SECONDS = 86400  # 24 小时，与旧版 cookie max-age 一致
 _MAX_SESSIONS = 1000
 
+_SESSION_STATE_FILE = "web_session_state.json"
 _sessions: Dict[str, float] = {}  # {token: 过期时间戳}
 _session_lock = threading.Lock()
+_session_dirty = False
+
+
+def _load_sessions():
+    """从文件恢复会话状态（启动时调用）"""
+    global _sessions
+    if not os.path.exists(_SESSION_STATE_FILE):
+        return
+    try:
+        with open(_SESSION_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.loads(f.read())
+        if isinstance(data, dict):
+            now = time.time()
+            # 清理已过期的 session
+            _sessions = {t: exp for t, exp in data.items() if isinstance(exp, (int, float)) and exp > now}
+            if _sessions:
+                import logging
+                logging.getLogger(__name__).info(f"[WEB_SESSION] 已恢复 {len(_sessions)} 个有效会话")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"[WEB_SESSION] 加载会话状态失败: {e}")
+
+
+def _save_sessions():
+    """持久化会话状态到文件"""
+    global _session_dirty
+    try:
+        tmp_path = _SESSION_STATE_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(_sessions, f, ensure_ascii=False)
+        os.replace(tmp_path, _SESSION_STATE_FILE)
+        _session_dirty = False
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"[WEB_SESSION] 保存会话状态失败: {e}")
+
+
+def _save_sessions_async():
+    """异步后台保存（不阻塞请求线程）"""
+    if not _session_dirty:
+        return
+    threading.Thread(target=_save_sessions, daemon=True).start()
 
 
 def create_session() -> str:
-    """签发一个新的会话 token（服务重启后所有会话失效，需重新登录）"""
+    """签发一个新的会话 token（持久化到文件，重启后仍有效）"""
     token = secrets.token_urlsafe(32)
     now = time.time()
     with _session_lock:
@@ -40,6 +86,9 @@ def create_session() -> str:
             oldest = min(_sessions, key=_sessions.__getitem__)
             del _sessions[oldest]
         _sessions[token] = now + SESSION_TTL_SECONDS
+    global _session_dirty
+    _session_dirty = True
+    _save_sessions_async()
     return token
 
 
@@ -53,6 +102,9 @@ def validate_session(token: str) -> bool:
             return False
         if exp <= time.time():
             del _sessions[token]
+            global _session_dirty
+            _session_dirty = True
+            _save_sessions_async()
             return False
         return True
 
@@ -157,3 +209,7 @@ def client_ip_from_request(request) -> str:
     """从 FastAPI/Starlette Request 中解析客户端 IP（反代感知）。"""
     direct_ip = request.client.host if request.client else "unknown"
     return resolve_client_ip(direct_ip, request.headers.get("x-forwarded-for", ""))
+
+
+# 模块加载时从文件恢复会话状态
+_load_sessions()
