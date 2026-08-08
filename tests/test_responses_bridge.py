@@ -11,6 +11,7 @@ from converters.responses_bridge import (
     convert_responses_response_to_chat,
 )
 from converters.anthropic_openai import convert_openai_non_stream_response_to_anthropic
+from converters.responses_openai import build_responses_streaming_response
 from routes._direct_api_responses import handle_responses_native_direct
 
 
@@ -437,6 +438,67 @@ class ResponsesNativeHandlerTests(unittest.TestCase):
         self.assertEqual(len(monitoring.ends), 1)
         self.assertTrue(monitoring.ends[0]["success"])
         self.assertIsNone(monitoring.ends[0]["error"])
+        self.assertEqual(monitoring.ends[0]["output_tokens"], 1)
+
+    def test_full_responses_chain_records_success_before_client_stops_after_completed(self):
+        """回归真实链路：Responses→Chat→Responses 双层转换。
+
+        外层一产出 response.completed，客户端就可能停止读取。此时内层监控必须
+        已经落盘成功，不能依赖外层生成器继续迭代或之后的关闭时机。
+        """
+        upstream = (
+            b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1","model":"upstream-model"}}\n\n'
+            b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hello"}\n\n'
+            b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        service = _FakeDirectApiService([upstream])
+        monitoring = _FakeMonitoring()
+
+        async def scenario():
+            chat_response = await handle_responses_native_direct(
+                openai_req={
+                    "model": "public-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                },
+                model_name="public-model",
+                target_model_id="upstream-model",
+                display_name="Public Model",
+                api_base_url="https://example.test/v1",
+                api_key="key",
+                endpoint_config={"api_type": "responses_native"},
+                pricing_config={},
+                monitoring_service=monitoring,
+                direct_api_service=service,
+                estimate_message_tokens_func=lambda *args, **kwargs: 1,
+                estimate_tokens_func=lambda *args, **kwargs: 1,
+                full_messages=[{"role": "user", "content": "hi"}],
+                CONFIG={},
+            )
+            responses_response = build_responses_streaming_response(
+                chat_response,
+                request={"model": "public-model", "input": "hi", "stream": True},
+                model="public-model",
+            )
+
+            raw = b""
+            async for chunk in responses_response.body_iterator:
+                raw += chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
+                if b"event: response.completed" in raw:
+                    self.assertEqual(len(monitoring.ends), 1)
+                    self.assertTrue(monitoring.ends[0]["success"])
+                    self.assertIsNone(monitoring.ends[0]["error"])
+                    break
+            await responses_response.body_iterator.aclose()
+            return raw
+
+        raw = asyncio.run(scenario())
+        self.assertIn(b"event: response.completed", raw)
+        self.assertEqual(len(monitoring.ends), 1)
+        self.assertTrue(monitoring.ends[0]["success"])
+        self.assertEqual(monitoring.ends[0]["response_content"], "hello")
+        self.assertEqual(monitoring.ends[0]["input_tokens"], 2)
         self.assertEqual(monitoring.ends[0]["output_tokens"], 1)
 
     def test_handler_stream_records_failure_when_client_disconnects_mid_stream(self):

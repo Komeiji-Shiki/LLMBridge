@@ -65,6 +65,15 @@ def _iter_chat_payloads(chunk: bytes):
             yield data
 
 
+def _is_chat_stream_done(chunk: bytes) -> bool:
+    """严格识别 Chat SSE 终止行，避免正文中的字面量 ``[DONE]`` 误触发。"""
+    text = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+    return any(
+        line.startswith("data:") and line[5:].strip() == "[DONE]"
+        for line in text.splitlines()
+    )
+
+
 async def _complete_monitoring(
     *,
     monitoring_service,
@@ -273,11 +282,45 @@ async def _handle_stream(
         cached_tokens = 0
         upstream_usage = None
         error_message = None
+        monitoring_completed = False
         # 上游流是否已完整处理：收到 finish_reason / [DONE] / 错误事件，或迭代自然结束。
         # 成功与否只看上游流完整性，与客户端是否提前断开无关（客户端在收到
         # [DONE] 后关闭连接是标准行为，若因此误报失败则所有成功流式请求都会
         # 记录为 failed 且 error 为空）。
         stream_complete = False
+
+        async def complete_monitoring_once() -> None:
+            """在终止块交给下游前完成落盘，避免外层提前结束消费造成误报。"""
+            nonlocal monitoring_completed, error_message
+            if monitoring_completed:
+                return
+            # 先占用完成权：_complete_monitoring 内部先同步 request_end、再异步广播，
+            # 若广播阶段任务被取消，finally 不得重复 request_end 生成第二条记录。
+            monitoring_completed = True
+            success = stream_complete and error_message is None
+            if not success and error_message is None:
+                error_message = "Client disconnected"
+            await _complete_monitoring(
+                monitoring_service=monitoring_service,
+                direct_api_service=direct_api_service,
+                request_id=request_id,
+                success=success,
+                openai_req=openai_req,
+                display_name=display_name,
+                pricing_config=pricing_config,
+                estimate_message_tokens_func=estimate_message_tokens_func,
+                estimate_tokens_func=estimate_tokens_func,
+                full_messages=full_messages,
+                content="".join(content_parts),
+                reasoning="".join(reasoning_parts),
+                tool_calls=finalize_tool_calls(tool_accumulator),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                error=error_message,
+                upstream_usage=upstream_usage,
+            )
+
         try:
             async for chunk in converted_response.body_iterator:
                 chunk_bytes = chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8")
@@ -304,11 +347,16 @@ async def _handle_stream(
                         if choices[0].get("finish_reason"):
                             stream_complete = True
                         append_tool_call_delta(tool_accumulator, delta.get("tool_calls"))
-                if b"[DONE]" in chunk_bytes:
+                if _is_chat_stream_done(chunk_bytes):
                     stream_complete = True
+                    # /v1/responses 外层收到该块后会立即生成 response.completed，
+                    # 客户端通常随即停止读取。必须在交出终止块之前完成监控，
+                    # 不能再依赖生成器下一次恢复或异步清理时机。
+                    await complete_monitoring_once()
                 yield chunk_bytes
             # 迭代自然结束 = 上游流已完整处理
             stream_complete = True
+            await complete_monitoring_once()
         except asyncio.CancelledError:
             # 客户端取消/断开：流已完整输出时不改判失败，否则按断连处理
             if not stream_complete:
@@ -326,34 +374,12 @@ async def _handle_stream(
             logger.error("[RESPONSES_NATIVE] 流式处理异常: %s", exc, exc_info=True)
             raise
         finally:
-            # 成功判定只看上游：流完整且无错误即成功，与客户端是否断开无关
-            success = stream_complete and error_message is None
-            if not success and error_message is None:
-                error_message = "Client disconnected"
             try:
                 await upstream_iterator.aclose()
             except Exception:
                 pass
-            await _complete_monitoring(
-                monitoring_service=monitoring_service,
-                direct_api_service=direct_api_service,
-                request_id=request_id,
-                success=success,
-                openai_req=openai_req,
-                display_name=display_name,
-                pricing_config=pricing_config,
-                estimate_message_tokens_func=estimate_message_tokens_func,
-                estimate_tokens_func=estimate_tokens_func,
-                full_messages=full_messages,
-                content="".join(content_parts),
-                reasoning="".join(reasoning_parts),
-                tool_calls=finalize_tool_calls(tool_accumulator),
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_tokens=cached_tokens,
-                error=error_message,
-                upstream_usage=upstream_usage,
-            )
+            if not monitoring_completed:
+                await complete_monitoring_once()
 
     return StreamingResponse(
         monitored_generator(),
