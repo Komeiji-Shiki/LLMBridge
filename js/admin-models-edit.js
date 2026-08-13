@@ -646,9 +646,6 @@ function getSystemInjectionConfig() {
     
     const content = document.getElementById('system-injection-content').value.trim();
     const fakeConversation = getFakeConversation();
-    if (!content && fakeConversation.length === 0) {
-        return null;
-    }
     
     const config = {
         enabled: true,
