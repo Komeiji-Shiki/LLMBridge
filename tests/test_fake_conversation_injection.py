@@ -14,7 +14,11 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from routes._direct_api_utils import inject_system_prompt, inject_fake_conversation
+from routes._direct_api_utils import (
+    inject_system_prompt,
+    inject_fake_conversation,
+    ensure_reasoning_noop_tool,
+)
 
 
 class TestInjectFakeConversation(unittest.TestCase):
@@ -102,6 +106,61 @@ class TestInjectSystemPromptWithFake(unittest.TestCase):
         msgs = [{"role": "user", "content": "hi"}]
         out = inject_system_prompt(msgs, cfg)
         self.assertEqual(out, msgs)
+
+
+class TestEnsureReasoningNoopTool(unittest.TestCase):
+    def test_inject_noop_when_reasoning_and_no_tools(self):
+        cfg = {
+            "enabled": True,
+            "fake_conversation": [
+                {"role": "assistant", "content": "a", "reasoning_content": "think"},
+            ],
+        }
+        req = {"messages": [{"role": "user", "content": "hi"}]}
+        out = ensure_reasoning_noop_tool(req, cfg)
+        self.assertIn("tools", out)
+        self.assertEqual(len(out["tools"]), 1)
+        self.assertEqual(out["tools"][0]["function"]["name"], "noop")
+
+    def test_keep_existing_tools(self):
+        cfg = {
+            "enabled": True,
+            "fake_conversation": [
+                {"role": "assistant", "content": "a", "reasoning_content": "think"},
+            ],
+        }
+        existing = [
+            {"type": "function", "function": {"name": "real", "parameters": {"type": "object", "properties": {}}}}
+        ]
+        req = {"messages": [], "tools": existing}
+        out = ensure_reasoning_noop_tool(req, cfg)
+        self.assertEqual(out["tools"], existing)
+
+    def test_no_reasoning_no_inject(self):
+        cfg = {
+            "enabled": True,
+            "fake_conversation": [{"role": "assistant", "content": "a"}],
+        }
+        req = {"messages": []}
+        out = ensure_reasoning_noop_tool(req, cfg)
+        self.assertNotIn("tools", out)
+
+    def test_empty_tools_list_gets_injected(self):
+        cfg = {
+            "enabled": True,
+            "fake_conversation": [
+                {"role": "assistant", "content": "a", "reasoning_content": "think"},
+            ],
+        }
+        req = {"messages": [], "tools": []}
+        out = ensure_reasoning_noop_tool(req, cfg)
+        self.assertEqual(len(out["tools"]), 1)
+
+    def test_no_fake_conversation_no_inject(self):
+        cfg = {"enabled": True}
+        req = {"messages": []}
+        out = ensure_reasoning_noop_tool(req, cfg)
+        self.assertNotIn("tools", out)
 
 
 if __name__ == "__main__":

@@ -955,3 +955,50 @@ def inject_system_prompt(messages: list, injection_config: dict, convert_system_
                 logger.info(f"[SYSTEM_INJECT] 后置模式：创建新的 system 消息")
 
     return inject_fake_conversation(messages, fake_conversation)
+
+
+# ============================================================
+# 思考模型伪造思维链：自动注入占位工具
+# ============================================================
+
+# DeepSeek 等思考模型在「携带 tools 参数」的请求中，会把历史 assistant 消息的
+# reasoning_content 拼接进上下文；无工具调用时历史思维链会被忽略。
+# 为了让伪造的思维链真正生效，若伪造对话里含 reasoning_content 且下游未带工具，
+# 注入一个精简、不会被主动调用的占位工具。
+_REASONING_NOOP_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "noop",
+        "description": "Reserved placeholder. Never call this tool.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+
+def ensure_reasoning_noop_tool(openai_req: dict, injection_config: dict) -> dict:
+    """确保思考模型请求携带 tools，以触发历史 reasoning_content 拼接。
+
+    仅当伪造对话中存在 assistant 消息携带 reasoning_content，且请求本身没有
+    tools 时，才注入一个精简的占位工具。下游已有工具则保持原样。
+    """
+    if not isinstance(injection_config, dict):
+        return openai_req
+
+    fake_conversation = injection_config.get("fake_conversation") or []
+    has_reasoning = any(
+        isinstance(m, dict)
+        and m.get("role") == "assistant"
+        and m.get("reasoning_content")
+        for m in fake_conversation
+    )
+    if not has_reasoning:
+        return openai_req
+
+    tools = openai_req.get("tools")
+    if tools:
+        # 下游已带工具，尊重原样，避免覆盖
+        return openai_req
+
+    openai_req["tools"] = [_REASONING_NOOP_TOOL]
+    logger.info("[SYSTEM_INJECT] 伪造思维链检测到，注入占位工具以触发历史 reasoning_content 拼接")
+    return openai_req

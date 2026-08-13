@@ -25,6 +25,7 @@ from ._direct_api_utils import (
     should_retry_response,
     should_retry_http_exception,
     inject_system_prompt,
+    ensure_reasoning_noop_tool,
 )
 from ._direct_api_gemini import handle_gemini_native_direct
 from ._direct_api_passthrough import handle_passthrough_direct
@@ -76,6 +77,11 @@ async def handle_direct_api_request(
             f"[DIRECT_API] 系统提示词注入已启用 "
             f"(位置: {system_injection_config.get('position', 'before_system')}, "
             f"兼容System转User: {convert_system_to_user})")
+
+        # 思考模型伪造思维链：确保请求带 tools 以触发历史 reasoning_content 拼接
+        # （仅 OpenAI 兼容格式，DeepSeek 等；下游已带工具则保持原样）
+        if api_type == "direct_api":
+            ensure_reasoning_noop_tool(openai_req, system_injection_config)
 
     # 预填充注入（anthropic_native 跳过，Anthropic 格式 prefilling 方式不同）
     prefill_content = endpoint_config.get("prefill_content")

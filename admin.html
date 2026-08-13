@@ -2122,6 +2122,7 @@
                                     <small style="color: var(--text-dim); display: block; margin-bottom: 8px;">
                                         在上游请求中插入伪造的历史对话，可携带 <code>reasoning_content</code> 伪造思维链（DeepSeek 等思考模型）。
                                         伪造消息会插入到 system 消息之后、真实对话之前。
+                                        若携带了思维链而请求未带工具，会自动注入一个占位工具以触发 DeepSeek 历史思维链拼接（下游已有工具则不改动）。
                                     </small>
                                     <div id="fake-conversation-list" style="margin-bottom: 8px;"></div>
                                     <div style="display: flex; gap: 8px; flex-wrap: wrap;">
