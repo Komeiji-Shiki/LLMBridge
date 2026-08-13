@@ -2109,12 +2109,26 @@
                                     </select>
                                 </div>
                                 
-                                <div class="form-group" style="margin-bottom: 0;">
+                                <div class="form-group" style="margin-bottom: 15px;">
                                     <label class="form-label">注入内容</label>
                                     <textarea id="system-injection-content" class="form-input" rows="4" placeholder="输入要注入的系统提示词内容..."></textarea>
                                     <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                         这段内容会被注入到请求的 system 消息中
                                     </small>
+                                </div>
+
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">🃏 伪造对话历史（整轮/多轮 + 思维链）</label>
+                                    <small style="color: var(--text-dim); display: block; margin-bottom: 8px;">
+                                        在上游请求中插入伪造的历史对话，可携带 <code>reasoning_content</code> 伪造思维链（DeepSeek 等思考模型）。
+                                        伪造消息会插入到 system 消息之后、真实对话之前。
+                                    </small>
+                                    <div id="fake-conversation-list" style="margin-bottom: 8px;"></div>
+                                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                        <button type="button" class="btn btn-sm" onclick="addFakeConvRow()">＋ 添加消息</button>
+                                        <button type="button" class="btn btn-sm" onclick="addFakeConvTurn()">＋ 添加一轮对话</button>
+                                        <button type="button" class="btn btn-sm" onclick="importFakeConversationFromJson()">📥 从 JSON 导入</button>
+                                    </div>
                                 </div>
                             </div>
                         </div>

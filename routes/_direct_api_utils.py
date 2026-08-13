@@ -848,62 +848,110 @@ def extract_complete_sse_lines(decoded_chunk: str, pending_line: str) -> tuple:
 # 系统提示词注入
 # ============================================================
 
+def inject_fake_conversation(messages: list, fake_conversation: list, insert_at: Optional[int] = None) -> list:
+    """伪造整轮/多轮对话历史注入
+
+    将伪造的历史对话插入到消息列表，让上游模型误以为对话已经推进到某个阶段。
+    支持 assistant 消息携带 reasoning_content（DeepSeek 历史思维链回传），
+    以及 tool 角色消息携带 tool_call_id（带工具调用的多轮拼接）。
+
+    fake_conversation: [
+        {"role": "user", "content": "..."},
+        {"role": "assistant", "content": "...", "reasoning_content": "..."},
+        {"role": "tool", "tool_call_id": "call_xxx", "content": "..."},
+    ]
+    insert_at: 显式插入索引；None 时自动定位到开头的连续 system 消息之后。
+    """
+    if not fake_conversation:
+        return messages
+
+    msgs = messages.copy()
+
+    if insert_at is None:
+        insert_at = 0
+        for i, m in enumerate(msgs):
+            if isinstance(m, dict) and m.get("role") == "system":
+                insert_at = i + 1
+            else:
+                break
+
+    for item in reversed(fake_conversation):
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role") or "assistant"
+        new_msg = {"role": role, "content": item.get("content", "")}
+        reasoning = item.get("reasoning_content")
+        if reasoning and role == "assistant":
+            new_msg["reasoning_content"] = reasoning
+        tool_call_id = item.get("tool_call_id")
+        if tool_call_id and role == "tool":
+            new_msg["tool_call_id"] = tool_call_id
+        msgs.insert(insert_at, new_msg)
+
+    logger.info(f"[SYSTEM_INJECT] 伪造对话注入：{len(fake_conversation)} 条消息 @ index {insert_at}")
+    return msgs
+
+
 def inject_system_prompt(messages: list, injection_config: dict, convert_system_to_user: bool = False) -> list:
-    """系统提示词注入功能"""
+    """系统提示词注入 + 伪造对话历史注入"""
     if not injection_config or not injection_config.get("enabled", False):
         return messages
 
     content = injection_config.get("content", "").strip()
-    if not content:
+    fake_conversation = injection_config.get("fake_conversation") or []
+    if not content and not fake_conversation:
         return messages
 
     position = injection_config.get("position", "before_system")
     messages = messages.copy()
 
     if convert_system_to_user:
-        logger.warning(f"[SYSTEM_INJECT] 检测到同时启用了 System转User，将使用 user 角色注入伪装内容")
-        messages.insert(0, {"role": "user", "content": content})
-        messages.insert(1, {"role": "assistant", "content": "Understood. I'll follow these instructions."})
-        logger.info(f"[SYSTEM_INJECT] 兼容模式：以 user+assistant 对话形式注入 {len(content)} 字符")
-        return messages
+        if content:
+            logger.warning(f"[SYSTEM_INJECT] 检测到同时启用了 System转User，将使用 user 角色注入伪装内容")
+            messages.insert(0, {"role": "user", "content": content})
+            messages.insert(1, {"role": "assistant", "content": "Understood. I'll follow these instructions."})
+            logger.info(f"[SYSTEM_INJECT] 兼容模式：以 user+assistant 对话形式注入 {len(content)} 字符")
+        # 伪造对话插在兼容消息之后（无 content 时则插在最前）
+        return inject_fake_conversation(messages, fake_conversation, insert_at=2 if content else 0)
 
-    system_index = -1
-    for i, msg in enumerate(messages):
-        if isinstance(msg, dict) and msg.get("role") == "system":
-            system_index = i
-            break
+    if content:
+        system_index = -1
+        for i, msg in enumerate(messages):
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                system_index = i
+                break
 
-    if position == "replace_system":
-        messages = [msg for msg in messages if msg.get("role") != "system"]
-        messages.insert(0, {"role": "system", "content": content})
-        logger.info(f"[SYSTEM_INJECT] 替换模式：用注入内容替换了所有 system 消息")
-
-    elif position == "before_system":
-        if system_index >= 0:
-            original_content = messages[system_index].get("content", "")
-            if isinstance(original_content, str):
-                messages[system_index]["content"] = content + "\n\n" + original_content
-            else:
-                messages[system_index]["content"] = [{"type": "text", "text": content}] + (
-                    original_content if isinstance(original_content, list) else [{"type": "text", "text": str(original_content)}]
-                )
-            logger.info(f"[SYSTEM_INJECT] 前置模式：在 system 消息前插入 {len(content)} 字符")
-        else:
+        if position == "replace_system":
+            messages = [msg for msg in messages if msg.get("role") != "system"]
             messages.insert(0, {"role": "system", "content": content})
-            logger.info(f"[SYSTEM_INJECT] 前置模式：创建新的 system 消息")
+            logger.info(f"[SYSTEM_INJECT] 替换模式：用注入内容替换了所有 system 消息")
 
-    elif position == "after_system":
-        if system_index >= 0:
-            original_content = messages[system_index].get("content", "")
-            if isinstance(original_content, str):
-                messages[system_index]["content"] = original_content + "\n\n" + content
+        elif position == "before_system":
+            if system_index >= 0:
+                original_content = messages[system_index].get("content", "")
+                if isinstance(original_content, str):
+                    messages[system_index]["content"] = content + "\n\n" + original_content
+                else:
+                    messages[system_index]["content"] = [{"type": "text", "text": content}] + (
+                        original_content if isinstance(original_content, list) else [{"type": "text", "text": str(original_content)}]
+                    )
+                logger.info(f"[SYSTEM_INJECT] 前置模式：在 system 消息前插入 {len(content)} 字符")
             else:
-                messages[system_index]["content"] = (
-                    original_content if isinstance(original_content, list) else [{"type": "text", "text": str(original_content)}]
-                ) + [{"type": "text", "text": content}]
-            logger.info(f"[SYSTEM_INJECT] 后置模式：在 system 消息后追加 {len(content)} 字符")
-        else:
-            messages.insert(0, {"role": "system", "content": content})
-            logger.info(f"[SYSTEM_INJECT] 后置模式：创建新的 system 消息")
+                messages.insert(0, {"role": "system", "content": content})
+                logger.info(f"[SYSTEM_INJECT] 前置模式：创建新的 system 消息")
 
-    return messages
+        elif position == "after_system":
+            if system_index >= 0:
+                original_content = messages[system_index].get("content", "")
+                if isinstance(original_content, str):
+                    messages[system_index]["content"] = original_content + "\n\n" + content
+                else:
+                    messages[system_index]["content"] = (
+                        original_content if isinstance(original_content, list) else [{"type": "text", "text": str(original_content)}]
+                    ) + [{"type": "text", "text": content}]
+                logger.info(f"[SYSTEM_INJECT] 后置模式：在 system 消息后追加 {len(content)} 字符")
+            else:
+                messages.insert(0, {"role": "system", "content": content})
+                logger.info(f"[SYSTEM_INJECT] 后置模式：创建新的 system 消息")
+
+    return inject_fake_conversation(messages, fake_conversation)

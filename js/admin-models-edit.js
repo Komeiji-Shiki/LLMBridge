@@ -447,6 +447,159 @@ function applySystemInjectionPreset() {
     }
 }
 
+// ==================== 伪造对话历史注入（整轮/多轮 + 思维链） ====================
+
+let _fakeConvRowCounter = 0;
+
+/**
+ * 添加一条伪造对话消息行
+ * @param {string} role - user / assistant / system / tool
+ * @param {string} content - 消息正文（可留空，例如 assistant 仅思考时）
+ * @param {string} reasoning - 思维链 reasoning_content（仅 assistant 生效）
+ * @param {string} toolId - tool_call_id（仅 tool 生效）
+ */
+function addFakeConvRow(role = 'user', content = '', reasoning = '', toolId = '') {
+    _fakeConvRowCounter++;
+    const rowId = `fake-conv-row-${_fakeConvRowCounter}`;
+    const container = document.getElementById('fake-conversation-list');
+    if (!container) {
+        console.error('[FakeConv] 容器 #fake-conversation-list 未找到！');
+        return;
+    }
+
+    const row = document.createElement('div');
+    row.id = rowId;
+    row.className = 'fake-conv-row';
+    row.style.cssText = 'border: 1px solid var(--border, #444); border-radius: 6px; padding: 10px; margin-bottom: 10px; background: var(--bg-elevated, #1e1e2e);';
+    row.innerHTML = `
+        <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
+            <select class="fake-conv-role form-select" onchange="toggleFakeConvRowFields('${rowId}')" style="flex: 0 0 130px;">
+                <option value="user">user</option>
+                <option value="assistant">assistant</option>
+                <option value="system">system</option>
+                <option value="tool">tool</option>
+            </select>
+            <span style="flex: 1;"></span>
+            <button type="button" class="btn btn-sm btn-danger" onclick="removeFakeConvRow('${rowId}')" title="删除此消息">🗑️</button>
+        </div>
+        <textarea class="fake-conv-content form-input" rows="2" placeholder="消息内容（可留空，例如 assistant 仅思考时）" style="width: 100%; margin-bottom: 8px;"></textarea>
+        <textarea class="fake-conv-reasoning form-input" rows="2" placeholder="reasoning_content 思维链（仅 assistant 生效）" style="width: 100%; margin-bottom: 8px; display: none;"></textarea>
+        <input type="text" class="fake-conv-tool-id form-input" placeholder="tool_call_id（仅 tool 生效）" style="width: 100%; display: none;">
+    `;
+
+    row.querySelector('.fake-conv-role').value = role;
+    row.querySelector('.fake-conv-content').value = content;
+    row.querySelector('.fake-conv-reasoning').value = reasoning;
+    row.querySelector('.fake-conv-tool-id').value = toolId;
+    row.querySelector('.fake-conv-reasoning').style.display = role === 'assistant' ? 'block' : 'none';
+    row.querySelector('.fake-conv-tool-id').style.display = role === 'tool' ? 'block' : 'none';
+
+    container.appendChild(row);
+}
+
+/**
+ * 删除一条伪造对话消息行
+ */
+function removeFakeConvRow(rowId) {
+    const row = document.getElementById(rowId);
+    if (row) row.remove();
+}
+
+/**
+ * 切换单行内字段显示（reasoning_content 仅 assistant，tool_call_id 仅 tool）
+ */
+function toggleFakeConvRowFields(rowId) {
+    const row = document.getElementById(rowId);
+    if (!row) return;
+    const role = row.querySelector('.fake-conv-role').value;
+    const reasoningEl = row.querySelector('.fake-conv-reasoning');
+    const toolIdEl = row.querySelector('.fake-conv-tool-id');
+    if (reasoningEl) reasoningEl.style.display = role === 'assistant' ? 'block' : 'none';
+    if (toolIdEl) toolIdEl.style.display = role === 'tool' ? 'block' : 'none';
+}
+
+/**
+ * 添加一整轮对话（user + assistant 各一条）
+ */
+function addFakeConvTurn() {
+    addFakeConvRow('user', '', '');
+    addFakeConvRow('assistant', '', '');
+}
+
+/**
+ * 清空所有伪造对话消息行
+ */
+function resetFakeConvRows() {
+    const container = document.getElementById('fake-conversation-list');
+    if (container) container.innerHTML = '';
+    _fakeConvRowCounter = 0;
+}
+
+/**
+ * 从 JSON 数组导入伪造对话（支持直接粘贴 DeepSeek 官方 messages 片段）
+ */
+function importFakeConversationFromJson() {
+    const raw = prompt('请粘贴伪造对话的 JSON 数组，例如：\n[{"role":"user","content":"..."},{"role":"assistant","content":"...","reasoning_content":"..."}]');
+    if (raw === null) return;
+    let parsed;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (e) {
+        alert('JSON 解析失败：' + e.message);
+        return;
+    }
+    if (!Array.isArray(parsed)) {
+        alert('请粘贴一个 JSON 数组');
+        return;
+    }
+    let added = 0;
+    for (const item of parsed) {
+        if (!item || typeof item !== 'object') continue;
+        const role = item.role || 'assistant';
+        const content = typeof item.content === 'string' ? item.content : (item.content == null ? '' : JSON.stringify(item.content));
+        const reasoning = typeof item.reasoning_content === 'string' ? item.reasoning_content : '';
+        const toolId = typeof item.tool_call_id === 'string' ? item.tool_call_id : '';
+        addFakeConvRow(role, content, reasoning, toolId);
+        added++;
+    }
+    if (added === 0) alert('未导入任何有效消息');
+}
+
+/**
+ * 收集伪造对话配置
+ */
+function getFakeConversation() {
+    const rows = document.querySelectorAll('#fake-conversation-list .fake-conv-row');
+    const list = [];
+    rows.forEach(row => {
+        const role = row.querySelector('.fake-conv-role')?.value || 'assistant';
+        const content = row.querySelector('.fake-conv-content')?.value || '';
+        const reasoning = row.querySelector('.fake-conv-reasoning')?.value || '';
+        const toolId = row.querySelector('.fake-conv-tool-id')?.value || '';
+        const item = { role, content };
+        if (role === 'assistant' && reasoning) item.reasoning_content = reasoning;
+        if (role === 'tool' && toolId) item.tool_call_id = toolId;
+        list.push(item);
+    });
+    return list;
+}
+
+/**
+ * 加载伪造对话配置到行编辑器
+ */
+function loadFakeConversation(list) {
+    resetFakeConvRows();
+    if (!Array.isArray(list) || list.length === 0) return;
+    for (const item of list) {
+        if (!item || typeof item !== 'object') continue;
+        const role = item.role || 'assistant';
+        const content = typeof item.content === 'string' ? item.content : (item.content == null ? '' : JSON.stringify(item.content));
+        const reasoning = typeof item.reasoning_content === 'string' ? item.reasoning_content : '';
+        const toolId = typeof item.tool_call_id === 'string' ? item.tool_call_id : '';
+        addFakeConvRow(role, content, reasoning, toolId);
+    }
+}
+
 // 重置系统提示词注入字段
 function resetSystemInjectionFields() {
     document.getElementById('system-injection-enabled').checked = false;
@@ -454,6 +607,7 @@ function resetSystemInjectionFields() {
     document.getElementById('system-injection-preset').value = '';
     document.getElementById('system-injection-content').value = '';
     document.getElementById('system-injection-options').style.display = 'none';
+    resetFakeConvRows();
 }
 
 // 加载系统提示词注入配置到表单
@@ -475,6 +629,9 @@ function loadSystemInjectionConfig(injectionConfig) {
             }
         }
         document.getElementById('system-injection-preset').value = matchedPreset;
+
+        // 加载伪造对话历史
+        loadFakeConversation(injectionConfig.fake_conversation);
     } else {
         resetSystemInjectionFields();
     }
@@ -488,15 +645,20 @@ function getSystemInjectionConfig() {
     }
     
     const content = document.getElementById('system-injection-content').value.trim();
-    if (!content) {
+    const fakeConversation = getFakeConversation();
+    if (!content && fakeConversation.length === 0) {
         return null;
     }
     
-    return {
+    const config = {
         enabled: true,
         position: document.getElementById('system-injection-position').value,
         content: content
     };
+    if (fakeConversation.length > 0) {
+        config.fake_conversation = fakeConversation;
+    }
+    return config;
 }
 
 // 加载图片压缩配置到表单
