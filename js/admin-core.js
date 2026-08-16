@@ -2,6 +2,7 @@
 
 // ==================== 全局变量 ====================
 let currentEditingModel = null;
+let currentEditingArchived = false;
 let currentEditingTokenizer = null;
 let selectedCaptureMode = 'direct_chat';
 let selectedBattleTarget = 'A';

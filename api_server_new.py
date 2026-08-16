@@ -160,6 +160,25 @@ async def lifespan(app: FastAPI):
     from background_tasks.request_processor import idle_monitor
     spawn(idle_monitor(server_state.last_activity_time_ref, CONFIG), name="idle-monitor")
 
+    # 🔧 模型自动归档后台任务：每 24 小时检查一次 auto_archive 配置，
+    # 启用时自动归档超过 days 天未调用的模型（手动触发走管理面板接口）
+    async def _auto_archive_loop():
+        first_run = True
+        while True:
+            try:
+                aa_cfg = CONFIG.get("auto_archive") or {}
+                # 首次循环：仅当 run_on_startup=true 时立即扫描；
+                # 之后每个周期只要启用就扫描（配置变更时管理面板已立即执行一次）
+                if aa_cfg.get("enabled") and (not first_run or aa_cfg.get("run_on_startup")):
+                    days = int(aa_cfg.get("days", 30) or 30)
+                    await admin_routes.run_auto_archive_task(days)
+                first_run = False
+            except Exception as e:
+                logger.error(f"[MODEL_ARCHIVE] 后台自动归档任务失败: {e}", exc_info=True)
+            await asyncio.sleep(24 * 3600)
+
+    spawn(_auto_archive_loop(), name="auto-archive-loop")
+
     if stats_db.enabled and MODEL_ENDPOINT_MAP:
         # 🔧 A3 修复：用 asyncio.to_thread 包装同步 SQLite 批量操作，不阻塞事件循环
         async def _recalculate_costs_bg():

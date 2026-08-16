@@ -51,6 +51,14 @@
   "enable_lmarena_reasoning": true,
   "reasoning_output_mode": "openai",
   "preserve_streaming": true,
+  // 模型自动归档：按“最后调用时间”自动归档长期未使用的模型（归档后不出现在
+  // /v1/models 列表、无法被请求调用，管理面板折叠展示，可手动恢复）
+  // enabled: 是否启用；days: 超过多少天未调用则归档；run_on_startup: 服务启动时立即扫描一次
+  "auto_archive": {
+    "enabled": false,
+    "days": 30,
+    "run_on_startup": false
+  },
   // Tokenizer 配置：为每个模型指定使用的 tokenizer 类型
   // 支持: anthropic / google / deepseek / tiktoken / custom_xxx
   "tokenizer_config": {

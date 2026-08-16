@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 # 拆分的路由模块
@@ -58,6 +58,7 @@ from core.config_loader import (
 )
 from core.app_state import get_app_state
 from core.api_key_manager import api_key_manager
+from core.model_archive import is_model_archived
 from core.errors import (
     BadRequestError,
     AuthenticationError,
@@ -253,6 +254,13 @@ async def _dispatch_chat_completions_core(
     """
     model_name = openai_req.get("model")
     model_type = _resolve_model_type(model_name)
+
+    # 归档模型拦截：配置存在但已归档 → 按“模型不存在”处理。
+    # 检查原始配置而非轮询后的单端点，保证 list（多端点）配置任意端点都拦得住；
+    # 覆盖 /v1/chat/completions、/v1/messages（转换链路）、/v1/responses 全部入口。
+    raw_config = MODEL_ENDPOINT_MAP.get(model_name) if model_name else None
+    if raw_config is not None and is_model_archived(raw_config):
+        raise HTTPException(status_code=404, detail=f"模型 '{model_name}' 不存在")
 
     # 端点配置解析（列表配置轮询）
     endpoint_config = await _select_endpoint_config_for_model(model_name)

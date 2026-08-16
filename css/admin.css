@@ -608,3 +608,26 @@ textarea.form-input {
         grid-template-columns: 1fr;
     }
 }
+/* ==================== 模型归档 ==================== */
+/* 归档模型行：置灰 + 低对比度，视觉上从活跃列表中退场 */
+.model-row-archived td {
+    opacity: 0.55;
+    filter: grayscale(0.4);
+    background: rgba(127, 127, 127, 0.04);
+}
+
+.model-row-archived:hover td {
+    opacity: 0.8;
+    filter: grayscale(0.15);
+}
+
+/* 归档区折叠头 */
+.archive-header:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+/* 归档模型拖拽把手禁用（归档区不参与排序） */
+.model-row-archived .drag-handle {
+    cursor: not-allowed;
+    opacity: 0.4;
+}

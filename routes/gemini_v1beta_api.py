@@ -13,6 +13,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from core.config_loader import CONFIG, MODEL_ROUND_ROBIN_INDEX, MODEL_ROUND_ROBIN_LOCK
+from core.model_archive import is_model_archived
 from utils.monitor_params import build_monitor_request_params
 from ._direct_api_utils import get_api_key
 
@@ -74,6 +75,14 @@ async def gemini_native_api(
                 detail=f"模型 '{model_name}' 未在配置中找到"
             )
         
+        # 归档模型拦截：与 /v1 链路一致按“模型不存在”处理。
+        # 检查原始配置（而非轮询后的单端点），list 多端点任一端点都拦得住。
+        if is_model_archived(endpoint_config):
+            raise HTTPException(
+                status_code=404,
+                detail=f"模型 '{model_name}' 未在配置中找到"
+            )
+
         # 处理多端点情况（🔧 轮询而非固定取第一个，与 /v1 链路行为一致；
         # 计数器与 /v1 共享同一 MODEL_ROUND_ROBIN_INDEX，轮询状态统一）
         if isinstance(endpoint_config, list) and endpoint_config:

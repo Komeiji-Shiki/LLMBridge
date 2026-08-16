@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from core.api_key_manager import api_key_manager
 from core.config_loader import CONFIG, MODEL_ENDPOINT_MAP, MODEL_NAME_TO_ID_MAP
+from core.model_archive import is_model_archived as _is_archived
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["models"])
@@ -70,17 +71,6 @@ def _extract_provided_key(request: Request, allow_x_api_key: bool = True) -> str
         if x_api_key:
             return x_api_key.strip()
     return None
-
-
-def _is_archived(config) -> bool:
-    """检查模型配置是否标记为已归档"""
-    if isinstance(config, dict):
-        return config.get("archived", False)
-    if isinstance(config, list) and config:
-        # 列表配置取第一个元素判断
-        first = config[0] if isinstance(config[0], dict) else {}
-        return first.get("archived", False)
-    return False
 
 
 async def get_models(MODEL_ENDPOINT_MAP: dict, MODEL_NAME_TO_ID_MAP: dict, allowed_models: list = None):
@@ -154,6 +144,10 @@ async def get_gemini_models(MODEL_ENDPOINT_MAP: dict):
 
     if MODEL_ENDPOINT_MAP:
         for model_name, config in MODEL_ENDPOINT_MAP.items():
+            # 归档模型不出现（与 get_models 的 _is_archived 语义一致，
+            # 接收外层 config 而非列表内单个 cfg）
+            if _is_archived(config):
+                continue
             # 处理单个配置和配置列表
             configs_to_check = [config] if isinstance(config, dict) else config if isinstance(config, list) else []
 

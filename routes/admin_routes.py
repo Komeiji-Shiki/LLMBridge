@@ -14,6 +14,10 @@ from core.config_loader import (
     CONFIG, MODEL_ENDPOINT_MAP, MODEL_NAME_TO_ID_MAP,
     load_config, load_model_endpoint_map, _parse_jsonc,
 )
+from core.model_archive import (
+    is_model_archived, set_archive_flags,
+    find_inactive_models, build_last_used_map,
+)
 from core.app_state import get_app_state
 from core.db_stats import stats_db, get_exchange_rates
 from modules.monitoring import monitoring_service, MonitorConfig
@@ -231,20 +235,19 @@ async def reorder_models(
         # 读取现有配置
         current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
 
-        # 验证所有模型名称都存在
+        # 校验所有模型名称都存在（允许只提交部分模型，如仅活跃模型）
         for model_name in new_order:
             if model_name not in current_config:
                 raise HTTPException(status_code=400, detail=f"模型 {model_name} 不存在于配置中")
-        
-        # 检查是否有遗漏的模型
-        if set(new_order) != set(current_config.keys()):
-            missing = set(current_config.keys()) - set(new_order)
-            raise HTTPException(status_code=400, detail=f"顺序列表缺少以下模型: {', '.join(missing)}")
-        
-        # 创建新的有序字典
+
+        # 创建新的有序字典：先按提交顺序排，未提交的模型（如归档区不参与拖拽）
+        # 按原顺序追加到末尾，保证前端只提交活跃区顺序时不会丢归档模型
         reordered_config = {}
         for model_name in new_order:
             reordered_config[model_name] = current_config[model_name]
+        for model_name, model_config in current_config.items():
+            if model_name not in reordered_config:
+                reordered_config[model_name] = model_config
 
         # 写入文件
         await write_json_file(MODEL_ENDPOINT_MAP_FILE, reordered_config)
@@ -265,6 +268,162 @@ async def reorder_models(
         logger.error(f"重新排序模型失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+# ============================================================================
+# 模型归档（archived）
+# ============================================================================
+
+async def set_models_archive(
+    request: Request,
+    load_model_endpoint_map_func
+):
+    """批量归档/恢复模型。
+
+    body: {"model_names": ["a", "b"], "archived": true|false}
+    archived 缺省为 true（一键归档）。归档后的模型：
+    - 不出现在 /v1/models、/v1beta/models 列表
+    - 直接调用 chat/completions 等端点返回 404 模型不存在
+    - 管理面板模型列表折叠展示，可随时恢复
+    """
+    try:
+        data = await request.json()
+        model_names = data.get("model_names")
+        archived = bool(data.get("archived", True))
+        action = "归档" if archived else "恢复"
+
+        if not model_names or not isinstance(model_names, list):
+            raise HTTPException(status_code=400, detail="缺少有效的 model_names 列表")
+        model_names = [str(n) for n in model_names]
+
+        async with _MODEL_ENDPOINT_MAP_LOCK:
+            current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+            new_config, changed = set_archive_flags(current_config, model_names, archived)
+
+            if changed:
+                await write_json_file(MODEL_ENDPOINT_MAP_FILE, new_config)
+                await asyncio.to_thread(load_model_endpoint_map_func)
+
+        logger.info(f"✅ 模型{action}: {', '.join(changed) or '(无变更)'}")
+        return {
+            "status": "success",
+            "message": f"已{action} {len(changed)} 个模型",
+            "changed": changed,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"模型归档操作失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def run_auto_archive_task(days: int) -> dict:
+    """扫描并归档超过 days 天未调用的模型（手动触发与后台任务共用）。
+
+    无调用记录的模型（可能是新配置）跳过；已归档的跳过。
+    返回 {"archived": [模型名...], "total_inactive": N, "total_archived": N}
+    """
+    if days <= 0:
+        raise HTTPException(status_code=400, detail="days 必须为正整数")
+
+    async with _MODEL_ENDPOINT_MAP_LOCK:
+        current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+        last_used = build_last_used_map(stats_db, monitoring_service)
+        inactive = find_inactive_models(current_config, last_used, days)
+
+        if inactive:
+            new_config, changed = set_archive_flags(current_config, inactive, True)
+            if changed:
+                await write_json_file(MODEL_ENDPOINT_MAP_FILE, new_config)
+                await asyncio.to_thread(load_model_endpoint_map)
+        else:
+            changed = []
+
+    logger.info(f"[MODEL_ARCHIVE] 自动归档扫描完成: {days}天阈值, 命中 {len(inactive)} 个, 实际归档 {len(changed)} 个")
+    return {
+        "archived": changed,
+        "total_inactive": len(inactive),
+        "total_archived": sum(1 for c in current_config.values() if is_model_archived(c)),
+    }
+
+
+async def trigger_auto_archive(request: Request):
+    """手动触发一次自动归档扫描。body: {"days": 30}（缺省用配置值）"""
+    try:
+        data = await request.json()
+        days = data.get("days")
+        if days is None:
+            days = (CONFIG.get("auto_archive") or {}).get("days", 30)
+        days = int(days)
+    except Exception:
+        raise HTTPException(status_code=400, detail="days 参数无效")
+
+    result = await run_auto_archive_task(days)
+    return {
+        "status": "success",
+        "message": (
+            f"扫描完成：{result['total_inactive']} 个模型超过 {days} 天未调用，"
+            f"本次归档 {len(result['archived'])} 个（当前共已归档 {result['total_archived']} 个）"
+        ),
+        **result,
+        "days": days,
+    }
+
+
+def _get_archive_config() -> dict:
+    """读取自动归档配置（config.jsonc 的 auto_archive 键）"""
+    cfg = CONFIG.get("auto_archive")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "days": int(cfg.get("days", 30) or 30),
+    }
+
+
+async def get_archive_config():
+    """获取自动归档配置"""
+    return _get_archive_config()
+
+
+async def update_archive_config(request: Request):
+    """保存自动归档配置并立即生效。
+
+    body: {"enabled": true, "days": 30}
+    保存后若 enabled=true 立即执行一次扫描，不用等后台任务的下一个周期。
+    """
+    try:
+        data = await request.json()
+        enabled = bool(data.get("enabled", False))
+        days = int(data.get("days", 30) or 30)
+        if days <= 0:
+            raise HTTPException(status_code=400, detail="days 必须为正整数")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="参数无效")
+
+    # 写入 config.jsonc（保留注释、原有格式以及未在面板中编辑的配置项），再热重载
+    existing_config = CONFIG.get("auto_archive")
+    new_config = dict(existing_config) if isinstance(existing_config, dict) else {}
+    new_config.update({"enabled": enabled, "days": days})
+    content = await read_text_file(CONFIG_FILE)
+    updated = await asyncio.to_thread(set_jsonc_value, content, "auto_archive", new_config)
+    await write_text_file(CONFIG_FILE, updated)
+    await asyncio.to_thread(load_config)
+
+    message = f"自动归档已{'启用' if enabled else '停用'}（{days} 天未调用）"
+    logger.info(f"[MODEL_ARCHIVE] 配置更新: {new_config}")
+
+    # 启用后立即执行一次扫描，让配置立刻生效
+    if enabled:
+        try:
+            result = await run_auto_archive_task(days)
+            message += f"，本次扫描归档 {len(result['archived'])} 个模型"
+        except Exception as e:
+            logger.error(f"[MODEL_ARCHIVE] 启用后立即扫描失败: {e}", exc_info=True)
+
+    return {"status": "success", "message": message, "config": new_config}
 
 async def get_config(CONFIG: dict):
     """获取config.jsonc配置"""
@@ -1031,17 +1190,18 @@ async def list_custom_tokenizers_api(list_custom_tokenizers_func):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 async def test_model_keys(
     request: Request,
     direct_api_service,
 ):
-    """测试单个模型配置中的所有 API Key 是否有效（并行发送请求）
-    
+    """测试单个模型配置中的所有 API Key 是否有效（并行发送请求）。
+
     前端从编辑对话框中读取当前配置，POST 到此接口。
     对每个 key 分别发送一次测试请求。
     """
     data = await request.json()
-    
+
     api_keys = data.get("api_keys", [])
     api_base_url = data.get("api_base_url", "").strip()
     model_id = data.get("model_id", "unknown")
@@ -1052,22 +1212,18 @@ async def test_model_keys(
     endpoint_path = data.get("endpoint_path") or default_endpoint
     if endpoint_path and not endpoint_path.startswith("/"):
         endpoint_path = "/" + endpoint_path
-    
+
     is_gemini = api_type == "gemini_native"
     is_responses = api_type == "responses_native"
 
     if not api_keys:
         return {"status": "info", "message": "没有配置任何 API Key", "results": []}
 
-    # 🔧 修复：旧版为每个 key 单独 `aiohttp.ClientSession(TCPConnector(ssl=False))`：
-    #   1. ssl=False 关掉了证书校验，测试流量可被中间人静默劫持（测的是 API Key，
-    #      正是最不该裸奔的东西）；
-    #   2. 每个 key 建一个 session，N 个 key 就是 N 套连接池，用完即弃。
-    # 现在复用全局共享连接池（与真实请求同一条链路，测出来的结果也更有代表性）。
+    # 复用全局共享连接池，与真实请求使用相同的 TLS 校验和连接配置。
     shared_session = _app_state.server.aiohttp_session
 
     async def _test_one_key(key: str, index: int):
-        """测试单个 key"""
+        """测试单个 key。"""
         result = {
             "index": index,
             "key_preview": key[:6] + "..." + key[-4:] if len(key) > 10 else "***",
@@ -1075,12 +1231,12 @@ async def test_model_keys(
             "error": None,
             "response_time_ms": None,
         }
-        
+
         try:
-            t0 = time.time()
-            
+            started_at = time.time()
+
             if is_gemini:
-                gen = direct_api_service.call_gemini_native_api(
+                generator = direct_api_service.call_gemini_native_api(
                     api_key=key,
                     model=model_id,
                     messages=[{"role": "user", "content": "Hi"}],
@@ -1088,22 +1244,20 @@ async def test_model_keys(
                     base_url=api_base_url if api_base_url else None,
                     thinking_config={"includeThoughts": False},
                 )
-                resp = None
-                async for chunk in gen:
-                    resp = chunk
+                response = None
+                async for chunk in generator:
+                    response = chunk
                     break
-                
-                ms = round((time.time() - t0) * 1000, 1)
-                result["response_time_ms"] = ms
-                
-                if resp and "error" not in resp:
+
+                result["response_time_ms"] = round((time.time() - started_at) * 1000, 1)
+                if response and "error" not in response:
                     result["status"] = "ok"
                 else:
-                    err = resp.get("error", {}) if resp else "无响应"
-                    if isinstance(err, dict):
-                        err = str(err.get("message", str(err)))
+                    error = response.get("error", {}) if response else "无响应"
+                    if isinstance(error, dict):
+                        error = str(error.get("message", str(error)))
                     result["status"] = "error"
-                    result["error"] = str(err)[:200]
+                    result["error"] = str(error)[:200]
             else:
                 if not api_base_url:
                     result["status"] = "error"
@@ -1134,56 +1288,67 @@ async def test_model_keys(
                     headers["Authorization"] = f"Bearer {key}"
 
                 async with shared_session.post(
-                    url, json=body, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30, connect=10)
-                ) as resp:
-                    ms = round((time.time() - t0) * 1000, 1)
-                    result["response_time_ms"] = ms
-                    if resp.status == 200:
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30, connect=10),
+                ) as response:
+                    result["response_time_ms"] = round((time.time() - started_at) * 1000, 1)
+                    if response.status == 200:
                         result["status"] = "ok"
                     else:
                         try:
-                            ed = await resp.json()
-                            err_obj = ed.get("error")
-                            if isinstance(err_obj, dict):
-                                em = str(err_obj.get("message", resp.status))
+                            error_data = await response.json()
+                            error_obj = error_data.get("error")
+                            if isinstance(error_obj, dict):
+                                error_message = str(error_obj.get("message", response.status))
                             else:
-                                em = str(err_obj or ed.get("detail") or resp.status)
+                                error_message = str(
+                                    error_obj or error_data.get("detail") or response.status
+                                )
                         except Exception:
-                            em = f"HTTP {resp.status}"
+                            error_message = f"HTTP {response.status}"
                         result["status"] = "error"
-                        result["error"] = em[:200]
+                        result["error"] = error_message[:200]
         except asyncio.TimeoutError:
             result["status"] = "timeout"
             result["error"] = "请求超时（30s）"
-        except Exception as e:
+        except Exception as exc:
             result["status"] = "error"
-            result["error"] = str(e)[:200]
-        
+            result["error"] = str(exc)[:200]
+
         return result
-    
-    tasks = [_test_one_key(k, i) for i, k in enumerate(api_keys)]
-    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+
+    raw_results = await asyncio.gather(
+        *(_test_one_key(key, index) for index, key in enumerate(api_keys)),
+        return_exceptions=True,
+    )
+
     results = []
-    for i, r in enumerate(raw_results):
-        if isinstance(r, Exception):
-            results.append({"index": i, "key_preview": "???", "status": "error", "error": str(r)[:200], "response_time_ms": None})
+    for index, item in enumerate(raw_results):
+        if isinstance(item, Exception):
+            results.append({
+                "index": index,
+                "key_preview": "???",
+                "status": "error",
+                "error": str(item)[:200],
+                "response_time_ms": None,
+            })
         else:
-            results.append(r)
-    
-    ok = sum(1 for r in results if r["status"] == "ok")
-    err = sum(1 for r in results if r["status"] == "error")
-    to = sum(1 for r in results if r["status"] == "timeout")
-    
+            results.append(item)
+
+    ok_count = sum(1 for item in results if item["status"] == "ok")
+    error_count = sum(1 for item in results if item["status"] == "error")
+    timeout_count = sum(1 for item in results if item["status"] == "timeout")
+
     return {
         "status": "done",
         "total": len(results),
-        "ok": ok,
-        "error": err,
-        "timeout": to,
+        "ok": ok_count,
+        "error": error_count,
+        "timeout": timeout_count,
         "results": results,
-        "message": f"测试完成: {ok}/{len(results)} 个 Key 有效"
+        "message": f"测试完成: {ok_count}/{len(results)} 个 Key 有效",
     }
 
 
@@ -1352,6 +1517,26 @@ async def reorder_models_endpoint(request: Request):
     return await reorder_models(request, load_model_endpoint_map)
 
 
+@router.post("/api/admin/models/archive")
+async def set_models_archive_endpoint(request: Request):
+    return await set_models_archive(request, load_model_endpoint_map)
+
+
+@router.post("/api/admin/models/auto_archive")
+async def trigger_auto_archive_endpoint(request: Request):
+    return await trigger_auto_archive(request)
+
+
+@router.get("/api/admin/models/archive_config")
+async def get_archive_config_endpoint():
+    return await get_archive_config()
+
+
+@router.post("/api/admin/models/archive_config")
+async def update_archive_config_endpoint(request: Request):
+    return await update_archive_config(request)
+
+
 @router.get("/api/admin/config")
 async def get_config_endpoint():
     return await get_config(CONFIG)
@@ -1430,10 +1615,9 @@ async def list_custom_tokenizers_endpoint():
     """列出所有自定义分词器"""
     return await list_custom_tokenizers_api(list_custom_tokenizers)
 
-
 @router.post("/api/admin/test_model_keys")
 async def test_model_keys_endpoint(request: Request):
-    """测试单个模型配置中的所有 API Key（并行请求）"""
+    """测试单个模型配置中的所有 API Key（并行请求）。"""
     return await test_model_keys(request, _app_state.server.direct_api_service)
 
 

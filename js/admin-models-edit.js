@@ -262,6 +262,7 @@ function toggleCollapsible(headerElement) {
 
 function showAddModelModal() {
     currentEditingModel = null;
+    currentEditingArchived = false;
     document.getElementById('modal-title').textContent = '添加模型';
     document.getElementById('model-name').value = '';
     document.getElementById('model-name').disabled = false;
@@ -710,6 +711,7 @@ function getImageCompressionConfig() {
 // 复制模型配置
 function copyModel(name, config) {
     currentEditingModel = null;  // 设为null表示新建模式
+    currentEditingArchived = false;  // 复制出的新模型保持活跃，不带归档状态
     document.getElementById('modal-title').textContent = '复制模型';
     document.getElementById('model-name').value = name + '_copy';  // 默认添加_copy后缀
     document.getElementById('model-name').disabled = false;  // 允许修改名称
@@ -729,6 +731,8 @@ function copyModel(name, config) {
 
 function editModel(name, config) {
     currentEditingModel = name;
+    // 编辑保存时保留归档状态（表单里没有归档选项，归档/恢复走列表页按钮）
+    currentEditingArchived = !!((Array.isArray(config) ? config[0] : config) || {}).archived;
     document.getElementById('modal-title').textContent = '编辑模型';
     document.getElementById('model-name').value = name;
     // 允许在编辑时修改模型名称（重命名）
@@ -1199,7 +1203,12 @@ async function saveModel() {
             config.max_tokens = parseInt(lmarenaMaxTokens);
         }
     }
-    
+
+    // 编辑已归档模型时保留归档状态（不因编辑保存而意外解除归档）
+    if (currentEditingArchived) {
+        config.archived = true;
+    }
+
     try {
         // 🔧 修复：编辑模式下改名时传 old_model_name，让后端做重命名而非新增。
         // 旧版不论修改与否都发同名 POST，改名=新增重复模型，旧配置继续存活。

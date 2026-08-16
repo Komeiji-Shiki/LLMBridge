@@ -976,9 +976,15 @@
                 <div class="card">
                     <div class="card-header">
                         <h3>模型列表</h3>
-                        <div style="display: flex; gap: 10px;">
-                            <button class="btn btn-success" onclick="testAllApiKeys()" id="test-all-keys-btn">
-                                🔑 一键测试所有 Key
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-sm" onclick="archiveSelectedModels()" id="archive-selected-btn" disabled title="归档勾选的模型（归档后不可请求、列表折叠）">
+                                🗄️ 归档所选
+                            </button>
+                            <button class="btn btn-sm" onclick="runAutoArchive()" title="按最后调用时间自动归档闲置模型">
+                                🤖 自动归档
+                            </button>
+                            <button class="btn btn-sm" onclick="showArchiveSettings()" title="自动归档设置">
+                                ⚙️ 自动归档设置
                             </button>
                             <button class="btn btn-primary" onclick="showAddModelModal()">
                                 ➕ 添加模型
@@ -986,26 +992,6 @@
                         </div>
                     </div>
                     <div id="models-list"></div>
-                    <!-- 测试结果区域 -->
-                    <div id="test-results-container" style="display: none; margin-top: 20px; padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-strong); max-height: 500px; overflow-y: auto;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                            <h4 id="test-results-title" style="margin: 0;">测试结果</h4>
-                            <button class="btn btn-sm" onclick="document.getElementById('test-results-container').style.display='none'">✕ 关闭</button>
-                        </div>
-                        <div id="test-results-summary"></div>
-                        <table class="table" style="margin-top: 15px;">
-                            <thead>
-                                <tr>
-                                    <th>模型</th>
-                                    <th>模型ID</th>
-                                    <th>状态</th>
-                                    <th>响应时间</th>
-                                    <th>详情</th>
-                                </tr>
-                            </thead>
-                            <tbody id="test-results-body"></tbody>
-                        </table>
-                    </div>
                 </div>
             </div>
 
@@ -1371,6 +1357,39 @@
                     style="width: 100%; height: calc(100vh - 100px); border: none; background: var(--bg-deep);"
                     title="监控面板"
                 ></iframe>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自动归档设置模态框 -->
+    <div id="archive-settings-modal" class="modal">
+        <div class="modal-content" style="max-width: 440px;">
+            <div class="modal-header">
+                <h3>自动归档设置</h3>
+                <button class="close-btn" onclick="closeArchiveSettings()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" id="archive-auto-enabled" style="margin-right: 6px;">启用自动归档
+                    </label>
+                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                        启用后服务每 24 小时检查一次，将超过设定天数未调用的模型自动归档（无调用记录的新模型不会被归档）
+                    </small>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">未调用天数阈值</label>
+                    <input type="number" id="archive-auto-days" class="form-input" min="1" max="3650" value="30">
+                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                        例如 30 = 一个月未调用自动归档；90 = 三个月
+                    </small>
+                </div>
+                <div class="form-group" style="margin-bottom: 0;">
+                    <button class="btn btn-primary" style="width: 100%;" onclick="saveArchiveSettings()">💾 保存设置</button>
+                </div>
+                <div style="margin-top: 10px; text-align: center;">
+                    <button class="btn btn-sm" style="width: 100%;" onclick="runAutoArchive(parseInt(document.getElementById('archive-auto-days')?.value || '30', 10) || 30)">🤖 不保存，立即扫描一次</button>
+                </div>
             </div>
         </div>
     </div>
