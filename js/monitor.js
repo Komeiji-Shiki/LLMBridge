@@ -717,7 +717,8 @@ function formatJson(obj) {
 
 
 function messageContentToText(msg) {
-    if (!msg || msg.content === null || msg.content === undefined) {
+    if (!msg || !msg.content) {
+        // 空字符串/ null / undefined 统一显示占位，避免消息框整块空白
         return '(空消息)';
     }
 
@@ -750,14 +751,101 @@ function messageContentToText(msg) {
     return String(msg.content);
 }
 
+function coalesceResponsesRequestMessages(messages) {
+    if (!Array.isArray(messages)) return [];
+
+    const merged = [];
+    let pendingAssistant = null;
+    const mergedFields = new Set([
+        'role', 'content', 'reasoning_content', 'reasoning_signature', 'tool_calls'
+    ]);
+
+    function flushAssistant() {
+        if (pendingAssistant) {
+            merged.push(pendingAssistant);
+            pendingAssistant = null;
+        }
+    }
+
+    function cloneAssistant(message) {
+        const cloned = { ...message };
+        if (Array.isArray(message.tool_calls)) cloned.tool_calls = [...message.tool_calls];
+        if (Array.isArray(message.reasoning_signature)) {
+            cloned.reasoning_signature = [...message.reasoning_signature];
+        }
+        return cloned;
+    }
+
+    function mergeTextLikeField(target, source, field, separator) {
+        const incoming = source[field];
+        if (incoming === undefined || incoming === null || incoming === '') return;
+        const existing = target[field];
+        if (existing === undefined || existing === null || existing === '') {
+            target[field] = Array.isArray(incoming) ? [...incoming] : incoming;
+        } else if (typeof existing === 'string' && typeof incoming === 'string') {
+            target[field] = `${existing}${separator}${incoming}`;
+        } else {
+            const existingParts = Array.isArray(existing) ? existing : [existing];
+            const incomingParts = Array.isArray(incoming) ? incoming : [incoming];
+            target[field] = [...existingParts, ...incomingParts];
+        }
+    }
+
+    function mergeListField(target, source, field) {
+        const incoming = source[field];
+        if (incoming === undefined || incoming === null) return;
+        const incomingItems = Array.isArray(incoming) ? incoming : [incoming];
+        if (incomingItems.length === 0) return;
+        const existing = target[field];
+        if (existing === undefined || existing === null) {
+            target[field] = Array.isArray(incoming) ? [...incoming] : incoming;
+            return;
+        }
+        const existingItems = Array.isArray(existing) ? existing : [existing];
+        target[field] = [...existingItems, ...incomingItems];
+    }
+
+    for (const message of messages) {
+        if (!message || typeof message !== 'object' || Array.isArray(message) || message.role !== 'assistant') {
+            flushAssistant();
+            merged.push(message);
+            continue;
+        }
+
+        if (!pendingAssistant) {
+            pendingAssistant = cloneAssistant(message);
+            continue;
+        }
+
+        mergeTextLikeField(pendingAssistant, message, 'content', '');
+        mergeTextLikeField(pendingAssistant, message, 'reasoning_content', '\n');
+        mergeListField(pendingAssistant, message, 'reasoning_signature');
+        mergeListField(pendingAssistant, message, 'tool_calls');
+
+        for (const [key, value] of Object.entries(message)) {
+            if (!mergedFields.has(key) && pendingAssistant[key] === undefined) {
+                pendingAssistant[key] = value;
+            }
+        }
+    }
+
+    flushAssistant();
+    return merged;
+}
+
+
 function renderMessageBox(msg) {
     const content = messageContentToText(msg);
     const toolCalls = msg && msg.tool_calls;
     const reasoning = msg && msg.reasoning_content;
+    const reasoningSignature = msg && msg.reasoning_signature;
     let extraBadges = '';
 
     if (reasoning) {
         extraBadges += '<span class="status-badge" style="background:rgba(42,168,255,0.15);color:#7dd3fc;font-size:10px;margin-left:4px;">含思维链</span>';
+    }
+    if (reasoningSignature) {
+        extraBadges += '<span class="status-badge" style="background:rgba(139,92,246,0.15);color:#c4b5fd;font-size:10px;margin-left:4px;">含思维链签名</span>';
     }
     if (toolCalls) {
         extraBadges += '<span class="status-badge" style="background:rgba(245,158,11,0.15);color:#fcd34d;font-size:10px;margin-left:4px;">含工具调用</span>';
@@ -773,6 +861,16 @@ function renderMessageBox(msg) {
             </div>`;
     }
 
+    let signatureHtml = '';
+    if (reasoningSignature) {
+        const sig = typeof reasoningSignature === 'string' ? reasoningSignature : JSON.stringify(reasoningSignature, null, 2);
+        signatureHtml = `
+            <div style="margin-top:6px;padding:8px 10px;background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.2);border-radius:6px;font-size:12px;">
+                <div style="color:#c4b5fd;font-weight:600;margin-bottom:4px;">🔏 思维链签名 (Signature):</div>
+                <div style="white-space:pre-wrap;word-break:break-word;color:#ddd6fe;">${escapeHtml(sig.substring(0, 500))}${sig.length > 500 ? '... (截断)' : ''}</div>
+            </div>`;
+    }
+
     let toolCallsHtml = '';
     if (toolCalls) {
         toolCallsHtml = `
@@ -782,11 +880,19 @@ function renderMessageBox(msg) {
             </div>`;
     }
 
+    const hasStructuredPayload = Boolean(
+        reasoning || reasoningSignature || (Array.isArray(toolCalls) ? toolCalls.length : toolCalls)
+    );
+    const contentHtml = content === '(空消息)' && hasStructuredPayload
+        ? ''
+        : `<div class="message-content">${escapeHtml(content)}</div>`;
+
     return `
         <div class="message-box">
             <div class="message-role">${escapeHtml((msg && msg.role) || 'assistant')}${extraBadges}</div>
             ${reasoningHtml}
-            <div class="message-content">${escapeHtml(content)}</div>
+            ${signatureHtml}
+            ${contentHtml}
             ${toolCallsHtml}
         </div>`;
 }
@@ -840,6 +946,10 @@ async function viewRequestDetails(requestId) {
             }
         }
 
+        const displayRequestMessages = details.mode === 'responses_native_passthrough'
+            ? coalesceResponsesRequestMessages(details.request_messages)
+            : details.request_messages;
+
         modalBody.innerHTML = `
             <div class="detail-section">
                 <h3>基本信息</h3>
@@ -886,16 +996,16 @@ async function viewRequestDetails(requestId) {
                 <h3>请求参数</h3>
                 <div class="detail-item">
                     <div class="detail-label">流式输出:</div>
-                    <div class="detail-value">${details.request_params.streaming ? '是' : '否'}</div>
+                    <div class="detail-value">${(details.request_params.streaming ?? details.request_params.stream) ? '是' : '否'}</div>
                 </div>
                 <pre class="response-content" style="white-space:pre-wrap;word-break:break-word;margin-top:10px;">${renderTruncatable(JSON.stringify(details.request_params, null, 2), 4000)}</pre>
             </div>
             ` : ''}
 
-            ${details.request_messages && details.request_messages.length > 0 ? `
+            ${displayRequestMessages && displayRequestMessages.length > 0 ? `
             <div class="detail-section">
                 <h3>请求消息</h3>
-                ${details.request_messages.map(msg => renderMessageBox(msg)).join('')}
+                ${displayRequestMessages.map(msg => renderMessageBox(msg)).join('')}
             </div>
             ` : ''}
 
