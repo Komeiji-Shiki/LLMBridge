@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from typing import Optional
 from urllib.parse import unquote, quote
 from datetime import datetime
 from fastapi import Request, HTTPException
@@ -168,7 +169,23 @@ async def gemini_native_api(
                 target_url += "&alt=sse"
             
             logger.info(f"[GEMINI_V1BETA] 目标URL: {target_url.replace(key_param, '***') if key_param else target_url}")
-            
+
+            # 🔧 上游协议选择：generate_content（默认，原样透传）或 interactions（新 API 转换）
+            upstream_protocol = endpoint_config.get("upstream_protocol", "generate_content")
+            if upstream_protocol == "interactions":
+                logger.info(f"[GEMINI_V1BETA] 使用 Interactions 上游协议")
+                return await _forward_to_interactions(
+                    gemini_req=gemini_req,
+                    target_model_id=target_model_id,
+                    display_name=display_name,
+                    api_base_url=api_base_url,
+                    api_key=api_key,
+                    is_stream=is_stream,
+                    request_id=request_id,
+                    monitoring_service=monitoring_service,
+                    aiohttp_session=aiohttp_session,
+                )
+
             # 转发请求 - 使用传入的aiohttp_session或创建临时session
             import aiohttp
             
@@ -528,3 +545,251 @@ async def gemini_native_api(
     except Exception as e:
         logger.error(f"[GEMINI_V1BETA] 请求解析失败: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# interactions 上游协议分支（客户端 generateContent 格式 → interactions 上游）
+# ============================================================================
+
+def _estimate_partial_input_tokens(gemini_req: dict) -> int:
+    """失败时估算输入 token（只累加 text 内容，避免 base64 图片污染统计）"""
+    try:
+        contents = gemini_req.get("contents", [])
+        text_chars = 0
+        for c in (contents if isinstance(contents, list) else []):
+            parts = c.get("parts", []) if isinstance(c, dict) else []
+            for p in (parts if isinstance(parts, list) else []):
+                if isinstance(p, dict) and "text" in p:
+                    text_chars += len(str(p["text"]))
+        return text_chars // 4
+    except Exception:
+        return 0
+
+
+async def _forward_to_interactions(
+    gemini_req: dict,
+    target_model_id: str,
+    display_name: str,
+    api_base_url: Optional[str],
+    api_key: Optional[str],
+    is_stream: bool,
+    request_id: str,
+    monitoring_service,
+    aiohttp_session=None,
+):
+    """将 generateContent 请求转换为 interactions 协议并转发上游。
+
+    gemini_v1beta_api 链路的 interactions 分支：
+    - 请求：generateContent 体 → interactions 体（convert_gemini_gc_to_interactions，store=false）
+    - 非流式响应：Interaction → GenerateContentResponse（convert_interactions_to_gemini_gc）
+    - 流式响应：interactions 事件流 → generateContent SSE chunk 流
+
+    注意：api_base_url 在此链路中已包含 /v1beta（与 direct_api 链路的根 URL 约定不同），
+    因此上游端点拼为 {api_base_url}/interactions。
+    """
+    import aiohttp
+    from converters.gemini_interactions import (
+        convert_gemini_gc_to_interactions,
+        convert_interactions_to_gemini_gc,
+        InteractionsToGeminiGCConverter,
+    )
+    from services.direct_api_service import _iter_sse_json_events
+
+    if api_base_url:
+        base_url = api_base_url.rstrip('/')
+    else:
+        base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+    key_param = quote(api_key or "", safe="")
+    target_url = f"{base_url}/interactions?key={key_param}"
+    if is_stream:
+        target_url += "&alt=sse"
+
+    # 转换请求体（model 替换为上游 model_id；store=false 无状态）
+    interactions_req = convert_gemini_gc_to_interactions(gemini_req, target_model_id)
+    interactions_req["stream"] = is_stream
+
+    logger.info(f"[GEMINI_V1BETA] interactions 目标URL: {target_url.replace(key_param, '***')}")
+
+    session = aiohttp_session
+    temp_session = None
+    if not session:
+        logger.warning("[GEMINI_V1BETA] 未提供aiohttp_session，创建临时session（性能较差）")
+        temp_session = aiohttp.ClientSession()
+        session = temp_session
+
+    try:
+        interactions_req_json = await asyncio.to_thread(
+            json.dumps,
+            interactions_req,
+            ensure_ascii=False,
+            separators=(',', ':')
+        )
+        resp = await session.post(
+            target_url,
+            data=interactions_req_json.encode('utf-8'),
+            headers={
+                "Content-Type": "application/json"
+            },
+            timeout=aiohttp.ClientTimeout(
+                total=CONFIG.get("api_call_timeout_seconds", 3000),
+                sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
+                sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
+            )
+        )
+
+        if resp.status != 200:
+            error_text = await resp.text()
+            resp.release()
+            logger.error(f"[GEMINI_V1BETA] 上游API错误: {resp.status} - {error_text}")
+
+            partial_input_tokens = _estimate_partial_input_tokens(gemini_req)
+            monitoring_service.request_end(
+                request_id=request_id, success=False, error=error_text,
+                input_tokens=partial_input_tokens, output_tokens=0)
+            await monitoring_service.broadcast_to_monitors(
+                {"type": "request_end", "request_id": request_id, "success": False})
+
+            if temp_session:
+                await temp_session.close()
+
+            # 尝试解析上游错误 JSON，避免双层 JSON 包裹
+            try:
+                error_obj = json.loads(error_text)
+            except (json.JSONDecodeError, TypeError):
+                error_obj = {"message": error_text}
+            return JSONResponse(
+                status_code=resp.status,
+                content=error_obj if isinstance(error_obj, dict) else {"error": error_obj}
+            )
+
+        if is_stream:
+            async def stream_generator():
+                converter = InteractionsToGeminiGCConverter()
+                accumulated_text = []
+                input_tokens = 0
+                output_tokens = 0
+                request_success = False
+                error_msg = None
+
+                try:
+                    async for event in _iter_sse_json_events(
+                        resp, "GEMINI_V1BETA", parse_bare_json=True):
+                        if event.get("done"):
+                            break
+                        for gc_chunk in converter.feed(event):
+                            if "error" in gc_chunk:
+                                error_msg = str(gc_chunk.get("error"))
+                                yield f"data: {json.dumps({'error': gc_chunk['error']}, ensure_ascii=False)}\n\n".encode('utf-8')
+                                request_success = False
+                                break
+
+                            # 统计：累积文本块；usage 在 interaction.completed 由 converter 暴露
+                            for _cand in gc_chunk.get("candidates") or []:
+                                for _part in (_cand.get("content") or {}).get("parts") or []:
+                                    if "text" in _part:
+                                        accumulated_text.append(_part["text"])
+                            if "usageMetadata" in gc_chunk:
+                                _um = gc_chunk["usageMetadata"]
+                                input_tokens = _um.get("promptTokenCount", input_tokens)
+                                output_tokens = _um.get("candidatesTokenCount", output_tokens) + _um.get("thoughtsTokenCount", 0)
+
+                            yield f"data: {json.dumps(gc_chunk, ensure_ascii=False)}\n\n".encode('utf-8')
+
+                    request_success = (error_msg is None)
+
+                except Exception as e:
+                    logger.error(f"[GEMINI_V1BETA] interactions 流式处理错误: {e}")
+                    error_msg = str(e)
+                finally:
+                    try:
+                        resp.release()
+                    except Exception:
+                        pass
+                    if temp_session:
+                        try:
+                            await temp_session.close()
+                        except Exception:
+                            pass
+
+                    accumulated_text_str = ''.join(accumulated_text)
+                    if output_tokens == 0 and accumulated_text_str:
+                        try:
+                            from modules.token_counter import estimate_tokens
+                            output_tokens = await asyncio.to_thread(
+                                estimate_tokens, accumulated_text_str, model=display_name)
+                            logger.info(f"[GEMINI_V1BETA] 使用tokenizer计算输出: {output_tokens} tokens")
+                        except Exception as token_err:
+                            logger.warning(f"[GEMINI_V1BETA] Token计算失败: {token_err}")
+
+                    monitoring_service.request_end(
+                        request_id=request_id, success=request_success,
+                        input_tokens=input_tokens, output_tokens=output_tokens,
+                        error=error_msg, response_content=accumulated_text_str)
+                    await monitoring_service.broadcast_to_monitors(
+                        {"type": "request_end", "request_id": request_id, "success": request_success})
+
+                    logger.info(f"[GEMINI_V1BETA] interactions 流式请求完成: {request_id[:8]}")
+                    logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
+
+            return StreamingResponse(
+                stream_generator(),
+                media_type="text/event-stream",
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'keep-alive',
+                    'X-Accel-Buffering': 'no'
+                }
+            )
+
+        # 非流式响应
+        response_data = await resp.json()
+        try:
+            resp.release()
+        except Exception:
+            pass
+        if temp_session:
+            await temp_session.close()
+
+        gc_response = convert_interactions_to_gemini_gc(response_data)
+
+        usage_meta = gc_response.get("usageMetadata", {})
+        input_tokens = usage_meta.get("promptTokenCount", 0)
+        output_tokens = usage_meta.get("candidatesTokenCount", 0) + usage_meta.get("thoughtsTokenCount", 0)
+
+        response_text = ""
+        for candidate in gc_response.get("candidates", []):
+            for part in (candidate.get("content") or {}).get("parts", []):
+                if "text" in part:
+                    response_text += part["text"]
+
+        if output_tokens == 0 and response_text:
+            try:
+                from modules.token_counter import estimate_tokens
+                output_tokens = await asyncio.to_thread(
+                    estimate_tokens, response_text, model=display_name)
+            except Exception:
+                pass
+
+        monitoring_service.request_end(
+            request_id=request_id, success=True,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            response_content=response_text)
+        await monitoring_service.broadcast_to_monitors(
+            {"type": "request_end", "request_id": request_id, "success": True})
+
+        return JSONResponse(content=gc_response)
+
+    except Exception as e:
+        # 🔧 脱敏：api_key 拼在 URL 查询串中，异常 str() 可能携带完整 URL
+        safe_err = str(e)
+        if api_key:
+            safe_err = safe_err.replace(api_key, '***')
+            quoted_key = quote(api_key, safe="")
+            if quoted_key != api_key:
+                safe_err = safe_err.replace(quoted_key, '***')
+        logger.error(f"[GEMINI_V1BETA] interactions 请求处理失败: {safe_err}", exc_info=True)
+        monitoring_service.request_end(request_id=request_id, success=False, error=safe_err)
+        await monitoring_service.broadcast_to_monitors(
+            {"type": "request_end", "request_id": request_id, "success": False})
+        raise HTTPException(status_code=500, detail=safe_err)

@@ -1560,6 +1560,17 @@
                         </small>
                     </div>
 
+                    <div class="form-group" id="upstream-protocol-config" style="display: none;">
+                        <label class="form-label">上游协议（Gemini）</label>
+                        <select id="upstream-protocol" class="form-select">
+                            <option value="generate_content">generateContent（旧版，默认）</option>
+                            <option value="interactions">Interactions API（新版，gemini-3 系列推荐）</option>
+                        </select>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            Gemini 上游协议。旧版 <code>generateContent</code> 仍受支持；谷歌新 Interactions API（<code>/v1beta/interactions</code>）支持思考级别、思考签名回传等新特性，gemini-3 系列建议使用。仅 <code>gemini_native</code> 生效。
+                        </small>
+                    </div>
+
                     <div class="form-group">
                         <label class="form-label">模型端点（可选）</label>
                         <input type="text" id="endpoint-path" class="form-input" placeholder="/chat/completions">

@@ -162,6 +162,7 @@
     "api_key_strategy": "可选，API Key 轮询策略：round_robin（默认，逐key轮询）或 sticky（粘性轮询：先用第一个key，额度不足时切换并冷却48小时）",
     "api_key_cooldown_seconds": "可选，sticky 策略的冷却时长（秒），默认 172800（48小时）",
     "endpoint_path": "可选，上游模型端点路径。默认 /chat/completions，responses_native 默认 /responses，anthropic_native 默认 /messages",
+    "upstream_protocol": "可选，仅 gemini_native 生效：generate_content（默认，旧版 generateContent 协议）或 interactions（谷歌新 Interactions API，上游端点 /v1beta/interactions）。gemini-3 系列建议 interactions",
     "model_id": "发送给第三方API的实际模型ID",
     "display_name": "在统计中显示的模型名称",
     

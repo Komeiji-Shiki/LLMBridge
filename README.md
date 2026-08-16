@@ -299,7 +299,8 @@ total_cost = (uncached_input × input_price + cached_input × cached_input_price
 | `/v1/chat/completions` | POST | OpenAI 兼容聊天接口 |
 | `/v1/responses` | POST | OpenAI Responses API 无状态兼容接口（文本/图片/工具/流式） |
 | `/v1/messages` | POST | Anthropic Claude 兼容接口 |
-| `/v1beta/models/{model}:generateContent` | POST | Gemini Native API 接口 |
+| `/v1beta/models/{model}:generateContent` | POST | Gemini Native API 接口（模型配置 `upstream_protocol: interactions` 时自动转换为谷歌新 Interactions API） |
+| `/v1beta/models/{model}:streamGenerateContent` | POST | Gemini Native API 流式接口 |
 | `/v1/models` | GET | 模型列表 |
 | `/admin` | GET | 管理面板 |
 | `/api/admin/token_stats` | GET | Token 统计数据 |

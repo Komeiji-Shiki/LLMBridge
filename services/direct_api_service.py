@@ -21,6 +21,7 @@ from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 from urllib.parse import quote
 
 from core.config_loader import CONFIG
+from converters.gemini_interactions import build_interactions_request_body
 
 logger = logging.getLogger(__name__)
 
@@ -1006,7 +1007,157 @@ class DirectAPIService:
                     "type": "internal_error"
                 }
             }
-    
+
+    async def call_gemini_interactions_api(
+        self,
+        api_key: str,
+        model: str,
+        messages: list,
+        stream: bool = False,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        base_url: Optional[str] = None,
+        thinking_config: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """调用 Gemini Interactions API（新协议 /v1beta/interactions）。
+
+        与 call_gemini_native_api 平行：OpenAI 消息在内部转换为 interactions
+        无状态步骤数组（store=false，签名前缀匹配注入由转换器完成），
+        流式请求带 alt=sse，事件逐个 yield（含 event_type 字段的 data JSON）。
+
+        Args:
+            api_key: Google API密钥
+            model: 上游模型ID
+            messages: OpenAI格式的消息列表（需要转换）
+            stream: 是否流式响应
+            temperature: 温度参数
+            top_p: top_p参数（interactions 未确认支持，转换器忽略）
+            max_tokens: 最大token数
+            base_url: 自定义API地址（主机根，如 https://generativelanguage.googleapis.com
+                或 http://127.0.0.1:7861；缺省使用Google官方地址）
+            thinking_config: 思维链配置（thinkingLevel 映射为 thinking_level）
+            tools: OpenAI 格式的 tools 列表（interactions 同构，直接透传）
+            tool_choice: OAI tool_choice（仅 "none" 受支持，不传 tools）
+            extra_body: 额外的请求体键值对（直接合并到 request_body）
+
+        Yields:
+            流式：interactions SSE 事件 dict；非流式：interaction 对象 dict；
+            出错时：_normalize_error_for_passthrough 格式的错误 dict
+        """
+        # 构建 Interactions API URL（key 拼接进查询串前做 URL 编码）
+        key_param = quote(api_key or "", safe="")
+        sse_param = "&alt=sse" if stream else ""
+
+        def _redact(text: str) -> str:
+            """脱敏：key 以明文与 URL 编码两种形态出现在 URL/异常消息中"""
+            if api_key:
+                text = text.replace(api_key, '***')
+                if key_param != api_key:
+                    text = text.replace(key_param, '***')
+            return text
+
+        if base_url:
+            endpoint = f"{base_url.rstrip('/')}/v1beta/interactions?key={key_param}{sse_param}"
+        else:
+            endpoint = f"https://generativelanguage.googleapis.com/v1beta/interactions?key={key_param}{sse_param}"
+
+        request_body = build_interactions_request_body(
+            model=model,
+            messages=messages,
+            stream=stream,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            thinking_config=thinking_config,
+            tools=tools,
+            tool_choice=tool_choice,
+            extra_body=extra_body,
+        )
+
+        logger.info(f"[GEMINI_INTERACTIONS] 调用Interactions API: {_redact(endpoint)}")
+        logger.info(f"[GEMINI_INTERACTIONS] 模型: {model}, 流式: {stream}, 步骤数: {len(request_body.get('input', []))}")
+        if request_body.get("system_instruction"):
+            logger.info(f"[GEMINI_INTERACTIONS] system_instruction: {len(request_body['system_instruction'])} 字符")
+        if request_body.get("generation_config"):
+            logger.info(f"[GEMINI_INTERACTIONS] generation_config: {request_body['generation_config']}")
+
+        try:
+            request_body_json = await asyncio.to_thread(
+                json.dumps,
+                request_body,
+                ensure_ascii=False,
+                separators=(',', ':')
+            )
+            async with self.session.post(
+                endpoint,
+                data=request_body_json.encode('utf-8'),
+                headers={
+                    "Content-Type": "application/json"
+                },
+                timeout=aiohttp.ClientTimeout(
+                    total=CONFIG.get("api_call_timeout_seconds", 3000),
+                    sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
+                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
+                )
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"[GEMINI_INTERACTIONS] API调用失败: {response.status} - {error_text}")
+                    try:
+                        error_json = json.loads(error_text)
+                        yield _normalize_error_for_passthrough(
+                            error_json, response.status)
+                    except json.JSONDecodeError:
+                        yield {
+                            "error": {
+                                "message": error_text,
+                                "type": "api_error",
+                                "code": response.status
+                            }
+                        }
+                    return
+
+                if stream:
+                    # 流式：复用公共 SSE 解析器。interactions 官方是 event:+data: 双行，
+                    # event: 行会被跳过；parse_bare_json=True 兼容反代发裸 JSON 行。
+                    async for event in _iter_sse_json_events(
+                        response, "GEMINI_INTERACTIONS", parse_bare_json=True):
+                        yield event
+                else:
+                    response_data = await response.json()
+                    yield response_data
+
+        except asyncio.TimeoutError:
+            logger.error(f"[GEMINI_INTERACTIONS] 请求超时 (模型: {model})")
+            yield {
+                "error": {
+                    "message": "Request timed out while waiting for Gemini Interactions API response",
+                    "type": "timeout_error"
+                }
+            }
+        except aiohttp.ClientError as e:
+            safe_err = _redact(str(e))
+            logger.error(f"[GEMINI_INTERACTIONS] 网络请求失败: {safe_err}")
+            yield {
+                "error": {
+                    "message": f"Network error: {safe_err}",
+                    "type": "network_error"
+                }
+            }
+        except Exception as e:
+            safe_err = _redact(str(e))
+            logger.error(f"[GEMINI_INTERACTIONS] 未知错误: {safe_err}", exc_info=True)
+            yield {
+                "error": {
+                    "message": f"Unexpected error: {safe_err}",
+                    "type": "internal_error"
+                }
+            }
+
     def convert_gemini_response_to_openai(
         self,
         gemini_response: Dict[str, Any],

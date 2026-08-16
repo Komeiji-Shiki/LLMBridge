@@ -281,6 +281,7 @@ function showAddModelModal() {
     document.getElementById('api-key-cooldown').value = '';
     document.getElementById('api-key-cooldown-group').style.display = 'none';
     document.getElementById('endpoint-path').value = '/chat/completions';
+    document.getElementById('upstream-protocol').value = 'generate_content';
     document.getElementById('responses-store').checked = false;
     document.getElementById('responses-reasoning-summary').value = '';
     document.getElementById('model-id').value = '';
@@ -774,6 +775,8 @@ function fillModelForm(config) {
         document.getElementById('model-id').value = config.model_id || '';
         document.getElementById('display-name').value = config.display_name || '';
         document.getElementById('endpoint-path').value = config.endpoint_path || '/chat/completions';
+        // Gemini 上游协议（generate_content 为默认值）
+        document.getElementById('upstream-protocol').value = config.upstream_protocol || 'generate_content';
         document.getElementById('passthrough').checked = config.passthrough !== false;
         document.getElementById('force-stream').value = config.force_stream !== undefined ? String(config.force_stream) : '';
         document.getElementById('convert-system-to-user').checked = config.convert_system_to_user || false;
@@ -1045,6 +1048,11 @@ async function saveModel() {
                 config.endpoint_path = normalizedEndpointPath;
             }
         }
+
+        // Gemini 上游协议：仅 gemini_native 且选择 interactions 时写入（generate_content 为默认值）
+        if (apiType === 'gemini_native' && document.getElementById('upstream-protocol').value === 'interactions') {
+            config.upstream_protocol = 'interactions';
+        }
         
         // 🔧 只在有值时添加api_base_url字段
         if (apiBaseUrl) {
@@ -1283,6 +1291,9 @@ function toggleThinkingOptions() {
     // verbosity 对 OpenAI Chat 和 Responses 原生上游均可转换
     const verbosityDiv = document.getElementById('verbosity-config');
     if (verbosityDiv) verbosityDiv.style.display = (apiType === 'direct_api' || apiType === 'responses_native') ? 'block' : 'none';
+    // Gemini 上游协议选择仅 gemini_native 显示
+    const upstreamProtocolDiv = document.getElementById('upstream-protocol-config');
+    if (upstreamProtocolDiv) upstreamProtocolDiv.style.display = (apiType === 'gemini_native') ? 'block' : 'none';
     // OAI 兼容 thinking.type / output_config.effort 仅对 OpenAI 兼容上游显示，
     // Anthropic 原生格式下由顶层 enable_thinking 控制，显示这两项只会误导
     const oaiThinkingTypeDiv = document.getElementById('oai-thinking-type-config');

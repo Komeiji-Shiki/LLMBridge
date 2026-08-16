@@ -13,6 +13,10 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
+from converters.gemini_interactions import (
+    InteractionsStreamConverter,
+    convert_interactions_to_openai_response,
+)
 from ._direct_api_utils import (
     append_tool_call_delta,
     build_response_message,
@@ -161,23 +165,45 @@ async def handle_gemini_native_direct(
         is_stream = openai_req.get("stream", False)
         logger.info(f"[GEMINI_NATIVE] 模型映射: '{model_name}' -> '{target_model_id}'")
 
-        gemini_generator = direct_api_service.call_gemini_native_api(
-            api_key=api_key,
-            model=target_model_id,
-            messages=openai_req.get("messages", []),
-            stream=is_stream,
-            temperature=openai_req.get("temperature"),
-            top_p=openai_req.get("top_p"),
-            max_tokens=(
-                openai_req.get("max_tokens")
-                or openai_req.get("max_completion_tokens")
-            ),
-            base_url=api_base_url,
-            thinking_config=thinking_config,
-            tools=openai_req.get("tools"),
-            tool_choice=openai_req.get("tool_choice"),
-            extra_body=extra_kwargs if extra_kwargs else None,
-        )
+        # 🔧 上游协议选择：generate_content（默认，旧行为）或 interactions（新 API）
+        upstream_protocol = endpoint_config.get("upstream_protocol", "generate_content")
+        if upstream_protocol == "interactions":
+            logger.info(f"[GEMINI_NATIVE] 使用 Interactions 上游协议")
+            gemini_generator = direct_api_service.call_gemini_interactions_api(
+                api_key=api_key,
+                model=target_model_id,
+                messages=openai_req.get("messages", []),
+                stream=is_stream,
+                temperature=openai_req.get("temperature"),
+                top_p=openai_req.get("top_p"),
+                max_tokens=(
+                    openai_req.get("max_tokens")
+                    or openai_req.get("max_completion_tokens")
+                ),
+                base_url=api_base_url,
+                thinking_config=thinking_config,
+                tools=openai_req.get("tools"),
+                tool_choice=openai_req.get("tool_choice"),
+                extra_body=extra_kwargs if extra_kwargs else None,
+            )
+        else:
+            gemini_generator = direct_api_service.call_gemini_native_api(
+                api_key=api_key,
+                model=target_model_id,
+                messages=openai_req.get("messages", []),
+                stream=is_stream,
+                temperature=openai_req.get("temperature"),
+                top_p=openai_req.get("top_p"),
+                max_tokens=(
+                    openai_req.get("max_tokens")
+                    or openai_req.get("max_completion_tokens")
+                ),
+                base_url=api_base_url,
+                thinking_config=thinking_config,
+                tools=openai_req.get("tools"),
+                tool_choice=openai_req.get("tool_choice"),
+                extra_body=extra_kwargs if extra_kwargs else None,
+            )
 
         first_chunk_timeout = TimeoutDefaults.FIRST_CHUNK_TIMEOUT
         if CONFIG:
@@ -454,8 +480,268 @@ async def handle_gemini_native_direct(
                         except Exception as yield_err:
                             logger.debug(f"[GEMINI_NATIVE] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
 
+            async def interactions_stream_generator():
+                """Interactions 上游流式生成器：事件流 → OpenAI chunk 流。
+
+                与 gemini_stream_generator 骨架一致（keep-alive/首块超时/取消/
+                统计/尾部块），区别在于转换部分：interactions 是事件流（状态机
+                InteractionsStreamConverter 跨事件维护 step 状态）。
+                """
+                content_parts = []
+                reasoning_parts = []
+                tool_call_accumulator = {}
+                input_tokens = 0
+                output_tokens = 0
+                total_tokens = 0
+                upstream_usage = None  # interactions usage（interaction.completed 事件携带）
+                request_success = False
+                stream_completed = False
+                error_msg = None
+                client_gone = False
+                tail_suppressed = False
+                converter = InteractionsStreamConverter(display_name, request_id)
+
+                try:
+                    api_task = asyncio.create_task(anext(gemini_generator))
+                    heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
+                    first_chunk_wait_start = time.time()
+
+                    while not api_task.done():
+                        yield f": keep-alive {int(time.time())}\n\n"
+                        if time.time() - first_chunk_wait_start > first_chunk_timeout:
+                            api_task.cancel()
+                            try:
+                                await api_task
+                            except asyncio.CancelledError:
+                                pass
+                            error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
+                            logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
+                            partial_input_tokens = 0
+                            try:
+                                partial_input_tokens = estimate_message_tokens_func(
+                                    openai_req.get('messages', []), model=display_name)
+                            except Exception as token_err:
+                                logger.warning(f"[GEMINI_INTERACTIONS] 超时时输入token计算失败: {token_err}")
+                            cost_info = direct_api_service.calculate_cost(
+                                input_tokens=partial_input_tokens, output_tokens=0,
+                                pricing=pricing_config) if pricing_config else {}
+                            if cost_info.get("total_cost"):
+                                logger.info(f"[GEMINI_INTERACTIONS] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+                            monitoring_service.request_end(
+                                request_id=request_id, success=False, error=error_msg,
+                                input_tokens=partial_input_tokens, output_tokens=0,
+                                cost_info=cost_info, full_messages=full_messages)
+                            await monitoring_service.broadcast_to_monitors(
+                                {"type": "request_end", "request_id": request_id, "success": False})
+                            yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
+                            tail_suppressed = True
+                            return
+                        try:
+                            await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
+                        except asyncio.TimeoutError:
+                            continue
+
+                    try:
+                        first_event = await api_task
+                    except StopAsyncIteration:
+                        error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
+                        logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
+                        partial_input_tokens = 0
+                        try:
+                            partial_input_tokens = estimate_message_tokens_func(
+                                openai_req.get('messages', []), model=display_name)
+                        except Exception as token_err:
+                            logger.warning(f"[GEMINI_INTERACTIONS] 空响应时输入token计算失败: {token_err}")
+                        cost_info = direct_api_service.calculate_cost(
+                            input_tokens=partial_input_tokens, output_tokens=0,
+                            pricing=pricing_config) if pricing_config else {}
+                        if cost_info.get("total_cost"):
+                            logger.info(f"[GEMINI_INTERACTIONS] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+                        monitoring_service.request_end(
+                            request_id=request_id, success=False, error=error_msg,
+                            input_tokens=partial_input_tokens, output_tokens=0,
+                            cost_info=cost_info, full_messages=full_messages)
+                        await monitoring_service.broadcast_to_monitors(
+                            {"type": "request_end", "request_id": request_id, "success": False})
+                        yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'empty_response'}}, ensure_ascii=False)}\n\n"
+                        tail_suppressed = True
+                        return
+
+                    if "error" in first_event:
+                        error_detail = first_event.get("error")
+                        logger.error(f"[GEMINI_INTERACTIONS] 流式预读检测到错误: {first_event}")
+                        partial_input_tokens = 0
+                        try:
+                            partial_input_tokens = estimate_message_tokens_func(
+                                openai_req.get('messages', []), model=display_name)
+                        except Exception as token_err:
+                            logger.warning(f"[GEMINI_INTERACTIONS] 错误时输入token计算失败: {token_err}")
+                        cost_info = direct_api_service.calculate_cost(
+                            input_tokens=partial_input_tokens, output_tokens=0,
+                            pricing=pricing_config) if pricing_config else {}
+                        if cost_info.get("total_cost"):
+                            logger.info(f"[GEMINI_INTERACTIONS] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+                        monitoring_service.request_end(
+                            request_id=request_id, success=False, error=str(error_detail),
+                            input_tokens=partial_input_tokens, output_tokens=0,
+                            cost_info=cost_info, full_messages=full_messages)
+                        await monitoring_service.broadcast_to_monitors(
+                            {"type": "request_end", "request_id": request_id, "success": False})
+                        yield f"data: {json.dumps({'error': first_event['error']}, ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        tail_suppressed = True
+                        return
+
+                    # 预读的第一个事件
+                    for openai_chunk in converter.feed(first_event):
+                        if "error" in openai_chunk:
+                            error_msg = str(openai_chunk.get("error"))
+                            yield f"data: {json.dumps({'error': openai_chunk['error']}, ensure_ascii=False)}\n\n"
+                            tail_suppressed = True
+                            return
+
+                        delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
+                        delta_content = delta.get("content", "")
+                        delta_reasoning = delta.get("reasoning_content", "")
+                        delta_tool_calls = delta.get("tool_calls")
+
+                        if delta_content:
+                            content_parts.append(delta_content)
+                        if delta_reasoning:
+                            reasoning_parts.append(delta_reasoning)
+                        if delta_tool_calls:
+                            append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
+
+                        if "usage" in openai_chunk and openai_chunk["usage"]:
+                            usage = openai_chunk["usage"]
+                            input_tokens = usage.get("prompt_tokens", 0)
+                            output_tokens = usage.get("completion_tokens", 0)
+                            total_tokens = usage.get("total_tokens", 0)
+                            upstream_usage = converter.usage
+
+                        yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+
+                    # 继续处理剩余事件流
+                    async for event in gemini_generator:
+                        openai_chunks = converter.feed(event)
+                        if openai_chunks and "error" in openai_chunks[0]:
+                            error_msg = str(openai_chunks[0].get("error"))
+                            yield f"data: {json.dumps({'error': openai_chunks[0]['error']}, ensure_ascii=False)}\n\n"
+                            break
+
+                        for openai_chunk in openai_chunks:
+                            delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
+                            delta_content = delta.get("content", "")
+                            delta_reasoning = delta.get("reasoning_content", "")
+                            delta_tool_calls = delta.get("tool_calls")
+
+                            if delta_content:
+                                content_parts.append(delta_content)
+                            if delta_reasoning:
+                                reasoning_parts.append(delta_reasoning)
+                            if delta_tool_calls:
+                                append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
+
+                            if "usage" in openai_chunk and openai_chunk["usage"]:
+                                usage = openai_chunk["usage"]
+                                input_tokens = usage.get("prompt_tokens", 0)
+                                output_tokens = usage.get("completion_tokens", 0)
+                                total_tokens = usage.get("total_tokens", 0)
+                                upstream_usage = converter.usage
+
+                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+
+                    stream_completed = (error_msg is None)
+                    request_success = (error_msg is None)
+
+                except GeneratorExit:
+                    client_gone = True
+                    if stream_completed or (content_parts and not error_msg):
+                        request_success = True
+                        logger.info(f"[GEMINI_INTERACTIONS] 生成器被关闭，但流已完成或有有效输出，标记为成功")
+                    else:
+                        logger.warning(f"[GEMINI_INTERACTIONS] 生成器被提前关闭")
+                    raise
+                except asyncio.CancelledError:
+                    client_gone = True
+                    if stream_completed or (content_parts and not error_msg):
+                        request_success = True
+                        logger.info(f"[GEMINI_INTERACTIONS] 请求被取消，但流已完成或有有效输出，标记为成功")
+                    else:
+                        logger.warning(f"[GEMINI_INTERACTIONS] 请求被取消，客户端断开")
+                    raise
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"[GEMINI_INTERACTIONS] 流式处理失败: {e}", exc_info=True)
+                finally:
+                    if input_tokens == 0 or output_tokens == 0:
+                        try:
+                            if input_tokens == 0:
+                                input_tokens = await asyncio.shield(estimate_message_tokens_non_blocking(
+                                    estimate_message_tokens_func,
+                                    openai_req.get('messages', []), display_name))
+                            if output_tokens == 0:
+                                accumulated_content = ''.join(content_parts)
+                                accumulated_reasoning = ''.join(reasoning_parts)
+                                total_output_text = accumulated_reasoning + accumulated_content
+                                if total_output_text:
+                                    output_tokens = await asyncio.shield(estimate_text_tokens_non_blocking(
+                                        estimate_tokens_func, total_output_text, display_name))
+                        except asyncio.CancelledError:
+                            logger.warning(f"[GEMINI_INTERACTIONS] Token 估算被取消，使用上游返回的 usage 值")
+                        except Exception as token_error:
+                            logger.error(f"[GEMINI_INTERACTIONS] Token计算失败: {token_error}")
+
+                    cost_info = direct_api_service.calculate_cost(
+                        input_tokens=input_tokens, output_tokens=output_tokens,
+                        cached_tokens=0,
+                        pricing=pricing_config) if pricing_config else {}
+                    final_content = ''.join(content_parts)
+                    final_reasoning = ''.join(reasoning_parts)
+                    final_tool_calls = finalize_tool_calls(tool_call_accumulator)
+
+                    monitoring_service.request_end(
+                        request_id=request_id, success=request_success,
+                        input_tokens=input_tokens, output_tokens=output_tokens,
+                        cached_tokens=0, error=error_msg,
+                        response_content=final_content,
+                        reasoning_content=final_reasoning,
+                        cost_info=cost_info, full_messages=full_messages,
+                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
+                        response_tool_calls=final_tool_calls,
+                        upstream_usage=upstream_usage)
+
+                    await monitoring_service.broadcast_to_monitors({
+                        "type": "request_end", "request_id": request_id,
+                        "success": request_success})
+
+                    logger.info(f"[GEMINI_INTERACTIONS] 流式请求完成: {request_id[:8]}")
+                    logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
+                    if cost_info.get("total_cost"):
+                        logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+
+                    if not client_gone and not tail_suppressed:
+                        try:
+                            final_total_tokens = total_tokens if total_tokens > 0 else (input_tokens + output_tokens)
+                            usage_final_chunk = {
+                                "id": f"chatcmpl-{request_id}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": display_name,
+                                "choices": [],
+                                "usage": {
+                                    "prompt_tokens": input_tokens,
+                                    "completion_tokens": output_tokens,
+                                    "total_tokens": final_total_tokens
+                                }
+                            }
+                            yield f"data: {json.dumps(usage_final_chunk, ensure_ascii=False)}\n\n"
+                            yield "data: [DONE]\n\n"
+                        except Exception as yield_err:
+                            logger.debug(f"[GEMINI_INTERACTIONS] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
+
             return StreamingResponse(
-                gemini_stream_generator(),
+                interactions_stream_generator() if upstream_protocol == "interactions" else gemini_stream_generator(),
                 media_type="text/event-stream",
                 headers={
                     'Cache-Control': 'no-cache',
@@ -495,8 +781,12 @@ async def handle_gemini_native_direct(
                 mapped_status_code = map_upstream_error_to_status_code(gemini_response, default_status_code=500)
                 return JSONResponse(status_code=mapped_status_code, content=gemini_response)
 
-            openai_response = direct_api_service.convert_gemini_response_to_openai(
-                gemini_response, display_name, request_id, is_stream_chunk=False)
+            if upstream_protocol == "interactions":
+                openai_response = convert_interactions_to_openai_response(
+                    gemini_response, display_name, request_id)
+            else:
+                openai_response = direct_api_service.convert_gemini_response_to_openai(
+                    gemini_response, display_name, request_id, is_stream_chunk=False)
 
             response_content = ""
             reasoning_content = ""
@@ -507,7 +797,11 @@ async def handle_gemini_native_direct(
                 reasoning_content = message.get("reasoning_content", "")
                 response_tool_calls = message.get("tool_calls")
 
-            _meta = gemini_response.get("usageMetadata")
+            if upstream_protocol == "interactions":
+                # interactions 的 usage 在 Interaction 顶层（total_input_tokens 等）
+                _meta = gemini_response.get("usage")
+            else:
+                _meta = gemini_response.get("usageMetadata")
             upstream_usage = _meta if isinstance(_meta, dict) and _meta else None
 
             usage = openai_response.get("usage", {})
