@@ -1021,6 +1021,8 @@ class DirectAPIService:
         thinking_config: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
+        response_format: Optional[Any] = None,
+        stop_sequences: Optional[List[str]] = None,
         extra_body: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """调用 Gemini Interactions API（新协议 /v1beta/interactions）。
@@ -1040,30 +1042,29 @@ class DirectAPIService:
             base_url: 自定义API地址（主机根，如 https://generativelanguage.googleapis.com
                 或 http://127.0.0.1:7861；缺省使用Google官方地址）
             thinking_config: 思维链配置（thinkingLevel 映射为 thinking_level）
-            tools: OpenAI 格式的 tools 列表（interactions 同构，直接透传）
+            tools: OpenAI 格式的 tools 列表（转换为 Interactions 扁平工具定义）
             tool_choice: OAI tool_choice（仅 "none" 受支持，不传 tools）
+            response_format: OpenAI 结构化输出配置
+            stop_sequences: OpenAI stop 列表，映射为 generation_config.stop_sequences
             extra_body: 额外的请求体键值对（直接合并到 request_body）
 
         Yields:
             流式：interactions SSE 事件 dict；非流式：interaction 对象 dict；
             出错时：_normalize_error_for_passthrough 格式的错误 dict
         """
-        # 构建 Interactions API URL（key 拼接进查询串前做 URL 编码）
-        key_param = quote(api_key or "", safe="")
-        sse_param = "&alt=sse" if stream else ""
+        # Interactions 官方使用 x-goog-api-key 请求头。配置可以填写主机根地址，
+        # 也可以填写已经带 /v1beta 的地址，统一避免重复版本路径。
+        sse_param = "?alt=sse" if stream else ""
 
         def _redact(text: str) -> str:
-            """脱敏：key 以明文与 URL 编码两种形态出现在 URL/异常消息中"""
-            if api_key:
-                text = text.replace(api_key, '***')
-                if key_param != api_key:
-                    text = text.replace(key_param, '***')
-            return text
+            """脱敏异常消息中的 API key。"""
+            return text.replace(api_key, "***") if api_key else text
 
-        if base_url:
-            endpoint = f"{base_url.rstrip('/')}/v1beta/interactions?key={key_param}{sse_param}"
+        configured_base = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
+        if configured_base.endswith("/v1beta"):
+            endpoint = f"{configured_base}/interactions{sse_param}"
         else:
-            endpoint = f"https://generativelanguage.googleapis.com/v1beta/interactions?key={key_param}{sse_param}"
+            endpoint = f"{configured_base}/v1beta/interactions{sse_param}"
 
         request_body = build_interactions_request_body(
             model=model,
@@ -1075,6 +1076,8 @@ class DirectAPIService:
             thinking_config=thinking_config,
             tools=tools,
             tool_choice=tool_choice,
+            response_format=response_format,
+            stop_sequences=stop_sequences,
             extra_body=extra_body,
         )
 
@@ -1092,12 +1095,15 @@ class DirectAPIService:
                 ensure_ascii=False,
                 separators=(',', ':')
             )
+            headers = {
+                "Content-Type": "application/json"
+            }
+            if api_key:
+                headers["x-goog-api-key"] = api_key
             async with self.session.post(
                 endpoint,
                 data=request_body_json.encode('utf-8'),
-                headers={
-                    "Content-Type": "application/json"
-                },
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(
                     total=CONFIG.get("api_call_timeout_seconds", 3000),
                     sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),

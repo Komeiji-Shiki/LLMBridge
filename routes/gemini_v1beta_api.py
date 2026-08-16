@@ -595,21 +595,21 @@ async def _forward_to_interactions(
     )
     from services.direct_api_service import _iter_sse_json_events
 
-    if api_base_url:
-        base_url = api_base_url.rstrip('/')
+    configured_base = (api_base_url or "https://generativelanguage.googleapis.com").rstrip('/')
+    if configured_base.endswith("/v1beta"):
+        base_url = configured_base
     else:
-        base_url = "https://generativelanguage.googleapis.com/v1beta"
+        base_url = f"{configured_base}/v1beta"
 
-    key_param = quote(api_key or "", safe="")
-    target_url = f"{base_url}/interactions?key={key_param}"
+    target_url = f"{base_url}/interactions"
     if is_stream:
-        target_url += "&alt=sse"
+        target_url += "?alt=sse"
 
     # 转换请求体（model 替换为上游 model_id；store=false 无状态）
     interactions_req = convert_gemini_gc_to_interactions(gemini_req, target_model_id)
     interactions_req["stream"] = is_stream
 
-    logger.info(f"[GEMINI_V1BETA] interactions 目标URL: {target_url.replace(key_param, '***')}")
+    logger.info(f"[GEMINI_V1BETA] interactions 目标URL: {target_url}")
 
     session = aiohttp_session
     temp_session = None
@@ -625,12 +625,15 @@ async def _forward_to_interactions(
             ensure_ascii=False,
             separators=(',', ':')
         )
+        interactions_headers = {
+            "Content-Type": "application/json"
+        }
+        if api_key:
+            interactions_headers["x-goog-api-key"] = api_key
         resp = await session.post(
             target_url,
             data=interactions_req_json.encode('utf-8'),
-            headers={
-                "Content-Type": "application/json"
-            },
+            headers=interactions_headers,
             timeout=aiohttp.ClientTimeout(
                 total=CONFIG.get("api_call_timeout_seconds", 3000),
                 sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
@@ -781,7 +784,7 @@ async def _forward_to_interactions(
         return JSONResponse(content=gc_response)
 
     except Exception as e:
-        # 🔧 脱敏：api_key 拼在 URL 查询串中，异常 str() 可能携带完整 URL
+        # 脱敏：代理或异常信息可能回显认证 key，即使请求本身通过 header 发送
         safe_err = str(e)
         if api_key:
             safe_err = safe_err.replace(api_key, '***')

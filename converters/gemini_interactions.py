@@ -124,7 +124,7 @@ def match_and_inject_thought_signatures(reasoning_content: str) -> List[dict]:
             steps.append({
                 "type": "thought",
                 "signature": signature,
-                "summary": {"type": "text", "text": fragment},
+                "summary": [{"type": "text", "text": fragment}],
             })
             remaining = remaining[len(fragment):]
         elif fragment.startswith(remaining):
@@ -132,7 +132,7 @@ def match_and_inject_thought_signatures(reasoning_content: str) -> List[dict]:
             steps.append({
                 "type": "thought",
                 "signature": signature,
-                "summary": {"type": "text", "text": remaining},
+                "summary": [{"type": "text", "text": remaining}],
             })
             remaining = ""
             break
@@ -152,11 +152,16 @@ def match_and_inject_thought_signatures(reasoning_content: str) -> List[dict]:
 # ============================================================================
 
 def _extract_text_from_content_block(block: Any) -> str:
-    """从 interactions 内容块（TextContent/ImageContent 等）提取文本"""
+    """从 interactions 内容块（TextContent/ImageContent 等）提取文本。
+
+    `summary` 在最新 Interactions API 中是内容块数组，旧版本/部分代理
+    仍可能返回单个对象，因此这里统一支持两种形态。
+    """
+    if isinstance(block, list):
+        return "".join(_extract_text_from_content_block(item) for item in block)
     if isinstance(block, dict):
         if block.get("type") == "text":
             return str(block.get("text", ""))
-        # ImageContent 等媒体块无文本
     return ""
 
 
@@ -168,7 +173,7 @@ def _oai_part_to_interactions_block(item: Any) -> Optional[dict]:
         return None
     item_type = item.get("type")
 
-    if item_type == "text":
+    if item_type in ("text", "input_text"):
         text = item.get("text", "")
         return {"type": "text", "text": text} if text else None
 
@@ -215,6 +220,47 @@ def _oai_part_to_interactions_block(item: Any) -> Optional[dict]:
     return None
 
 
+
+def _oai_tool_to_interactions_tool(tool: Any) -> Optional[dict]:
+    """把 Chat Completions 或 Responses 的工具定义转成 Interactions 格式。
+
+    Chat Completions 使用 `{"type":"function", "function": {...}}`，而
+    Interactions 使用 `{"type":"function", "name":..., "parameters":...}`。
+    已经是扁平格式的定义也允许直接通过，便于配置中的额外工具使用。
+    """
+    if not isinstance(tool, dict):
+        return None
+
+    if tool.get("type") == "function":
+        function = tool.get("function")
+        if isinstance(function, dict):
+            name = function.get("name", "")
+            if not name:
+                return None
+            converted = {
+                "type": "function",
+                "name": name,
+                "description": function.get("description", ""),
+                "parameters": function.get("parameters") or {},
+            }
+            return converted
+        if tool.get("name"):
+            return {
+                "type": "function",
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters") or {},
+            }
+
+    # Interactions 内置工具或已转换的函数工具可以原样保留。
+    if tool.get("type") in {
+        "code_execution", "url_context", "computer_use", "mcp_server",
+        "google_search", "file_search", "google_maps", "retrieval",
+    }:
+        return dict(tool)
+    return None
+
+
 def _extract_message_text(content: Any) -> str:
     """从 OAI 消息 content（str / list）提取纯文本"""
     if isinstance(content, str):
@@ -224,7 +270,7 @@ def _extract_message_text(content: Any) -> str:
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
-            elif isinstance(item, dict) and item.get("type") == "text":
+            elif isinstance(item, dict) and item.get("type") in ("text", "input_text"):
                 parts.append(str(item.get("text", "")))
         return "".join(parts)
     return ""
@@ -327,16 +373,32 @@ def convert_oai_messages_to_interactions(
                     if block:
                         result_blocks.append(block)
             elif isinstance(content, dict):
-                # dict 内容（如 {"content": "..."}）尝试提取
-                text = content.get("content")
-                if isinstance(text, str) and text:
-                    result_blocks.append({"type": "text", "text": text})
+                # dict 内容（如 {"content": "..."} 或 {"result": ...}）尝试提取
+                value = content.get("content", content.get("result"))
+                if isinstance(value, str) and value:
+                    result_blocks.append({"type": "text", "text": value})
+                elif value is not None:
+                    try:
+                        result_blocks.append({
+                            "type": "text",
+                            "text": json.dumps(value, ensure_ascii=False),
+                        })
+                    except (TypeError, ValueError):
+                        result_blocks.append({"type": "text", "text": str(value)})
+                elif content:
+                    try:
+                        result_blocks.append({
+                            "type": "text",
+                            "text": json.dumps(content, ensure_ascii=False),
+                        })
+                    except (TypeError, ValueError):
+                        result_blocks.append({"type": "text", "text": str(content)})
 
             result_step: dict = {
                 "type": "function_result",
                 "name": func_name,
                 "call_id": tool_call_id,
-                "result": {"content": result_blocks or [{"type": "text", "text": ""}]},
+                "result": result_blocks or [{"type": "text", "text": ""}],
             }
             steps.append(result_step)
             continue
@@ -347,21 +409,40 @@ def convert_oai_messages_to_interactions(
 
 
 def map_thinking_config_to_level(thinking_config: Optional[dict]) -> Optional[str]:
-    """Gemini generateContent 的 thinkingConfig → interactions thinking_level。
-
-    - thinkingLevel → 小写映射（官方示例 "low"）
-    - includeThoughts=False → "none"
-    - thinkingBudget（Gemini 2.5）在 interactions 无对应字段，忽略并记日志
-    """
-    if not thinking_config:
+    """将 Gemini thinkingConfig.thinkingLevel 映射为 Interactions 的 thinking_level。"""
+    if not isinstance(thinking_config, dict):
         return None
     level = thinking_config.get("thinkingLevel")
     if level:
         return str(level).lower()
-    if thinking_config.get("includeThoughts") is False:
-        return "none"
     if thinking_config.get("thinkingBudget") is not None:
         logger.debug("[GEMINI_INTERACTIONS] thinkingBudget 在 interactions 无对应字段，已忽略")
+    return None
+
+
+def map_thinking_config_to_summaries(thinking_config: Optional[dict]) -> Optional[str]:
+    """将 includeThoughts 映射为 Interactions 的 thinking_summaries。"""
+    if not isinstance(thinking_config, dict) or "includeThoughts" not in thinking_config:
+        return None
+    return "auto" if thinking_config.get("includeThoughts") else "none"
+
+def map_tool_choice_to_interactions(tool_choice: Optional[Any]) -> Optional[dict]:
+    """把 OpenAI tool_choice 映射为 Interactions generation_config.tool_choice。"""
+    if tool_choice in (None, "auto"):
+        return None
+    if tool_choice in ("required", "any"):
+        return {"allowed_tools": {"mode": "any"}}
+    if isinstance(tool_choice, dict):
+        if tool_choice.get("type") == "none":
+            return None
+        if tool_choice.get("type") == "function":
+            function = tool_choice.get("function") or {}
+            name = function.get("name")
+            if name:
+                return {"allowed_tools": {"mode": "any", "tools": [name]}}
+        allowed = tool_choice.get("allowed_tools")
+        if isinstance(allowed, dict):
+            return {"allowed_tools": dict(allowed)}
     return None
 
 
@@ -375,15 +456,15 @@ def build_interactions_request_body(
     thinking_config: Optional[dict] = None,
     tools: Optional[List[dict]] = None,
     tool_choice: Optional[Any] = None,
-    response_format: Optional[dict] = None,
+    response_format: Optional[Any] = None,
+    stop_sequences: Optional[List[str]] = None,
     extra_body: Optional[dict] = None,
 ) -> dict:
     """构建 interactions 请求体（无状态模式 store=false）。
 
-    - tools：OAI function 工具格式与 interactions 完全一致（{type, name, description, parameters}），直接透传
-    - tool_choice：仅 "none" 受支持（不传 tools）；其余按默认行为透传 tools
-    - response_format.json_object → response_mime_type="application/json"；
-      json_schema 的 schema 无法映射（interactions 的 response_format 是多模态数组），仅设 mime_type
+    tools 会从 Chat Completions 的嵌套 function 定义转换为 Interactions 扁平定义；
+    tool_choice 映射为 generation_config.tool_choice.allowed_tools；
+    response_format 使用 Interactions 的 text/mime_type/schema 对象。
     """
     steps, system_instruction = convert_oai_messages_to_interactions(messages)
 
@@ -400,14 +481,19 @@ def build_interactions_request_body(
     if temperature is not None:
         gen_config["temperature"] = temperature
     if top_p is not None:
-        # interactions GenerationConfig 未确认支持 top_p，官方 protobuf 会忽略未知字段；
-        # 传了无副作用，但保守起见记日志便于排查
-        logger.debug("[GEMINI_INTERACTIONS] interactions 未确认支持 top_p，已忽略")
+        # 当前 Interactions GenerationConfig 没有稳定公开 top_p 字段，不能把
+        # Chat Completions 的旧字段原样发送，否则新版接口会返回 schema 错误。
+        logger.debug("[GEMINI_INTERACTIONS] interactions 未使用 top_p 参数")
     if max_tokens is not None:
         gen_config["max_output_tokens"] = max_tokens
+    if isinstance(stop_sequences, list) and stop_sequences:
+        gen_config["stop_sequences"] = stop_sequences
     thinking_level = map_thinking_config_to_level(thinking_config)
     if thinking_level:
         gen_config["thinking_level"] = thinking_level
+    thinking_summaries = map_thinking_config_to_summaries(thinking_config)
+    if thinking_summaries:
+        gen_config["thinking_summaries"] = thinking_summaries
     if gen_config:
         body["generation_config"] = gen_config
 
@@ -415,19 +501,47 @@ def build_interactions_request_body(
     tool_choice_none = tool_choice == "none" or (
         isinstance(tool_choice, dict) and tool_choice.get("type") == "none")
     if tools and not tool_choice_none:
-        body["tools"] = tools
-        logger.info(f"[GEMINI_INTERACTIONS] 透传 {len(tools)} 个 OAI tools")
+        interaction_tools = [
+            converted for tool in tools
+            if (converted := _oai_tool_to_interactions_tool(tool)) is not None
+        ]
+        if interaction_tools:
+            body["tools"] = interaction_tools
+            logger.info(f"[GEMINI_INTERACTIONS] 透传 {len(interaction_tools)} 个工具")
     elif tool_choice_none:
         logger.info("[GEMINI_INTERACTIONS] tool_choice=none，不携带 tools")
 
-    if isinstance(response_format, dict):
-        rf_type = response_format.get("type")
-        if rf_type == "json_object":
-            body["response_mime_type"] = "application/json"
-        elif rf_type == "json_schema":
-            # interactions 的 response_format 是多模态数组，json_schema 无法直接映射
-            body["response_mime_type"] = "application/json"
-            logger.warning("[GEMINI_INTERACTIONS] json_schema 无法映射为 interactions response_format，仅设置 response_mime_type")
+    mapped_tool_choice = map_tool_choice_to_interactions(tool_choice)
+    if mapped_tool_choice:
+        body.setdefault("generation_config", {})["tool_choice"] = mapped_tool_choice
+
+    if isinstance(response_format, (dict, list)):
+        if isinstance(response_format, list):
+            body["response_format"] = response_format
+            for item in response_format:
+                if isinstance(item, dict) and item.get("mime_type"):
+                    body["response_mime_type"] = item["mime_type"]
+                    break
+        else:
+            rf_type = response_format.get("type")
+            if rf_type == "json_object":
+                body["response_format"] = {
+                    "type": "text",
+                    "mime_type": "application/json",
+                }
+                body["response_mime_type"] = "application/json"
+            elif rf_type == "json_schema":
+                schema_info = response_format.get("json_schema") or {}
+                body["response_format"] = {
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": schema_info.get("schema") or response_format.get("schema") or {},
+                }
+                body["response_mime_type"] = "application/json"
+            elif rf_type:
+                body["response_format"] = dict(response_format)
+                if response_format.get("mime_type"):
+                    body["response_mime_type"] = response_format["mime_type"]
 
     if extra_body:
         body.update(extra_body)
@@ -454,7 +568,21 @@ def _interactions_finish_reason(status: Optional[str]) -> str:
     """Interaction.status → OpenAI finish_reason"""
     if status == "requires_action":
         return "tool_calls"
+    if status == "incomplete":
+        return "length"
     return "stop"
+
+
+def _usage_int(usage: dict, *keys: str) -> int:
+    """从新旧 Interaction usage 字段中读取整数值。"""
+    for key in keys:
+        value = usage.get(key)
+        if value is not None:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
 
 
 def convert_interactions_to_openai_response(
@@ -482,8 +610,7 @@ def convert_interactions_to_openai_response(
                 if text:
                     content_parts.append(text)
         elif stype == "thought":
-            summary = step.get("summary")
-            text = _extract_text_from_content_block(summary)
+            text = _extract_text_from_content_block(step.get("summary"))
             if text:
                 reasoning_parts.append(text)
             signature = step.get("signature")
@@ -506,27 +633,26 @@ def convert_interactions_to_openai_response(
                     "arguments": args_str,
                 },
             })
-        # 其他步骤类型（google_search_call 等服务器端工具）信息有限，跳过
+        # 其他步骤类型（google_search_call 等服务器端工具）信息有限，跳过。
 
     if thought_fragments:
         cache_thought_signatures(thought_fragments)
 
     usage = interaction.get("usage") or {}
-    prompt_tokens = int(usage.get("total_input_tokens", 0) or 0)
-    # 🔧 思考 token 计入输出（对齐 UNFIXED_ISSUES #44 的修复方向）
-    completion_tokens = int(usage.get("total_output_tokens", 0) or 0) + int(
-        usage.get("total_thought_tokens", 0) or 0)
-    total_tokens = int(usage.get("total_tokens", 0) or 0) or (prompt_tokens + completion_tokens)
+    prompt_tokens = _usage_int(usage, "total_input_tokens", "prompt_tokens")
+    output_tokens = _usage_int(usage, "total_output_tokens", "completion_tokens")
+    thought_tokens = _usage_int(usage, "total_thought_tokens", "reasoning_tokens")
+    completion_tokens = output_tokens + thought_tokens
+    total_tokens = _usage_int(usage, "total_tokens") or (prompt_tokens + completion_tokens)
 
     message: dict = {"role": "assistant"}
-    if content_parts:
-        message["content"] = "".join(content_parts)
-    else:
-        message["content"] = None
+    message["content"] = "".join(content_parts) if content_parts else None
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
     if tool_calls:
         message["tool_calls"] = tool_calls
+        if not content_parts:
+            message["content"] = None
 
     return {
         "id": f"chatcmpl-{request_id}",
@@ -553,14 +679,9 @@ def convert_interactions_to_openai_response(
 class InteractionsStreamConverter:
     """把 interactions SSE 事件流转换为 OpenAI chat.completion.chunk 流。
 
-    用法：对每个事件调用 feed(event)，返回 0 个或多个 OpenAI chunk dict；
-    事件流结束时调用 finalize() 获取收尾块（usage + finish_reason）。
-
-    支持的事件：
-    - interaction.created / interaction.status_update：忽略
-    - step.start / step.delta / step.stop：文本/思考/工具调用
-    - interaction.completed：usage + finish_reason
-    - error：错误块
+    Interactions 的 thought signature 属于整个 thought step。流式期间可能有
+    多个 thought_summary 增量，必须先合并摘要，再与 step.stop 前收到的签名
+    一起缓存，下一轮无状态请求才能完整回传。
     """
 
     def __init__(self, model: str, request_id: str):
@@ -568,7 +689,8 @@ class InteractionsStreamConverter:
         self.request_id = request_id
         self.current_step_type: Optional[str] = None
         self.current_func: Optional[dict] = None
-        self.current_thought_fragments: List[Tuple[str, str]] = []
+        self.current_thought_text = ""
+        self.current_thought_signature: Optional[str] = None
         self.usage: Optional[dict] = None
         self.completed: bool = False
         self.status: Optional[str] = None
@@ -578,27 +700,83 @@ class InteractionsStreamConverter:
         chunk.update(extra)
         return chunk
 
+    def _reasoning_chunk(self, text: str) -> dict:
+        return self._chunk({
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": text},
+            }],
+        })
+
+    def _append_argument_delta(self, delta: dict) -> None:
+        if not self.current_func:
+            return
+        piece = delta.get("arguments")
+        if piece is None:
+            piece = delta.get("partial_arguments")
+        if piece is None:
+            return
+        if isinstance(piece, (dict, list)):
+            piece = json.dumps(piece, ensure_ascii=False)
+        self.current_func["arguments"] += str(piece)
+
+    def _cache_current_thought(self) -> None:
+        if self.current_thought_text and self.current_thought_signature:
+            cache_thought_signatures([(
+                self.current_thought_text,
+                self.current_thought_signature,
+            )])
+        self.current_thought_text = ""
+        self.current_thought_signature = None
+
     def feed(self, event: dict) -> List[dict]:
-        """处理单个 interactions 事件，返回 OpenAI chunk 列表（可能为空）"""
+        """处理单个 interactions 事件，返回 OpenAI chunk 列表（可能为空）。"""
         if not isinstance(event, dict):
             return []
         event_type = event.get("event_type")
         chunks: List[dict] = []
 
-        if event_type == "step.start":
+        if event_type == "interaction.created":
+            interaction = event.get("interaction") or {}
+            if isinstance(interaction, dict):
+                self.status = interaction.get("status", self.status)
+
+        elif event_type in ("interaction.status_update", "interaction.requires_action"):
+            interaction = event.get("interaction") or {}
+            self.status = event.get("status") or (
+                interaction.get("status") if isinstance(interaction, dict) else None
+            ) or self.status
+
+        elif event_type == "step.start":
             step = event.get("step") or {}
+            if not isinstance(step, dict):
+                return []
             self.current_step_type = step.get("type")
             if self.current_step_type == "function_call":
+                initial_arguments = step.get("arguments")
+                if isinstance(initial_arguments, (dict, list)):
+                    initial_arguments = (
+                        json.dumps(initial_arguments, ensure_ascii=False)
+                        if initial_arguments else ""
+                    )
+                elif initial_arguments is None:
+                    initial_arguments = ""
                 self.current_func = {
                     "id": step.get("id") or f"call_{uuid.uuid4().hex[:24]}",
                     "name": step.get("name", ""),
-                    "arguments": "",
+                    "arguments": str(initial_arguments),
                 }
             elif self.current_step_type == "thought":
-                self.current_thought_fragments = []
+                self.current_thought_text = _extract_text_from_content_block(
+                    step.get("summary"))
+                self.current_thought_signature = step.get("signature") or None
+                if self.current_thought_text:
+                    chunks.append(self._reasoning_chunk(self.current_thought_text))
 
         elif event_type == "step.delta":
             delta = event.get("delta") or {}
+            if not isinstance(delta, dict):
+                return []
             delta_type = delta.get("type")
             if delta_type == "text":
                 text = delta.get("text", "")
@@ -609,34 +787,27 @@ class InteractionsStreamConverter:
                             "delta": {"content": text},
                         }],
                     }))
-            elif delta_type == "thought_summary":
+            elif delta_type in ("thought_summary", "thought"):
                 content = delta.get("content")
                 text = _extract_text_from_content_block(content)
+                if not text:
+                    text = str(delta.get("text", "") or "")
                 if text:
-                    chunks.append(self._chunk({
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"reasoning_content": text},
-                        }],
-                    }))
-                    # 记录片段文本，step.stop 时与签名一起入缓存
+                    chunks.append(self._reasoning_chunk(text))
                     if self.current_step_type == "thought":
-                        self.current_thought_fragments.append((text, ""))
+                        self.current_thought_text += text
             elif delta_type == "thought_signature":
                 signature = delta.get("signature")
-                if signature and self.current_thought_fragments:
-                    # 签名是 step 最后一个 delta，与当前累积的摘要文本配对
-                    self.current_thought_fragments[-1] = (
-                        self.current_thought_fragments[-1][0], signature)
-            elif delta_type == "arguments_delta":
-                if self.current_func:
-                    self.current_func["arguments"] += delta.get("arguments", "")
-            # image/audio/document/video 等媒体 delta 无法在 OAI 文本流表达，跳过
+                if signature:
+                    self.current_thought_signature = str(signature)
+            elif delta_type in ("arguments_delta", "arguments"):
+                self._append_argument_delta(delta)
+            # image/audio/document/video 与服务器端工具 delta 无法在普通
+            # OpenAI 文本流中表达，保留状态并跳过未知内容。
 
         elif event_type == "step.stop":
             if self.current_step_type == "function_call" and self.current_func:
                 args_str = self.current_func["arguments"]
-                # 尝试规范化参数 JSON；不完整时原样透传
                 try:
                     if args_str:
                         parsed = json.loads(args_str)
@@ -661,30 +832,31 @@ class InteractionsStreamConverter:
                 }))
                 self.current_func = None
             elif self.current_step_type == "thought":
-                valid = [(t, s) for t, s in self.current_thought_fragments if t and s]
-                if valid:
-                    cache_thought_signatures(valid)
-                self.current_thought_fragments = []
+                self._cache_current_thought()
             self.current_step_type = None
 
         elif event_type == "interaction.completed":
             interaction = event.get("interaction") or {}
-            self.status = interaction.get("status")
-            self.usage = interaction.get("usage") if isinstance(interaction.get("usage"), dict) else None
+            if not isinstance(interaction, dict):
+                interaction = {}
+            self.status = interaction.get("status", self.status)
+            self.usage = interaction.get("usage") if isinstance(
+                interaction.get("usage"), dict) else None
             self.completed = True
-            finish_reason = _interactions_finish_reason(self.status)
             chunks.append(self._chunk({
                 "choices": [{
                     "index": 0,
                     "delta": {},
-                    "finish_reason": finish_reason,
+                    "finish_reason": _interactions_finish_reason(self.status),
                 }],
             }))
             usage = self.usage or {}
-            prompt_tokens = int(usage.get("total_input_tokens", 0) or 0)
-            completion_tokens = int(usage.get("total_output_tokens", 0) or 0) + int(
-                usage.get("total_thought_tokens", 0) or 0)
-            total_tokens = int(usage.get("total_tokens", 0) or 0) or (prompt_tokens + completion_tokens)
+            prompt_tokens = _usage_int(usage, "total_input_tokens", "prompt_tokens")
+            output_tokens = _usage_int(usage, "total_output_tokens", "completion_tokens")
+            thought_tokens = _usage_int(usage, "total_thought_tokens", "reasoning_tokens")
+            completion_tokens = output_tokens + thought_tokens
+            total_tokens = _usage_int(usage, "total_tokens") or (
+                prompt_tokens + completion_tokens)
             chunks.append(self._chunk({
                 "choices": [],
                 "usage": {
@@ -699,6 +871,13 @@ class InteractionsStreamConverter:
             chunks.append({"error": error})
 
         return chunks
+
+    def finalize(self) -> List[dict]:
+        """在上游没有发送 completed 事件时完成当前思考状态的清理。"""
+        if self.current_step_type == "thought":
+            self._cache_current_thought()
+            self.current_step_type = None
+        return []
 
 
 # ============================================================================
@@ -717,89 +896,218 @@ def _mime_to_content_type(mime_type: str) -> str:
     return "document"
 
 
-def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
-    """Gemini generateContent 请求体 → interactions 请求体（无状态模式）。
+def _gemini_part_to_interactions_block(part: Any) -> Optional[dict]:
+    """把 generateContent 的 Part 转成 Interactions 内容块。"""
+    if not isinstance(part, dict):
+        return None
+    if "text" in part and part.get("text") is not None:
+        return {"type": "text", "text": str(part.get("text", ""))}
 
-    - contents → input steps（user → user_input；model → model_output；
-      functionCall / functionResponse part 拆为独立 step）
-    - systemInstruction → system_instruction（文本拼接）
-    - generationConfig → generation_config（temperature / max_output_tokens / thinking_level）
-    - tools（functionDeclarations）→ interactions function tools
-    """
+    inline = part.get("inlineData") or part.get("inline_data")
+    if isinstance(inline, dict):
+        data = inline.get("data", "")
+        mime_type = inline.get("mimeType") or inline.get("mime_type") or ""
+        if data:
+            return {
+                "type": _mime_to_content_type(mime_type),
+                "data": data,
+                "mime_type": mime_type,
+            }
+
+    file_data = part.get("fileData") or part.get("file_data")
+    if isinstance(file_data, dict):
+        uri = file_data.get("fileUri") or file_data.get("file_uri") or ""
+        mime_type = file_data.get("mimeType") or file_data.get("mime_type") or ""
+        if uri:
+            return {
+                "type": _mime_to_content_type(mime_type),
+                "uri": uri,
+                "mime_type": mime_type,
+            }
+    return None
+
+
+def _function_response_to_interactions_blocks(response: Any) -> List[dict]:
+    """把 Gemini functionResponse 的任意结果整理为内容块数组。"""
+    blocks: List[dict] = []
+
+    def append_value(value: Any) -> None:
+        if isinstance(value, str):
+            if value:
+                blocks.append({"type": "text", "text": value})
+            return
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and item.get("type") in {
+                    "text", "image", "audio", "video", "document"
+                }:
+                    blocks.append(dict(item))
+                elif isinstance(item, dict):
+                    converted = _gemini_part_to_interactions_block(item)
+                    if converted:
+                        blocks.append(converted)
+                    else:
+                        append_value(item)
+                else:
+                    append_value(item)
+            return
+        if isinstance(value, dict):
+            if "content" in value:
+                append_value(value.get("content"))
+                return
+            if "result" in value:
+                append_value(value.get("result"))
+                return
+            converted = _gemini_part_to_interactions_block(value)
+            if converted:
+                blocks.append(converted)
+                return
+            try:
+                blocks.append({"type": "text", "text": json.dumps(value, ensure_ascii=False)})
+            except (TypeError, ValueError):
+                blocks.append({"type": "text", "text": str(value)})
+            return
+        if value is not None:
+            blocks.append({"type": "text", "text": str(value)})
+
+    append_value(response)
+    return blocks or [{"type": "text", "text": ""}]
+
+
+def _interactions_block_to_gemini_part(block: Any, thought: bool = False) -> Optional[dict]:
+    """把 Interactions 内容块转成 generateContent Part。"""
+    if not isinstance(block, dict):
+        return None
+    block_type = block.get("type")
+    if block_type == "text":
+        part: dict = {"text": str(block.get("text", ""))}
+    elif block_type in {"image", "audio", "video", "document"}:
+        mime_type = block.get("mime_type", "")
+        if block.get("data"):
+            part = {"inlineData": {"mimeType": mime_type, "data": block["data"]}}
+        elif block.get("uri"):
+            part = {"fileData": {"mimeType": mime_type, "fileUri": block["uri"]}}
+        else:
+            return None
+    else:
+        return None
+    if thought:
+        part["thought"] = True
+    return part
+
+
+def _interactions_to_gemini_finish_reason(status: Optional[str]) -> str:
+    """Interaction.status → generateContent 的 FinishReason 枚举。"""
+    if status == "incomplete":
+        return "MAX_TOKENS"
+    if status == "failed":
+        return "OTHER"
+    return "STOP"
+
+
+def _append_thought_parts(parts: List[dict], step: dict) -> None:
+    """将一个 thought step 追加为带 thoughtSignature 的 Gemini Parts。"""
+    summary = step.get("summary")
+    blocks = summary if isinstance(summary, list) else ([summary] if summary else [])
+    thought_parts: List[dict] = []
+    for block in blocks:
+        part = _interactions_block_to_gemini_part(block, thought=True)
+        if part:
+            thought_parts.append(part)
+    signature = step.get("signature")
+    if signature:
+        if thought_parts:
+            thought_parts[-1]["thoughtSignature"] = signature
+        else:
+            thought_parts.append({"thought": True, "thoughtSignature": signature})
+    parts.extend(thought_parts)
+
+
+def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
+    """Gemini generateContent 请求体 → interactions 请求体（无状态模式）。"""
     steps: List[dict] = []
     system_parts: List[str] = []
+    raw_contents = gc_req.get("contents", []) if isinstance(gc_req, dict) else []
+    if isinstance(raw_contents, str):
+        raw_contents = [{"role": "user", "parts": [{"text": raw_contents}]}]
 
-    for content in gc_req.get("contents", []) or []:
+    for content in raw_contents or []:
+        if isinstance(content, str):
+            content = {"role": "user", "parts": [{"text": content}]}
         if not isinstance(content, dict):
             continue
-        role = content.get("role")
+        role = content.get("role") or "user"
         parts = content.get("parts", []) or []
-        text_blocks: List[dict] = []
+        if not isinstance(parts, list):
+            parts = [parts]
+        content_blocks: List[dict] = []
 
-        def _flush_text_blocks():
-            """把已累积的文本块落为一个 step（保持原始 parts 顺序）"""
-            nonlocal text_blocks
-            if text_blocks:
-                if role == "model":
-                    steps.append({"type": "model_output", "content": text_blocks})
-                else:
-                    steps.append({"type": "user_input", "content": text_blocks})
-                text_blocks = []
+        def flush_content_blocks() -> None:
+            nonlocal content_blocks
+            if content_blocks:
+                step_type = "model_output" if role == "model" else "user_input"
+                steps.append({"type": step_type, "content": content_blocks})
+                content_blocks = []
 
         for part in parts:
+            if isinstance(part, str):
+                if part:
+                    content_blocks.append({"type": "text", "text": part})
+                continue
             if not isinstance(part, dict):
                 continue
-            if "text" in part:
-                text_blocks.append({"type": "text", "text": part["text"]})
-            elif "inline_data" in part:
-                inline = part["inline_data"]
-                mime_type = inline.get("mimeType", "")
-                data = inline.get("data", "")
-                if data:
-                    text_blocks.append({
-                        "type": _mime_to_content_type(mime_type),
-                        "data": data,
-                        "mime_type": mime_type,
-                    })
-            elif "fileData" in part:
-                file_data = part["fileData"]
-                mime_type = file_data.get("mimeType", "")
-                uri = file_data.get("fileUri", "")
-                if uri:
-                    text_blocks.append({
-                        "type": _mime_to_content_type(mime_type),
-                        "uri": uri,
-                        "mime_type": mime_type,
-                    })
-            elif "functionCall" in part:
-                # 先落文本块，再落函数调用步骤（保持 parts 顺序）
-                _flush_text_blocks()
-                fc = part["functionCall"]
+
+            is_thought = bool(part.get("thought"))
+            if is_thought:
+                flush_content_blocks()
+                thought_step: dict = {"type": "thought"}
+                thought_block = _gemini_part_to_interactions_block(part)
+                if thought_block:
+                    thought_step["summary"] = [thought_block]
+                signature = part.get("thoughtSignature") or part.get("thought_signature")
+                if signature:
+                    thought_step["signature"] = signature
+                # 即使只有签名也必须保留 thought step。
+                steps.append(thought_step)
+                continue
+
+            if "functionCall" in part or "function_call" in part:
+                flush_content_blocks()
+                fc = part.get("functionCall") or part.get("function_call") or {}
+                if not isinstance(fc, dict):
+                    continue
+                signature = part.get("thoughtSignature") or part.get("thought_signature")
+                if signature:
+                    steps.append({"type": "thought", "signature": signature})
                 fc_step: dict = {
                     "type": "function_call",
                     "name": fc.get("name", ""),
-                    "arguments": fc.get("args") or {},
+                    "arguments": fc.get("args") or fc.get("arguments") or {},
                 }
                 if fc.get("id"):
                     fc_step["id"] = fc["id"]
                 steps.append(fc_step)
-            elif "functionResponse" in part:
-                _flush_text_blocks()
-                fr = part["functionResponse"]
-                response = fr.get("response") or {}
-                result_blocks: List[dict] = []
-                if isinstance(response, dict):
-                    inner = response.get("content")
-                    if isinstance(inner, str) and inner:
-                        result_blocks.append({"type": "text", "text": inner})
+                continue
+
+            if "functionResponse" in part or "function_response" in part:
+                flush_content_blocks()
+                fr = part.get("functionResponse") or part.get("function_response") or {}
+                if not isinstance(fr, dict):
+                    continue
+                result_blocks = _function_response_to_interactions_blocks(fr.get("response"))
                 steps.append({
                     "type": "function_result",
                     "name": fr.get("name", "_unknown"),
-                    "call_id": fr.get("id", ""),
-                    "result": {"content": result_blocks or [{"type": "text", "text": ""}]},
+                    "call_id": fr.get("id") or fr.get("call_id", ""),
+                    "result": result_blocks,
                 })
+                continue
 
-        _flush_text_blocks()
+            converted = _gemini_part_to_interactions_block(part)
+            if converted:
+                content_blocks.append(converted)
+
+        flush_content_blocks()
 
     body: Dict[str, Any] = {
         "model": model,
@@ -807,11 +1115,11 @@ def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
         "store": False,
     }
 
-    system_instruction = gc_req.get("systemInstruction")
+    system_instruction = gc_req.get("systemInstruction") if isinstance(gc_req, dict) else None
     if isinstance(system_instruction, dict):
         for part in system_instruction.get("parts", []) or []:
             if isinstance(part, dict) and part.get("text"):
-                system_parts.append(part["text"])
+                system_parts.append(str(part["text"]))
     elif isinstance(system_instruction, str) and system_instruction:
         system_parts.append(system_instruction)
     if system_parts:
@@ -824,11 +1132,27 @@ def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
             gen_config["temperature"] = gc["temperature"]
         if gc.get("maxOutputTokens") is not None:
             gen_config["max_output_tokens"] = gc["maxOutputTokens"]
+        if isinstance(gc.get("stopSequences"), list) and gc["stopSequences"]:
+            gen_config["stop_sequences"] = gc["stopSequences"]
         thinking = gc.get("thinkingConfig")
         if isinstance(thinking, dict):
             thinking_level = map_thinking_config_to_level(thinking)
             if thinking_level:
                 gen_config["thinking_level"] = thinking_level
+            thinking_summaries = map_thinking_config_to_summaries(thinking)
+            if thinking_summaries:
+                gen_config["thinking_summaries"] = thinking_summaries
+        response_mime_type = gc.get("responseMimeType")
+        response_schema = gc.get("responseSchema")
+        if response_mime_type or response_schema:
+            response_format: dict = {
+                "type": "text",
+                "mime_type": response_mime_type or "application/json",
+            }
+            if response_schema:
+                response_format["schema"] = response_schema
+            body["response_format"] = response_format
+            body["response_mime_type"] = response_format["mime_type"]
     if gen_config:
         body["generation_config"] = gen_config
 
@@ -839,62 +1163,87 @@ def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
         for tool in tools:
             if not isinstance(tool, dict):
                 continue
-            for decl in tool.get("functionDeclarations", []) or []:
-                if not isinstance(decl, dict):
+            declarations = tool.get("functionDeclarations") or tool.get("function_declarations") or []
+            for decl in declarations:
+                if not isinstance(decl, dict) or not decl.get("name"):
                     continue
                 function_tools.append({
                     "type": "function",
-                    "name": decl.get("name", ""),
+                    "name": decl["name"],
                     "description": decl.get("description", ""),
                     "parameters": decl.get("parameters") or {},
                 })
         if function_tools:
             body["tools"] = function_tools
 
-    # toolConfig 在 interactions 无直接对应字段（allowed_tools 语义不同），忽略并提示
-    if gc_req.get("toolConfig"):
-        logger.debug("[GEMINI_INTERACTIONS] toolConfig 无法映射到 interactions，已忽略")
+    tool_config = gc_req.get("toolConfig") or {}
+    function_calling_config = (
+        tool_config.get("functionCallingConfig")
+        if isinstance(tool_config, dict) else None
+    )
+    if isinstance(function_calling_config, dict):
+        mode = str(function_calling_config.get("mode", "AUTO")).upper()
+        if mode == "NONE":
+            body.pop("tools", None)
+        elif mode in {"ANY", "VALIDATED"}:
+            allowed = {"mode": "any" if mode == "ANY" else "validated"}
+            names = function_calling_config.get("allowedFunctionNames")
+            if isinstance(names, list) and names:
+                allowed["tools"] = names
+            body.setdefault("generation_config", {})["tool_choice"] = {
+                "allowed_tools": allowed
+            }
+        elif mode != "AUTO":
+            logger.debug(
+                "[GEMINI_INTERACTIONS] 未识别的 functionCallingConfig.mode=%s，使用默认模式",
+                mode,
+            )
 
     return body
 
 
 def convert_interactions_to_gemini_gc(interaction: dict) -> dict:
-    """interactions Interaction 对象 → Gemini generateContent 响应。
-
-    - model_output → candidates[].content.parts 文本块
-    - function_call → parts 中 functionCall 块
-    - thought → 忽略（旧格式客户端无签名概念，不注入思考）
-    - usage → usageMetadata（promptTokenCount / candidatesTokenCount / thoughtsTokenCount）
-    """
+    """interactions Interaction 对象 → Gemini generateContent 响应。"""
     parts: List[dict] = []
     for step in interaction.get("steps", []) or []:
         if not isinstance(step, dict):
             continue
         stype = step.get("type")
-        if stype == "model_output":
+        if stype == "thought":
+            _append_thought_parts(parts, step)
+        elif stype == "model_output":
             for block in step.get("content", []) or []:
-                if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
-                    parts.append({"text": block["text"]})
+                part = _interactions_block_to_gemini_part(block)
+                if part:
+                    parts.append(part)
         elif stype == "function_call":
+            args = step.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
             fc: dict = {
                 "name": step.get("name", ""),
-                "args": step.get("arguments") or {},
+                "args": args if isinstance(args, dict) else {},
             }
             if step.get("id"):
                 fc["id"] = step["id"]
+            if step.get("signature"):
+                fc["thoughtSignature"] = step["signature"]
             parts.append({"functionCall": fc})
 
     usage = interaction.get("usage") or {}
-    prompt_tokens = int(usage.get("total_input_tokens", 0) or 0)
-    candidates_tokens = int(usage.get("total_output_tokens", 0) or 0)
-    thoughts_tokens = int(usage.get("total_thought_tokens", 0) or 0)
-    total_tokens = int(usage.get("total_tokens", 0) or 0) or (
+    prompt_tokens = _usage_int(usage, "total_input_tokens", "prompt_tokens")
+    candidates_tokens = _usage_int(usage, "total_output_tokens", "completion_tokens")
+    thoughts_tokens = _usage_int(usage, "total_thought_tokens", "reasoning_tokens")
+    total_tokens = _usage_int(usage, "total_tokens") or (
         prompt_tokens + candidates_tokens + thoughts_tokens)
 
     response: dict = {
         "candidates": [{
             "content": {"role": "model", "parts": parts},
-            "finishReason": _interactions_finish_reason(interaction.get("status")),
+            "finishReason": _interactions_to_gemini_finish_reason(interaction.get("status")),
         }],
         "usageMetadata": {
             "promptTokenCount": prompt_tokens,
@@ -903,7 +1252,6 @@ def convert_interactions_to_gemini_gc(interaction: dict) -> dict:
             "totalTokenCount": total_tokens,
         },
     }
-    # OpenAI 兼容 usage（与 gemini_v1beta_api 现有注入行为一致）
     response["usage"] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": candidates_tokens + thoughts_tokens,
@@ -913,20 +1261,50 @@ def convert_interactions_to_gemini_gc(interaction: dict) -> dict:
 
 
 class InteractionsToGeminiGCConverter:
-    """interactions 流式事件 → Gemini generateContent SSE chunk 流（状态机）。
-
-    与 InteractionsStreamConverter 类似，但输出旧版 generateContent 格式：
-    - step.delta(text) → candidates[].content.parts[].text
-    - function_call step.stop → parts 中 functionCall 块
-    - interaction.completed → finishReason + usageMetadata 收尾块
-    """
+    """interactions 流式事件 → Gemini generateContent SSE chunk 流。"""
 
     def __init__(self):
         self.current_step_type: Optional[str] = None
         self.current_func: Optional[dict] = None
+        self.current_thought_blocks: List[dict] = []
+        self.current_thought_signature: Optional[str] = None
         self.completed: bool = False
         self.status: Optional[str] = None
         self.usage: Optional[dict] = None
+
+    @staticmethod
+    def _chunk(parts: Optional[List[dict]] = None) -> dict:
+        return {
+            "candidates": [{
+                "content": {"role": "model", "parts": parts or []},
+            }]
+        }
+
+    @staticmethod
+    def _argument_piece(delta: dict) -> str:
+        piece = delta.get("arguments")
+        if piece is None:
+            piece = delta.get("partial_arguments")
+        if piece is None:
+            return ""
+        if isinstance(piece, (dict, list)):
+            return json.dumps(piece, ensure_ascii=False)
+        return str(piece)
+
+    def _flush_thought(self) -> List[dict]:
+        parts: List[dict] = []
+        for block in self.current_thought_blocks:
+            part = _interactions_block_to_gemini_part(block, thought=True)
+            if part:
+                parts.append(part)
+        if self.current_thought_signature:
+            if parts:
+                parts[-1]["thoughtSignature"] = self.current_thought_signature
+            else:
+                parts.append({"thought": True, "thoughtSignature": self.current_thought_signature})
+        self.current_thought_blocks = []
+        self.current_thought_signature = None
+        return [self._chunk(parts)] if parts else []
 
     def feed(self, event: dict) -> List[dict]:
         if not isinstance(event, dict):
@@ -934,70 +1312,106 @@ class InteractionsToGeminiGCConverter:
         event_type = event.get("event_type")
         chunks: List[dict] = []
 
-        if event_type == "step.start":
+        if event_type in ("interaction.created", "interaction.status_update", "interaction.requires_action"):
+            interaction = event.get("interaction") or {}
+            if isinstance(interaction, dict):
+                self.status = interaction.get("status", self.status)
+            self.status = event.get("status", self.status)
+
+        elif event_type == "step.start":
             step = event.get("step") or {}
+            if not isinstance(step, dict):
+                return []
             self.current_step_type = step.get("type")
             if self.current_step_type == "function_call":
+                initial_arguments = step.get("arguments")
+                if isinstance(initial_arguments, (dict, list)):
+                    initial_arguments = (
+                        json.dumps(initial_arguments, ensure_ascii=False)
+                        if initial_arguments else ""
+                    )
                 self.current_func = {
                     "name": step.get("name", ""),
-                    "arguments": "",
+                    "arguments": str(initial_arguments or ""),
                     "id": step.get("id"),
                 }
+            elif self.current_step_type == "thought":
+                summary = step.get("summary")
+                blocks = summary if isinstance(summary, list) else ([summary] if summary else [])
+                self.current_thought_blocks = [
+                    dict(block) for block in blocks if isinstance(block, dict)
+                ]
+                self.current_thought_signature = step.get("signature") or None
+            elif self.current_step_type == "model_output":
+                for block in step.get("content", []) or []:
+                    if isinstance(block, dict):
+                        part = _interactions_block_to_gemini_part(block)
+                        if part:
+                            chunks.append(self._chunk([part]))
 
         elif event_type == "step.delta":
             delta = event.get("delta") or {}
+            if not isinstance(delta, dict):
+                return []
             delta_type = delta.get("type")
             if delta_type == "text":
                 text = delta.get("text", "")
                 if text:
-                    chunks.append({
-                        "candidates": [{
-                            "content": {"role": "model", "parts": [{"text": text}]},
-                        }],
-                    })
-            elif delta_type == "arguments_delta":
+                    chunks.append(self._chunk([{"text": text}]))
+            elif delta_type in ("image", "audio", "video", "document"):
+                block = dict(delta)
+                part = _interactions_block_to_gemini_part(block)
+                if part:
+                    chunks.append(self._chunk([part]))
+            elif delta_type in ("thought_summary", "thought"):
+                block = delta.get("content")
+                if not isinstance(block, dict):
+                    text = delta.get("text", "")
+                    block = {"type": "text", "text": text} if text else None
+                if block:
+                    self.current_thought_blocks.append(dict(block))
+            elif delta_type == "thought_signature":
+                if delta.get("signature"):
+                    self.current_thought_signature = str(delta["signature"])
+            elif delta_type in ("arguments_delta", "arguments"):
                 if self.current_func:
-                    self.current_func["arguments"] += delta.get("arguments", "")
-            # thought_summary / thought_signature 等思考内容旧格式不表达，跳过
+                    self.current_func["arguments"] += self._argument_piece(delta)
 
         elif event_type == "step.stop":
             if self.current_step_type == "function_call" and self.current_func:
-                args_str = self.current_func["arguments"]
+                args_value: Any = self.current_func["arguments"]
                 try:
-                    if args_str:
-                        parsed = json.loads(args_str)
-                        args_str = parsed
+                    args_value = json.loads(args_value) if args_value else {}
                 except json.JSONDecodeError:
-                    args_str = self.current_func["arguments"] or {}
+                    args_value = {}
                 fc: dict = {
                     "name": self.current_func["name"],
-                    "args": args_str if isinstance(args_str, dict) else {},
+                    "args": args_value if isinstance(args_value, dict) else {},
                 }
                 if self.current_func.get("id"):
                     fc["id"] = self.current_func["id"]
-                chunks.append({
-                    "candidates": [{
-                        "content": {"role": "model", "parts": [{"functionCall": fc}]},
-                    }],
-                })
+                chunks.append(self._chunk([{"functionCall": fc}]))
                 self.current_func = None
+            elif self.current_step_type == "thought":
+                chunks.extend(self._flush_thought())
             self.current_step_type = None
 
         elif event_type == "interaction.completed":
             interaction = event.get("interaction") or {}
-            self.status = interaction.get("status")
-            self.usage = interaction.get("usage") if isinstance(interaction.get("usage"), dict) else None
+            if not isinstance(interaction, dict):
+                interaction = {}
+            self.status = interaction.get("status", self.status)
+            self.usage = interaction.get("usage") if isinstance(
+                interaction.get("usage"), dict) else None
             self.completed = True
-            chunks.append({
-                "candidates": [{
-                    "finishReason": _interactions_finish_reason(self.status),
-                }],
-            })
+            chunks.append({"candidates": [{
+                "finishReason": _interactions_to_gemini_finish_reason(self.status),
+            }]})
             usage = self.usage or {}
-            prompt_tokens = int(usage.get("total_input_tokens", 0) or 0)
-            candidates_tokens = int(usage.get("total_output_tokens", 0) or 0)
-            thoughts_tokens = int(usage.get("total_thought_tokens", 0) or 0)
-            total_tokens = int(usage.get("total_tokens", 0) or 0) or (
+            prompt_tokens = _usage_int(usage, "total_input_tokens", "prompt_tokens")
+            candidates_tokens = _usage_int(usage, "total_output_tokens", "completion_tokens")
+            thoughts_tokens = _usage_int(usage, "total_thought_tokens", "reasoning_tokens")
+            total_tokens = _usage_int(usage, "total_tokens") or (
                 prompt_tokens + candidates_tokens + thoughts_tokens)
             chunks.append({
                 "usageMetadata": {

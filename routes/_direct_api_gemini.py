@@ -184,6 +184,12 @@ async def handle_gemini_native_direct(
                 thinking_config=thinking_config,
                 tools=openai_req.get("tools"),
                 tool_choice=openai_req.get("tool_choice"),
+                response_format=openai_req.get("response_format"),
+                stop_sequences=(
+                    openai_req.get("stop")
+                    if isinstance(openai_req.get("stop"), list)
+                    else ([openai_req["stop"]] if isinstance(openai_req.get("stop"), str) else None)
+                ),
                 extra_body=extra_kwargs if extra_kwargs else None,
             )
         else:
@@ -600,7 +606,8 @@ async def handle_gemini_native_direct(
                             tail_suppressed = True
                             return
 
-                        delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
+                        choices = openai_chunk.get("choices") or []
+                        delta = choices[0].get("delta", {}) if choices else {}
                         delta_content = delta.get("content", "")
                         delta_reasoning = delta.get("reasoning_content", "")
                         delta_tool_calls = delta.get("tool_calls")
@@ -630,7 +637,8 @@ async def handle_gemini_native_direct(
                             break
 
                         for openai_chunk in openai_chunks:
-                            delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
+                            choices = openai_chunk.get("choices") or []
+                            delta = choices[0].get("delta", {}) if choices else {}
                             delta_content = delta.get("content", "")
                             delta_reasoning = delta.get("reasoning_content", "")
                             delta_tool_calls = delta.get("tool_calls")

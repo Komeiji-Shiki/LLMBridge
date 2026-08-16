@@ -258,13 +258,33 @@ pip install tiktoken     # GPT tokenizer
 total_cost = (uncached_input × input_price + cached_input × cached_input_price + output × output_price) ÷ unit
 ```
 
+### Gemini Interactions 上游
+
+`gemini_native` 模型可以通过 `upstream_protocol: "interactions"` 使用 Google 的 `/v1beta/interactions` 接口。桥接层会把 OpenAI Chat/Anthropic 归一化后的消息转换为 Interactions steps，再把 Interaction 或 SSE 事件转换回客户端协议。
+
+```json
+{
+  "gemini-3-flash": {
+    "api_type": "gemini_native",
+    "api_base_url": "https://generativelanguage.googleapis.com",
+    "api_key": "AIza...",
+    "model_id": "gemini-3-flash-preview",
+    "display_name": "Gemini 3 Flash",
+    "upstream_protocol": "interactions",
+    "enable_thinking": true
+  }
+}
+```
+
+`api_base_url` 可以填写主机根地址，也可以填写已经带 `/v1beta` 的地址。上游认证通过 `x-goog-api-key` 请求头发送，不需要把 key 拼进 URL。桥接默认使用 `store: false`，每次请求携带完整 steps；Gemini thought 的摘要和签名会在原生 Gemini 请求中保留，OpenAI 兼容请求则通过 `reasoning_content` 和签名缓存维持多轮连续性。Interactions 工具定义会自动从 OpenAI 的嵌套 `function` 格式转换为 Google 要求的扁平格式。
+
 ### Responses API 兼容范围
 
 `/v1/responses` 会将 Responses 请求转换到现有 Chat Completions 执行链路，再转换回 Responses JSON 或 SSE 事件。支持 `input`、`instructions`、图片、function tools、`reasoning.effort`、`max_output_tokens`、usage 和流式事件。
 
 当前版本为无状态兼容：`previous_response_id`、`conversation`、`store: true`、`background: true` 以及 OpenAI 内置工具需要响应存储或额外执行环境，暂不支持，收到后会返回 400。
 
-管理面板的模型编辑器已经提供“思维链配置”可视化控件。对 Gemini 3，强度模式会将 `reasoning_effort` 映射为原生 `generationConfig.thinkingConfig.thinkingLevel`；Gemini 2.5 及旧模型继续使用 `thinkingBudget`。
+管理面板的模型编辑器已经提供“思维链配置”可视化控件。对 Gemini 3，强度模式会将 `reasoning_effort` 映射为 Interactions 的 `generation_config.thinking_level`，启用思考摘要时同时发送 `thinking_summaries: "auto"`；Gemini 2.5 及旧模型的 `thinkingBudget` 在 Interactions 上游中不直接映射。
 
 ### 使用原生 Responses 上游
 

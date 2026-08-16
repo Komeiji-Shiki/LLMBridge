@@ -9,6 +9,7 @@ Gemini Interactions 转换器测试（纯函数，无网络依赖）
 - InteractionsStreamConverter 流式状态机
 - generateContent ↔ interactions 双向转换（请求/响应/流式）
 """
+import asyncio
 import json
 import unittest
 
@@ -24,6 +25,7 @@ from converters.gemini_interactions import (
     convert_oai_messages_to_interactions,
     match_and_inject_thought_signatures,
 )
+from services.direct_api_service import DirectAPIService
 
 
 def setUpModule():
@@ -94,7 +96,7 @@ class OaiMessagesToInteractionsTests(unittest.TestCase):
         self.assertEqual(steps[2]["call_id"], "call_123")
         # 函数名从 assistant tool_calls 映射（而非 id 猜测）
         self.assertEqual(steps[2]["name"], "get_weather")
-        self.assertEqual(steps[2]["result"]["content"][0]["text"], "Sunny")
+        self.assertEqual(steps[2]["result"][0]["text"], "Sunny")
 
     def test_reasoning_signature_injection(self):
         # 先缓存签名（模拟响应侧捕获）
@@ -110,7 +112,7 @@ class OaiMessagesToInteractionsTests(unittest.TestCase):
         self.assertEqual(steps[0]["type"], "user_input")
         self.assertEqual(steps[1]["type"], "thought")
         self.assertEqual(steps[1]["signature"], "sig_abc")
-        self.assertEqual(steps[1]["summary"]["text"], "Let me think about this. ")
+        self.assertEqual(steps[1]["summary"][0]["text"], "Let me think about this. ")
         self.assertEqual(steps[2]["type"], "thought")
         self.assertEqual(steps[2]["signature"], "sig_def")
         self.assertEqual(steps[3]["type"], "model_output")
@@ -144,7 +146,7 @@ class ThoughtSignatureCacheTests(unittest.TestCase):
         steps2 = match_and_inject_thought_signatures("AA")
         self.assertEqual(len(steps2), 1)
         self.assertEqual(steps2[0]["signature"], "sig1")
-        self.assertEqual(steps2[0]["summary"]["text"], "AA")
+        self.assertEqual(steps2[0]["summary"][0]["text"], "AA")
 
     def test_no_match(self):
         cache_thought_signatures([("AAAA ", "sig1")])
@@ -177,6 +179,7 @@ class BuildRequestBodyTests(unittest.TestCase):
         self.assertEqual(body["generation_config"]["temperature"], 0.7)
         self.assertEqual(body["generation_config"]["max_output_tokens"], 100)
         self.assertEqual(body["generation_config"]["thinking_level"], "low")
+        self.assertEqual(body["generation_config"]["thinking_summaries"], "auto")
 
     def test_tools_passthrough_and_tool_choice_none(self):
         tools = [{"type": "function", "name": "f", "description": "d", "parameters": {"type": "object"}}]
@@ -186,10 +189,59 @@ class BuildRequestBodyTests(unittest.TestCase):
             "m", [{"role": "user", "content": "x"}], tools=tools, tool_choice="none")
         self.assertNotIn("tools", body2)
 
+    def test_nested_chat_tools_are_flattened(self):
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }]
+        body = build_interactions_request_body("m", [{"role": "user", "content": "x"}], tools=tools)
+        self.assertEqual(body["tools"], [{
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get weather",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+        }])
+
+    def test_tool_choice_maps_to_generation_config(self):
+        tools = [{"type": "function", "name": "f", "parameters": {"type": "object"}}]
+        body = build_interactions_request_body(
+            "m", [{"role": "user", "content": "x"}],
+            tools=tools, tool_choice="required")
+        self.assertEqual(body["generation_config"]["tool_choice"], {
+            "allowed_tools": {"mode": "any"}
+        })
+        named = build_interactions_request_body(
+            "m", [{"role": "user", "content": "x"}],
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "f"}},
+        )
+        self.assertEqual(named["generation_config"]["tool_choice"]["allowed_tools"]["tools"], ["f"])
+
     def test_response_format_json_object(self):
         body = build_interactions_request_body(
             "m", [{"role": "user", "content": "x"}], response_format={"type": "json_object"})
         self.assertEqual(body["response_mime_type"], "application/json")
+        self.assertEqual(body["response_format"], {
+            "type": "text",
+            "mime_type": "application/json",
+        })
+
+    def test_response_schema_and_stop_sequences(self):
+        body = build_interactions_request_body(
+            "m",
+            [{"role": "user", "content": "x"}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+            },
+            stop_sequences=["END"],
+        )
+        self.assertEqual(body["response_format"]["schema"], {"type": "object"})
+        self.assertEqual(body["generation_config"]["stop_sequences"], ["END"])
 
     def test_thinking_budget_ignored(self):
         body = build_interactions_request_body(
@@ -201,7 +253,8 @@ class BuildRequestBodyTests(unittest.TestCase):
         body = build_interactions_request_body(
             "m", [{"role": "user", "content": "x"}],
             thinking_config={"includeThoughts": False})
-        self.assertEqual(body["generation_config"]["thinking_level"], "none")
+        self.assertEqual(body["generation_config"]["thinking_summaries"], "none")
+        self.assertNotIn("thinking_level", body["generation_config"])
 
 
 class InteractionsToOpenaiResponseTests(unittest.TestCase):
@@ -286,7 +339,7 @@ class InteractionsStreamConverterTests(unittest.TestCase):
             {"event_type": "step.start", "index": 1,
              "step": {"type": "function_call", "id": "fc2", "name": "get_weather", "arguments": {}}},
             {"event_type": "step.delta", "index": 1,
-             "delta": {"type": "arguments_delta", "arguments": "{\"city\":"}},
+             "delta": {"type": "arguments_delta", "partial_arguments": "{\"city\":"}},
             {"event_type": "step.delta", "index": 1,
              "delta": {"type": "arguments_delta", "arguments": " \"Paris\"}"}},
             {"event_type": "step.stop", "index": 1},
@@ -341,6 +394,7 @@ class GeminiGcInteractionsTests(unittest.TestCase):
             "systemInstruction": {"role": "system", "parts": [{"text": "Be nice"}]},
             "generationConfig": {"temperature": 0.5, "maxOutputTokens": 100},
             "tools": [{"functionDeclarations": [{"name": "get_weather", "description": "d", "parameters": {}}]}],
+            "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["get_weather"]}},
         }
         body = convert_gemini_gc_to_interactions(gc, "gemini-3-flash-preview")
         self.assertEqual(body["model"], "gemini-3-flash-preview")
@@ -350,10 +404,45 @@ class GeminiGcInteractionsTests(unittest.TestCase):
         self.assertEqual(body["generation_config"]["max_output_tokens"], 100)
         self.assertEqual(body["tools"][0]["type"], "function")
         self.assertEqual(body["tools"][0]["name"], "get_weather")
+        self.assertEqual(body["generation_config"]["tool_choice"]["allowed_tools"]["tools"], ["get_weather"])
         types = [s["type"] for s in body["input"]]
         self.assertEqual(types, ["user_input", "model_output", "user_input", "function_call", "function_result"])
         # function_call step 拆出后，user 消息的文本块保留
         self.assertEqual(body["input"][2]["content"][0]["text"], "Weather?")
+        self.assertEqual(body["input"][4]["result"][0]["text"], "Sunny")
+
+    def test_gc_to_interactions_preserves_thought_signature_and_camel_case_media(self):
+        gc = {
+            "contents": [{
+                "role": "model",
+                "parts": [
+                    {"text": "thinking", "thought": True, "thoughtSignature": "sig_native"},
+                    {"text": "answer"},
+                ],
+            }, {
+                "role": "user",
+                "parts": [{"inlineData": {"mimeType": "image/png", "data": "AAAA"}}],
+            }],
+            "generationConfig": {"thinkingConfig": {"includeThoughts": True}},
+        }
+        body = convert_gemini_gc_to_interactions(gc, "gemini-3-flash-preview")
+        self.assertEqual([step["type"] for step in body["input"]], [
+            "thought", "model_output", "user_input"
+        ])
+        self.assertEqual(body["input"][0]["signature"], "sig_native")
+        self.assertEqual(body["input"][0]["summary"][0]["text"], "thinking")
+        self.assertEqual(body["input"][2]["content"][0]["type"], "image")
+        self.assertEqual(body["generation_config"]["thinking_summaries"], "auto")
+
+        response = convert_interactions_to_gemini_gc({
+            "status": "completed",
+            "steps": [{"type": "thought", "signature": "sig_native",
+                        "summary": [{"type": "text", "text": "thinking"}]}],
+            "usage": {},
+        })
+        thought_part = response["candidates"][0]["content"]["parts"][0]
+        self.assertTrue(thought_part["thought"])
+        self.assertEqual(thought_part["thoughtSignature"], "sig_native")
 
     def test_interactions_to_gc_response(self):
         interaction = {
@@ -369,7 +458,7 @@ class GeminiGcInteractionsTests(unittest.TestCase):
         parts = resp["candidates"][0]["content"]["parts"]
         self.assertEqual(parts[0]["text"], "Hi there")
         self.assertEqual(parts[1]["functionCall"]["name"], "f")
-        self.assertEqual(resp["candidates"][0]["finishReason"], "stop")
+        self.assertEqual(resp["candidates"][0]["finishReason"], "STOP")
         self.assertEqual(resp["usageMetadata"]["promptTokenCount"], 5)
         self.assertEqual(resp["usageMetadata"]["candidatesTokenCount"], 7)
         self.assertEqual(resp["usageMetadata"]["thoughtsTokenCount"], 3)
@@ -394,7 +483,7 @@ class GeminiGcInteractionsTests(unittest.TestCase):
                  if c.get("candidates") and c["candidates"][0].get("content")]
         self.assertEqual("".join(texts), "Yo")
         finish = [c for c in chunks if c.get("candidates") and c["candidates"][0].get("finishReason")]
-        self.assertEqual(finish[0]["candidates"][0]["finishReason"], "stop")
+        self.assertEqual(finish[0]["candidates"][0]["finishReason"], "STOP")
         usage_chunks = [c for c in chunks if "usageMetadata" in c]
         self.assertEqual(usage_chunks[0]["usageMetadata"]["candidatesTokenCount"], 2)
 
@@ -415,6 +504,55 @@ class GeminiGcInteractionsTests(unittest.TestCase):
         self.assertEqual(fc["name"], "f")
         self.assertEqual(fc["args"], {"x": 1})
         self.assertEqual(fc["id"], "fc7")
+
+
+
+
+class _FakeInteractionsResponse:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def json(self):
+        return {"status": "completed", "steps": [], "usage": {}}
+
+
+class _FakeInteractionsSession:
+    def __init__(self):
+        self.endpoint = None
+        self.kwargs = None
+
+    def post(self, endpoint, **kwargs):
+        self.endpoint = endpoint
+        self.kwargs = kwargs
+        return _FakeInteractionsResponse()
+
+
+class InteractionsHttpTests(unittest.TestCase):
+    def test_header_auth_and_base_url_normalization(self):
+        session = _FakeInteractionsSession()
+        service = DirectAPIService.__new__(DirectAPIService)
+        service.session = session
+
+        async def collect():
+            return [item async for item in service.call_gemini_interactions_api(
+                api_key="AIza/test?key",
+                model="gemini-3-flash-preview",
+                messages=[{"role": "user", "content": "Hi"}],
+                base_url="https://proxy.example/v1beta",
+            )]
+
+        result = asyncio.run(collect())
+        self.assertEqual(result[0]["status"], "completed")
+        self.assertEqual(session.endpoint, "https://proxy.example/v1beta/interactions")
+        self.assertNotIn("key=", session.endpoint)
+        self.assertEqual(session.kwargs["headers"]["x-goog-api-key"], "AIza/test?key")
+        request_body = json.loads(session.kwargs["data"])
+        self.assertEqual(request_body["model"], "gemini-3-flash-preview")
 
 
 if __name__ == "__main__":
