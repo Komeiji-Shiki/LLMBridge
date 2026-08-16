@@ -73,6 +73,9 @@ async def handle_direct_api_request(
         injected_messages = inject_system_prompt(
             original_messages, system_injection_config, convert_system_to_user)
         openai_req["messages"] = injected_messages
+        # 🔧 full_messages 同步为注入后的消息：日志 request_messages 才能
+        # 记录到伪造对话历史（此前记的是调用方传入的注入前原始消息）
+        full_messages = injected_messages
         logger.info(
             f"[DIRECT_API] 系统提示词注入已启用 "
             f"(位置: {system_injection_config.get('position', 'before_system')}, "
