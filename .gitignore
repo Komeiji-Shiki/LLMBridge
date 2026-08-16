@@ -114,3 +114,7 @@ deepseek_v3_tokenizer/tokenizer_config.json
 
 # ==================== Claude Code 本地设置 ====================
 .claude/settings.local.json
+
+# ==================== GrayCode / 临时分析产物 ====================
+/.graycode/
+/_server_js.bin
