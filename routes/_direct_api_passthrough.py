@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from core.constants import TimeoutDefaults
+from services.logprobs_collector import create_logprobs_collector
 from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
 from ._direct_api_reasoning_cache import lookup_reasoning_details, store_reasoning_details
@@ -100,6 +101,23 @@ async def handle_passthrough_direct(
         passthrough_request = _prepare_passthrough_request(
             openai_req, model_name, target_model_id, endpoint_config)
 
+        try:
+            logprobs_collector = create_logprobs_collector(
+                passthrough_request=passthrough_request,
+                openai_req=openai_req,
+                model_name=model_name,
+                target_model_id=target_model_id,
+                display_name=display_name,
+                api_base_url=api_base_url,
+                endpoint_config=endpoint_config,
+                request_id=request_id,
+                full_messages=full_messages,
+                endpoint_path=endpoint_path,
+            )
+        except Exception as collector_err:
+            logger.warning("[LOGPROBS_COLLECT] 初始化采集器失败，已跳过采集: %s", collector_err)
+            logprobs_collector = None
+
         is_stream = openai_req.get("stream", False)
         logger.info(f"[DIRECT_API_PASSTHROUGH] 使用上游端点: {endpoint_path}")
 
@@ -110,7 +128,7 @@ async def handle_passthrough_direct(
                 pricing_config, thinking_separator, endpoint_path,
                 monitoring_service, direct_api_service,
                 estimate_message_tokens_func, estimate_tokens_func,
-                full_messages, CONFIG
+                full_messages, CONFIG, logprobs_collector=logprobs_collector
             )
         else:
             return await _handle_passthrough_non_stream(
@@ -119,7 +137,7 @@ async def handle_passthrough_direct(
                 thinking_separator, endpoint_path,
                 monitoring_service, direct_api_service,
                 estimate_message_tokens_func, estimate_tokens_func,
-                full_messages
+                full_messages, logprobs_collector=logprobs_collector
             )
 
     except HTTPException:
@@ -382,7 +400,7 @@ async def _handle_passthrough_stream(
     pricing_config, thinking_separator, endpoint_path,
     monitoring_service, direct_api_service,
     estimate_message_tokens_func, estimate_tokens_func,
-    full_messages, CONFIG
+    full_messages, CONFIG, logprobs_collector=None
 ):
     """处理流式透传请求。
 
@@ -455,11 +473,17 @@ async def _handle_passthrough_stream(
         estimate_message_tokens_func=estimate_message_tokens_func,
         estimate_tokens_func=estimate_tokens_func,
         full_messages=full_messages,
+        logprobs_collector=logprobs_collector,
     )
 
     processed_first = session.process_sse_chunk(first_chunk_bytes)
 
     if session.upstream_error_detected:
+        if logprobs_collector is not None:
+            try:
+                await logprobs_collector.finish(completed=False, error="上游返回错误响应")
+            except Exception:
+                pass
         try:
             await api_iterator.aclose()
         except Exception:
@@ -587,7 +611,7 @@ async def _handle_passthrough_non_stream(
     thinking_separator, endpoint_path,
     monitoring_service, direct_api_service,
     estimate_message_tokens_func, estimate_tokens_func,
-    full_messages
+    full_messages, logprobs_collector=None
 ):
     """处理非流式透传请求"""
     try:
@@ -635,6 +659,14 @@ async def _handle_passthrough_non_stream(
             await monitoring_service.broadcast_to_monitors({
                 "type": "request_end", "request_id": request_id, "success": False})
             return JSONResponse(status_code=status_code, content=normalized_error)
+
+        if logprobs_collector is not None:
+            try:
+                logprobs_collector.capture_non_stream_response(response_json)
+                logprobs_collector.strip_non_stream_response(response_json)
+                await logprobs_collector.finish(completed=True)
+            except Exception as collector_err:
+                logger.warning("[LOGPROBS_COLLECT] 非流式采集失败，已继续转发响应 request_id=%s: %s", request_id[:8], collector_err)
 
         # 原样保留上游返回的原生 usage（在任何本地统计加工之前）
         upstream_usage = response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None

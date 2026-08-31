@@ -16,11 +16,13 @@ process_sse_chunk 闭包，约 30 个闭包变量通过 nonlocal 共享，完全
    未定义触发 NameError，依赖 except 兜底走异常控制流，统计结果一致但丑陋。
 2. 删除了声明但从未使用的 decode_buffer 变量。
 """
+import asyncio
 import codecs
 import copy
 import json
 import logging
 import time
+from typing import Optional
 
 from ._direct_api_reasoning_cache import (
     merge_reasoning_detail_chunks,
@@ -61,6 +63,7 @@ class PassthroughStreamSession:
         estimate_message_tokens_func,
         estimate_tokens_func,
         full_messages,
+        logprobs_collector=None,
     ):
         self.request_id = request_id
         self.display_name = display_name
@@ -96,6 +99,10 @@ class PassthroughStreamSession:
         self.repetition_detected = False  # 预留：回放检测
         self.request_end_called = False
         self.client_disconnected = False
+
+        # ---- DeepSeek logprobs 蒸馏采集 ----
+        self.logprobs_collector = logprobs_collector
+        self._logprobs_finish_tasks = set()
 
         # ---- thinking separator 切分状态 ----
         self._accumulated_for_split = ""
@@ -140,6 +147,7 @@ class PassthroughStreamSession:
             upstream_usage=self.upstream_usage,
             system_fingerprint=self.system_fingerprint)
         self.request_end_called = True
+        self._schedule_logprobs_finish(completed=False, error=reason)
 
     async def handle_client_disconnect(self) -> None:
         """异步断连处理：标记 + 广播。"""
@@ -275,7 +283,16 @@ class PassthroughStreamSession:
                 if isinstance(fp, str) and fp:
                     self.system_fingerprint = fp
 
-            event_modified = self._check_error_event(chunk_json)
+            if self.logprobs_collector is not None:
+                try:
+                    if self.logprobs_collector.capture_stream_event(chunk_json):
+                        event_modified = True
+                except Exception as lp_err:
+                    logger.debug("[LOGPROBS_COLLECT] 旁路采集异常 request_id=%s: %s", self.request_id[:8], lp_err)
+
+            error_modified = self._check_error_event(chunk_json)
+            if error_modified:
+                event_modified = True
 
             delta = {}
 
@@ -298,6 +315,26 @@ class PassthroughStreamSession:
         except Exception as process_err:
             logger.debug("[PROCESS_SSE] 处理事件时出错: %s", process_err)
         return event_modified, False
+
+    def _schedule_logprobs_finish(self, completed: bool = False, error: Optional[str] = None) -> None:
+        """同步断连路径里异步落盘 logprobs 采集记录。"""
+        if not self.logprobs_collector:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.logprobs_collector.finish(completed=completed, error=error))
+        self._logprobs_finish_tasks.add(task)
+        task.add_done_callback(self._on_logprobs_finish_done)
+
+    def _on_logprobs_finish_done(self, task: asyncio.Task) -> None:
+        self._logprobs_finish_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.debug("[LOGPROBS_COLLECT] 异步收尾失败 request_id=%s: %s", self.request_id[:8], exc)
 
 
     # ---- 错误事件检测 ----
@@ -548,6 +585,15 @@ class PassthroughStreamSession:
 
         （usage chunk + [DONE]；若已在断连路径记录过则返回空列表）
         """
+        if self.logprobs_collector is not None:
+            try:
+                await self.logprobs_collector.finish(
+                    completed=self.request_success,
+                    error=self.error_msg or ("client disconnected" if self.client_disconnected else None),
+                )
+            except Exception as lp_err:
+                logger.debug("[LOGPROBS_COLLECT] 收尾失败 request_id=%s: %s", self.request_id[:8], lp_err)
+
         if self.request_end_called:
             return []
 

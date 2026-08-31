@@ -118,3 +118,9 @@ deepseek_v3_tokenizer/tokenizer_config.json
 # ==================== GrayCode / 临时分析产物 ====================
 /.graycode/
 /_server_js.bin
+
+# ==================== DeepSeek logprobs 蒸馏数据 ====================
+data/deepseek-logprobs/
+data/
+*.jsonl.gz
+

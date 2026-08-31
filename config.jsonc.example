@@ -59,6 +59,23 @@
     "days": 30,
     "run_on_startup": false
   },
+  // DeepSeek 官方 logprobs 蒸馏采集：命中 api_base_hosts 且模型名匹配时，
+  // 自动给上游 /chat/completions 注入 logprobs=true、top_logprobs=20，并把
+  // reasoning/content 两路 token 分布落成 raw + normalized JSONL。
+  "deepseek_logprobs": {
+    "enabled": true,
+    "output_dir": "data/deepseek-logprobs",
+    "api_base_hosts": ["api.deepseek.com"],
+    "top_logprobs": 20,
+    "force_logprobs": true,
+    "force_top_logprobs": true,
+    "strip_logprobs_from_client": true,
+    "record_raw_stream": true,
+    "write_normalized": true,
+    "redact_image_data": true,
+    "require_logprobs_to_write": true,
+    "compress": true
+  },
   // Tokenizer 配置：为每个模型指定使用的 tokenizer 类型
   // 支持: anthropic / google / deepseek / tiktoken / custom_xxx
   "tokenizer_config": {

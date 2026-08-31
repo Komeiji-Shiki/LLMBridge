@@ -89,6 +89,7 @@
     "model_id": "deepseek-chat",
     "display_name": "DeepSeek V3 (透传)",
     "passthrough": true,
+    "collect_logprobs": true,
     "cached_tokens_mode": "reverse",
     "// cached_tokens_mode说明": "off=不处理, forward=prompt+cached, reverse=prompt已是总数(DeepSeek官方)",
     "pricing": {
@@ -179,6 +180,7 @@
     "auto_cache": "自动提示词缓存（true/false），仅 anthropic_native 上游生效。自动为 tools/system/最后两条 user 消息注入 cache_control ephemeral 断点（上限 4 个），多轮对话命中上游缓存可大幅降低成本；客户端已自带 cache_control 时不重复注入",
     "custom_params": "自定义参数（JSON对象），直接合并到上游请求体，适合 chat_template_kwargs、thinking 等模型行为参数",
     "extra_body_params": "附加主体参数（JSON对象），在 custom_params 之后合并到请求体（同名键优先），适合 top_p、OpenRouter provider 指定提供商等请求级参数",
+    "collect_logprobs": "可选，覆盖全局 DeepSeek logprobs 采集开关：true=强制采集（仍需模型/域名匹配），false=该端点不采集",
     
     "cached_tokens_mode": "缓存token处理模式（off/forward/reverse）",
     "// cached_tokens_mode说明": {

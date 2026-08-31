@@ -26,6 +26,7 @@
 - **图片优化**：自动压缩和处理多模态请求中的图片（支持格式转换、尺寸限制、质量调整）
 - **思考内容分离**：通过 thinking_separator 自动分离思维链和正文内容
 - **温度/最大 Token 限制**：按模型限制 temperature 和 max_tokens，防止配置错误
+- **DeepSeek 官方 logprobs 蒸馏采集**：自动给 DeepSeek 官方 `/chat/completions` 注入 `logprobs=true` / `top_logprobs=20`，旁路保存 `reasoning_content` 与 `content` 两路 token 分布、完整上下文和 `reasoning_effort` 等元数据；默认按天落到 `data/deepseek-logprobs/{raw,normalized}/`
 
 ### Token 与成本
 - **精确 Token 计数**：支持多种 tokenizer（Anthropic、Gemma、DeepSeek、tiktoken、自定义）
