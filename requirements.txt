@@ -1,27 +1,28 @@
 # Core dependencies
-fastapi
-hypercorn
-requests
-packaging
-aiohttp
-httpx
-Pillow
-psutil
-watchdog
-typing_extensions
+# 版本约束为“下限 + 大版本上限”：保证新环境可复现，又不至于锁死收不到安全更新
+fastapi>=0.100,<1.0
+hypercorn>=0.14,<1.0
+requests>=2.28,<3.0
+packaging>=20.0,<26.0
+aiohttp>=3.8,<4.0
+httpx>=0.24,<1.0
+Pillow>=9.0,<12.0
+psutil>=5.8,<8.0
+watchdog>=2.0,<7.0
+typing_extensions>=4.0,<5.0
 
 # HTTP/2 support (Hypercorn 原生支持 h2c/h2，h2 为其依赖项)
-h2
+h2>=4.0,<5.0
 
 # File upload / background scheduler
-python-multipart
-apscheduler
+python-multipart>=0.0.5,<1.0
+apscheduler>=3.8,<4.0
 
 # Cache management
-cachetools
+cachetools>=4.0,<7.0
 
 # Token counter dependencies (optional)
-tiktoken
-anthropic
-google-generativeai
-transformers
+tiktoken>=0.4,<1.0
+anthropic>=0.18,<1.0
+google-generativeai>=0.3,<1.0
+transformers>=4.30,<5.0

@@ -18,11 +18,11 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5102 ^| findstr LISTENING') 
 )
 
 echo.
-echo 正在查找所有 api_server.py 进程...
+echo 正在查找所有 api_server_new.py 进程...
 for /f "tokens=2" %%a in ('tasklist ^| findstr python.exe') do (
-    wmic process where "ProcessId=%%a" get CommandLine /format:list | findstr api_server.py >nul
+    wmic process where "ProcessId=%%a" get CommandLine /format:list | findstr api_server_new.py >nul
     if not errorlevel 1 (
-        echo 发现 api_server.py 进程 PID: %%a
+        echo 发现 api_server_new.py 进程 PID: %%a
         taskkill /F /PID %%a
         echo 已终止
     )

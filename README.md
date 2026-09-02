@@ -457,7 +457,7 @@ python id_updater.py
 | `start_server_improved.cmd` | 带进程守护的启动 |
 | `check_processes.cmd` | 检查端口占用和进程状态 |
 | `kill_server.cmd` | 停止所有相关进程 |
-| `刷新模型.cmd` | 强制刷新模型列表 |
+| `刷新模型.cmd` | 模型热更新说明（改完自动重载，无需手动操作） |
 | `清理敏感数据.py` | 清除配置中的占位 key 和敏感信息 |
 | `id_updater.py` | LMArena ID 捕获工具（已弃用） |
 | `start_tunnel.cmd` | Cloudflare Tunnel 启动脚本 |

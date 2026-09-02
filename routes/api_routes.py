@@ -518,16 +518,31 @@ def _apply_native_thinking_config(passthrough_body: dict, endpoint_config: dict)
         et_mode = "disabled"
 
     if et_mode == "enabled":
-        budget = endpoint_config.get("thinking_budget", 20000)
-        passthrough_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # 思考强度等级（Claude Opus 4.5+ 支持 output_config.effort），与 budget 二选一
+        # 思考控制方式二选一（与 _direct_api_anthropic.apply_thinking_config 保持一致）：
+        #   - 配置了 reasoning_effort（前端“强度等级”模式）：Anthropic 新模型
+        #     已废弃 thinking.budget_tokens，只注入 output_config.effort。
+        #   - 仅配置了 thinking_budget（前端“Token 预算”模式，旧模型兼容）：
+        #     注入 thinking.type=enabled + budget_tokens。
+        #   - 均未配置：不强改，透传客户端原始 thinking 参数。
         configured_effort = endpoint_config.get("reasoning_effort")
+        thinking_budget = endpoint_config.get("thinking_budget")
         if configured_effort:
             passthrough_body["output_config"] = {"effort": configured_effort}
-            logger.info(f"[ANTHROPIC_COMPAT] thinking 强制启用: budget_tokens={budget}, output_config.effort={configured_effort}")
-        else:
+            # 客户端已带 thinking 时：enabled → adaptive 并清掉废弃的 budget_tokens
+            thinking_obj = passthrough_body.get("thinking")
+            if isinstance(thinking_obj, dict) and thinking_obj.get("type") in ("enabled", "adaptive"):
+                thinking_obj["type"] = "adaptive"
+                thinking_obj.pop("budget_tokens", None)
+            else:
+                passthrough_body["thinking"] = {"type": "adaptive"}
+            logger.info(f"[ANTHROPIC_COMPAT] thinking 启用(强度等级): output_config.effort={configured_effort}, thinking=adaptive（无 budget_tokens）")
+        elif thinking_budget:
+            budget = int(thinking_budget or 0)
+            passthrough_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
             passthrough_body.pop("output_config", None)
-            logger.info(f"[ANTHROPIC_COMPAT] thinking 强制启用: budget_tokens={budget}")
+            logger.info(f"[ANTHROPIC_COMPAT] thinking 强制启用(Token预算): budget_tokens={budget}")
+        else:
+            logger.info("[ANTHROPIC_COMPAT] thinking 配置未指定控制方式，透传客户端参数")
     elif et_mode == "adaptive":
         # adaptive 模式：将客户端 thinking.type=enabled 转为 adaptive
         # 不强制注入 output_config.effort，仅在配置了 thinking_effort 时才添加

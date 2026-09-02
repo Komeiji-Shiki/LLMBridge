@@ -1,4 +1,30 @@
 // admin-core.js - 核心功能和工具函数
+// ==================== 全局会话失效处理 ====================
+// admin 各页几十处裸 fetch 不检查 401，会话过期后只会显示空数据。
+// 这里统一包装 window.fetch：遇到 401/403 弹一次横幅引导重新登录，
+// 原始 Response 原样返回，各调用方原有错误分支不受影响。
+(function() {
+    if (window.__adminFetchPatched) return;
+    window.__adminFetchPatched = true;
+    const _origFetch = window.fetch.bind(window);
+    let _sessionInvalid = false;
+    window.fetch = async function(...args) {
+        const resp = await _origFetch(...args);
+        if ((resp.status === 401 || resp.status === 403) && !_sessionInvalid) {
+            _sessionInvalid = true;
+            if (typeof showMessage === 'function') {
+                showMessage('登录会话已失效，请重新登录', 'error');
+            }
+            const banner = document.createElement('div');
+            banner.id = 'admin-session-banner';
+            banner.style.cssText = 'background:#7f1d1d;color:#fca5a5;padding:10px 20px;text-align:center;font-size:0.85rem;position:sticky;top:0;z-index:9999;';
+            banner.innerHTML = '会话已失效，<a href="/login?next=/admin" style="color:#fff;text-decoration:underline;">点此重新登录</a>';
+            const header = document.querySelector('.container') || document.body;
+            header.insertAdjacentElement('beforebegin', banner);
+        }
+        return resp;
+    };
+})();
 
 // ==================== 全局变量 ====================
 let currentEditingModel = null;

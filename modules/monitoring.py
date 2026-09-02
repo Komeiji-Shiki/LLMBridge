@@ -731,7 +731,13 @@ class MonitoringService:
         # ═══════════════════════════════════════════
         
         # （_store_request_details 已移回锁内，因为需要修改共享的 request_details_cache）
-        
+
+        # 停止原因：cost_info.stop_reason 优先（Anthropic 链路写入），
+        # 兜底从 response_message.finish_reason 提取（OpenAI 兼容链路）
+        stop_reason = (cost_info or {}).get('stop_reason')
+        if not stop_reason and isinstance(response_message, dict):
+            stop_reason = response_message.get('finish_reason') or response_message.get('stop_reason')
+
         log_entry = {
             'type': 'request_end',
             'timestamp': _original_timestamp,
@@ -754,7 +760,8 @@ class MonitoringService:
             'reasoning_content': reasoning_content,
             'cost_info': cost_info,
             'upstream_usage': upstream_usage,
-            'system_fingerprint': system_fingerprint
+            'system_fingerprint': system_fingerprint,
+            'stop_reason': (cost_info or {}).get('stop_reason')
         }
         if isinstance(_request_params, dict):
             for param_key, param_value in _request_params.items():
@@ -1042,6 +1049,7 @@ class MonitoringService:
             'cached_cost',
             'total_cost',
             'currency',
+            'stop_reason',
             'created_at',
             'request_params',
         }

@@ -12,15 +12,20 @@ if "%PORT%"=="" set PORT=5102
 echo [1/3] 清理残留进程...
 echo.
 
-echo 正在查找占用端口 %PORT% 的进程...
+echo 正在查找占用端口 %PORT% 的进程（仅列出，不自动终止）...
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%PORT% ^| findstr LISTENING') do (
-    echo 发现进程 PID: %%a
-    echo 正在终止进程...
-    taskkill /F /PID %%a
-    if errorlevel 1 (
-        echo 终止失败，可能需要管理员权限
+    echo 发现占用进程 PID: %%a
+    choice /C YN /N /M "是否终止该进程? (Y/N)"
+    if not errorlevel 2 (
+        echo 正在终止进程 %%a ...
+        taskkill /F /PID %%a
+        if errorlevel 1 (
+            echo 终止失败，可能需要管理员权限
+        ) else (
+            echo 进程已终止
+        )
     ) else (
-        echo 进程已终止
+        echo 已跳过 PID %%a
     )
 )
 
@@ -30,7 +35,7 @@ echo [2/3] 检查依赖...
 echo.
 
 if exist requirements.txt (
-    python -c "import fastapi, aiohttp, uvicorn" >nul 2>&1
+    python -c "import fastapi, aiohttp, hypercorn" >nul 2>&1
     if errorlevel 1 (
         echo 正在安装依赖...
         pip install -r requirements.txt -q --disable-pip-version-check

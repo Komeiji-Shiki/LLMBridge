@@ -439,31 +439,47 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
         et_mode = "disabled"
 
     if et_mode == "enabled":
-        budget = int(endpoint_config.get("thinking_budget", 20000) or 0)
-        passthrough_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
-        # 🔧 校验修复：Anthropic 强制要求 max_tokens > thinking.budget_tokens，
-        # 而 convert_openai_to_anthropic_request 在客户端不传 max_tokens 时兜底
-        # 为 4096，enabled 模式下必然 400。这里把 max_tokens 与 budget 协调：
-        # 不超过端点硬上限时给正文预留空间，否则优先保证 max_tokens 合法。
-        hard_cap = endpoint_config.get("max_tokens")
-        reserve = 4096  # 给正文输出预留的最小 token 数
-        if hard_cap:
-            hard_cap = int(hard_cap)
-            if budget + reserve > hard_cap:
-                budget = max(1024, hard_cap - reserve)
-                passthrough_body["thinking"]["budget_tokens"] = budget
-        cur_max = int(passthrough_body.get("max_tokens") or 0)
-        if cur_max <= budget:
-            new_max = budget + reserve
-            passthrough_body["max_tokens"] = min(new_max, hard_cap) if hard_cap else new_max
-        # 思考强度等级（Claude Opus 4.5+ 支持 output_config.effort），与 budget 二选一
+        # 思考控制方式二选一：
+        #   - 配置了 reasoning_effort（前端“强度等级”模式）：Anthropic 新模型
+        #     已废弃 thinking.budget_tokens，思考强度由 output_config.effort 控制，
+        #     只注入 effort，绝不注入额度字段（二者并存会被上游拒绝）。
+        #   - 仅配置了 thinking_budget（前端“Token 预算”模式，旧模型兼容）：
+        #     注入 thinking.type=enabled + budget_tokens，并协调 max_tokens。
+        #   - 均未配置：不强改，透传客户端原始 thinking 参数。
         configured_effort = endpoint_config.get("reasoning_effort")
+        thinking_budget = endpoint_config.get("thinking_budget")
         if configured_effort:
             passthrough_body["output_config"] = {"effort": configured_effort}
-            logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用: budget_tokens={budget}, max_tokens={passthrough_body.get('max_tokens')}, output_config.effort={configured_effort}")
-        else:
+            # 客户端已带 thinking 时：enabled → adaptive 并清掉废弃的 budget_tokens
+            thinking_obj = passthrough_body.get("thinking")
+            if isinstance(thinking_obj, dict) and thinking_obj.get("type") in ("enabled", "adaptive"):
+                thinking_obj["type"] = "adaptive"
+                thinking_obj.pop("budget_tokens", None)
+            else:
+                passthrough_body["thinking"] = {"type": "adaptive"}
+            logger.info(f"[OAI_TO_ANTHROPIC] thinking 启用(强度等级): output_config.effort={configured_effort}, thinking=adaptive（无 budget_tokens）")
+        elif thinking_budget:
+            budget = int(thinking_budget or 0)
+            # 🔧 校验修复：Anthropic 强制要求 max_tokens > thinking.budget_tokens，
+            # 而 convert_openai_to_anthropic_request 在客户端不传 max_tokens 时兜底
+            # 为 4096，enabled 模式下必然 400。这里把 max_tokens 与 budget 协调：
+            # 不超过端点硬上限时给正文预留空间，否则优先保证 max_tokens 合法。
+            hard_cap = endpoint_config.get("max_tokens")
+            reserve = 4096  # 给正文输出预留的最小 token 数
+            if hard_cap:
+                hard_cap = int(hard_cap)
+                if budget + reserve > hard_cap:
+                    budget = max(1024, hard_cap - reserve)
+            passthrough_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            cur_max = int(passthrough_body.get("max_tokens") or 0)
+            if cur_max <= budget:
+                new_max = budget + reserve
+                passthrough_body["max_tokens"] = min(new_max, hard_cap) if hard_cap else new_max
             passthrough_body.pop("output_config", None)
-            logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用: budget_tokens={budget}, max_tokens={passthrough_body.get('max_tokens')}")
+            logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用(Token预算): budget_tokens={budget}, max_tokens={passthrough_body.get('max_tokens')}")
+        else:
+            # 未配置思考控制方式：尊重客户端原始参数
+            logger.info(f"[OAI_TO_ANTHROPIC] thinking 配置未指定控制方式，透传客户端参数")
     elif et_mode == "adaptive":
         thinking = passthrough_body.get("thinking")
         if isinstance(thinking, dict) and thinking.get("type") == "enabled":
@@ -838,7 +854,9 @@ def build_openai_stream_from_anthropic(
     output_tokens = 0
     cached_tokens = 0
     upstream_usage: Dict[str, Any] = {}  # 上游原生 usage（message_start/message_delta 增量合并）
-    stop_reason = "end_turn"
+    # 只有收到上游 message_delta.stop_reason 才是真实值（1047 行处更新）；
+    # 初始为 None：网络波动、上游截断、客户端断开等异常路径不会伪造成 end_turn
+    stop_reason: Optional[str] = None
     token_stats_local = (endpoint_config or {}).get("token_stats_mode") == "local"
 
     async def stream_generator():
@@ -1468,6 +1486,7 @@ async def handle_anthropic_native_from_openai(
         resp_output_tokens = None
         resp_cached_tokens = 0
         resp_upstream_usage = None
+        resp_stop_reason = None
 
         try:
             async for chunk in direct_api_service.call_api_passthrough(
@@ -1499,6 +1518,7 @@ async def handle_anthropic_native_from_openai(
                 extract_anthropic_response_content(response_json)
             raw_usage = response_json.get("usage")
             resp_upstream_usage = raw_usage if isinstance(raw_usage, dict) else None
+            resp_stop_reason = response_json.get("stop_reason")
 
             # local 统计模式：忽略上游 usage，用本地 tokenizer 重算
             if endpoint_config.get("token_stats_mode") == "local":
@@ -1555,6 +1575,8 @@ async def handle_anthropic_native_from_openai(
                             pricing=pricing_config)
                     except Exception:
                         pass
+                if isinstance(cost_info, dict) and resp_stop_reason:
+                    cost_info["stop_reason"] = resp_stop_reason
 
                 monitoring_service.request_end(
                     request_id=request_id, success=True,

@@ -309,8 +309,16 @@ def save_config():
         )
         if pattern.search(content):
             return pattern.sub(lambda m: m.group(1) + value_json, content, count=1)
-        # key 不存在：添加到文件末尾（简化处理）
-        return re.sub(r'}\s*$', lambda m: f'  ,"{key}": {value_json}\n}}', content)
+        # key 不存在：追加到文件末尾。先看尾部已有分隔符，避免拼出
+        # 非法 JSON（空对象 `{}` 后直接加逗号、或已有尾逗号时再加逗号）。
+        def _append(m):
+            tail = content[:m.start()].rstrip()
+            if tail.endswith("{") or tail.endswith(","):
+                sep = ""
+            else:
+                sep = ","
+            return f'  {sep}"{key}": {value_json}\n}}'
+        return re.sub(r'}\s*$', _append, content)
 
     try:
         with CONFIG_LOCK:

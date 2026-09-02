@@ -11,14 +11,19 @@ echo ========================================
 echo.
 
 REM 设置窗口标题，方便识别
-title LMArena Bridge Server - Port 5102
+title LMArena Bridge Server
+
+REM 读取端口号（与 点击启动.CMD 同口径，缺配置时回退 5102）
+for /f "delims=" %%i in ('python -c "import re;c=open('config.jsonc',encoding='utf-8').read();m=re.search(r'\"server_port\"\s*:\s*(\d+)',c);print(m.group(1) if m else 5102)" 2^>nul') do set PORT=%%i
+if "%PORT%"=="" set PORT=5102
+title LMArena Bridge Server - Port %PORT%
 
 REM 检查端口是否已被占用
-echo 检查端口 5102 是否可用...
-netstat -ano | findstr :5102 | findstr LISTENING >nul
+echo 检查端口 %PORT% 是否可用...
+netstat -ano | findstr :%PORT% | findstr LISTENING >nul
 if not errorlevel 1 (
     echo.
-    echo 警告: 端口 5102 已被占用！
+    echo 警告: 端口 %PORT% 已被占用！
     echo.
     echo 可能的原因：
     echo   1. 服务器已经在运行
@@ -47,7 +52,7 @@ echo.
 
 REM 使用 start /wait 确保进程附加到当前窗口
 REM 这样关闭窗口时进程也会被终止
-python api_server.py
+python api_server_new.py
 
 REM 如果Python退出，显示提示
 echo.

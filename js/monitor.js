@@ -516,7 +516,7 @@ async function refreshRequestLogs() {
         const tbody = document.getElementById('request-logs');
 
         if (logs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="9" style="text-align: center;">暂无匹配的请求日志</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" style="text-align: center;">暂无匹配的请求日志</td></tr>';
             return;
         }
 
@@ -557,6 +557,7 @@ async function refreshRequestLogs() {
                     <td>${duration}</td>
                     <td>${inTokens}</td>
                     <td>${outTokens}</td>
+                    <td style="white-space: nowrap;">${formatStopReason(log.stop_reason || (log.cost_info && log.cost_info.stop_reason))}</td>
                     <td style="font-family: monospace; font-size: 11px;" title="${costTitle}">${costDisplay}</td>
                     <td>
                         <button class="detail-btn" data-request-id="${escapeHtml(log.request_id || '')}" onclick="viewRequestDetails(this.dataset.requestId)">查看详细</button>
@@ -676,6 +677,11 @@ function escapeHtml(unsafe) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+}
+
+// 停止原因（直接显示上游原始值，不做翻译）
+function formatStopReason(reason) {
+    return reason ? escapeHtml(reason) : '-';
 }
 
 // 🔧 修复：截断长内容到指定字符数，添加"展开"按钮
@@ -976,6 +982,10 @@ async function viewRequestDetails(requestId) {
                 <div class="detail-item">
                     <div class="detail-label">Token使用:</div>
                     <div class="detail-value">输入: ${(details.input_tokens || 0).toLocaleString()}${details.cached_tokens > 0 ? ` (缓存命中: ${(details.cached_tokens || 0).toLocaleString()}, ${((details.cached_tokens / details.input_tokens) * 100).toFixed(1)}%)` : ''}, 输出: ${(details.output_tokens || 0).toLocaleString()}</div>
+                </div>
+                <div class="detail-item">
+                    <div class="detail-label">停止原因:</div>
+                    <div class="detail-value">${formatStopReason(details.stop_reason || (details.cost_info && details.cost_info.stop_reason))}</div>
                 </div>
                 ${details.upstream_usage && Object.keys(details.upstream_usage).length > 0 ? `
                 <div class="detail-item">

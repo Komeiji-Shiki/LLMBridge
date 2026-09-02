@@ -103,6 +103,13 @@ async def _set_admin_cached_response(cache_name: str, cache_key: str, value):
         _ADMIN_STATS_CACHE[cache_name][cache_key] = value
 
 
+async def _invalidate_admin_stats_cache():
+    """模型写操作后清空统计缓存：改价/改模型立即在面板生效，不用等 TTL。"""
+    async with _ADMIN_STATS_CACHE_LOCK:
+        for bucket in _ADMIN_STATS_CACHE.values():
+            bucket.clear()
+
+
 async def admin_dashboard():
     """返回管理界面HTML页面"""
     try:
@@ -178,6 +185,8 @@ async def update_model_config(
             # 重新加载配置
             await asyncio.to_thread(load_model_endpoint_map_func)
 
+        # 模型变了统计口径可能也变，立即清统计缓存
+        await _invalidate_admin_stats_cache()
         return {"status": "success", "message": message}
     except HTTPException:
         raise
@@ -212,6 +221,7 @@ async def delete_model_config(
         # 重新加载配置
         await asyncio.to_thread(load_model_endpoint_map_func)
 
+        await _invalidate_admin_stats_cache()
         return {"status": "success", "message": f"模型 {model_name} 已删除"}
     except HTTPException:
         raise
@@ -256,7 +266,7 @@ async def reorder_models(
         await asyncio.to_thread(load_model_endpoint_map_func)
 
         logger.info(f"✅ 模型顺序已更新: {' -> '.join(new_order)}")
-        
+        await _invalidate_admin_stats_cache()
         return {
             "status": "success",
             "message": f"已重新排序 {len(new_order)} 个模型",
@@ -305,6 +315,7 @@ async def set_models_archive(
                 await asyncio.to_thread(load_model_endpoint_map_func)
 
         logger.info(f"✅ 模型{action}: {', '.join(changed) or '(无变更)'}")
+        await _invalidate_admin_stats_cache()
         return {
             "status": "success",
             "message": f"已{action} {len(changed)} 个模型",
@@ -340,6 +351,7 @@ async def run_auto_archive_task(days: int) -> dict:
             changed = []
 
     logger.info(f"[MODEL_ARCHIVE] 自动归档扫描完成: {days}天阈值, 命中 {len(inactive)} 个, 实际归档 {len(changed)} 个")
+    await _invalidate_admin_stats_cache()
     return {
         "archived": changed,
         "total_inactive": len(inactive),
@@ -1319,10 +1331,16 @@ async def test_model_keys(
 
         return result
 
-    raw_results = await asyncio.gather(
-        *(_test_one_key(key, index) for index, key in enumerate(api_keys)),
-        return_exceptions=True,
-    )
+    # Key 测试限流：每批最多 3 并发，避免一次点测把上游打到 429
+    raw_results = []
+    _test_batch_size = 3
+    for _batch_start in range(0, len(api_keys), _test_batch_size):
+        _batch = api_keys[_batch_start:_batch_start + _test_batch_size]
+        _batch_results = await asyncio.gather(
+            *(_test_one_key(key, _batch_start + _i) for _i, key in enumerate(_batch)),
+            return_exceptions=True,
+        )
+        raw_results.extend(_batch_results)
 
     results = []
     for index, item in enumerate(raw_results):
@@ -1447,7 +1465,15 @@ async def query_key_balance(request: Request):
         return result
 
     tasks = [_query_one(k, i) for i, k in enumerate(api_keys)]
-    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+    # 余额查询限流：每批最多 3 并发，避免一次点查把上游打到 429
+    raw_results = []
+    _balance_batch_size = 3
+    for _batch_start in range(0, len(tasks), _balance_batch_size):
+        _batch_results = await asyncio.gather(
+            *tasks[_batch_start:_batch_start + _balance_batch_size],
+            return_exceptions=True,
+        )
+        raw_results.extend(_batch_results)
 
     results = []
     for i, r in enumerate(raw_results):

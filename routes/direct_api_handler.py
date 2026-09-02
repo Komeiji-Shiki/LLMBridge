@@ -562,6 +562,10 @@ def _convert_non_stream_to_sse(resp_body: bytes) -> str:
     if data.get("object") == "chat.completion.chunk":
         return f"data: {resp_body.decode('utf-8')}\n\ndata: [DONE]\n\n"
 
+    # 上游把错误包在 HTTP 200 里时：原样透传 error，不伪装成正常结束的空流
+    if isinstance(data.get("error"), dict):
+        return f"data: {resp_body.decode('utf-8', errors='replace')}\n\ndata: [DONE]\n\n"
+
     rid = data.get("id", "")
     model = data.get("model", "")
     created = data.get("created", int(_time.time()))

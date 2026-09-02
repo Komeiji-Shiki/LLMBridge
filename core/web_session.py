@@ -23,7 +23,8 @@ from core.config_loader import CONFIG
 # ==================== 会话管理 ====================
 
 SESSION_COOKIE_NAME = "web_session"
-SESSION_TTL_SECONDS = 86400  # 24 小时，与旧版 cookie max-age 一致
+# 会话有效期 30 天：浏览器登录一次管一个月，旧会话按各自过期时间自然失效
+SESSION_TTL_SECONDS = 30 * 86400
 _MAX_SESSIONS = 1000
 
 _SESSION_STATE_FILE = "web_session_state.json"
