@@ -101,22 +101,57 @@ def compare_messages(old: dict[str, Any], new: dict[str, Any]) -> tuple[bool, in
     return strict_append, first_difference
 
 
-def compare_tools(old: dict[str, Any], new: dict[str, Any]) -> bool:
-    old_tools = old.get("tools") or []
-    new_tools = new.get("tools") or []
-    same = canonical(old_tools) == canonical(new_tools)
+def compare_tools(old: dict[str, Any], new: dict[str, Any]) -> bool | None:
+    """比较工具定义。返回 True=相同，False=不同，None=未知（无记录可比）。
+
+    Responses 原生透传链路的日志不存 tools 全文（只记 tools_count / tools_sha256 /
+    tools_names）；旧日志连摘要都没有时不得谎报 identical，必须报 unknown。
+    """
+    old_tools = old.get("tools")
+    new_tools = new.get("tools")
+    if old_tools is not None or new_tools is not None:
+        old_list = old_tools or []
+        new_list = new_tools or []
+        same = canonical(old_list) == canonical(new_list)
+        print("\n[Tools]")
+        print(
+            f"old={len(old_list)}, new={len(new_list)}, identical={same}, "
+            f"old_sha256={short_hash(old_list)}, new_sha256={short_hash(new_list)}"
+        )
+        if not same:
+            for index, (left, right) in enumerate(zip(old_list, new_list)):
+                if canonical(left) != canonical(right):
+                    print(f"FIRST DIFFERENCE: tool[{index}]")
+                    print(f"  old={left.get('function', {}).get('name')!r}")
+                    print(f"  new={right.get('function', {}).get('name')!r}")
+                    break
+        return same
+    old_sha = old.get("tools_sha256")
+    new_sha = new.get("tools_sha256")
     print("\n[Tools]")
+    if old_sha is None or new_sha is None:
+        print(
+            "UNKNOWN: neither log records tool definitions "
+            f"(tools_count old={old.get('tools_count')} new={new.get('tools_count')}). "
+            "Tool changes cannot be ruled out as the cache-break cause; "
+            "compare tools_sha256/tools_names in newer logs."
+        )
+        return None
+    same = old_sha == new_sha
     print(
-        f"old={len(old_tools)}, new={len(new_tools)}, identical={same}, "
-        f"old_sha256={short_hash(old_tools)}, new_sha256={short_hash(new_tools)}"
+        f"via tools_sha256: identical={same}, "
+        f"old_count={old.get('tools_count')} new_count={new.get('tools_count')}, "
+        f"old_sha256={old_sha}, new_sha256={new_sha}"
     )
     if not same:
-        for index, (left, right) in enumerate(zip(old_tools, new_tools)):
-            if canonical(left) != canonical(right):
-                print(f"FIRST DIFFERENCE: tool[{index}]")
-                print(f"  old={left.get('function', {}).get('name')!r}")
-                print(f"  new={right.get('function', {}).get('name')!r}")
-                break
+        old_names = old.get("tools_names") or []
+        new_names = new.get("tools_names") or []
+        print(f"  old names({len(old_names)}): {old_names[:20]}")
+        print(f"  new names({len(new_names)}): {new_names[:20]}")
+        print(f"  removed: {sorted(set(old_names) - set(new_names))[:20]}")
+        print(f"  added: {sorted(set(new_names) - set(old_names))[:20]}")
+        if set(old_names) == set(new_names):
+            print("  same name set but different hash: order or schemas changed")
     return same
 
 
@@ -154,12 +189,16 @@ def print_cache_summary(old: dict[str, Any], new: dict[str, Any]) -> None:
         print(f"previous-end-to-new-start gap={new_start - old_end:.3f}s")
 
 
-def infer(strict_append: bool, tools_same: bool, params_same: bool, old: dict[str, Any], new: dict[str, Any]) -> None:
+def infer(strict_append: bool | None, tools_same: bool | None, params_same: bool, old: dict[str, Any], new: dict[str, Any]) -> None:
     old_cached = cached_tokens(old)
     new_cached = cached_tokens(new)
     print("\n[Inference]")
-    if strict_append and tools_same and params_same and new_cached < old_cached:
-        print("The recorded request did not break the shared prompt prefix.")
+    if tools_same is None:
+        print("Tool definitions were NOT recorded: tool changes cannot be ruled out.")
+    if strict_append and tools_same is not False and params_same and new_cached < old_cached:
+        print("The recorded message history did not break the shared prompt prefix.")
+        if tools_same is None:
+            print("BUT tool definitions are unrecorded: a tool change upstream of the logged messages can still be the cause.")
         print("The cache discontinuity occurred upstream, before model generation, not inside the logged message history.")
         print("Most likely causes: cache-shard/backend reassignment, partial cache eviction, or provider-side cache expiration.")
         print("A surviving non-zero prefix means an earlier/shared prefix block was present while later conversation-specific blocks were absent.")

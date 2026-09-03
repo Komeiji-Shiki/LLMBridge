@@ -532,7 +532,7 @@ class PassthroughHandlerTests(unittest.TestCase):
         ])
 
     def test_params_excludes_bulk_fields_and_records_tools_count(self):
-        """instructions/tools/include/prompt_cache_key 不进 params；tools 记数量。"""
+        """instructions/tools/include/prompt_cache_key 不进 params；tools 记摘要。"""
         service = _FakeDirectApiService(
             [json.dumps(_upstream_non_stream_payload(), ensure_ascii=False).encode("utf-8")])
         request_body = {
@@ -540,7 +540,7 @@ class PassthroughHandlerTests(unittest.TestCase):
             "instructions": "sys",
             "input": "hi",
             "tools": [
-                {"type": "function", "function": {"name": "read_file"}},
+                {"type": "function", "name": "read_file"},
                 {"type": "function", "function": {"name": "write_file"}},
             ],
             "include": ["reasoning.encrypted_content"],
@@ -557,7 +557,42 @@ class PassthroughHandlerTests(unittest.TestCase):
         for key in ("input", "instructions", "tools", "include", "prompt_cache_key"):
             self.assertNotIn(key, params)
         self.assertEqual(params["tools_count"], 2)
+        # 工具摘要：规范哈希 + 工具名序列，用于缓存掉链时排除工具变化
+        self.assertEqual(params["tools_names"], ["read_file", "write_file"])
+        self.assertIn("tools_sha256", params)
+        self.assertEqual(len(params["tools_sha256"]), 64)
         self.assertEqual(params["upstream_model"], "gpt-5.6-sol")
+
+    def test_tools_summary_is_order_sensitive_and_schema_sensitive(self):
+        """工具顺序或定义变化必须改变摘要哈希（缓存前缀同样会被破坏）。"""
+        from routes.responses_api import _summarize_tools_for_monitor
+
+        base = [
+            {"type": "function", "name": "read_file", "description": "read"},
+            {"type": "function", "name": "write_file", "description": "write"},
+        ]
+        same = [dict(tool) for tool in base]
+        reordered = [base[1], base[0]]
+        edited = [dict(base[0], description="READ"), base[1]]
+
+        self.assertEqual(
+            _summarize_tools_for_monitor(base)["tools_sha256"],
+            _summarize_tools_for_monitor(same)["tools_sha256"],
+        )
+        self.assertNotEqual(
+            _summarize_tools_for_monitor(base)["tools_sha256"],
+            _summarize_tools_for_monitor(reordered)["tools_sha256"],
+        )
+        self.assertNotEqual(
+            _summarize_tools_for_monitor(base)["tools_sha256"],
+            _summarize_tools_for_monitor(edited)["tools_sha256"],
+        )
+        self.assertEqual(
+            _summarize_tools_for_monitor(reordered)["tools_names"],
+            ["write_file", "read_file"],
+        )
+        self.assertEqual(_summarize_tools_for_monitor(None), {})
+        self.assertEqual(_summarize_tools_for_monitor("not-a-list"), {})
 
     def test_non_stream_error_records_failure(self):
         error_payload = {

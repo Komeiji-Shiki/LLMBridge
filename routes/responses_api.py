@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import hashlib
 import json
 import logging
 import re
@@ -135,6 +136,32 @@ def _extract_message_content_text(content: Any) -> str:
             elif part_type in ("input_audio", "audio"):
                 text_parts.append("[audio]")
     return "".join(text_parts)
+
+
+def _summarize_tools_for_monitor(tools: Any) -> Dict[str, Any]:
+    """工具定义的监控摘要：记数量、规范哈希与工具名序列，不记全文。
+
+    上游隐式 prompt cache 把 tools 计入缓存前缀，顺序或定义差一个字节
+    就会整体 miss；日志只记 tools_count 会留下排查盲区，记 sha256 + names 补上。
+    顺序参与哈希（不排序），因为工具顺序变化同样破坏缓存前缀。
+    """
+    if not isinstance(tools, list):
+        return {}
+    try:
+        canonical = json.dumps(tools, ensure_ascii=False, separators=(",", ":"), sort_keys=False, default=str)
+    except (TypeError, ValueError):
+        return {"tools_count": len(tools)}
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    names: List[str] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        if not name and isinstance(tool.get("function"), dict):
+            name = tool["function"].get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return {"tools_count": len(tools), "tools_sha256": digest, "tools_names": names}
 
 
 def _extract_reasoning_summary_text(summary: Any) -> str:
@@ -271,7 +298,7 @@ def _apply_responses_sse_event(event: Any, stats: Dict[str, Any]) -> None:
     """把单个 Responses SSE 事件累加进统计 dict。
 
     stats 键：content_parts / reasoning_parts / input_tokens / output_tokens /
-    cached_tokens / upstream_usage / error_message。
+    cached_tokens / upstream_usage / error_message / saw_completed。
     """
     if not isinstance(event, dict):
         return
@@ -285,6 +312,9 @@ def _apply_responses_sse_event(event: Any, stats: Dict[str, Any]) -> None:
         if isinstance(delta, str) and delta:
             stats["reasoning_parts"].append(delta)
     elif event_type in ("response.completed", "response.incomplete"):
+        # 上游已完整结束一轮（usage 可能缺席，但结束事实本身成立）；
+        # Codex 等客户端拿到 completed 后会主动断开，此时不得再记为失败。
+        stats["saw_completed"] = True
         response = event.get("response")
         if isinstance(response, dict) and isinstance(response.get("usage"), dict):
             stats["upstream_usage"] = response["usage"]
@@ -445,6 +475,27 @@ async def _handle_responses_native_passthrough(
     passthrough_body = dict(responses_request)
     passthrough_body["model"] = target_model_id
 
+    # Codex 等客户端下发的 tools / text.format 常带递归 $ref，上游会 400：
+    #   Recursive JSON schemas are not currently supported。
+    # 端点配置 sanitize_recursive_schemas=true（默认）时清洗：先截断真正的
+    # 递归环（非递归 $ref 原样保留，不膨胀体量），再把剩余 strict=True 全降级
+    # （非 strict 下递归是放行的）。管理面板模型编辑页可按模型开关。
+    if endpoint_config.get("sanitize_recursive_schemas", True):
+        try:
+            from utils.schema_sanitizer import (
+                force_all_strict_false_responses,
+                sanitize_responses_request,
+            )
+            washed = sanitize_responses_request(passthrough_body)
+            forced = force_all_strict_false_responses(passthrough_body)
+            if washed or forced:
+                logger.info(
+                    "[RESPONSES_NATIVE] 已处理 JSON Schema（清洗改写=%s，strict 降级数=%s）: model=%s",
+                    washed, forced, model,
+                )
+        except Exception as exc:
+            logger.warning("[RESPONSES_NATIVE] 递归 schema 清洗失败，原样透传: %s", exc)
+
     is_stream = bool(responses_request.get("stream", False))
     logger.info(
         "[RESPONSES_NATIVE] 原生透传: model=%s → target=%s, endpoint_path=%s, stream=%s",
@@ -460,12 +511,12 @@ async def _handle_responses_native_passthrough(
     # 延迟导入避免启动开销（与 api_routes 的 direct 分支一致）
     from modules.token_counter import estimate_message_tokens, estimate_tokens
 
-    # instructions 已转为 system 消息进入 request_messages；tools 巨大且无排查
-    # 价值（记数量即可）；include / prompt_cache_key 属内部字段，均不进 params
-    tools = responses_request.get("tools")
+    # instructions 已转为 system 消息进入 request_messages；tools 全文巨大不进 params，
+    # 但 tools 参与上游隐式 prompt cache 前缀：记规范哈希 + 工具名序列 + 数量，
+    # 否则缓存掉链时无法排除工具定义变化（只记数量是排查盲区）。
+    # 取清洗后实际发送的 passthrough_body，而非清洗前的原始请求。
     monitor_extra = {"upstream_model": target_model_id, "endpoint_path": endpoint_path}
-    if isinstance(tools, list):
-        monitor_extra["tools_count"] = len(tools)
+    monitor_extra.update(_summarize_tools_for_monitor(passthrough_body.get("tools")))
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -564,6 +615,7 @@ async def _handle_responses_native_passthrough(
                 "upstream_usage": None,
                 "error_message": None,
                 "stream_complete": False,
+                "saw_completed": False,
             }
             monitoring_done = False
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -575,7 +627,9 @@ async def _handle_responses_native_passthrough(
                     return
                 # 先占用完成权，避免 finally 重复落盘第二条记录
                 monitoring_done = True
-                success = stats["stream_complete"] and stats["error_message"] is None
+                # 上游 response.completed 已到 = 本轮实际成功；客户端随后断开
+                # （Codex 拿到完整回复就关连接是常态）不得改判失败。
+                success = (stats["stream_complete"] or stats.get("saw_completed")) and stats["error_message"] is None
                 if not success and stats["error_message"] is None:
                     stats["error_message"] = "Client disconnected"
                 await _complete_responses_monitoring(
@@ -616,12 +670,12 @@ async def _handle_responses_native_passthrough(
                 stats["stream_complete"] = True
                 await complete_monitoring_once()
             except asyncio.CancelledError:
-                # 客户端取消：流已完整输出时不改判失败，否则按断连处理
-                if not stats["stream_complete"]:
+                # 客户端取消：上游已 completed（或流已完整输出）时不改判失败，否则按断连处理
+                if not (stats["stream_complete"] or stats.get("saw_completed")):
                     stats["error_message"] = "Client disconnected"
                 raise
             except GeneratorExit:
-                if not stats["stream_complete"]:
+                if not (stats["stream_complete"] or stats.get("saw_completed")):
                     stats["error_message"] = "Client disconnected"
                 raise
             except Exception as exc:
