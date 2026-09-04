@@ -316,6 +316,7 @@ function showAddModelModal() {
     document.getElementById('max-tokens').value = '';
     document.getElementById('lmarena-max-tokens').value = '';
     document.getElementById('cached-tokens-mode').value = 'reverse';
+    document.getElementById('completion-tokens-mode').checked = true;
     
     // 重置自动重试配置
     resetAutoRetryFields();
@@ -778,6 +779,7 @@ function fillModelForm(config) {
         // Gemini 上游协议（generate_content 为默认值）
         document.getElementById('upstream-protocol').value = config.upstream_protocol || 'generate_content';
         document.getElementById('passthrough').checked = config.passthrough !== false;
+        document.getElementById('sanitize-recursive-schemas').checked = config.sanitize_recursive_schemas !== false;
         document.getElementById('force-stream').value = config.force_stream !== undefined ? String(config.force_stream) : '';
         document.getElementById('convert-system-to-user').checked = config.convert_system_to_user || false;
         document.getElementById('enable-prefix').checked = config.enable_prefix || false;
@@ -850,6 +852,9 @@ function fillModelForm(config) {
         
         // 加载Token统计来源
         document.getElementById('token-stats-mode').value = config.token_stats_mode || 'api';
+
+        // 加载思考Token是否计入输出Token（不写入配置时为默认相加）
+        document.getElementById('completion-tokens-mode').checked = config.completion_tokens_mode !== 'separate';
         
         // 加载图片压缩配置
         loadImageCompressionConfig(config.image_compression);
@@ -950,7 +955,12 @@ async function saveModel() {
             api_type: apiType,
             model_id: document.getElementById('model-id').value.trim() || modelName,
             display_name: document.getElementById('display-name').value.trim() || modelName,
-            passthrough: apiType === 'responses_native' ? false : document.getElementById('passthrough').checked,
+            // passthrough 仅对 api_type=direct_api 生效（gemini/responses/anthropic
+            // 都在 direct_api_handler 的分发中先于该判断返回），所以这里不管当前选的是
+            // 哪种协议都原样保存勾选值。旧版在 responses_native 下强制写 false，
+            // 导致“切到 Responses 保存再切回 OpenAI 兼容”后透传开关被莫名关闭。
+            passthrough: document.getElementById('passthrough').checked,
+            sanitize_recursive_schemas: document.getElementById('sanitize-recursive-schemas').checked,
             convert_system_to_user: document.getElementById('convert-system-to-user').checked,
             enable_prefix: document.getElementById('enable-prefix').checked,
             enable_partial: document.getElementById('enable-partial').checked,
@@ -1146,6 +1156,11 @@ async function saveModel() {
         const tokenStatsMode = document.getElementById('token-stats-mode').value;
         if (tokenStatsMode && tokenStatsMode !== 'api') {
             config.token_stats_mode = tokenStatsMode;
+        }
+
+        // 保存思考Token口径（勾选=相加为总输出，为默认值不写入配置）
+        if (!document.getElementById('completion-tokens-mode').checked) {
+            config.completion_tokens_mode = 'separate';
         }
         
         // 保存图片压缩配置

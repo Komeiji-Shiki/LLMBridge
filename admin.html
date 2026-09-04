@@ -995,6 +995,18 @@
                     </div>
 
                     <div class="form-group">
+                        <label class="form-label">
+                            <input type="checkbox" id="sanitize-recursive-schemas" checked style="margin-right: 8px;">
+                            清洗递归 JSON Schema（Codex 兼容）
+                        </label>
+                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            转发前截断工具参数里的递归引用，并把 <code>strict</code> 降级。
+                            Codex 发的 MCP 工具常带自引用，不开会被上游直接 400 拒绝。
+                            关掉后原样透传（出 400 别怪我）
+                        </small>
+                    </div>
+
+                    <div class="form-group">
                         <label class="form-label">流式模式控制</label>
                         <select id="force-stream" class="form-input">
                             <option value="">不强制（透传客户端参数）</option>
@@ -1250,6 +1262,21 @@
                                 </select>
                                 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     上游usage不可信时（如输入恒为个位数的反代），选择“本地Tokenizer”用tiktoken等本地分词器估算输入/输出token
+                                </small>
+                            </div>
+
+                            <div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
+                                <label class="form-label" style="display: flex; align-items: center; margin-bottom: 0;">
+                                    <input type="checkbox" id="completion-tokens-mode" checked style="margin-right: 8px;">
+                                    <span>思考Token计入输出Token（相加返回）</span>
+                                </label>
+                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    控制发给下游客户端的 <code>usage.completion_tokens</code> 口径（成本与监控统计永远按真实总输出计算，不受本项影响）：<br>
+                                    • <strong>勾选（默认）</strong>：completion_tokens = 正文 + 思考，即总输出，与多数API的口径一致<br>
+                                    • <strong>不勾选</strong>：completion_tokens 只算正文，思考量单独放在 <code>completion_tokens_details.reasoning_tokens</code><br>
+                                    两种口径下 reasoning_tokens 都会保留，<code>total_tokens</code> 都等于「输入 + 正文 + 思考」的真实总量。<br>
+                                    部分上游与中转把思考单列（total = prompt + completion + reasoning），不开本项时客户端读到的输出会明显偏小；
+                                    已经包含思考的标准 OpenAI 响应不会重复相加（按 total 算术关系自动识别）。
                                 </small>
                             </div>
                         </div>
