@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
+from utils.usage_tokens import total_output_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -671,7 +672,9 @@ def convert_openai_usage_to_anthropic(usage: Optional[Dict[str, Any]]) -> Dict[s
     if not isinstance(usage, dict):
         usage = {}
     prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    # Anthropic 的 output_tokens 含 thinking：内部 usage 若是 separate 口径（只记正文），
+    # 这里要还原成正文 + 思考，否则 Anthropic 客户端读到的输出会偏小
+    completion_tokens = total_output_tokens(usage)
     details = usage.get("prompt_tokens_details")
     cached_tokens = int(details.get("cached_tokens", 0) or 0) if isinstance(details, dict) else 0
     return {

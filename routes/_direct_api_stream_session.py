@@ -39,6 +39,11 @@ from ._direct_api_utils import (
     _enrich_error_message,
 )
 from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
+from utils.usage_tokens import (
+    apply_usage_tokens,
+    compose_chat_usage,
+    get_completion_tokens_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +99,8 @@ class PassthroughStreamSession:
         self.reasoning_tokens = 0
         self.cached_tokens = 0
         self.upstream_usage = None  # 上游返回的原生 usage 对象（原样保留，供日志记录）
+        # 思考 token 是否并入下发给下游的 completion_tokens（模型级配置）
+        self.completion_mode = get_completion_tokens_mode(endpoint_config)
         self.system_fingerprint = None  # 上游返回的 system_fingerprint（OpenAI 兼容顶层字段）
         self.separator_found = False
         self.repetition_detected = False  # 预留：回放检测
@@ -552,7 +559,6 @@ class PassthroughStreamSession:
                 pass
 
         base_prompt = usage.get('prompt_tokens', 0) or usage.get('input_tokens', 0)
-        base_output = usage.get('completion_tokens', 0) or usage.get('output_tokens', 0)
 
         prompt_details = usage.get('prompt_tokens_details', {})
         cached = prompt_details.get('cached_tokens', 0) if isinstance(prompt_details, dict) else 0
@@ -565,16 +571,28 @@ class PassthroughStreamSession:
             line_modified = True
             logger.info(f"[CACHED_TOKENS] 正向模式修正: prompt {base_prompt} + cached {cached} = {usage['prompt_tokens']}")
 
+        # 思考 token 归一：上游常把思考量放在 usage.completion_tokens_details
+        # 里，旧版只读顶层 usage['reasoning_tokens'] 所以恒为 0。这里同时按
+        # 模型配置改写本 chunk 的 usage，使中间块与收尾块口径一致。
+        # 必须在正向缓存修正之后调用，否则 total 会漏算 cached。
+        usage_tokens = apply_usage_tokens(usage, self.completion_mode)
+        if usage_tokens.changed:
+            line_modified = True
+
         if cached_mode == 'forward':
             if base_prompt > 0:
                 self.input_tokens = base_prompt + cached
         else:
             if base_prompt > 0:
                 self.input_tokens = base_prompt
-        if base_output > 0:
-            self.output_tokens = base_output
-        self.total_tokens = usage.get('total_tokens', 0)
-        self.reasoning_tokens = usage.get('reasoning_tokens', 0)
+        if usage_tokens.output_tokens > 0:
+            self.output_tokens = usage_tokens.output_tokens
+        # 部分上游分批下发 usage（前块给正文/思考、后块只补 total），
+        # 无条件的覆盖会被后续不含思考量的块清零，必须只在取到值时更新
+        if usage_tokens.reasoning_tokens > 0:
+            self.reasoning_tokens = usage_tokens.reasoning_tokens
+        if usage_tokens.total_tokens > 0:
+            self.total_tokens = usage_tokens.total_tokens
 
         return line_modified
 
@@ -703,7 +721,7 @@ class PassthroughStreamSession:
                 usage_parts.append(f"(缓存={self.cached_tokens})")
             usage_parts.append(f"输出={self.output_tokens}")
             if self.reasoning_tokens > 0:
-                usage_parts.append(f"思考={self.reasoning_tokens}")
+                usage_parts.append(f"(内含思考={self.reasoning_tokens})")
             usage_parts.append(f"总计={self.total_tokens}")
             logger.info(f"[DIRECT_API_PASSTHROUGH] Token统计: {', '.join(usage_parts)}")
         if cost_info.get("total_cost"):
@@ -717,25 +735,29 @@ class PassthroughStreamSession:
             logger.debug(f"[SSE_TAIL_FILLER] 补发 {len(filler_chunks)} 个 tool_args 尾部 delta")
         if self.input_tokens > 0 or self.output_tokens > 0:
             final_total_tokens = self.total_tokens if self.total_tokens > 0 else (self.input_tokens + self.output_tokens)
+            # 收尾 usage 块统一由 compose_chat_usage 组装：思考量始终写在
+            # completion_tokens_details，completion_tokens 本身按模式下总量或正文
             usage_final_chunk = {
                 "id": f"chatcmpl-{self.request_id}",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": self.display_name,
                 "choices": [],
-                "usage": {
-                    "prompt_tokens": self.input_tokens,
-                    "completion_tokens": self.output_tokens,
-                    "total_tokens": final_total_tokens,
-                    **({"prompt_tokens_details": {"cached_tokens": self.cached_tokens}}
-                       if self.cached_tokens else {}),
-                    **({"completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens}}
-                       if self.reasoning_tokens else {})
-                }
+                "usage": compose_chat_usage(
+                    prompt_tokens=self.input_tokens,
+                    output_tokens=self.output_tokens,
+                    reasoning_tokens=self.reasoning_tokens,
+                    cached_tokens=self.cached_tokens,
+                    completion_mode=self.completion_mode,
+                    total_tokens=final_total_tokens,
+                )
             }
             tail_chunks.append(
                 (SSE_DATA_PREFIX + json.dumps(usage_final_chunk, ensure_ascii=False) + "\n\n").encode('utf-8'))
-            logger.debug(f"[SSE_USAGE] 已发送 usage chunk: input={self.input_tokens}, output={self.output_tokens}, total={final_total_tokens}")
+            logger.debug(
+                f"[SSE_USAGE] 已发送 usage chunk: input={self.input_tokens}, "
+                f"output={usage_final_chunk['usage']['completion_tokens']}, "
+                f"total={final_total_tokens}")
 
         tail_chunks.append(SSE_DONE_BYTES)
         return tail_chunks

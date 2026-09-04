@@ -110,6 +110,8 @@
     "passthrough": true,
     "cached_tokens_mode": "forward",
     "// 说明": "某些反代会把cached_tokens单独返回，需要用forward模式相加",
+    "completion_tokens_mode": "separate",
+    "// completion_tokens_mode说明": "该反代把思考token单列（total = prompt + completion + reasoning），separate 保持正文与思考分开；改成 merge 则下发总输出",
     "pricing": {
       "input": 1,
       "output": 2,
@@ -168,6 +170,7 @@
     "display_name": "在统计中显示的模型名称",
     
     "passthrough": "是否启用透传模式（true/false），适用于 OpenAI 兼容 API",
+    "sanitize_recursive_schemas": "是否清洗递归 JSON Schema（true/false，默认 true）。Codex 的 MCP 工具常带自引用 $ref，不清洗会被上游 400 拒绝；管理面板模型编辑页可按模型开关",
     "// passthrough说明": "启用后，请求和响应将原样转发，不做格式转换",
     
     "enable_thinking": "思维链模式。空/不设置=透传客户端参数不修改；true=启用思考(配合thinking_budget)；false=显式禁用；\"adaptive\"=自适应思考，将客户端 thinking.type=enabled 转为 adaptive(适用于Claude Opus 4.7等新模型)，thinking_effort 可选",
@@ -188,6 +191,13 @@
       "forward": "正向模式，input = prompt_tokens + cached_tokens（适合某些反代把缓存单独返回的情况）",
       "off": "关闭，不做特殊处理，直接使用prompt_tokens"
     },
+
+    "completion_tokens_mode": "思考token输出口径（merge/separate），控制发给下游客户端的 usage.completion_tokens；管理面板模型编辑页有对应勾选框",
+    "// completion_tokens_mode说明": {
+      "merge": "默认，completion_tokens = 正文 + 思考（总输出），与多数API口径一致。上游已把思考算进 completion_tokens 时（OpenAI 官方形态，total = prompt + completion）会按 total 算术关系识别，不重复相加",
+      "separate": "completion_tokens 只算正文，思考量单独放在 completion_tokens_details.reasoning_tokens（适用于部分把思考单列的中转与自建网关）"
+    },
+    "// 思考token补充": "两种模式下 completion_tokens_details.reasoning_tokens 都会保留，total_tokens 恒等于「输入 + 正文 + 思考」的真实总量；成本与监控统计始终按真实总输出计算，不受该配置影响",
     
     "pricing": {
       "input": "输入token单价",

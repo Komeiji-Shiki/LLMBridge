@@ -19,6 +19,7 @@ from converters.responses_bridge import (
 )
 from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
+from utils.usage_tokens import MODE_MERGE, get_completion_tokens_mode, total_output_tokens
 from ._direct_api_utils import (
     append_tool_call_delta,
     build_response_message,
@@ -43,7 +44,8 @@ def _extract_chat_response(chat_response: Dict[str, Any]) -> tuple:
     tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else None
     usage = chat_response.get("usage") if isinstance(chat_response.get("usage"), dict) else {}
     input_tokens = int(usage.get("prompt_tokens", 0) or 0)
-    output_tokens = int(usage.get("completion_tokens", 0) or 0)
+    # 统计与计费按真实总输出（正文+思考），不受下游 completion_tokens 口径影响
+    output_tokens = total_output_tokens(usage)
     prompt_details = usage.get("prompt_tokens_details")
     cached_tokens = int(prompt_details.get("cached_tokens", 0) or 0) if isinstance(prompt_details, dict) else 0
     return content, reasoning, tool_calls, input_tokens, output_tokens, cached_tokens
@@ -157,6 +159,7 @@ async def _handle_non_stream(
     estimate_message_tokens_func,
     estimate_tokens_func,
     full_messages,
+    completion_tokens_mode: str = MODE_MERGE,
 ):
     response_buffer = bytearray()
     async for chunk in direct_api_service.call_api_passthrough(
@@ -194,7 +197,8 @@ async def _handle_non_stream(
         return JSONResponse(status_code=status_code, content=normalized)
 
     try:
-        chat_response = convert_responses_response_to_chat(responses_json, display_name)
+        chat_response = convert_responses_response_to_chat(
+            responses_json, display_name, completion_tokens_mode)
     except ResponsesBridgeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -271,6 +275,7 @@ async def _handle_stream(
     converted_response = build_chat_streaming_response_from_responses(
         prefixed_source(),
         display_name,
+        get_completion_tokens_mode(endpoint_config),
     )
 
     async def monitored_generator():
@@ -332,7 +337,8 @@ async def _handle_stream(
                     usage = payload.get("usage")
                     if isinstance(usage, dict):
                         input_tokens = int(usage.get("prompt_tokens", 0) or 0)
-                        output_tokens = int(usage.get("completion_tokens", 0) or 0)
+                        # 计费按真实总输出（正文+思考），下游按模式下总量还是正文
+                        output_tokens = total_output_tokens(usage)
                         details = usage.get("prompt_tokens_details")
                         cached_tokens = int(details.get("cached_tokens", 0) or 0) if isinstance(details, dict) else 0
                         upstream_usage = usage
@@ -412,6 +418,7 @@ async def handle_responses_native_direct(
 ):
     """内部 Chat 请求 → 上游 Responses → 内部 Chat 响应。"""
     request_id = str(uuid.uuid4())
+    completion_tokens_mode = get_completion_tokens_mode(endpoint_config)
     endpoint_path = endpoint_config.get("endpoint_path") or "/responses"
     endpoint_path = endpoint_path if endpoint_path.startswith("/") else "/" + endpoint_path
     try:
@@ -422,6 +429,24 @@ async def handle_responses_native_direct(
         )
     except ResponsesBridgeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 上游 Responses 同样拒绝递归 schema，端点配置 sanitize_recursive_schemas=true
+    # （默认）时在转换后统一清洗（管理面板可按模型开关）。
+    if endpoint_config.get("sanitize_recursive_schemas", True):
+        try:
+            from utils.schema_sanitizer import (
+                force_all_strict_false_responses,
+                sanitize_responses_request,
+            )
+            washed = sanitize_responses_request(upstream_request)
+            forced = force_all_strict_false_responses(upstream_request)
+            if washed or forced:
+                logger.info(
+                    "[RESPONSES_NATIVE] 已处理递归 JSON Schema（chat->responses 转换结果，清洗=%s，strict 降级=%s）",
+                    washed, forced,
+                )
+        except Exception as exc:
+            logger.warning("[RESPONSES_NATIVE] 递归 schema 清洗失败，原样透传: %s", exc)
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -475,6 +500,7 @@ async def handle_responses_native_direct(
             estimate_message_tokens_func=estimate_message_tokens_func,
             estimate_tokens_func=estimate_tokens_func,
             full_messages=full_messages,
+            completion_tokens_mode=completion_tokens_mode,
         )
     except HTTPException as exc:
         await _complete_monitoring(

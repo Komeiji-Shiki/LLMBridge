@@ -17,6 +17,12 @@ from core.constants import TimeoutDefaults
 from services.logprobs_collector import create_logprobs_collector
 from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
+from utils.usage_tokens import (
+    MODE_MERGE,
+    apply_usage_tokens,
+    get_completion_tokens_mode,
+    resolve_usage_tokens,
+)
 from ._direct_api_reasoning_cache import lookup_reasoning_details, store_reasoning_details
 from ._direct_api_stream_session import PassthroughStreamSession
 from ._direct_api_utils import (
@@ -387,6 +393,22 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
         passthrough_request["verbosity"] = verbosity
         logger.info(f"[DIRECT_API_VERBOSITY] verbosity={verbosity}（已注入请求体顶层）")
 
+    # Codex 等客户端下发的 tools / response_format 常带递归 $ref，上游会 400：
+    #   Recursive JSON schemas are not currently supported。
+    # 端点配置 sanitize_recursive_schemas=true（默认）时清洗（管理面板可按模型开关）。
+    if endpoint_config.get("sanitize_recursive_schemas", True):
+        try:
+            from utils.schema_sanitizer import force_all_strict_false_chat, sanitize_chat_request
+            washed = sanitize_chat_request(passthrough_request)
+            forced = force_all_strict_false_chat(passthrough_request)
+            if washed or forced:
+                logger.info(
+                    "[DIRECT_API_PASSTHROUGH] 已处理递归 JSON Schema（清洗=%s，strict 降级=%s）",
+                    washed, forced,
+                )
+        except Exception as exc:
+            logger.warning("[DIRECT_API_PASSTHROUGH] 递归 schema 清洗失败，原样透传: %s", exc)
+
     return passthrough_request
 
 
@@ -669,7 +691,10 @@ async def _handle_passthrough_non_stream(
                 logger.warning("[LOGPROBS_COLLECT] 非流式采集失败，已继续转发响应 request_id=%s: %s", request_id[:8], collector_err)
 
         # 原样保留上游返回的原生 usage（在任何本地统计加工之前）
-        upstream_usage = response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None
+        # 必须深拷贝：下方会按 completion_tokens_mode 就地改写 response_json["usage"]，
+        # 只持引用的话监控里记录的"上游原生值"会被一起改掉
+        native_usage = response_json.get("usage")
+        upstream_usage = copy.deepcopy(native_usage) if isinstance(native_usage, dict) else None
         # 原样保留上游返回的 system_fingerprint（DeepSeek 等 OpenAI 兼容 API 顶层字段）
         system_fingerprint = response_json.get("system_fingerprint")
 
@@ -703,6 +728,18 @@ async def _handle_passthrough_non_stream(
                 logger.warning(f"[DIRECT_API] Tokenizer计算失败: {token_error}，使用简单估算")
                 input_tokens = sum(len(str(m.get('content', ''))) for m in openai_req.get('messages', [])) // 4
                 output_tokens = len(output_text) // 4
+
+        # 按模型配置归一下发给客户端的 usage 口径：
+        # merge=completion_tokens 含思考（总输出），separate=只含正文；
+        # 两种模式都在 completion_tokens_details.reasoning_tokens 保留思考量。
+        # 统计与计费仍使用上方解析出的真实总输出，切换该配置不影响成本。
+        if isinstance(response_json.get("usage"), dict):
+            usage_tokens = apply_usage_tokens(
+                response_json["usage"], get_completion_tokens_mode(endpoint_config))
+            if usage_tokens.changed:
+                logger.info(
+                    f"[COMPLETION_TOKENS_MODE] 思考={usage_tokens.reasoning_tokens} "
+                    f"→ completion_tokens={usage_tokens.reported_completion_tokens}")
 
         # 🔧 关键修复：_extract_and_split_content 可能修改了 response_json
         # （如添加 reasoning_content、字段转换等），必须重新编码以确保客户端收到修改后的数据
@@ -799,7 +836,12 @@ async def _handle_first_chunk_error(error_json, monitoring_service, request_id,
 
 
 def _extract_tokens_from_response(response_json, endpoint_config):
-    """从响应JSON中提取token统计"""
+    """从响应JSON中提取token统计。
+
+    output_tokens 统一返回「正文 + 思考」的真实总输出，成本和监控都按这个
+    口径走；下游客户端看到的 completion_tokens 是总量还是正文，由
+    completion_tokens_mode 在改写 response_json["usage"] 时单独决定。
+    """
     usage = response_json.get("usage", {})
     input_tokens = 0
     output_tokens = 0
@@ -809,7 +851,6 @@ def _extract_tokens_from_response(response_json, endpoint_config):
 
     if usage:
         base_prompt_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
-        base_output_tokens = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
 
         prompt_details = usage.get("prompt_tokens_details", {})
         cached_tokens = prompt_details.get("cached_tokens", 0) if isinstance(prompt_details, dict) else 0
@@ -826,13 +867,21 @@ def _extract_tokens_from_response(response_json, endpoint_config):
         else:
             input_tokens = base_prompt_tokens
 
-        output_tokens = base_output_tokens
-        reasoning_tokens = usage.get("reasoning_tokens", 0)
-        total_tokens = usage.get("total_tokens", 0)
+        # 思考 token 大多放在 usage.completion_tokens_details.reasoning_tokens，
+        # 旧版只读顶层字段所以恒为 0，既没上报也没计入成本
+        usage_tokens = resolve_usage_tokens(usage, MODE_MERGE)
+        reasoning_tokens = usage_tokens.reasoning_tokens
+        output_tokens = usage_tokens.output_tokens
+        total_tokens = usage_tokens.total_tokens
+        # 正向缓存模式下本地修正过输入量，上游 total 不含这部分，需要重新合成
+        if cached_mode == 'forward' and cached_tokens > 0:
+            total_tokens = max(total_tokens, input_tokens + output_tokens)
 
         if reasoning_tokens > 0:
             logger.info(f"[DIRECT_API] 检测到思考token: {reasoning_tokens}")
-        logger.info(f"[DIRECT_API] 使用API返回的token统计: 输入={input_tokens}, 输出={output_tokens}")
+        logger.info(
+            f"[DIRECT_API] 使用API返回的token统计: 输入={input_tokens}, "
+            f"输出={output_tokens}(正文{usage_tokens.content_tokens}+思考{reasoning_tokens})")
 
     return input_tokens, output_tokens, reasoning_tokens, total_tokens, cached_tokens
 

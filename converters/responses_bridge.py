@@ -11,6 +11,8 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from fastapi.responses import StreamingResponse
 
+from utils.usage_tokens import MODE_MERGE, apply_usage_tokens
+
 
 _SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
 _STREAM_DONE = object()
@@ -269,7 +271,10 @@ def _extract_reasoning_text(item: Dict[str, Any]) -> str:
     )
 
 
-def _usage_to_chat(usage: Any) -> Dict[str, Any]:
+def _usage_to_chat(
+    usage: Any,
+    completion_tokens_mode: str = MODE_MERGE,
+) -> Dict[str, Any]:
     if not isinstance(usage, dict):
         return {}
     input_tokens = int(usage.get("input_tokens", 0) or 0)
@@ -291,12 +296,15 @@ def _usage_to_chat(usage: Any) -> Dict[str, Any]:
             "reasoning_tokens": int(output_details.get("reasoning_tokens", 0) or 0)
         }
         result["reasoning_tokens"] = int(output_details.get("reasoning_tokens", 0) or 0)
+    # Responses 的 output_tokens 已含思考，按模型配置决定 Chat 侧给总量还是正文
+    apply_usage_tokens(result, completion_tokens_mode)
     return result
 
 
 def convert_responses_response_to_chat(
     responses_response: Dict[str, Any],
     request_model: str,
+    completion_tokens_mode: str = MODE_MERGE,
 ) -> Dict[str, Any]:
     """将完整的上游 Responses 响应转换为 Chat Completions JSON。"""
     if not isinstance(responses_response, dict):
@@ -367,7 +375,7 @@ def convert_responses_response_to_chat(
             "message": message,
             "finish_reason": finish_reason,
         }],
-        "usage": _usage_to_chat(responses_response.get("usage")),
+        "usage": _usage_to_chat(responses_response.get("usage"), completion_tokens_mode),
     }
 
 
@@ -448,8 +456,9 @@ async def iter_responses_sse_events(source: Any) -> AsyncIterator[Any]:
 
 
 class _ChatStreamBuilder:
-    def __init__(self, request_model: str):
+    def __init__(self, request_model: str, completion_tokens_mode: str = MODE_MERGE):
         self.request_model = request_model
+        self.completion_tokens_mode = completion_tokens_mode
         self.response_id = "chatcmpl-" + uuid.uuid4().hex
         self.model = request_model
         self.created = int(time.time())
@@ -514,7 +523,8 @@ class _ChatStreamBuilder:
         if not event_type and (
             event.get("object") == "response" or isinstance(event.get("output"), list)
         ):
-            chat_response = convert_responses_response_to_chat(event, self.request_model)
+            chat_response = convert_responses_response_to_chat(
+                event, self.request_model, self.completion_tokens_mode)
             choice = (chat_response.get("choices") or [{}])[0]
             message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
             self.usage = chat_response.get("usage") if isinstance(chat_response.get("usage"), dict) else {}
@@ -614,7 +624,7 @@ class _ChatStreamBuilder:
 
         if event_type in ("response.completed", "response.incomplete"):
             response = event.get("response") if isinstance(event.get("response"), dict) else {}
-            self.usage = _usage_to_chat(response.get("usage"))
+            self.usage = _usage_to_chat(response.get("usage"), self.completion_tokens_mode)
             if event_type == "response.incomplete":
                 details = response.get("incomplete_details")
                 reason = details.get("reason") if isinstance(details, dict) else None
@@ -658,10 +668,11 @@ class _ChatStreamBuilder:
 def build_chat_streaming_response_from_responses(
     source: Any,
     request_model: str,
+    completion_tokens_mode: str = MODE_MERGE,
 ) -> StreamingResponse:
     """将上游 Responses SSE 转成 OpenAI Chat Completions SSE。"""
     async def generator():
-        builder = _ChatStreamBuilder(request_model)
+        builder = _ChatStreamBuilder(request_model, completion_tokens_mode)
         yield builder.chunk({"role": "assistant"})
         async for event in iter_responses_sse_events(source):
             if event is _STREAM_DONE:
@@ -683,7 +694,11 @@ def build_chat_streaming_response_from_responses(
     )
 
 
-async def collect_responses_stream_to_chat(source: Any, request_model: str) -> Dict[str, Any]:
+async def collect_responses_stream_to_chat(
+    source: Any,
+    request_model: str,
+    completion_tokens_mode: str = MODE_MERGE,
+) -> Dict[str, Any]:
     """收集上游 Responses SSE，用于 force_stream 导致的非流式客户端。"""
     chunks: List[Dict[str, Any]] = []
     async for event in iter_responses_sse_events(source):
@@ -692,7 +707,7 @@ async def collect_responses_stream_to_chat(source: Any, request_model: str) -> D
         if isinstance(event, dict):
             chunks.append(event)
 
-    builder = _ChatStreamBuilder(request_model)
+    builder = _ChatStreamBuilder(request_model, completion_tokens_mode)
     for event in chunks:
         builder.process(event)
     message: Dict[str, Any] = {"role": "assistant", "content": ""}

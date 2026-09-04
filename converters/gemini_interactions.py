@@ -23,6 +23,8 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from utils.usage_tokens import MODE_MERGE, compose_chat_usage
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -589,6 +591,7 @@ def convert_interactions_to_openai_response(
     interaction: dict,
     model: str,
     request_id: str,
+    completion_tokens_mode: str = MODE_MERGE,
 ) -> dict:
     """interactions Interaction 对象 → OpenAI chat.completion 响应。
 
@@ -642,8 +645,17 @@ def convert_interactions_to_openai_response(
     prompt_tokens = _usage_int(usage, "total_input_tokens", "prompt_tokens")
     output_tokens = _usage_int(usage, "total_output_tokens", "completion_tokens")
     thought_tokens = _usage_int(usage, "total_thought_tokens", "reasoning_tokens")
-    completion_tokens = output_tokens + thought_tokens
-    total_tokens = _usage_int(usage, "total_tokens") or (prompt_tokens + completion_tokens)
+    total_tokens = _usage_int(usage, "total_tokens")
+
+    # interactions 的 total_output_tokens 不含思考，两者相加才是真实总输出；
+    # 下发给下游的 completion_tokens 按模型配置决定给总量还是仅正文
+    chat_usage = compose_chat_usage(
+        prompt_tokens=prompt_tokens,
+        output_tokens=output_tokens + thought_tokens,
+        reasoning_tokens=thought_tokens,
+        completion_mode=completion_tokens_mode,
+        total_tokens=total_tokens,
+    )
 
     message: dict = {"role": "assistant"}
     message["content"] = "".join(content_parts) if content_parts else None
@@ -664,11 +676,7 @@ def convert_interactions_to_openai_response(
             "message": message,
             "finish_reason": _interactions_finish_reason(interaction.get("status")),
         }],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        },
+        "usage": chat_usage,
     }
 
 
@@ -684,9 +692,10 @@ class InteractionsStreamConverter:
     一起缓存，下一轮无状态请求才能完整回传。
     """
 
-    def __init__(self, model: str, request_id: str):
+    def __init__(self, model: str, request_id: str, completion_tokens_mode: str = MODE_MERGE):
         self.model = model
         self.request_id = request_id
+        self.completion_tokens_mode = completion_tokens_mode
         self.current_step_type: Optional[str] = None
         self.current_func: Optional[dict] = None
         self.current_thought_text = ""
@@ -854,16 +863,15 @@ class InteractionsStreamConverter:
             prompt_tokens = _usage_int(usage, "total_input_tokens", "prompt_tokens")
             output_tokens = _usage_int(usage, "total_output_tokens", "completion_tokens")
             thought_tokens = _usage_int(usage, "total_thought_tokens", "reasoning_tokens")
-            completion_tokens = output_tokens + thought_tokens
-            total_tokens = _usage_int(usage, "total_tokens") or (
-                prompt_tokens + completion_tokens)
             chunks.append(self._chunk({
                 "choices": [],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": total_tokens,
-                },
+                "usage": compose_chat_usage(
+                    prompt_tokens=prompt_tokens,
+                    output_tokens=output_tokens + thought_tokens,
+                    reasoning_tokens=thought_tokens,
+                    completion_mode=self.completion_tokens_mode,
+                    total_tokens=_usage_int(usage, "total_tokens"),
+                ),
             }))
 
         elif event_type == "error":

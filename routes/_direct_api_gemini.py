@@ -13,6 +13,14 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
+from utils.usage_tokens import (
+    compose_chat_usage,
+    extract_prompt_tokens,
+    extract_reasoning_tokens,
+    get_completion_tokens_mode,
+    resolve_usage_tokens,
+    total_output_tokens,
+)
 from converters.gemini_interactions import (
     InteractionsStreamConverter,
     convert_interactions_to_openai_response,
@@ -49,6 +57,10 @@ async def handle_gemini_native_direct(
     logger.info(f"[GEMINI_NATIVE] 使用Gemini原生API格式")
 
     request_id = str(uuid.uuid4())
+
+    # 思考 token 是否并入下发给下游的 completion_tokens（模型级配置，
+    # 两个内嵌生成器通过闭包读取）
+    completion_tokens_mode = get_completion_tokens_mode(endpoint_config)
 
     extra_kwargs = {}
     custom_params = endpoint_config.get("custom_params", {})
@@ -223,6 +235,7 @@ async def handle_gemini_native_direct(
                 input_tokens = 0
                 output_tokens = 0
                 total_tokens = 0
+                reasoning_tokens = 0  # 思考 token（含在 output_tokens 里）
                 upstream_usage = None  # Gemini 原生 usageMetadata（原样保留，供日志记录）
                 request_success = False
                 stream_completed = False
@@ -332,7 +345,8 @@ async def handle_gemini_native_direct(
                         if isinstance(_meta, dict) and _meta:
                             upstream_usage = _meta
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
-                            gemini_chunk, display_name, request_id, is_stream_chunk=True)
+                            gemini_chunk, display_name, request_id, is_stream_chunk=True,
+                            completion_tokens_mode=completion_tokens_mode)
 
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
                         delta_content = delta.get("content", "")
@@ -348,9 +362,11 @@ async def handle_gemini_native_direct(
 
                         if "usage" in openai_chunk and openai_chunk["usage"]:
                             usage = openai_chunk["usage"]
-                            input_tokens = usage.get("prompt_tokens", 0)
-                            output_tokens = usage.get("completion_tokens", 0)
-                            total_tokens = usage.get("total_tokens", 0)
+                            input_tokens = extract_prompt_tokens(usage)
+                            # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
+                            output_tokens = total_output_tokens(usage)
+                            reasoning_tokens = extract_reasoning_tokens(usage)
+                            total_tokens = resolve_usage_tokens(usage).total_tokens
 
                         yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
@@ -367,7 +383,8 @@ async def handle_gemini_native_direct(
                             upstream_usage = _meta
 
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
-                            gemini_chunk, display_name, request_id, is_stream_chunk=True)
+                            gemini_chunk, display_name, request_id, is_stream_chunk=True,
+                            completion_tokens_mode=completion_tokens_mode)
 
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
                         delta_content = delta.get("content", "")
@@ -383,9 +400,11 @@ async def handle_gemini_native_direct(
 
                         if "usage" in openai_chunk and openai_chunk["usage"]:
                             usage = openai_chunk["usage"]
-                            input_tokens = usage.get("prompt_tokens", 0)
-                            output_tokens = usage.get("completion_tokens", 0)
-                            total_tokens = usage.get("total_tokens", 0)
+                            input_tokens = extract_prompt_tokens(usage)
+                            # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
+                            output_tokens = total_output_tokens(usage)
+                            reasoning_tokens = extract_reasoning_tokens(usage)
+                            total_tokens = resolve_usage_tokens(usage).total_tokens
 
                         yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
@@ -475,11 +494,13 @@ async def handle_gemini_native_direct(
                                 "created": int(time.time()),
                                 "model": display_name,
                                 "choices": [],
-                                "usage": {
-                                    "prompt_tokens": input_tokens,
-                                    "completion_tokens": output_tokens,
-                                    "total_tokens": final_total_tokens
-                                }
+                                "usage": compose_chat_usage(
+                                    prompt_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    reasoning_tokens=reasoning_tokens,
+                                    completion_mode=completion_tokens_mode,
+                                    total_tokens=final_total_tokens,
+                                )
                             }
                             yield f"data: {json.dumps(usage_final_chunk, ensure_ascii=False)}\n\n"
                             yield "data: [DONE]\n\n"
@@ -499,13 +520,14 @@ async def handle_gemini_native_direct(
                 input_tokens = 0
                 output_tokens = 0
                 total_tokens = 0
+                reasoning_tokens = 0  # 思考 token（含在 output_tokens 里）
                 upstream_usage = None  # interactions usage（interaction.completed 事件携带）
                 request_success = False
                 stream_completed = False
                 error_msg = None
                 client_gone = False
                 tail_suppressed = False
-                converter = InteractionsStreamConverter(display_name, request_id)
+                converter = InteractionsStreamConverter(display_name, request_id, completion_tokens_mode)
 
                 try:
                     api_task = asyncio.create_task(anext(gemini_generator))
@@ -621,9 +643,11 @@ async def handle_gemini_native_direct(
 
                         if "usage" in openai_chunk and openai_chunk["usage"]:
                             usage = openai_chunk["usage"]
-                            input_tokens = usage.get("prompt_tokens", 0)
-                            output_tokens = usage.get("completion_tokens", 0)
-                            total_tokens = usage.get("total_tokens", 0)
+                            input_tokens = extract_prompt_tokens(usage)
+                            # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
+                            output_tokens = total_output_tokens(usage)
+                            reasoning_tokens = extract_reasoning_tokens(usage)
+                            total_tokens = resolve_usage_tokens(usage).total_tokens
                             upstream_usage = converter.usage
 
                         yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
@@ -652,9 +676,11 @@ async def handle_gemini_native_direct(
 
                             if "usage" in openai_chunk and openai_chunk["usage"]:
                                 usage = openai_chunk["usage"]
-                                input_tokens = usage.get("prompt_tokens", 0)
-                                output_tokens = usage.get("completion_tokens", 0)
-                                total_tokens = usage.get("total_tokens", 0)
+                                input_tokens = extract_prompt_tokens(usage)
+                                # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
+                                output_tokens = total_output_tokens(usage)
+                                reasoning_tokens = extract_reasoning_tokens(usage)
+                                total_tokens = resolve_usage_tokens(usage).total_tokens
                                 upstream_usage = converter.usage
 
                             yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
@@ -737,11 +763,13 @@ async def handle_gemini_native_direct(
                                 "created": int(time.time()),
                                 "model": display_name,
                                 "choices": [],
-                                "usage": {
-                                    "prompt_tokens": input_tokens,
-                                    "completion_tokens": output_tokens,
-                                    "total_tokens": final_total_tokens
-                                }
+                                "usage": compose_chat_usage(
+                                    prompt_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    reasoning_tokens=reasoning_tokens,
+                                    completion_mode=completion_tokens_mode,
+                                    total_tokens=final_total_tokens,
+                                )
                             }
                             yield f"data: {json.dumps(usage_final_chunk, ensure_ascii=False)}\n\n"
                             yield "data: [DONE]\n\n"
@@ -791,10 +819,11 @@ async def handle_gemini_native_direct(
 
             if upstream_protocol == "interactions":
                 openai_response = convert_interactions_to_openai_response(
-                    gemini_response, display_name, request_id)
+                    gemini_response, display_name, request_id, completion_tokens_mode)
             else:
                 openai_response = direct_api_service.convert_gemini_response_to_openai(
-                    gemini_response, display_name, request_id, is_stream_chunk=False)
+                    gemini_response, display_name, request_id, is_stream_chunk=False,
+                    completion_tokens_mode=completion_tokens_mode)
 
             response_content = ""
             reasoning_content = ""
@@ -813,8 +842,9 @@ async def handle_gemini_native_direct(
             upstream_usage = _meta if isinstance(_meta, dict) and _meta else None
 
             usage = openai_response.get("usage", {})
-            input_tokens = usage.get("prompt_tokens", 0)
-            output_tokens = usage.get("completion_tokens", 0)
+            input_tokens = extract_prompt_tokens(usage)
+            # 计费按真实总输出（正文+思考），与下游看到的 completion_tokens 口径无关
+            output_tokens = total_output_tokens(usage)
 
             if input_tokens == 0 or output_tokens == 0:
                 try:

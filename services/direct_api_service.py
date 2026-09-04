@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 from core.config_loader import CONFIG
 from converters.gemini_interactions import build_interactions_request_body
+from utils.usage_tokens import MODE_MERGE, compose_chat_usage
 
 logger = logging.getLogger(__name__)
 
@@ -1169,7 +1170,8 @@ class DirectAPIService:
         gemini_response: Dict[str, Any],
         model: str,
         request_id: str,
-        is_stream_chunk: bool = False
+        is_stream_chunk: bool = False,
+        completion_tokens_mode: str = MODE_MERGE
     ) -> Dict[str, Any]:
         """
         将Gemini原生响应转换为OpenAI格式（支持工具调用转换）
@@ -1244,14 +1246,16 @@ class DirectAPIService:
                 
                 prompt_tokens = metadata.get("promptTokenCount", 0)
                 candidates_tokens = metadata.get("candidatesTokenCount", 0)
-                completion_tokens = candidates_tokens + thoughts_tokens
-                
-                usage = {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                    "reasoning_tokens": thoughts_tokens if thoughts_tokens > 0 else None
-                }
+
+                # Gemini 的 candidatesTokenCount 不含思考，相加才是真实总输出；
+                # 下发给下游的 completion_tokens 按模型配置决定给总量还是仅正文
+                usage = compose_chat_usage(
+                    prompt_tokens=prompt_tokens,
+                    output_tokens=candidates_tokens + thoughts_tokens,
+                    reasoning_tokens=thoughts_tokens,
+                    completion_mode=completion_tokens_mode,
+                    total_tokens=metadata.get("totalTokenCount", 0),
+                )
         except Exception as e:
             logger.error(f"[GEMINI_NATIVE] 响应转换失败: {e}", exc_info=True)
         

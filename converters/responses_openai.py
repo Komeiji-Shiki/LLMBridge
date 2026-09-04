@@ -19,6 +19,8 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
+from utils.usage_tokens import total_output_tokens
+
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 
@@ -351,7 +353,9 @@ def _usage_to_responses(usage: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(usage, dict):
         return None
     input_tokens = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
-    output_tokens = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
+    # Responses 的 output_tokens 官方语义包含思考量：内部 usage 即使按 separate
+    # 口径只记了正文，这里也必须还原成正文 + 思考
+    output_tokens = total_output_tokens(usage)
     total_tokens = int(usage.get("total_tokens", input_tokens + output_tokens) or 0)
     result: Dict[str, Any] = {
         "input_tokens": input_tokens,
