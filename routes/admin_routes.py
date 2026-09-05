@@ -31,6 +31,7 @@ from utils.jsonc_edit import (
     atomic_write_json, atomic_write_text, set_jsonc_value, set_jsonc_values,
 )
 from ._direct_api_utils import set_sticky_current_key
+from utils.csv_export import csv_safe_text
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.responses import Response
@@ -45,6 +46,17 @@ CONFIG_FILE = 'config.jsonc'
 
 # asyncio.Lock 串行化对 model_endpoint_map.json 的读写（update/delete/reorder 并发调用）
 _MODEL_ENDPOINT_MAP_LOCK = asyncio.Lock()
+_CONFIG_FILE_LOCK = asyncio.Lock()
+
+
+async def _read_admin_json(request: Request) -> dict:
+    try:
+        data = await request.json()
+    except (ValueError, UnicodeError):
+        raise HTTPException(status_code=400, detail="无效的 JSON 请求体")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
+    return data
 
 
 # ============================================================================
@@ -142,10 +154,12 @@ async def update_model_config(
 ):
     """更新模型端点配置（支持模型名称重命名）"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         model_name = data.get("model_name")
         old_model_name = data.get("old_model_name")
         config = data.get("config")
+        if old_model_name is not None and not isinstance(old_model_name, str):
+            raise HTTPException(status_code=400, detail="old_model_name 必须是字符串")
         
         if (not isinstance(model_name, str) or not model_name.strip()
                 or not (isinstance(config, dict) or (isinstance(config, list)
@@ -203,7 +217,7 @@ async def delete_model_config(
 ):
     """删除模型端点配置"""
     try:
-        body = await request.json()
+        body = await _read_admin_json(request)
         model_name = body.get("model_name")
         if not isinstance(model_name, str) or not model_name.strip():
             raise HTTPException(status_code=400, detail="缺少 model_name 字段")
@@ -231,7 +245,7 @@ async def reorder_models(
 ):
     """重新排序模型端点配置"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         new_order = data.get("order")
         
         if (not isinstance(new_order, list) or not new_order
@@ -284,9 +298,11 @@ async def set_models_archive(
     - 管理面板模型列表折叠展示，可随时恢复
     """
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         model_names = data.get("model_names")
-        archived = bool(data.get("archived", True))
+        archived = data.get("archived", True)
+        if not isinstance(archived, bool):
+            raise HTTPException(status_code=400, detail="archived 必须是布尔值")
         action = "归档" if archived else "恢复"
 
         if not model_names or not isinstance(model_names, list):
@@ -326,7 +342,7 @@ async def run_auto_archive_task(days: int) -> dict:
 
     async with _MODEL_ENDPOINT_MAP_LOCK:
         current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
-        last_used = build_last_used_map(stats_db, monitoring_service)
+        last_used = await asyncio.to_thread(build_last_used_map, stats_db, monitoring_service)
         inactive = find_inactive_models(current_config, last_used, days)
 
         if inactive:
@@ -349,7 +365,7 @@ async def run_auto_archive_task(days: int) -> dict:
 async def trigger_auto_archive(request: Request):
     """手动触发一次自动归档扫描。body: {"days": 30}（缺省用配置值）"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         days = data.get("days")
         if days is None:
             days = (CONFIG.get("auto_archive") or {}).get("days", 30)
@@ -392,8 +408,10 @@ async def update_archive_config(request: Request):
     保存后若 enabled=true 立即执行一次扫描，不用等后台任务的下一个周期。
     """
     try:
-        data = await request.json()
-        enabled = bool(data.get("enabled", False))
+        data = await _read_admin_json(request)
+        enabled = data.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="enabled 必须是布尔值")
         days = int(data.get("days", 30) or 30)
         if days <= 0:
             raise HTTPException(status_code=400, detail="days 必须为正整数")
@@ -403,13 +421,14 @@ async def update_archive_config(request: Request):
         raise HTTPException(status_code=400, detail="参数无效")
 
     # 写入 config.jsonc（保留注释、原有格式以及未在面板中编辑的配置项），再热重载
-    existing_config = CONFIG.get("auto_archive")
-    new_config = dict(existing_config) if isinstance(existing_config, dict) else {}
-    new_config.update({"enabled": enabled, "days": days})
-    content = await read_text_file(CONFIG_FILE)
-    updated = await asyncio.to_thread(set_jsonc_value, content, "auto_archive", new_config)
-    await write_text_file(CONFIG_FILE, updated)
-    await asyncio.to_thread(load_config)
+    async with _CONFIG_FILE_LOCK:
+        existing_config = CONFIG.get("auto_archive")
+        new_config = dict(existing_config) if isinstance(existing_config, dict) else {}
+        new_config.update({"enabled": enabled, "days": days})
+        content = await read_text_file(CONFIG_FILE)
+        updated = await asyncio.to_thread(set_jsonc_value, content, "auto_archive", new_config)
+        await write_text_file(CONFIG_FILE, updated)
+        await asyncio.to_thread(load_config)
 
     message = f"自动归档已{'启用' if enabled else '停用'}（{days} 天未调用）"
     logger.info(f"[MODEL_ARCHIVE] 配置更新: {new_config}")
@@ -440,49 +459,52 @@ async def update_config(
 ):
     """更新config.jsonc配置"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         content = data.get("content")
         partial = data.get("config")
+        if content is not None and not isinstance(content, str):
+            raise HTTPException(status_code=400, detail="content 必须是 JSONC 文本")
 
-        if content:
-            # 源码编辑模式：整体覆盖，用户看到什么就写入什么
-            try:
-                parsed = _parse_jsonc_func(content)
-                if not isinstance(parsed, dict):
-                    raise HTTPException(status_code=400, detail="配置根节点必须是 JSON 对象")
-            except json.JSONDecodeError as e:
-                raise HTTPException(status_code=400, detail=f"配置格式错误: {e}")
-            new_content = content
-        elif isinstance(partial, dict) and partial:
-            # 🔧 表单模式：只定点替换给出的顶层键。
-            # 旧版前端把表单收集到的对象 JSON.stringify 后当 content 提交，
-            # 等于用一份无注释的纯 JSON 覆盖 config.jsonc —— 在配置页点一次
-            # "保存"，整份配置文件的注释就全部消失了。
-            original = await read_text_file(CONFIG_FILE)
-            # 只替换值真正发生变化的键：表单会回传全部字段，对未改动的键做
-            # 同值替换会白白重排它们的格式（内联对象被展开成多行等）
-            try:
-                current = _parse_jsonc_func(original)
-            except json.JSONDecodeError:
-                current = {}
-            changed = {k: v for k, v in partial.items() if current.get(k) != v}
-            if not changed:
-                return {"status": "success", "message": "配置无变化"}
-            new_content = set_jsonc_values(original, changed)
-            logger.info(f"[CONFIG] 表单模式更新 {len(changed)} 个字段: {', '.join(sorted(changed))}")
-            try:
-                _parse_jsonc_func(new_content)
-            except json.JSONDecodeError as e:
-                logger.error(f"生成的 config.jsonc 非法，已放弃写入: {e}")
-                raise HTTPException(status_code=500, detail=f"配置写入前校验失败: {e}")
-        else:
-            raise HTTPException(status_code=400, detail="缺少配置内容")
+        async with _CONFIG_FILE_LOCK:
+            if content:
+                # 源码编辑模式：整体覆盖，用户看到什么就写入什么
+                try:
+                    parsed = _parse_jsonc_func(content)
+                    if not isinstance(parsed, dict):
+                        raise HTTPException(status_code=400, detail="配置根节点必须是 JSON 对象")
+                except json.JSONDecodeError as e:
+                    raise HTTPException(status_code=400, detail=f"配置格式错误: {e}")
+                new_content = content
+            elif isinstance(partial, dict) and partial:
+                # 🔧 表单模式：只定点替换给出的顶层键。
+                # 旧版前端把表单收集到的对象 JSON.stringify 后当 content 提交，
+                # 等于用一份无注释的纯 JSON 覆盖 config.jsonc —— 在配置页点一次
+                # "保存"，整份配置文件的注释就全部消失了。
+                original = await read_text_file(CONFIG_FILE)
+                # 只替换值真正发生变化的键：表单会回传全部字段，对未改动的键做
+                # 同值替换会白白重排它们的格式（内联对象被展开成多行等）
+                try:
+                    current = _parse_jsonc_func(original)
+                except json.JSONDecodeError:
+                    current = {}
+                changed = {k: v for k, v in partial.items() if current.get(k) != v}
+                if not changed:
+                    return {"status": "success", "message": "配置无变化"}
+                new_content = set_jsonc_values(original, changed)
+                logger.info(f"[CONFIG] 表单模式更新 {len(changed)} 个字段: {', '.join(sorted(changed))}")
+                try:
+                    _parse_jsonc_func(new_content)
+                except json.JSONDecodeError as e:
+                    logger.error(f"生成的 config.jsonc 非法，已放弃写入: {e}")
+                    raise HTTPException(status_code=500, detail=f"配置写入前校验失败: {e}")
+            else:
+                raise HTTPException(status_code=400, detail="缺少配置内容")
 
-        # 写入文件（原子写）
-        await write_text_file(CONFIG_FILE, new_content)
+            # 写入文件（原子写）
+            await write_text_file(CONFIG_FILE, new_content)
 
-        # 重新加载配置
-        await asyncio.to_thread(load_config_func, True)
+            # 重新加载配置
+            await asyncio.to_thread(load_config_func, True)
 
         return {"status": "success", "message": "配置已更新"}
     except HTTPException:
@@ -614,7 +636,7 @@ async def calculate_tokens_api(
 ):
     """计算文本的token数量"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         text = data.get("text", "")
         tokenizers = data.get("tokenizers", None)  # 可选：指定使用哪些分词器
         
@@ -636,7 +658,7 @@ async def compare_tokenizers_api(
 ):
     """对比两种分词器的结果"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         text = data.get("text", "")
         tokenizer1 = data.get("tokenizer1", "tiktoken_cl100k")
         tokenizer2 = data.get("tokenizer2", "estimate")
@@ -660,7 +682,7 @@ async def install_tokenizer_api(
 ):
     """安装分词器包"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         package_name = data.get("package", "")
         
         if not package_name:
@@ -703,32 +725,33 @@ async def update_all_tokenizer_mappings(
 ):
     """批量更新所有模型的tokenizer配置"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         tokenizer_config = data.get("tokenizer_config")
         
         if not isinstance(tokenizer_config, dict):
             raise HTTPException(status_code=400, detail="缺少有效的tokenizer_config参数")
 
-        # 读取当前配置
-        content = await read_text_file(CONFIG_FILE)
+        async with _CONFIG_FILE_LOCK:
+            # 读取当前配置
+            content = await read_text_file(CONFIG_FILE)
 
-        # 🔧 修复：旧版把 JSONC 解析成 dict 后用 json.dump 覆盖回去，
-        # config.jsonc 里全部说明性注释被一次保存彻底抹掉（这个文件的注释
-        # 就是本项目的配置文档）。改为只在原始文本上替换 tokenizer_config
-        # 这一个键的值，其余字节（含注释、缩进、键序）原样保留。
-        updated = set_jsonc_value(content, 'tokenizer_config', tokenizer_config)
+            # 🔧 修复：旧版把 JSONC 解析成 dict 后用 json.dump 覆盖回去，
+            # config.jsonc 里全部说明性注释被一次保存彻底抹掉（这个文件的注释
+            # 就是本项目的配置文档）。改为只在原始文本上替换 tokenizer_config
+            # 这一个键的值，其余字节（含注释、缩进、键序）原样保留。
+            updated = set_jsonc_value(content, 'tokenizer_config', tokenizer_config)
 
-        # 写回前先校验替换结果仍是合法 JSONC，避免写坏运行中的配置
-        try:
-            _parse_jsonc_func(updated)
-        except json.JSONDecodeError as e:
-            logger.error(f"生成的 config.jsonc 非法，已放弃写入: {e}")
-            raise HTTPException(status_code=500, detail=f"配置写入前校验失败: {e}")
+            # 写回前先校验替换结果仍是合法 JSONC，避免写坏运行中的配置
+            try:
+                _parse_jsonc_func(updated)
+            except json.JSONDecodeError as e:
+                logger.error(f"生成的 config.jsonc 非法，已放弃写入: {e}")
+                raise HTTPException(status_code=500, detail=f"配置写入前校验失败: {e}")
 
-        await write_text_file(CONFIG_FILE, updated)
+            await write_text_file(CONFIG_FILE, updated)
 
-        # 重新加载配置
-        await asyncio.to_thread(load_config_func, True)
+            # 重新加载配置
+            await asyncio.to_thread(load_config_func, True)
 
         logger.info(f"✅ 已批量保存 {len(tokenizer_config)} 个模型的tokenizer配置")
         for model, tokenizer in tokenizer_config.items():
@@ -752,7 +775,7 @@ async def merge_model_stats(
 ):
     """合并多个模型的统计数据"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         source_models = data.get("source_models", [])
         target_model = data.get("target_model", "")
         
@@ -791,7 +814,7 @@ async def delete_model_stats(
 ):
     """删除指定模型的统计数据"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         models = data.get("models", [])
         
         if not models:
@@ -1062,12 +1085,12 @@ async def export_report(
                 # 写入表头
                 writer.writerow([
                     '模型', '请求数', '输入Tokens', '输出Tokens', '缓存命中Tokens',
-                    '总Tokens', '输入成本(USD)', '缓存成本(USD)', '输出成本(USD)', '总成本(USD)',
+                    '总Tokens', '输入成本(原币)', '缓存成本(原币)', '输出成本(原币)', '总成本(原币)',
                     '货币', '平均Token/请求'
                 ])
                 for stat in model_stats:
                     writer.writerow([
-                        stat.get('display_name', stat.get('model', '')),
+                        csv_safe_text(stat.get('display_name', stat.get('model', ''))),
                         stat.get('request_count', 0),
                         stat.get('input_tokens', 0),
                         stat.get('output_tokens', 0),
@@ -1077,15 +1100,15 @@ async def export_report(
                         round(stat.get('cached_cost', 0), 6),
                         round(stat.get('output_cost', 0), 6),
                         round(stat.get('total_cost', 0), 6),
-                        stat.get('currency', 'USD'),
+                        csv_safe_text(stat.get('currency', 'USD')),
                         stat.get('request_count', 0) > 0 and round(stat.get('total_tokens', 0) / stat.get('request_count', 0)) or 0
                     ])
 
                 csv_content = output.getvalue()
                 output.close()
                 return Response(
-                    content=csv_content,
-                    media_type="text/csv; charset=utf-8-sig",
+                    content=csv_content.encode('utf-8-sig'),
+                    media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": "attachment; filename=token_report.csv"}
                 )
 
@@ -1099,7 +1122,7 @@ async def export_report(
         ])
         for stat in model_stats:
             writer.writerow([
-                stat.get('model', ''),
+                csv_safe_text(stat.get('model', '')),
                 stat.get('total_requests', 0),
                 stat.get('success_requests', 0),
                 stat.get('failed_requests', 0),
@@ -1108,8 +1131,8 @@ async def export_report(
         csv_content = output.getvalue()
         output.close()
         return Response(
-            content=csv_content,
-            media_type="text/csv; charset=utf-8-sig",
+            content=csv_content.encode('utf-8-sig'),
+            media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": "attachment; filename=token_report.csv"}
         )
     except Exception as e:
@@ -1123,7 +1146,7 @@ async def add_custom_tokenizer_api(
 ):
     """添加自定义分词器"""
     try:
-        data = await request.json()
+        data = await _read_admin_json(request)
         name = data.get("name", "")
         source_type = data.get("source_type", "huggingface")
         source = data.get("source", "")
@@ -1201,7 +1224,7 @@ async def test_model_keys(
     前端从编辑对话框中读取当前配置，POST 到此接口。
     对每个 key 分别发送一次测试请求。
     """
-    data = await request.json()
+    data = await _read_admin_json(request)
 
     api_keys = data.get("api_keys", [])
     api_base_url = data.get("api_base_url", "").strip()
@@ -1368,7 +1391,7 @@ async def query_key_balance(request: Request):
 
     前端 POST 当前模型的所有 key + api_base_url，后端并行查询余额。
     """
-    data = await request.json()
+    data = await _read_admin_json(request)
     api_keys = data.get("api_keys", [])
     api_base_url = data.get("api_base_url", "").strip()
 
@@ -1645,7 +1668,7 @@ async def query_key_balance_endpoint(request: Request):
 @router.post("/api/admin/set_sticky_key")
 async def set_sticky_key_endpoint(request: Request):
     """将指定 key 设为 sticky 轮询的当前 key（查余额后自动粘性到余额最多的 key）"""
-    data = await request.json()
+    data = await _read_admin_json(request)
     model_name = (data.get("model_name") or "").strip()
     api_key = (data.get("api_key") or "").strip()
 

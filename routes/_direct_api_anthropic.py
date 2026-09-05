@@ -16,6 +16,7 @@ import codecs
 import copy
 import json
 import logging
+from utils.anthropic_params import set_output_effort
 import re
 import time
 import uuid
@@ -236,6 +237,8 @@ def _convert_openai_tools_to_anthropic(tools: List[Dict[str, Any]]) -> List[Dict
             "description": func.get("description", ""),
             "input_schema": func.get("parameters", {}) if isinstance(func.get("parameters"), dict) else {}
         })
+        if isinstance(func.get("strict"), bool):
+            anthropic_tools[-1]["strict"] = func["strict"]
     return anthropic_tools
 
 
@@ -420,6 +423,18 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
         if anthropic_tc is not None:
             anthropic_req["tool_choice"] = anthropic_tc
 
+    if isinstance(openai_req.get("parallel_tool_calls"), bool) and anthropic_req.get("tools"):
+        choice = anthropic_req.setdefault("tool_choice", {"type": "auto"})
+        if choice.get("type") != "none":
+            choice["disable_parallel_tool_use"] = not openai_req["parallel_tool_calls"]
+
+    response_format = openai_req.get("response_format")
+    if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
+        schema = (response_format.get("json_schema") or {}).get("schema")
+        if isinstance(schema, dict):
+            anthropic_req.setdefault("output_config", {})["format"] = {
+                "type": "json_schema", "schema": copy.deepcopy(schema)}
+
     return anthropic_req
 
 
@@ -449,7 +464,7 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
         configured_effort = endpoint_config.get("reasoning_effort")
         thinking_budget = endpoint_config.get("thinking_budget")
         if configured_effort:
-            passthrough_body["output_config"] = {"effort": configured_effort}
+            set_output_effort(passthrough_body, configured_effort)
             # 客户端已带 thinking 时：enabled → adaptive 并清掉废弃的 budget_tokens
             thinking_obj = passthrough_body.get("thinking")
             if isinstance(thinking_obj, dict) and thinking_obj.get("type") in ("enabled", "adaptive"):
@@ -475,7 +490,7 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
             if cur_max <= budget:
                 new_max = budget + reserve
                 passthrough_body["max_tokens"] = min(new_max, hard_cap) if hard_cap else new_max
-            passthrough_body.pop("output_config", None)
+            set_output_effort(passthrough_body, None)
             logger.info(f"[OAI_TO_ANTHROPIC] thinking 强制启用(Token预算): budget_tokens={budget}, max_tokens={passthrough_body.get('max_tokens')}")
         else:
             # 未配置思考控制方式：尊重客户端原始参数
@@ -491,13 +506,13 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
             logger.info(f"[OAI_TO_ANTHROPIC] thinking 注入 adaptive")
         configured_effort = endpoint_config.get("thinking_effort")
         if configured_effort:
-            passthrough_body["output_config"] = {"effort": configured_effort}
+            set_output_effort(passthrough_body, configured_effort)
             logger.info(f"[OAI_TO_ANTHROPIC] output_config.effort={configured_effort}")
         else:
-            passthrough_body.pop("output_config", None)
+            set_output_effort(passthrough_body, None)
     elif et_mode == "disabled":
         passthrough_body["thinking"] = {"type": "disabled"}
-        passthrough_body.pop("output_config", None)
+        set_output_effort(passthrough_body, None)
         logger.info(f"[OAI_TO_ANTHROPIC] thinking 显式禁用")
 
     # thinking display 注入

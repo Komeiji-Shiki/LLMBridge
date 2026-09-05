@@ -3,3 +3,4 @@ uvicorn[standard]
 pydantic
 python-multipart
 apscheduler
+Pillow>=9.0,<12.0

@@ -13,7 +13,8 @@ import os
 import secrets
 import time
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
+from functools import wraps
 from typing import Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,14 @@ class RateLimiter:
             self._windows.pop(key_id, None)
 
 
+def _serialize_key_mutation(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._save_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class APIKeyManager:
     """API Key 管理器（单例）"""
 
@@ -94,7 +103,7 @@ class APIKeyManager:
         self._lock = Lock()
         # 🔧 磁盘写入专用锁：写盘已移出 _lock（validate_request 热路径与管理
         # 操作共享 _lock，锁内写盘会把所有请求的鉴权卡在磁盘 IO 上）
-        self._save_lock = Lock()
+        self._save_lock = RLock()
         self._rate_limiter = RateLimiter()
         # 建立 secret -> key_id 的快速查找索引
         self._secret_index: Dict[str, str] = {}
@@ -102,6 +111,7 @@ class APIKeyManager:
         self._dirty = False
         self._load()
 
+    @_serialize_key_mutation
     def _load(self):
         """从文件加载 API Key 配置"""
         if not os.path.exists(API_KEYS_FILE):
@@ -180,6 +190,7 @@ class APIKeyManager:
         """生成一个安全的 API Key secret"""
         return "sk-" + secrets.token_urlsafe(32)
 
+    @_serialize_key_mutation
     def create_key(
         self,
         name: str,
@@ -230,6 +241,7 @@ class APIKeyManager:
             **{k: v for k, v in key_data.items() if k != "secret"},
         }
 
+    @_serialize_key_mutation
     def delete_key(self, key_id: str) -> bool:
         """删除一个 API Key"""
         payload = None
@@ -247,6 +259,7 @@ class APIKeyManager:
         logger.info(f"[APIKeyManager] 🗑️ 删除 API Key: id={key_id}")
         return True
 
+    @_serialize_key_mutation
     def update_key(self, key_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         更新一个 API Key 的配置。

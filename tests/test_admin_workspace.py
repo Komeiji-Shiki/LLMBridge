@@ -54,9 +54,9 @@ def ui():
             if path.startswith('/api/'):
                 if request.method == 'POST': writes.append({'path': path, **(request.post_data_json or {})})
                 return request_route.fulfill(json={})
-            relative = 'admin.html' if path == '/admin' else path.lstrip('/')
+            relative = {'/admin': 'admin.html', '/monitor': 'monitor.html'}.get(path, path.lstrip('/'))
             asset = (ROOT / relative).resolve()
-            if asset.is_relative_to(ROOT) and asset.is_file() and (relative == 'admin.html' or relative.startswith(('js/', 'css/'))):
+            if asset.is_relative_to(ROOT) and asset.is_file() and (relative in ('admin.html', 'monitor.html') or relative.startswith(('js/', 'css/'))):
                 return request_route.fulfill(body=asset.read_bytes(), content_type=mimetypes.guess_type(asset)[0] or 'text/plain')
             request_route.fulfill(status=404, body='Not found')
 
@@ -116,6 +116,48 @@ def test_config_parser_escaped_backslashes_and_form_snapshot(ui):
         formToConfig();
         return before === JSON.stringify(currentConfigData);
     }''')
+
+
+def test_edit_preserves_unrepresented_fields_and_other_endpoints(ui):
+    page, models, writes, _ = ui
+    primary = {**models['Alpha'], 'custom_header_policy': {'tenant': 'keep'}, 'prefill_content': 'clear me'}
+    secondary = {'api_type': 'direct_api', 'api_base_url': 'https://backup.test', 'api_key': 'backup-key'}
+    models['Alpha'] = [primary, secondary]
+    page.evaluate('loadModels()')
+    page.locator('.model-name', has_text='Alpha').click()
+    page.locator('[data-settings-page="messages"]').click()
+    page.locator('#prefill-content').fill('')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    saved = writes[-1]
+    assert saved['old_model_name'] == 'Alpha'
+    assert saved['config'][0]['custom_header_policy'] == {'tenant': 'keep'}
+    assert 'prefill_content' not in saved['config'][0]
+    assert saved['config'][1] == secondary
+
+
+def test_monitor_keeps_newest_query_and_supports_programmatic_tabs(ui):
+    page, _, _, _ = ui
+    page.add_init_script('window.WebSocket = class {}; window.setInterval = () => 0; window.setTimeout = () => 0;')
+    page.goto('http://bridge.test/monitor')
+    result = page.evaluate('''async () => {
+        let olderResolve, newerResolve;
+        const pending = [new Promise(resolve => olderResolve = resolve), new Promise(resolve => newerResolve = resolve)];
+        apiGet = async () => { const response = pending.shift(); return {json: () => response}; };
+        const older = refreshRequestLogs();
+        const newer = refreshRequestLogs();
+        newerResolve({total: 1, items: [{request_id: 'new', model: 'new', status: 'success', timestamp: 1,
+            currency: 'USD" onmouseover="window.auditInjected=true', total_cost: 1}]});
+        await newer;
+        olderResolve({total: 999, items: []});
+        await older;
+        const count = document.getElementById('request-count').textContent;
+        const injected = !!document.querySelector('[onmouseover]');
+        apiGet = async () => ({json: async () => []});
+        switchTab('errors');
+        return {count, injected, active: document.querySelector('.tab.active').dataset.tab};
+    }''')
+    assert result == {'count': '(1)', 'injected': False, 'active': 'errors'}
 
 
 def test_groups_zero_values_and_save(ui):

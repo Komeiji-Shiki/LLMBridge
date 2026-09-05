@@ -492,8 +492,9 @@ def convert_chat_response_to_responses(
     output.extend(_convert_tool_call_to_output_item(call) for call in tool_calls)
 
     finish_reason = first_choice.get("finish_reason", "stop")
-    status = "incomplete" if finish_reason == "length" else "completed"
-    incomplete_details = {"reason": "max_output_tokens"} if status == "incomplete" else None
+    incomplete_reason = {"length": "max_output_tokens", "content_filter": "content_filter"}.get(finish_reason)
+    status = "incomplete" if incomplete_reason else "completed"
+    incomplete_details = {"reason": incomplete_reason} if incomplete_reason else None
     response_id = _response_id(chat_response.get("id"))
     model = chat_response.get("model") or (request or {}).get("model") or "unknown"
     return _build_response_object(
@@ -890,8 +891,9 @@ class _ResponsesStreamBuilder:
         return events
 
     def final_event(self) -> bytes:
-        status = "incomplete" if self.finish_reason == "length" else "completed"
-        details = {"reason": "max_output_tokens"} if status == "incomplete" else None
+        incomplete_reason = {"length": "max_output_tokens", "content_filter": "content_filter"}.get(self.finish_reason)
+        status = "incomplete" if incomplete_reason else "completed"
+        details = {"reason": incomplete_reason} if incomplete_reason else None
         response = _build_response_object(
             self.response_id, self.model, self.request, self.output, status,
             self.usage, details,

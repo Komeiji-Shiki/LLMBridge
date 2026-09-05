@@ -92,56 +92,7 @@ def _replace_dict_no_gap(target: dict, new_data: dict) -> None:
         target.pop(key, None)
 
 
-def _parse_jsonc(jsonc_string: str) -> dict:
-    """
-    稳健地解析 JSONC 字符串，移除 // 和 /* */ 注释。
-
-    使用单遍字符状态机，正确处理字符串字面量内出现的
-    //、/*、*/ 与转义引号，避免误删字符串内容。
-    """
-    result_chars = []
-    i = 0
-    n = len(jsonc_string)
-    in_string = False
-
-    while i < n:
-        char = jsonc_string[i]
-
-        if in_string:
-            result_chars.append(char)
-            if char == '\\' and i + 1 < n:
-                # 保留转义序列的下一个字符，避免 \" 被误判为字符串结束
-                result_chars.append(jsonc_string[i + 1])
-                i += 2
-                continue
-            if char == '"':
-                in_string = False
-            i += 1
-            continue
-
-        if char == '"':
-            in_string = True
-            result_chars.append(char)
-            i += 1
-            continue
-
-        if char == '/' and i + 1 < n:
-            next_char = jsonc_string[i + 1]
-            if next_char == '/':
-                # 单行注释：跳到行尾（保留换行符以维持行号）
-                newline_pos = jsonc_string.find('\n', i)
-                i = n if newline_pos == -1 else newline_pos
-                continue
-            if next_char == '*':
-                # 块注释：跳到 */ 之后
-                end_pos = jsonc_string.find('*/', i + 2)
-                i = n if end_pos == -1 else end_pos + 2
-                continue
-
-        result_chars.append(char)
-        i += 1
-
-    return json.loads(''.join(result_chars))
+from utils.jsonc_edit import parse_jsonc as _parse_jsonc
 
 
 def load_config(force_reload=False):

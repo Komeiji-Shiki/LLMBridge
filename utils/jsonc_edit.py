@@ -11,10 +11,21 @@
 """
 import json
 import os
+import re
 import threading
 from typing import Any, Optional
 
 _WHITESPACE = " \t\r\n"
+
+
+def parse_jsonc(text: str):
+    """Parse comments and trailing commas without modifying string literals."""
+    string = r'"(?:\\[\s\S]|[^"\\])*"'
+    text = re.sub(string + r'|//[^\r\n]*|/\*[\s\S]*?\*/',
+                  lambda match: match[0] if match[0].startswith('"') else ' ' + '\n' * match[0].count('\n'), text)
+    text = re.sub(string + r'|,(?=\s*[}\]])',
+                  lambda match: match[0] if match[0].startswith('"') else '', text)
+    return json.loads(text)
 
 
 def _skip_ws_and_comments(text: str, i: int) -> int:

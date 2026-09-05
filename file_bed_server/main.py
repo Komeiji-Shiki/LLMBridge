@@ -1,6 +1,7 @@
 # file_bed_server/main.py
 import base64
 import os
+import sys
 import uuid
 import time
 from datetime import datetime, timedelta
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 # --- 路径配置 ---
 # 将上传目录定位到 main.py 文件的同级目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(BASE_DIR))
+from utils.jsonc_edit import parse_jsonc
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 API_KEY = os.environ.get("FILE_BED_API_KEY", "")  # 从环境变量读取，不再硬编码
 # 允许上传的文件扩展名白名单（防止 XSS：禁止 .html/.svg/.xml 等可执行类型）
@@ -36,9 +40,7 @@ def load_optimization_config():
         # 假设 config.jsonc 在 file_bed_server 目录的上一级
         config_path = os.path.join(os.path.dirname(BASE_DIR), 'config.jsonc')
         with open(config_path, 'r', encoding='utf-8') as f:
-            # 简单处理jsonc注释
-            content = '\n'.join(line for line in f if not line.strip().startswith('//'))
-            config = json.loads(content)
+            config = parse_jsonc(f.read())
             return config.get('image_optimization', {})
     except Exception as e:
         logger.error(f"加载图片优化配置失败: {e}", exc_info=True)
@@ -112,7 +114,7 @@ class UploadRequest(BaseModel):
 
 # --- API 端点 ---
 @app.post("/upload")
-async def upload_file(request: UploadRequest, http_request: Request):
+def upload_file(request: UploadRequest, http_request: Request):
     """
     接收 base64 编码的文件并保存，返回可访问的 URL。
     """
@@ -125,7 +127,7 @@ async def upload_file(request: UploadRequest, http_request: Request):
         header, encoded_data = request.file_data.split(',', 1)
         
         # 2. 解码 base64 数据
-        file_data = base64.b64decode(encoded_data)
+        file_data = base64.b64decode(encoded_data, validate=True)
 
         # 3. 生成唯一文件名以避免冲突
         file_extension = os.path.splitext(request.file_name)[1]
@@ -147,15 +149,14 @@ async def upload_file(request: UploadRequest, http_request: Request):
         if OPTIMIZATION_CONFIG.get('enabled') and file_extension.lower() in ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff']:
             try:
                 img = Image.open(io.BytesIO(file_data))
+                output_format = img.format
                 original_size = len(file_data)
 
                 # 步骤1: 清除元数据
                 if OPTIMIZATION_CONFIG.get('strip_metadata'):
                     # 创建一个没有exif数据的新图像
-                    img_data = list(img.getdata())
-                    img_clean = Image.new(img.mode, img.size)
-                    img_clean.putdata(img_data)
-                    img = img_clean
+                    img = img.copy()
+                    img.info.clear()
 
                 # 步骤2: 调整尺寸
                 max_w = OPTIMIZATION_CONFIG.get('max_width', 1920)
@@ -168,7 +169,6 @@ async def upload_file(request: UploadRequest, http_request: Request):
                 save_kwargs = {}
                 
                 # 确定输出格式
-                output_format = img.format
                 if OPTIMIZATION_CONFIG.get('convert_to_webp'):
                     output_format = 'WEBP'
                     file_extension = '.webp'
@@ -216,6 +216,8 @@ async def upload_file(request: UploadRequest, http_request: Request):
             content={"success": True, "filename": unique_filename}
         )
 
+    except HTTPException:
+        raise
     except (ValueError, IndexError) as e:
         logger.error(f"解析 base64 数据时出错: {e}")
         raise HTTPException(status_code=400, detail=f"无效的 base64 data URI 格式: {e}")

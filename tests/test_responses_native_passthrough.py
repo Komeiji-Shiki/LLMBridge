@@ -243,6 +243,22 @@ class RewriteSseModelTests(unittest.TestCase):
 
 
 class PassthroughHandlerTests(unittest.TestCase):
+    def test_truncated_stream_emits_error_and_records_failure(self):
+        service = _FakeDirectApiService(_upstream_stream_payloads()[:2])
+        _, raw = self._run(self._handle_async(service, {
+            'model': 'gpt-5.6-sol_sph', 'input': 'hi', 'stream': True,
+        }, consume_stream=True))
+        self.assertIn(b'incomplete_stream', raw)
+        self.assertFalse(self.monitoring_mock.request_end.call_args.kwargs['success'])
+
+    def test_final_event_without_blank_line_is_counted(self):
+        service = _FakeDirectApiService([_upstream_stream_payloads()[2].rstrip()])
+        _, raw = self._run(self._handle_async(service, {
+            'model': 'gpt-5.6-sol_sph', 'input': 'hi', 'stream': True,
+        }, consume_stream=True))
+        self.assertNotIn(b'incomplete_stream', raw)
+        self.assertTrue(self.monitoring_mock.request_end.call_args.kwargs['success'])
+
     def _run(self, coro):
         return asyncio.run(coro)
 

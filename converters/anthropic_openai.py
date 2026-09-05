@@ -88,6 +88,8 @@ def convert_anthropic_tools_to_openai(tools: List[Dict[str, Any]]) -> List[Dict[
                 "parameters": input_schema if isinstance(input_schema, dict) else {}
             }
         })
+        if isinstance(tool.get("strict"), bool):
+            openai_tools[-1]["function"]["strict"] = tool["strict"]
     return openai_tools
 
 
@@ -382,6 +384,17 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
     if isinstance(thinking, dict):
         openai_req["_anthropic_thinking"] = thinking
         logger.info(f"[ANTHROPIC_CONVERT] thinking 配置已保留: budget_tokens={thinking.get('budget_tokens', 'N/A')}")
+
+    if isinstance(tool_choice, dict) and isinstance(tool_choice.get("disable_parallel_tool_use"), bool):
+        openai_req["parallel_tool_calls"] = not tool_choice["disable_parallel_tool_use"]
+
+    output = anthropic_req.get("output_config") or {}
+    output_format = output.get("format")
+    if isinstance(output_format, dict) and output_format.get("type") == "json_schema":
+        openai_req["response_format"] = {"type": "json_schema", "json_schema": {
+            "name": "response", "schema": output_format.get("schema", {})}}
+    if output.get("effort") is not None:
+        openai_req["reasoning_effort"] = output["effort"]
 
     return openai_req
 

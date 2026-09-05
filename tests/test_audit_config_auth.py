@@ -125,11 +125,12 @@ def test_invalid_key_configuration_is_rejected(payload):
 
 
 def test_invalid_key_file_does_not_disable_existing_auth(monkeypatch):
-    from threading import Lock
+    from threading import Lock, RLock
     from unittest.mock import mock_open
     from core import api_key_manager as module
     manager = object.__new__(module.APIKeyManager)
     manager._lock = Lock()
+    manager._save_lock = RLock()
     manager._keys = {'keep': {'secret': 'current'}}
     manager._secret_index = {'current': 'keep'}
     monkeypatch.setattr(module.os.path, 'exists', lambda _: True)
@@ -137,3 +138,45 @@ def test_invalid_key_file_does_not_disable_existing_auth(monkeypatch):
     manager._load()
     assert manager._keys == {'keep': {'secret': 'current'}}
     assert manager._secret_index == {'current': 'keep'}
+
+
+@pytest.mark.parametrize('body', [{'model': []}, {'messages': 'bad'}, {'messages': [1]}, {'stream': 'false'}])
+def test_invalid_inference_field_types_are_client_errors(body):
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(api_routes._read_request_json_non_blocking(request_for(body)))
+    assert error.value.status_code == 400
+
+
+def test_unknown_model_is_not_queued_for_retired_browser_bridge(monkeypatch):
+    monkeypatch.setattr(api_routes, 'MODEL_ENDPOINT_MAP', {})
+    monkeypatch.setattr(api_routes, 'MODEL_NAME_TO_ID_MAP', {})
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(api_routes._dispatch_chat_completions_core({'model': 'missing', 'messages': []}))
+    assert error.value.status_code == 404
+
+
+@pytest.mark.parametrize('operation,payload', [
+    ('update_config', {'config': {'server_port': 5200}}),
+    ('update_all_tokenizer_mappings', {'tokenizer_config': {'demo': 'tiktoken'}}),
+    ('update_archive_config', {'enabled': False, 'days': 30})])
+def test_jsonc_mutations_share_transaction_lock(monkeypatch, operation, payload):
+    async def run():
+        lock = asyncio.Lock()
+        monkeypatch.setattr(admin_routes, '_CONFIG_FILE_LOCK', lock)
+        reader = AsyncMock(return_value='{}')
+        monkeypatch.setattr(admin_routes, 'read_text_file', reader)
+        monkeypatch.setattr(admin_routes, 'write_text_file', AsyncMock())
+        monkeypatch.setattr(admin_routes, 'load_config', Mock())
+        monkeypatch.setattr(admin_routes, 'CONFIG', {})
+        args = [request_for(payload)]
+        if operation != 'update_archive_config':
+            args.extend([json.loads, Mock()])
+        await lock.acquire()
+        task = asyncio.create_task(getattr(admin_routes, operation)(*args))
+        await asyncio.sleep(0)
+        try:
+            assert not reader.called
+        finally:
+            lock.release()
+            await task
+    asyncio.run(run())

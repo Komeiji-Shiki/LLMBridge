@@ -490,7 +490,9 @@ function _renderPagination() {
 }
 
 // 刷新请求日志
+let _requestLogsSequence = 0;
 async function refreshRequestLogs() {
+    const sequence = ++_requestLogsSequence;
     try {
         const model = document.getElementById('filter-model')?.value || '';
         const status = document.getElementById('filter-status')?.value || '';
@@ -504,6 +506,7 @@ async function refreshRequestLogs() {
 
         const response = await apiGet(`/api/monitor/logs/requests/query?${params}`);
         const data = await response.json();
+        if (sequence !== _requestLogsSequence) return;
         const logs = data.items || [];
         const exRate = data.exchange_rate || { USD_TO_CNY: 7.2, CNY_TO_USD: 1 / 7.2 };
         currentLogTotal = data.total || 0;
@@ -558,7 +561,7 @@ async function refreshRequestLogs() {
                     <td>${inTokens}</td>
                     <td>${outTokens}</td>
                     <td style="white-space: nowrap;">${formatStopReason(log.stop_reason || (log.cost_info && log.cost_info.stop_reason))}</td>
-                    <td style="font-family: monospace; font-size: 11px;" title="${costTitle}">${costDisplay}</td>
+                    <td style="font-family: monospace; font-size: 11px;" title="${escapeHtml(costTitle)}">${escapeHtml(costDisplay)}</td>
                     <td>
                         <button class="detail-btn" data-request-id="${escapeHtml(log.request_id || '')}" onclick="viewRequestDetails(this.dataset.requestId)">查看详细</button>
                     </td>
@@ -625,7 +628,7 @@ function switchTab(tab) {
         t.classList.remove('active');
     });
     // 🔧 修复：旧版依赖全局 event.target，嵌套元素点击时可能拿到子元素而非 .tab
-    var targetTab = event.target.closest('.tab');
+    var targetTab = document.querySelector(`.tab[data-tab="${tab}"]`);
     if (targetTab) targetTab.classList.add('active');
 
     // 切换内容

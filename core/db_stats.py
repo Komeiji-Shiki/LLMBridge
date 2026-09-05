@@ -207,6 +207,19 @@ class StatsDB:
             }
             
             model_stats = []
+            # 同一模型可能在历史上切换过货币，原币金额不能直接相加。
+            # 与每日汇总一致，展示时按当前配置汇率转换，不改写历史记录。
+            USD_TO_CNY, CNY_TO_USD = get_exchange_rates()
+            cursor.execute(f'''
+                SELECT model, COALESCE(currency, 'USD'),
+                       SUM(COALESCE(cached_cost, 0)), SUM(COALESCE(input_cost, 0)),
+                       SUM(COALESCE(output_cost, 0)), SUM(COALESCE(total_cost, 0))
+                FROM requests {where_clause}
+                GROUP BY model, COALESCE(currency, 'USD')
+            ''', params)
+            model_costs = {}
+            for cost_row in cursor.fetchall():
+                model_costs.setdefault(cost_row[0], []).append(cost_row[1:])
             for row in model_rows:
                 model_name = row[0]
                 display_name = model_name  # 默认使用model_name
@@ -251,6 +264,12 @@ class StatsDB:
                     rpm = model_rpm_data['request_count'] / rpm_minutes
                     tpm = model_rpm_data['total_tokens'] / rpm_minutes
                 
+                converted_costs = [0.0] * 4
+                for currency, *amounts in model_costs.get(model_name, []):
+                    factor = (USD_TO_CNY if currency == 'USD' and display_currency == 'CNY'
+                              else CNY_TO_USD if currency == 'CNY' and display_currency == 'USD' else 1.0)
+                    for index, amount in enumerate(amounts):
+                        converted_costs[index] += amount * factor
                 model_stats.append({
                     'model': model_name,
                     'display_name': display_name,
@@ -259,10 +278,10 @@ class StatsDB:
                     'output_tokens': row[3],
                     'total_tokens': row[4],
                     'cached_tokens': row[5],  # 🔧 新增：缓存命中tokens
-                    'cached_cost': row[6],    # 🔧 新增：缓存命中成本
-                    'input_cost': row[7],
-                    'output_cost': row[8],
-                    'total_cost': row[9],
+                    'cached_cost': converted_costs[0],
+                    'input_cost': converted_costs[1],
+                    'output_cost': converted_costs[2],
+                    'total_cost': converted_costs[3],
                     'currency': display_currency,
                     'rpm': round(rpm, 2),
                     'tpm': round(tpm, 2)

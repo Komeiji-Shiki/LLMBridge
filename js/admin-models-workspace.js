@@ -2,10 +2,34 @@
 'use strict';
 
 const modelWorkspace = { models: {}, request: 0 };
-const modelEditor = { snapshot: '', saving: false, opener: null, page: 'connection' };
+const modelEditor = { snapshot: '', saving: false, opener: null, page: 'connection', originalConfig: {} };
 
 function modelPrimaryConfig(config) {
     return (Array.isArray(config) ? config[0] : config) || {};
+}
+
+function mergeModelEditorConfig(config) {
+    const original = structuredClone(modelEditor.originalConfig);
+    const primary = modelPrimaryConfig(original);
+    // Only fields represented by this form can be removed by clearing a control.
+    const managedFields = [
+        'api_type', 'model_id', 'display_name', 'passthrough', 'sanitize_recursive_schemas',
+        'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream',
+        'enable_thinking', 'reasoning_effort', 'thinking_budget', 'thinking_effort', 'thinking_display',
+        'responses_store', 'responses_reasoning_summary', 'auto_cache', 'verbosity',
+        'oai_thinking_type', 'oai_thinking_effort', 'prefill_content', 'endpoint_path', 'upstream_protocol',
+        'api_base_url', 'api_key', 'api_keys', 'api_key_strategy', 'api_key_cooldown_seconds',
+        'thinking_separator', 'custom_params', 'extra_body_params', 'pricing', 'max_temperature',
+        'max_tokens', 'cached_tokens_mode', 'token_stats_mode', 'completion_tokens_mode',
+        'image_compression', 'system_prompt_injection', 'auto_retry', 'session_id', 'mode',
+        'type', 'battle_target', 'archived'
+    ];
+    for (const field of managedFields) delete primary[field];
+    Object.assign(primary, config);
+    if (!Array.isArray(original)) return primary;
+    original[0] = primary;
+    if (!currentEditingModel) original.forEach(endpoint => { delete endpoint.archived; });
+    return original;
 }
 
 function modelProtocol(config) {
@@ -17,7 +41,7 @@ function modelService(config) {
 }
 
 function openModelFromList(name, copy = false) {
-    const config = modelPrimaryConfig(modelWorkspace.models[name]);
+    const config = modelWorkspace.models[name];
     if (copy) copyModel(name, config);
     else editModel(name, config);
 }

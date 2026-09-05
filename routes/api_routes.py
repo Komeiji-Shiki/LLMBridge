@@ -12,6 +12,7 @@ import asyncio
 import copy
 import json
 import logging
+from utils.anthropic_params import set_output_effort
 import secrets
 import time
 import uuid
@@ -233,6 +234,13 @@ async def _read_request_json_non_blocking(request: Request) -> Dict[str, Any]:
         data = json.loads(body or b"")
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象。")
+    if 'model' in data and (not isinstance(data['model'], str) or not data['model'].strip()):
+        raise HTTPException(status_code=400, detail="model 必须是非空字符串。")
+    if 'messages' in data and (not isinstance(data['messages'], list)
+                               or not all(isinstance(message, dict) for message in data['messages'])):
+        raise HTTPException(status_code=400, detail="messages 必须是消息对象列表。")
+    if 'stream' in data and not isinstance(data['stream'], bool):
+        raise HTTPException(status_code=400, detail="stream 必须是布尔值。")
     return data
 
 
@@ -264,6 +272,10 @@ async def _dispatch_chat_completions_core(
         skip_api_auth: 是否跳过 API Key 验证（内部重试/已在上层验证时使用）
     """
     model_name = openai_req.get("model")
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise HTTPException(status_code=400, detail="model 必须是非空字符串。")
+    if model_name not in MODEL_ENDPOINT_MAP and model_name not in MODEL_NAME_TO_ID_MAP:
+        raise HTTPException(status_code=404, detail=f"模型 '{model_name}' 不存在")
     model_type = _resolve_model_type(model_name)
 
     # 归档模型拦截：配置存在但已归档 → 按“模型不存在”处理。
@@ -538,7 +550,7 @@ def _apply_native_thinking_config(passthrough_body: dict, endpoint_config: dict)
         configured_effort = endpoint_config.get("reasoning_effort")
         thinking_budget = endpoint_config.get("thinking_budget")
         if configured_effort:
-            passthrough_body["output_config"] = {"effort": configured_effort}
+            set_output_effort(passthrough_body, configured_effort)
             # 客户端已带 thinking 时：enabled → adaptive 并清掉废弃的 budget_tokens
             thinking_obj = passthrough_body.get("thinking")
             if isinstance(thinking_obj, dict) and thinking_obj.get("type") in ("enabled", "adaptive"):
@@ -550,7 +562,7 @@ def _apply_native_thinking_config(passthrough_body: dict, endpoint_config: dict)
         elif thinking_budget:
             budget = int(thinking_budget or 0)
             passthrough_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            passthrough_body.pop("output_config", None)
+            set_output_effort(passthrough_body, None)
             logger.info(f"[ANTHROPIC_COMPAT] thinking 强制启用(Token预算): budget_tokens={budget}")
         else:
             logger.info("[ANTHROPIC_COMPAT] thinking 配置未指定控制方式，透传客户端参数")
@@ -568,13 +580,13 @@ def _apply_native_thinking_config(passthrough_body: dict, endpoint_config: dict)
         # 仅在显式配置 thinking_effort 时才添加 output_config，否则让模型自行决定
         configured_effort = endpoint_config.get("thinking_effort")
         if configured_effort:
-            passthrough_body["output_config"] = {"effort": configured_effort}
+            set_output_effort(passthrough_body, configured_effort)
             logger.info(f"[ANTHROPIC_COMPAT] output_config.effort={configured_effort}")
         else:
-            passthrough_body.pop("output_config", None)
+            set_output_effort(passthrough_body, None)
     elif et_mode == "disabled":
         passthrough_body["thinking"] = {"type": "disabled"}
-        passthrough_body.pop("output_config", None)
+        set_output_effort(passthrough_body, None)
         logger.info("[ANTHROPIC_COMPAT] thinking 显式禁用")
 
     # ── thinking display 注入 ──

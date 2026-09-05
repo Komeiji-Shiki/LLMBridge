@@ -220,6 +220,8 @@ async def handle_gemini_native_direct(
                 thinking_config=thinking_config,
                 tools=openai_req.get("tools"),
                 tool_choice=openai_req.get("tool_choice"),
+                response_format=openai_req.get("response_format"),
+                stop_sequences=([openai_req["stop"]] if isinstance(openai_req.get("stop"), str) else openai_req.get("stop")),
                 extra_body=extra_kwargs if extra_kwargs else None,
             )
 
@@ -232,6 +234,7 @@ async def handle_gemini_native_direct(
                 content_parts = []
                 reasoning_parts = []
                 tool_call_accumulator = {}
+                tool_call_indices = {}
                 input_tokens = 0
                 output_tokens = 0
                 total_tokens = 0
@@ -346,7 +349,7 @@ async def handle_gemini_native_direct(
                             upstream_usage = _meta
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
                             gemini_chunk, display_name, request_id, is_stream_chunk=True,
-                            completion_tokens_mode=completion_tokens_mode)
+                            completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
 
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
                         delta_content = delta.get("content", "")
@@ -384,7 +387,7 @@ async def handle_gemini_native_direct(
 
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
                             gemini_chunk, display_name, request_id, is_stream_chunk=True,
-                            completion_tokens_mode=completion_tokens_mode)
+                            completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
 
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
                         delta_content = delta.get("content", "")

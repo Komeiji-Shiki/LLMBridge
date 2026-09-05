@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import copy
 import hashlib
 import json
 import logging
@@ -472,7 +473,7 @@ async def _handle_responses_native_passthrough(
         return build_responses_error_response(503, "Direct API service not initialized")
 
     # ── 构造上游请求：仅替换 model，其余字段（含 reasoning item）原样保留 ──
-    passthrough_body = dict(responses_request)
+    passthrough_body = copy.deepcopy(responses_request)
     passthrough_body["model"] = target_model_id
 
     # Codex 等客户端下发的 tools / text.format 常带递归 $ref，上游会 400：
@@ -666,8 +667,17 @@ async def _handle_responses_native_passthrough(
                         _apply_sse_block(block, stats)
                     yield _rewrite_sse_model(chunk, model, target_model_id)
 
-                # 流自然结束 = 上游流已完整处理
-                stats["stream_complete"] = True
+                # TCP EOF 不是 Responses 成功终止事件。先处理没有空行的尾块，
+                # 然后确认终态，避免截断响应被记录为成功。
+                sse_buffer += decoder.decode(b"", final=True)
+                if sse_buffer.strip():
+                    _apply_sse_block(sse_buffer, stats)
+                stats["stream_complete"] = bool(stats.get("saw_completed"))
+                if not stats["stream_complete"] and stats["error_message"] is None:
+                    stats["error_message"] = "Upstream Responses stream ended before a terminal event"
+                    error_event = {"type": "error", "code": "incomplete_stream",
+                                   "message": stats["error_message"], "param": None}
+                    yield ("event: error\ndata: " + json.dumps(error_event) + "\n\n").encode()
                 await complete_monitoring_once()
             except asyncio.CancelledError:
                 # 客户端取消：上游已 completed（或流已完整输出）时不改判失败，否则按断连处理

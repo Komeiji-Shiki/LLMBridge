@@ -110,71 +110,7 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
     }
 
 
-async def _iter_sse_json_events(
-    response: "aiohttp.ClientResponse",
-    tag: str,
-    parse_bare_json: bool = False,
-) -> AsyncGenerator[Dict[str, Any], None]:
-    """把 aiohttp 响应体解析为 SSE JSON 事件流（公共实现）。
-
-    🔧 重构说明：旧版在 call_api / call_gemini_native_api 里各自手写一份
-    几乎相同的解析循环，且使用 `async for line in response.content`（readline），
-    遇到超长行（图像模型的 base64 数据行可达数 MB）会抛
-    "Chunk too big" 导致流中断。现在：
-    - 用 iter_any + 增量 UTF-8 解码器 + 手工行缓冲，不受行长度限制，
-      也不会在多字节字符中间截断
-    - `data: [DONE]` → yield {"done": True} 并结束
-    - 带 data 前缀的 JSON 行 → yield 解析后的 dict
-    - parse_bare_json=True 时，无 data: 前缀的行也尝试按 JSON 解析（Gemini 兼容）
-    """
-    import codecs
-    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-    buffer = ""
-
-    def _parse_line(line: str) -> Optional[Dict[str, Any]]:
-        """解析单行，返回事件 dict；[DONE] 返回 {"done": True}；无效行返回 None"""
-        if line.startswith('data:'):
-            data = line[5:].lstrip()
-            if data == '[DONE]':
-                logger.debug(f"[{tag}] 流式响应结束")
-                return {"done": True}
-            try:
-                return json.loads(data)
-            except json.JSONDecodeError as e:
-                logger.warning(f"[{tag}] JSON解析失败: {e}, 数据: {data[:100]}")
-                return None
-        if parse_bare_json:
-            # 纯JSON格式（无前缀，Gemini 部分网关会这样返回）
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError as e:
-                logger.warning(f"[{tag}] JSON解析失败: {e}, 数据: {line[:100]}")
-        return None
-
-    async for raw_chunk in response.content.iter_any():
-        buffer += decoder.decode(raw_chunk)
-        if '\n' not in buffer:
-            continue
-        # 🔧 性能：一次 split 处理本批所有完整行（旧版逐行 find+切片，
-        # 单批行数多时 O(n²)）；最后一段是未完成行，保留到下一批
-        *complete_lines, buffer = buffer.split('\n')
-        for raw_line in complete_lines:
-            line = raw_line.strip()
-            if not line:
-                continue
-            event = _parse_line(line)
-            if event is not None:
-                yield event
-                if event.get("done"):
-                    return
-
-    # flush 残留（没有尾随换行符的最后一行）
-    buffer += decoder.decode(b"", final=True)
-    line = buffer.strip()
-    if line:
-        event = _parse_line(line)
-        if event is not None:
-            yield event
+from services.sse import iter_sse_json_events as _iter_sse_json_events
 
 
 
@@ -634,6 +570,8 @@ class DirectAPIService:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         extra_body: Optional[Dict[str, Any]] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        stop_sequences: Optional[List[str]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         调用Gemini原生API（非OpenAI兼容格式）
@@ -867,7 +805,11 @@ class DirectAPIService:
                             function_call["id"] = tc_id
                             if fc_name:
                                 tool_id_to_name[tc_id] = fc_name
-                        parts.append({"functionCall": function_call})
+                        function_part = {"functionCall": function_call}
+                        signature = tc.get("_thought_signature")
+                        if signature:
+                            function_part["thoughtSignature"] = signature
+                        parts.append(function_part)
                 
                 if not parts:
                     parts.append({"text": " "})
@@ -914,6 +856,16 @@ class DirectAPIService:
             
         if thinking_config:
             generation_config["thinkingConfig"] = thinking_config
+
+        if stop_sequences:
+            generation_config["stopSequences"] = stop_sequences
+        if isinstance(response_format, dict):
+            if response_format.get("type") in ("json_object", "json_schema"):
+                generation_config["responseMimeType"] = "application/json"
+            if response_format.get("type") == "json_schema":
+                schema = (response_format.get("json_schema") or {}).get("schema")
+                if isinstance(schema, dict):
+                    generation_config["responseJsonSchema"] = schema
         
         if generation_config:
             request_body["generationConfig"] = generation_config
@@ -1171,7 +1123,8 @@ class DirectAPIService:
         model: str,
         request_id: str,
         is_stream_chunk: bool = False,
-        completion_tokens_mode: str = MODE_MERGE
+        completion_tokens_mode: str = MODE_MERGE,
+        tool_call_indices: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """
         将Gemini原生响应转换为OpenAI格式（支持工具调用转换）
@@ -1203,10 +1156,14 @@ class DirectAPIService:
                             # 旧版用 parts 的下标，parts 里混有 text 块时会得到
                             # 不连续的 index（如 [text, functionCall] → index=1），
                             # 客户端按 index 聚合流式工具调用时直接错位。
-                            tool_calls.append(
-                                DirectAPIService._gemini_function_call_to_oai_tool_call(
-                                    fc, index=len(tool_calls))
-                            )
+                            call = DirectAPIService._gemini_function_call_to_oai_tool_call(
+                                fc, index=len(tool_calls))
+                            # 签名属于 Part，不能从 Part.functionCall 中读取。
+                            if part.get("thoughtSignature"):
+                                call["_thought_signature"] = part["thoughtSignature"]
+                            if tool_call_indices is not None:
+                                call["index"] = tool_call_indices.setdefault(call["id"], len(tool_call_indices))
+                            tool_calls.append(call)
                         # 处理文本
                         elif "text" in part:
                             text = part.get("text", "")
@@ -1260,6 +1217,9 @@ class DirectAPIService:
             logger.error(f"[GEMINI_NATIVE] 响应转换失败: {e}", exc_info=True)
         
         # 构建OpenAI格式响应
+        if finish_reason == "stop" and (tool_calls or tool_call_indices):
+            finish_reason = "tool_calls"
+
         if is_stream_chunk:
             response = {
                 "id": request_id,
@@ -1292,7 +1252,7 @@ class DirectAPIService:
             # 添加工具调用或正文内容
             if tool_calls:
                 message["tool_calls"] = tool_calls
-                message["content"] = None  # 工具调用时 content 为 null
+                message["content"] = content or None
             else:
                 message["content"] = content
             

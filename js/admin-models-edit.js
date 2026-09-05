@@ -6,6 +6,7 @@ function toggleCollapsible(headerElement) {
 
 function showAddModelModal() {
     resetModelEditorForm();
+    modelEditor.originalConfig = {};
     currentEditingModel = null;
     currentEditingArchived = false;
     document.getElementById('modal-title').textContent = '添加模型';
@@ -116,6 +117,8 @@ function editModel(name, config) {
 // 填充模型表单（editModel和copyModel共用）
 function fillModelForm(config) {
     resetModelEditorForm();
+    modelEditor.originalConfig = structuredClone(config);
+    config = modelPrimaryConfig(config);
     
     if (config.api_type === 'direct_api' || config.api_type === 'responses_native' || config.api_type === 'gemini_native' || config.api_type === 'anthropic_native') {
         document.getElementById('config-type').value = 'direct_api';
@@ -607,8 +610,8 @@ async function saveModel() {
     try {
         // 🔧 修复：编辑模式下改名时传 old_model_name，让后端做重命名而非新增。
         // 旧版不论修改与否都发同名 POST，改名=新增重复模型，旧配置继续存活。
-        const body = { model_name: modelName, config: config };
-        if (currentEditingModel && currentEditingModel !== modelName) {
+        const body = { model_name: modelName, config: mergeModelEditorConfig(config) };
+        if (currentEditingModel) {
             body.old_model_name = currentEditingModel;
         }
 
