@@ -483,6 +483,8 @@ class _ChatStreamBuilder:
         self.tool_arguments: Dict[str, str] = {}
         self.next_tool_index = 0
         self.failed = False
+        self.native_response = None
+        self.output_items = {}
 
     def chunk(self, delta: Dict[str, Any], finish_reason: Optional[str] = None) -> bytes:
         payload = {
@@ -536,6 +538,7 @@ class _ChatStreamBuilder:
         if not event_type and (
             event.get("object") == "response" or isinstance(event.get("output"), list)
         ):
+            self.native_response = copy.deepcopy(event)
             chat_response = convert_responses_response_to_chat(
                 event, self.request_model, self.completion_tokens_mode)
             choice = (chat_response.get("choices") or [{}])[0]
@@ -618,6 +621,8 @@ class _ChatStreamBuilder:
 
         if event_type == "response.output_item.done":
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
+            if item:
+                self.output_items[event.get('output_index', len(self.output_items))] = copy.deepcopy(item)
             if item.get("type") != "function_call":
                 return []
             key, index = self._tool_index({**item, "output_index": event.get("output_index")})
@@ -639,6 +644,10 @@ class _ChatStreamBuilder:
 
         if event_type in ("response.completed", "response.incomplete"):
             response = event.get("response") if isinstance(event.get("response"), dict) else {}
+            self.native_response = copy.deepcopy(response)
+            if not self.native_response.get('output') and self.output_items:
+                self.native_response['output'] = [self.output_items[i] for i in sorted(self.output_items)]
+            response = self.native_response
             self.usage = _usage_to_chat(response.get("usage"), self.completion_tokens_mode)
             if event_type == "response.incomplete":
                 details = response.get("incomplete_details")
@@ -686,6 +695,7 @@ def build_chat_streaming_response_from_responses(
     source: Any,
     request_model: str,
     completion_tokens_mode: str = MODE_MERGE,
+    on_response=None,
 ) -> StreamingResponse:
     """将上游 Responses SSE 转成 OpenAI Chat Completions SSE。"""
     async def generator():
@@ -694,7 +704,13 @@ def build_chat_streaming_response_from_responses(
         async for event in iter_responses_sse_events(source):
             if event is _STREAM_DONE:
                 break
-            for chunk in builder.process(event):
+            chunks = builder.process(event)
+            if on_response is not None and builder.native_response is not None and not builder.failed:
+                # Persist before exposing the terminal chunk: a client may send
+                # the next request as soon as it sees that chunk.
+                response, builder.native_response = builder.native_response, None
+                await on_response(response)
+            for chunk in chunks:
                 yield chunk
         for chunk in builder.final_chunks():
             yield chunk

@@ -18,6 +18,8 @@ from converters.responses_bridge import (
     convert_responses_response_to_chat,
 )
 from core.constants import TimeoutDefaults
+from core.request_context import current_request
+from services.responses_history import ResponsesHistory
 from utils.monitor_params import build_monitor_request_params
 from utils.usage_tokens import MODE_MERGE, get_completion_tokens_mode, total_output_tokens
 from ._direct_api_utils import (
@@ -33,6 +35,12 @@ from ._direct_api_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _remember_response(response):
+    context = current_request.get()
+    if context is not None and context.responses_history is not None:
+        await context.responses_history.remember(response)
 
 
 def _extract_chat_response(chat_response: Dict[str, Any]) -> tuple:
@@ -203,6 +211,7 @@ async def _handle_non_stream(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     content, reasoning, tool_calls, input_tokens, output_tokens, cached_tokens = _extract_chat_response(chat_response)
+    await _remember_response(responses_json)
     await _complete_monitoring(
         monitoring_service=monitoring_service,
         direct_api_service=direct_api_service,
@@ -276,6 +285,7 @@ async def _handle_stream(
         prefixed_source(),
         display_name,
         get_completion_tokens_mode(endpoint_config),
+        on_response=_remember_response,
     )
 
     async def monitored_generator():
@@ -429,6 +439,16 @@ async def handle_responses_native_direct(
         )
     except ResponsesBridgeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    context = current_request.get()
+    if context is not None and context.authenticated:
+        # Custom input bypasses Chat history, so it cannot be matched to a phone's
+        # visible messages. Native client-supplied metadata still passes through.
+        overrides_input = any(isinstance(endpoint_config.get(k), dict) and 'input' in endpoint_config[k]
+                              for k in ('custom_params', 'extra_body_params'))
+        if not overrides_input:
+            context.responses_history = ResponsesHistory(context, openai_req, target_model_id,
+                                                        endpoint_config, upstream_request)
 
     # 工具 Schema、strict 与 required 保真转发。
 

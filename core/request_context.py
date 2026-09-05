@@ -27,6 +27,7 @@ class RequestContext:
     artifacts: dict = field(default_factory=dict)
     upstream_request: dict = field(default_factory=dict)
     outcome: dict = field(default_factory=dict)
+    responses_history: object | None = None
 
     def cache_session(self):
         # Never use an artifact to choose a route. Each selected upstream has

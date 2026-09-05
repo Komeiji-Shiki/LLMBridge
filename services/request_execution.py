@@ -63,6 +63,10 @@ def retry_before_output(method):
                     except Exception:
                         context.artifacts = {}
                 if 'request_body' in bound.arguments:
+                    if context.responses_history is not None:
+                        prepared = copy.deepcopy(body)
+                        prepared['input'] = await context.responses_history.restore_input()
+                        bound.arguments['request_body'] = prepared
                     context.upstream_request = copy.deepcopy(bound.arguments['request_body'])
                 info = {'attempt': attempt + 1, 'started_ms': round((time.perf_counter() - context.started) * 1000, 2)}
                 context.attempts.append(info)

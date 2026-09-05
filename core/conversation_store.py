@@ -33,6 +33,11 @@ class ConversationStore:
                     PRIMARY KEY(owner, session, key),
                     FOREIGN KEY(owner, session) REFERENCES conversations(owner, session) ON DELETE CASCADE);
                 CREATE INDEX IF NOT EXISTS idx_conversations_idle ON conversations(touched);
+                CREATE TABLE IF NOT EXISTS response_prefixes (
+                    owner TEXT NOT NULL, scope TEXT NOT NULL, prefix TEXT NOT NULL,
+                    payload BLOB, digest TEXT NOT NULL, touched REAL NOT NULL,
+                    PRIMARY KEY(owner, scope, prefix));
+                CREATE INDEX IF NOT EXISTS idx_response_prefixes_idle ON response_prefixes(touched);
             ''')
             yield connection
             connection.commit()
@@ -85,7 +90,45 @@ class ConversationStore:
 
     def cleanup(self):
         with self.connection() as connection:
+            connection.execute('DELETE FROM response_prefixes WHERE touched<=?', (time.time() - self.idle_seconds,))
             return connection.execute('DELETE FROM conversations WHERE touched<=?', (time.time() - self.idle_seconds,)).rowcount
+
+    def remember_response_prefix(self, owner, scope, prefix, output):
+        """A conflicting output makes the prefix ambiguous until it expires."""
+        import hashlib
+        raw = json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+        digest = hashlib.sha256(raw).hexdigest()
+        now = time.time()
+        with self.connection() as connection:
+            connection.execute('''INSERT INTO response_prefixes VALUES(?,?,?,?,?,?)
+                ON CONFLICT(owner,scope,prefix) DO UPDATE SET
+                    payload=CASE WHEN response_prefixes.touched<=? THEN excluded.payload
+                                 WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.payload
+                                 ELSE NULL END,
+                    digest=CASE WHEN response_prefixes.touched<=? THEN excluded.digest
+                                WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.digest
+                                ELSE '' END,
+                    touched=excluded.touched''',
+                (owner, scope, prefix, gzip.compress(raw, compresslevel=6), digest, now,
+                 now - self.idle_seconds, now - self.idle_seconds))
+
+    def response_prefixes(self, owner, scope, prefixes):
+        """Fetch exact assistant boundaries in one transaction, without scanning logs."""
+        result = {}
+        now = time.time()
+        with self.connection() as connection:
+            for prefix in prefixes:
+                row = connection.execute('''SELECT payload FROM response_prefixes
+                    WHERE owner=? AND scope=? AND prefix=? AND touched>?''',
+                    (owner, scope, prefix, now - self.idle_seconds)).fetchone()
+                if row is not None:
+                    # Touch ambiguous entries too: they must not become valid again
+                    # merely because the client keeps using one side of a conflict.
+                    connection.execute('UPDATE response_prefixes SET touched=? WHERE owner=? AND scope=? AND prefix=?',
+                                       (now, owner, scope, prefix))
+                    if row['payload'] is not None:
+                        result[prefix] = json.loads(gzip.decompress(row['payload']))
+        return result
 
 
 conversation_store = ConversationStore()
