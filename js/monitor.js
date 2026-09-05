@@ -933,6 +933,10 @@ async function viewRequestDetails(requestId) {
     console.log(`[DEBUG] 查看请求详情: ${requestId}`);
 
     modal.style.display = 'block';
+    if (!modal._returnFocus) modal._returnFocus = document.activeElement;
+    document.body.classList.add('detail-open');
+    modal.querySelector('.close').focus();
+    modal.querySelector('.modal-content').scrollTop = 0;
     _expandedTextValues.clear();
     modalBody.innerHTML = '<div class="empty-state">加载中...</div>';
 
@@ -971,7 +975,7 @@ async function viewRequestDetails(requestId) {
             : details.request_messages;
 
         modalBody.innerHTML = `
-            <div class="detail-section">
+            <div class="detail-section detail-overview">
                 <h3>基本信息</h3>
                 <div class="detail-item">
                     <div class="detail-label">请求ID:</div>
@@ -1002,10 +1006,7 @@ async function viewRequestDetails(requestId) {
                     <div class="detail-value">${formatStopReason(details.stop_reason || (details.cost_info && details.cost_info.stop_reason))}</div>
                 </div>
                 ${details.upstream_usage && Object.keys(details.upstream_usage).length > 0 ? `
-                <div class="detail-item">
-                    <div class="detail-label">上游用量(原生):</div>
-                    <div class="detail-value"><pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-size:12px;line-height:1.5;">${formatJson(details.upstream_usage)}</pre></div>
-                </div>
+                <details class="data-disclosure"><summary>上游原始用量 <span>JSON</span></summary><pre>${formatJson(details.upstream_usage)}</pre></details>
                 ` : ''}
                 ${details.error ? `
                 <div class="detail-item">
@@ -1016,12 +1017,12 @@ async function viewRequestDetails(requestId) {
             </div>
 
             <div class="detail-section"><h3>调用方与阶段耗时</h3>
-                <p>${escapeHtml(details.caller_name || '历史未归属')} · ${escapeHtml(details.caller_id || 'unattributed')}</p>
-                <p>会话：${escapeHtml(details.conversation_id || '未记录')}</p>
-                <p>${escapeHtml(renderPhaseTimings(details.timings))}</p>
-                ${details.timings?.attempts?.length ? `<pre class="response-content">${renderTruncatable(JSON.stringify(details.timings.attempts, null, 2), 2000)}</pre>` : ''}
-                ${details.pricing_snapshot ? `<details><summary>调用时价格快照</summary><pre>${escapeHtml(JSON.stringify(details.pricing_snapshot, null, 2))}</pre></details>` : ''}
-                ${details.gateway_request_id ? `<a href="/api/admin/exchanges/${encodeURIComponent(details.gateway_request_id)}">下载完整原生请求与响应归档</a>` : ''}
+                <div class="caller-meta"><div><span>调用方</span><strong>${escapeHtml(details.caller_name || '历史未归属')}</strong><code>${escapeHtml(details.caller_id || 'unattributed')}</code></div>
+                <div><span>会话 ID</span><code>${escapeHtml(details.conversation_id || '未记录')}</code></div></div>
+                <div class="timing-grid">${Object.entries({prepare_ms: '准备', upstream_wait_ms: '等待上游首字节', first_business_ms: '首业务事件', output_ms: '输出', total_ms: '总计'}).map(([key, label]) => `<div class="timing-card"><span>${label}</span><strong>${details.timings?.[key] == null ? '—' : (Number(details.timings[key]) / 1000).toFixed(3)}<small>${details.timings?.[key] == null ? '无数据' : '秒'}</small></strong></div>`).join('')}</div>
+                ${details.timings?.attempts?.length ? `<details class="data-disclosure"><summary>请求尝试记录 <span>${details.timings.attempts.length} 次</span></summary><pre>${renderTruncatable(JSON.stringify(details.timings.attempts, null, 2), 2000)}</pre></details>` : ''}
+                ${details.pricing_snapshot ? `<details class="data-disclosure"><summary>调用时价格快照 <span>JSON</span></summary><pre>${escapeHtml(JSON.stringify(details.pricing_snapshot, null, 2))}</pre></details>` : ''}
+                ${details.gateway_request_id ? `<a class="archive-link" href="/api/admin/exchanges/${encodeURIComponent(details.gateway_request_id)}">下载完整原生请求与响应归档 <span aria-hidden="true">↗</span></a>` : ''}
             </div>
 
             ${details.request_params ? `
@@ -1086,8 +1087,24 @@ async function viewRequestDetails(requestId) {
 function closeModal() {
     ++_detailRequestVersion;
     _expandedTextValues.clear();
-    document.getElementById('detailModal').style.display = 'none';
+    const modal = document.getElementById('detailModal');
+    modal.style.display = 'none';
+    document.body.classList.remove('detail-open');
+    modal._returnFocus?.focus();
+    modal._returnFocus = null;
 }
+
+// 保持键盘焦点在详情窗口内，关闭后回到原入口。
+document.addEventListener('keydown', event => {
+    const modal = document.getElementById('detailModal');
+    if (modal.style.display !== 'block') return;
+    if (event.key === 'Escape') closeModal();
+    if (event.key !== 'Tab') return;
+    const focusable = [...modal.querySelectorAll('button, a[href], summary, input, select, textarea, [tabindex="0"]')].filter(el => el.getClientRects().length);
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
 
 // 点击模态框外部关闭
 window.onclick = function(event) {
