@@ -51,6 +51,17 @@ def test_key_save_failure_rolls_back_creation_but_preserves_revocation(tmp_path,
     assert not manager.validate_request(key['secret'])[0]
 
 
+def test_key_reload_read_failure_is_reported(tmp_path, monkeypatch):
+    from core import api_key_manager as module
+    manager = object.__new__(module.APIKeyManager)
+    manager._lock, manager._save_lock = Lock(), RLock()
+    manager._keys, manager._secret_index, manager._dirty = {'key': {'secret': 'active'}}, {'active': 'key'}, False
+    path = tmp_path / 'keys.json'; path.write_text('invalid')
+    monkeypatch.setattr(module, 'API_KEYS_FILE', str(path))
+    with pytest.raises(module.KeyPersistenceError): manager.reload()
+    assert manager._secret_index == {'active': 'key'}
+
+
 def test_responses_native_tools_reasoning_and_citations_round_trip():
     from converters.responses_bridge import convert_chat_request_to_responses, convert_responses_response_to_chat, _ChatStreamBuilder
     output = [{'type': 'reasoning', 'encrypted_content': 'signed'}, {'type': 'web_search_call', 'id': 'search'},

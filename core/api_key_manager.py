@@ -170,8 +170,10 @@ class APIKeyManager:
                             self._secret_index[secret] = key_id
 
             logger.info(f"[APIKeyManager] ✅ 已加载 {len(self._keys)} 个 API Key")
+            return True
         except Exception as e:
             logger.error(f"[APIKeyManager] ❌ 加载 '{API_KEYS_FILE}' 失败: {e}")
+            return False
 
     def _serialize_unsafe(self) -> Tuple[str, int]:
         """锁内调用：序列化当前 keys 并清除脏标记，返回 (JSON文本, key数量)。
@@ -216,7 +218,8 @@ class APIKeyManager:
         """重新加载配置"""
         if self._dirty:
             self.save_now()
-        self._load()
+        if self._load() is not True:
+            raise KeyPersistenceError('API Key 配置读取失败，现有有效配置保持不变。')
 
     @staticmethod
     def _generate_secret() -> str:
