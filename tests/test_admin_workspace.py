@@ -33,6 +33,17 @@ def ui():
         def route(request_route):
             request = request_route.request
             path = urlparse(request.url).path
+            if path == '/api/admin/capabilities':
+                return request_route.fulfill(json={'providers': {}, 'models': [{'model': 'Beta', 'endpoint': 0, 'provider': 'deepseek', 'protocol': 'responses', 'native_tools': ['web_search'], 'configured_tools': [], 'docs': 'https://api-docs.deepseek.com', 'issues': []}]})
+            if path == '/api/admin/tokenizer_trust':
+                return request_route.fulfill(json={'sources': []})
+            if path == '/api/admin/playground/run':
+                writes.append({'path': path, **request.post_data_json})
+                return request_route.fulfill(content_type='text/event-stream', headers={'X-Bridge-Request-ID': 'run-id', 'X-Bridge-Session-ID': 'conversation'}, body='data: {"type":"response.output_text.delta","delta":"<img src=x>"}\n\ndata: {"type":"response.completed","response":{"id":"response-id"}}\n\n')
+            if path == '/api/admin/playground/runs/run-id':
+                return request_route.fulfill(json={'timings': {'prepare_ms': 20, 'upstream_wait_ms': 40, 'first_business_ms': 60, 'output_ms': 50, 'total_ms': 110, 'attempts': [{'attempt': 1, 'status': 200}]}, 'finished': True})
+            if path == '/api/admin/current_price_analysis':
+                return request_route.fulfill(json={'items': [{'model': 'Beta', 'requests': 1, 'historical_cost': 10, 'currency': 'USD', 'current_estimate': 20, 'current_currency': 'CNY'}]})
             if path == '/api/admin/overview':
                 return request_route.fulfill(json={'active_requests': [], 'stats': {}, 'mode': {}, 'total_models': len(models), 'total_tabs': 0})
             if path == '/api/admin/config' and request.method == 'GET':
@@ -189,7 +200,9 @@ def test_dirty_guard_and_fresh_defaults(ui):
     page.keyboard.press('Escape')
     page.get_by_role('button', name='添加模型').click()
     page.locator('[data-settings-page="messages"]').click()
-    assert page.locator('#sanitize-recursive-schemas').is_checked()
+    assert page.locator('#sanitize-recursive-schemas').count() == 0
+    assert page.locator('#model-provider').input_value() == ''
+    assert page.locator('#model-native-tools').input_value() == ''
     page.locator('[data-settings-page="reliability"]').click()
     assert page.locator('#img-compression-enabled').is_visible()
     assert page.locator('#auto-retry-enabled').is_visible()
@@ -310,3 +323,45 @@ def test_square_spacious_navigation(ui, width):
         assert link.evaluate("el => getComputedStyle(el).whiteSpace") == 'nowrap'
         assert link.evaluate("el => getComputedStyle(el).borderRadius") == '0px'
     assert page.locator('#models > .card').evaluate("el => getComputedStyle(el).borderRadius") == '0px'
+
+
+def test_native_playground_request_events_and_timings(ui):
+    page, _, writes, _ = ui
+    page.locator('[data-page="gateway-workspace"]').click()
+    page.locator('#gw-tools input[value="web_search"]').check()
+    page.locator('#gw-insert-tools').click()
+    page.locator('#gw-run').click()
+    page.wait_for_function("document.getElementById('gw-state').textContent.includes('传输结束')")
+    assert writes[-1]['request']['tools'] == [{'type': 'web_search'}]
+    assert 'response.completed' in page.locator('#gw-output').inner_text()
+    assert page.locator('#gw-output img').count() == 0
+    page.wait_for_function("document.getElementById('gw-timing').textContent.includes('0.110')")
+    assert page.locator('#gw-session').input_value() == 'conversation'
+    page.locator('#gw-prices').click()
+    playwright.expect(page.locator('#gw-analysis').get_by_text('历史金额', exact=True)).to_be_visible()
+
+
+def test_native_tool_model_configuration_survives_save(ui):
+    page, _, writes, _ = ui
+    page.locator('.model-name', has_text='Beta').click()
+    page.locator('[data-settings-page="messages"]').click()
+    page.locator('#model-provider').select_option('deepseek')
+    page.locator('#model-native-tools').fill('web_search')
+    page.locator('#model-native-tool-options').fill('{"web_search": {}}')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    assert writes[-1]['config']['native_tools'] == ['web_search']
+    assert writes[-1]['config']['provider'] == 'deepseek'
+    assert writes[-1]['config']['sanitize_recursive_schemas'] is False
+
+
+def test_monitor_large_detail_only_expands_on_demand(ui):
+    page, _, _, _ = ui
+    page.goto('http://bridge.test/monitor')
+    page.evaluate("document.body.insertAdjacentHTML('beforeend', '<pre id=lazy-test>' + renderTruncatable('x'.repeat(100000) + '<img src=x>', 4000) + '</pre>')")
+    assert len(page.locator('#lazy-test').inner_text()) < 4100
+    page.locator('#lazy-test button').click()
+    assert len(page.locator('#lazy-test').inner_text()) > 100000
+    assert page.locator('#lazy-test img').count() == 0
+    page.locator('#lazy-test button').click()
+    assert len(page.locator('#lazy-test').inner_text()) < 4100

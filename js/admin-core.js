@@ -83,6 +83,9 @@ function loadPageData(page) {
     }
 
     switch(page) {
+        case 'gateway-workspace':
+            window.gatewayWorkspace?.load();
+            break;
         case 'overview':
             refreshOverview();
             break;

@@ -268,8 +268,17 @@ function updateStats(stats) {
 }
 
 // 更新活跃请求列表
+let _activeRequestSignature = '';
 function updateActiveRequests(requests) {
     const container = document.getElementById('active-requests-list');
+    const signature = JSON.stringify(requests || []);
+    if (signature === _activeRequestSignature) {
+        container.querySelectorAll('[data-started]').forEach(node => {
+            node.textContent = Math.max(0, Date.now() / 1000 - Number(node.dataset.started)).toFixed(1) + 's';
+        });
+        return;
+    }
+    _activeRequestSignature = signature;
 
     if (!requests || requests.length === 0) {
         container.innerHTML = '<div class="empty-state">暂无活跃请求</div>';
@@ -286,7 +295,7 @@ function updateActiveRequests(requests) {
                         ${req.mode ? `<span class="mode-indicator">${escapeHtml(req.mode)}</span>` : ''}
                     </div>
                 </div>
-                <div class="request-duration">${duration}s</div>
+                <div class="request-duration" data-started="${Number(req.timestamp)}">${duration}s</div>
                 <span class="status-badge active">处理中</span>
             </div>
         `;
@@ -555,9 +564,9 @@ async function refreshRequestLogs() {
                 <tr>
                     <td>${time}</td>
                     <td style="font-family: monospace; font-size: 12px;">${escapeHtml(log.request_id?.substring(0, 8) || 'N/A')}...</td>
-                    <td>${escapeHtml(log.model)}${featureBadges ? ' ' + featureBadges : ''}</td>
+                    <td>${escapeHtml(log.model)}${featureBadges ? ' ' + featureBadges : ''}<div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div></td>
                     <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span></td>
-                    <td>${duration}</td>
+                    <td title="${escapeHtml(renderPhaseTimings(log.timings))}">${duration}${log.timings?.first_business_ms != null ? `<div style="font-size:11px;opacity:.7">首事件 ${(Number(log.timings.first_business_ms) / 1000).toFixed(2)}s</div>` : ""}</td>
                     <td>${inTokens}</td>
                     <td>${outTokens}</td>
                     <td style="white-space: nowrap;">${formatStopReason(log.stop_reason || (log.cost_info && log.cost_info.stop_reason))}</td>
@@ -690,17 +699,25 @@ function formatStopReason(reason) {
 // 🔧 修复：截断长内容到指定字符数，添加"展开"按钮
 // 旧版全量渲染导致包含大量内容的模态框渲染卡顿甚至页面崩溃
 let _expandCounter = 0;
-function renderTruncatable(text, maxLen) {
-    maxLen = maxLen || 4000;
-    if (!text || text.length <= maxLen) {
-        return escapeHtml(text || '');
-    }
-    var id = '_trunc_' + (++_expandCounter);
-    var truncated = escapeHtml(text.substring(0, maxLen));
-    var full = escapeHtml(text);
-    return '<span id="' + id + '_short">' + truncated + '\u2026</span>' +
-        '<span id="' + id + '_full" style="display:none;">' + full + '</span>' +
-        ' <button onclick="(function(){var s=document.getElementById(\'' + id + '_short\');var f=document.getElementById(\'' + id + '_full\');var b=document.getElementById(\'' + id + '_btn\');if(f.style.display===\'none\'){s.style.display=\'none\';f.style.display=\'\';b.textContent=\'收起\';}else{s.style.display=\'\';f.style.display=\'none\';b.textContent=\'展开\';}})()" id="' + id + '_btn" style="cursor:pointer;background:rgba(59,130,246,0.2);color:#93c5fd;border:1px solid rgba(59,130,246,0.3);border-radius:4px;padding:2px 10px;font-size:12px;margin-left:4px;">展开</button>';
+const _expandedTextValues = new Map();
+function renderTruncatable(text, maxLen = 4000) {
+    text = String(text || '');
+    if (text.length <= maxLen) return escapeHtml(text);
+    const id = '_trunc_' + (++_expandCounter);
+    _expandedTextValues.set(id, {text, maxLen, expanded: false});
+    return `<span id="${id}">${escapeHtml(text.slice(0, maxLen))}…</span> <button type="button" onclick="toggleLongText('${id}', this)">展开</button>`;
+}
+function toggleLongText(id, button) {
+    const entry = _expandedTextValues.get(id), node = document.getElementById(id);
+    if (!entry || !node) return;
+    entry.expanded = !entry.expanded;
+    node.textContent = entry.expanded ? entry.text : entry.text.slice(0, entry.maxLen) + '…';
+    button.textContent = entry.expanded ? '收起' : '展开';
+}
+function renderPhaseTimings(timings) {
+    if (!timings) return '该记录没有阶段耗时';
+    const labels = {prepare_ms: '准备', upstream_wait_ms: '等待上游首字节', first_business_ms: '首业务事件', output_ms: '输出', total_ms: '总计'};
+    return Object.entries(labels).map(([key, name]) => `${name}：${timings[key] == null ? '无数据' : (Number(timings[key]) / 1000).toFixed(3) + ' 秒'}`).join(' · ');
 }
 
 // 格式化JSON内容
@@ -906,7 +923,9 @@ function renderMessageBox(msg) {
         </div>`;
 }
 // 查看请求详情
+let _detailRequestVersion = 0;
 async function viewRequestDetails(requestId) {
+    const version = ++_detailRequestVersion;
     const modal = document.getElementById('detailModal');
     const modalBody = document.getElementById('modalBody');
 
@@ -914,23 +933,15 @@ async function viewRequestDetails(requestId) {
     console.log(`[DEBUG] 查看请求详情: ${requestId}`);
 
     modal.style.display = 'block';
+    _expandedTextValues.clear();
     modalBody.innerHTML = '<div class="empty-state">加载中...</div>';
 
     try {
         const response = await apiGet(`/api/request/${requestId}`);
 
         const details = await response.json();
-
-        // 添加调试日志查看数据结构
-        console.log('[DEBUG] 请求详情数据:', details);
-
-        // 检测可能导致渲染问题的内容
-        if (details.response_content) {
-            console.log('[DEBUG] 响应内容长度:', details.response_content.length);
-            if (details.response_content.includes('<') || details.response_content.includes('>')) {
-                console.warn('[DEBUG] 响应内容包含HTML特殊字符，需要转义');
-            }
-        }
+        if (version !== _detailRequestVersion) return;
+        if (!response.ok) throw new Error(details.detail || '读取详情失败');
 
         // 统一构造结构化响应消息：有它就只渲染“模型响应消息”一块，
         // 避免与单独的“思维链”“响应内容”区块重复展示
@@ -1004,6 +1015,15 @@ async function viewRequestDetails(requestId) {
                 ` : ''}
             </div>
 
+            <div class="detail-section"><h3>调用方与阶段耗时</h3>
+                <p>${escapeHtml(details.caller_name || '历史未归属')} · ${escapeHtml(details.caller_id || 'unattributed')}</p>
+                <p>会话：${escapeHtml(details.conversation_id || '未记录')}</p>
+                <p>${escapeHtml(renderPhaseTimings(details.timings))}</p>
+                ${details.timings?.attempts?.length ? `<pre class="response-content">${renderTruncatable(JSON.stringify(details.timings.attempts, null, 2), 2000)}</pre>` : ''}
+                ${details.pricing_snapshot ? `<details><summary>调用时价格快照</summary><pre>${escapeHtml(JSON.stringify(details.pricing_snapshot, null, 2))}</pre></details>` : ''}
+                ${details.gateway_request_id ? `<a href="/api/admin/exchanges/${encodeURIComponent(details.gateway_request_id)}">下载完整原生请求与响应归档</a>` : ''}
+            </div>
+
             ${details.request_params ? `
             <div class="detail-section">
                 <h3>请求参数</h3>
@@ -1057,13 +1077,15 @@ async function viewRequestDetails(requestId) {
         `;
 
     } catch (error) {
-        console.error('[DEBUG] 加载请求详情失败:', error);
+        if (version !== _detailRequestVersion) return;
         modalBody.innerHTML = `<div class="empty-state">加载失败: ${escapeHtml(error.message)}</div>`;
     }
 }
 
 // 关闭模态框
 function closeModal() {
+    ++_detailRequestVersion;
+    _expandedTextValues.clear();
     document.getElementById('detailModal').style.display = 'none';
 }
 
@@ -1071,7 +1093,7 @@ function closeModal() {
 window.onclick = function(event) {
     const modal = document.getElementById('detailModal');
     if (event.target == modal) {
-        modal.style.display = 'none';
+        closeModal();
     }
 }
 

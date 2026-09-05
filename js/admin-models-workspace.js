@@ -14,6 +14,7 @@ function mergeModelEditorConfig(config) {
     // Only fields represented by this form can be removed by clearing a control.
     const managedFields = [
         'api_type', 'model_id', 'display_name', 'passthrough', 'sanitize_recursive_schemas',
+        'provider', 'native_tools', 'native_tool_options',
         'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream',
         'enable_thinking', 'reasoning_effort', 'thinking_budget', 'thinking_effort', 'thinking_display',
         'responses_store', 'responses_reasoning_summary', 'auto_cache', 'verbosity',

@@ -151,7 +151,9 @@ function fillModelForm(config) {
         // Gemini 上游协议（generate_content 为默认值）
         document.getElementById('upstream-protocol').value = config.upstream_protocol || 'generate_content';
         document.getElementById('passthrough').checked = config.passthrough !== false;
-        document.getElementById('sanitize-recursive-schemas').checked = config.sanitize_recursive_schemas !== false;
+        document.getElementById('model-provider').value = config.provider || '';
+        document.getElementById('model-native-tools').value = (config.native_tools || []).join(', ');
+        document.getElementById('model-native-tool-options').value = config.native_tool_options ? JSON.stringify(config.native_tool_options, null, 2) : '';
         document.getElementById('force-stream').value = config.force_stream !== undefined ? String(config.force_stream) : '';
         document.getElementById('convert-system-to-user').checked = config.convert_system_to_user || false;
         document.getElementById('enable-prefix').checked = config.enable_prefix || false;
@@ -334,7 +336,10 @@ async function saveModel() {
             // 哪种协议都原样保存勾选值。旧版在 responses_native 下强制写 false，
             // 导致“切到 Responses 保存再切回 OpenAI 兼容”后透传开关被莫名关闭。
             passthrough: document.getElementById('passthrough').checked,
-            sanitize_recursive_schemas: document.getElementById('sanitize-recursive-schemas').checked,
+            sanitize_recursive_schemas: false,
+            ...(document.getElementById('model-provider').value ? {provider: document.getElementById('model-provider').value} : {}),
+            native_tools: document.getElementById('model-native-tools').value.split(',').map(value => value.trim()).filter(Boolean),
+            native_tool_options: JSON.parse(document.getElementById('model-native-tool-options').value.trim() || '{}'),
             convert_system_to_user: document.getElementById('convert-system-to-user').checked,
             enable_prefix: document.getElementById('enable-prefix').checked,
             enable_partial: document.getElementById('enable-partial').checked,

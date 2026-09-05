@@ -8,6 +8,7 @@
     <script defer src="js/vendor/Sortable.min.js"></script>
     <link rel="stylesheet" href="css/admin.css">
     <link rel="stylesheet" href="css/admin-workspace.css">
+    <link rel="stylesheet" href="css/admin-gateway.css">
     
     <!-- 拆分后的管理面板JS文件 -->
     <script defer src="js/jsonc-utils.js"></script>
@@ -23,6 +24,7 @@
     <script defer src="js/admin-tokenizer.js"></script>
     <script defer src="js/admin-config.js"></script>
     <script defer src="js/admin-apikeys.js"></script>
+    <script defer src="js/admin-gateway.js"></script>
     
 </head>
 <body>
@@ -1150,15 +1152,14 @@
                             启用 OpenAI 兼容透传路径。消息处理和参数覆盖仍受本页其他配置控制。
                         </small>
 </div><div class="form-group" data-direct-setting="">
-<label class="form-label">
-<input checked="" id="sanitize-recursive-schemas" style="margin-right: 8px;" type="checkbox">
-                            清洗递归 JSON Schema（Codex 兼容）
-                        </input></label>
-<small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            转发前截断工具参数里的递归引用，并把 <code>strict</code> 降级。
-                            Codex 发的 MCP 工具常带自引用，不开会被上游直接 400 拒绝。
-                            关闭后保留原始 Schema，请确认上游支持该格式。
-                        </small>
+<p>工具 Schema 保真转发：保留 strict、required、递归引用及供应商扩展字段。</p>
+<label class="form-label" for="model-provider">供应商</label>
+<select class="form-select" id="model-provider"><option value="">按官方地址识别</option value="openai">OpenAI</option><option value="qwen">阿里百炼 Qwen</option><option value="deepseek">DeepSeek 官方</option><option value="gemini">Google Gemini</option><option value="custom">自定义兼容服务</option></select>
+<label class="form-label" for="model-native-tools">默认原生工具（英文逗号分隔）</label>
+<input class="form-input" id="model-native-tools" placeholder="web_search">
+<label class="form-label" for="model-native-tool-options">工具选项 JSON</label>
+<textarea class="form-textarea" id="model-native-tool-options" rows="4" placeholder='{"web_search": {}}'></textarea>
+<small>可用工具请查“能力与 Playground”。客户端提供 tools 时优先原样使用；百炼 Chat 的搜索选项单独保留。</small>
 </div><div class="form-group" data-direct-setting="" id="anthropic-auto-cache-config" style="display: none;">
 <label class="form-label">
 <input id="anthropic-auto-cache" style="margin-right: 8px;" type="checkbox">

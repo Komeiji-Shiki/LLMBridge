@@ -1,0 +1,14 @@
+.gateway-controls { padding: 20px; margin-bottom: 20px; }
+.gateway-controls > label { display: block; margin: 12px 0; }
+.gateway-controls textarea, #model-native-tool-options { width: 100%; box-sizing: border-box; background: var(--surface-2); color: var(--text-main); border: 1px solid var(--line-strong); padding: 14px; line-height: 1.6; resize: vertical; border-radius: 0; }
+.gateway-controls input[type="date"] { background: var(--surface-2); color: var(--text-main); border: 1px solid var(--line-strong); padding: 9px; color-scheme: dark; }
+.gateway-controls a { color: var(--accent); }
+.gateway-controls p { color: var(--text-dim); line-height: 1.7; margin: 10px 0; }
+.gateway-json, .gateway-output { font-family: Consolas, monospace; font-size: 13px; }
+.gateway-output { max-height: 520px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface-2); padding: 16px; border-radius: 0; }
+.gateway-actions, .gateway-metrics { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+.gateway-metrics > span { padding: 8px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 0; }
+#gw-tools { display: flex; gap: 14px; flex-wrap: wrap; }
+#gw-diagnosis { white-space: pre-line; }
+#gw-analysis { overflow: auto; }
+#gw-analysis th, #gw-analysis td { padding: 10px; text-align: left; }
