@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8,<10
+playwright>=1.40,<2
+beautifulsoup4>=4.12,<5

@@ -17,7 +17,7 @@
   - 透传模式：不修改请求/响应，原样转发到任何 OpenAI 兼容后端
   - 消息角色自动转换（system/user/assistant 重映射）
 - **LMArena 集成（已弃用）**：兼容 LMArena 协议的会话管理和 Battle 模式（新版本不再依赖 LMArena）
-- **OpenAI Responses API 兼容**：`/v1/responses` 支持文本、图片、function tools、reasoning、usage 及 Responses SSE；当前为无状态模式
+- **OpenAI Responses API 兼容**：`/v1/responses` 支持文本、图片、function tools、reasoning、usage 及 Responses SSE。Chat 转换分支为无状态；`responses_native` 可透传原生请求与内置工具，但本网关尚未提供 response 的查询、取消、删除等资源路由。
 - **多 API Key 轮询**：支持配置多个 API Key 并轮询调用，提升并发上限
 
 ### 请求增强
@@ -67,8 +67,7 @@ LLMBridge/
 │   ├── db_stats.py            # SQLite 统计查询（Token/成本/请求聚合）
 │   ├── api_key_manager.py     # 访客 Key 权限管理与 RPM 限流
 │   ├── app_state.py           # 应用全局状态管理
-│   ├── context.py             # 请求上下文管理
-│   ├── lifespan.py            # FastAPI 生命周期管理
+│   ├── web_session.py         # Web 会话验证与登录限流
 │   ├── load_balancer.py       # 负载均衡器
 │   └── ...
 │
@@ -160,7 +159,7 @@ pip install -r requirements.txt
 ```bash
 # 1. 复制示例配置
 cp config.jsonc.example config.jsonc
-cp model_endpoint_map.json.example model_endpoint_map.json
+cp model_endpoint_map.example.json model_endpoint_map.json
 
 # 2. 编辑 config.jsonc（`session_id` 等 LMArena 相关字段已弃用，无需填写）
 # 3. 编辑 model_endpoint_map.json，配置你要代理的模型
