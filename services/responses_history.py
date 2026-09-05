@@ -22,6 +22,16 @@ def visible_message(message):
         value['content'] = ''
     elif isinstance(content, list) and all(isinstance(p, dict) and p.get('type') in ('text', 'input_text', 'output_text') for p in content):
         value['content'] = ''.join(str(p.get('text', '')) for p in content)
+    if isinstance(value.get('content'), str):
+        value['content'] = value['content'].replace('\r\n', '\n').replace('\r', '\n')
+    elif isinstance(value.get('content'), list):
+        for part in value['content']:
+            if isinstance(part, dict) and part.get('type') in ('text', 'input_text', 'output_text') and isinstance(part.get('text'), str):
+                part['text'] = part['text'].replace('\r\n', '\n').replace('\r', '\n')
+    # Some Chat clients trim the assistant's displayed text before replaying it.
+    # Normalize only this fingerprint; retain the original output for the model.
+    if value.get('role') == 'assistant' and isinstance(value.get('content'), str):
+        value['content'] = value['content'].strip()
     if not value.get('tool_calls'):
         value.pop('tool_calls', None)
     return value

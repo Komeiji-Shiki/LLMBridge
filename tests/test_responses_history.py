@@ -227,3 +227,50 @@ def test_database_failure_does_not_leak_state_or_break_chat(store, caplog):
             await replay.remember(response(cipher='private-ciphertext'))
         assert 'private-' not in caplog.text
     asyncio.run(run())
+
+
+def test_phone_trimming_recovers_all_reasoning_items_and_original_message(store):
+    async def run():
+        initial = [{'role': 'system', 'content': 'unchanged'}, {'role': 'user', 'content': 'question'}]
+        native = response(text='\n\nanswer  \n')
+        native['output'] = [dict(native['output'][0], id=f'rs_{i}', encrypted_content=f'opaque-{i}',
+            content=[], summary=[{'type': 'summary_text', 'text': f'summary-{i}'}]) for i in range(7)] + [native['output'][-1]]
+        await history(context(), initial).remember(native)
+        phone = initial + [{'role': 'assistant', 'content': 'answer', 'reasoning_content': 'summary ignored'}, {'role': 'user', 'content': 'follow up'}]
+        restored = await history(context(), phone).restore_input()
+        assert restored[1:9] == native['output']
+        assert restored[8]['content'][0]['text'] == '\n\nanswer  \n'
+        second = response(text=' second answer\n', cipher='second-cipher')
+        await history(context(), phone).remember(second)
+        phone += [{'role': 'assistant', 'content': 'second answer'}, {'role': 'user', 'content': 'third'}]
+        restored = await history(context(), phone).restore_input()
+        assert [i['encrypted_content'] for i in restored if i.get('type') == 'reasoning'] == [f'opaque-{i}' for i in range(7)] + ['second-cipher']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('change', ['user whitespace', 'interior assistant whitespace', 'ambiguous trim'])
+def test_trimming_does_not_relax_other_history_or_select_conflicting_output(store, change):
+    async def run():
+        initial = [{'role': 'user', 'content': 'question'}]
+        await history(context(), initial).remember(response(text='\n\nfirst second'))
+        phone = initial + [{'role': 'assistant', 'content': 'first second'}, {'role': 'user', 'content': 'next'}]
+        if change == 'user whitespace': phone[0] = {'role': 'user', 'content': ' question'}
+        if change == 'interior assistant whitespace': phone[1]['content'] = 'first  second'
+        if change == 'ambiguous trim': await history(context(), initial).remember(response(text='first second', cipher='other-cipher'))
+        assert not any(i.get('type') == 'reasoning' for i in await history(context(), phone).restore_input())
+    asyncio.run(run())
+
+
+def test_client_line_endings_and_text_blocks_are_equivalent(store):
+    async def run():
+        initial = [{'role': 'user', 'content': 'question\r\nsecond line'}]
+        native = response(text='\n\nanswer\n```python\n    indented()\n```\n')
+        await history(context(), initial).remember(native)
+        phone = [{'role': 'user', 'content': [{'type': 'text', 'text': 'question\nsecond line'}]},
+                 {'role': 'assistant', 'content': [{'type': 'text', 'text': 'answer\r\n```python\r\n    indented()\r\n```'}]},
+                 {'role': 'user', 'content': 'next'}]
+        restored = await history(context(), phone).restore_input()
+        assert restored[1:3] == native['output']
+        phone[1]['content'][0]['text'] = 'answer\r\n```python\r\nindented()\r\n```'
+        assert not any(i.get('type') == 'reasoning' for i in await history(context(), phone).restore_input())
+    asyncio.run(run())
