@@ -93,12 +93,8 @@ class CachedStaticFiles(StaticFiles):
                 if message["type"] == "http.response.start":
                     headers = list(message.get("headers", []))
                     path = scope.get("path", "")
-                    # 🔧 区分 vendor 与业务 JS 缓存策略：
-                    # vendor 第三方库（/js/vendor/）文件名带版本 hash，可长缓存 + immutable；
-                    # 业务 JS 频繁更新，使用 no-cache 避免浏览器缓存旧版本导致故障。
-                    if "/js/vendor/" in path or "vendor" in path:
-                        headers.append((b"cache-control", b"public, max-age=31536000, immutable"))
-                    elif path.endswith(".js") or path.endswith(".mjs"):
+                    # 文件名未带内容指纹，脚本和样式更新后必须重新验证缓存。
+                    if path.endswith((".js", ".mjs", ".css")):
                         headers.append((b"cache-control", b"no-cache"))
                     else:
                         # CSS / 图片 / 字体等静态资源：1 小时缓存

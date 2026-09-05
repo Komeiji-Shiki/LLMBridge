@@ -147,7 +147,9 @@ async def update_model_config(
         old_model_name = data.get("old_model_name")
         config = data.get("config")
         
-        if not model_name or config is None:
+        if (not isinstance(model_name, str) or not model_name.strip()
+                or not (isinstance(config, dict) or (isinstance(config, list)
+                        and config and all(isinstance(item, dict) for item in config)))):
             raise HTTPException(status_code=400, detail="缺少必要参数")
 
         async with _MODEL_ENDPOINT_MAP_LOCK:
@@ -203,23 +205,16 @@ async def delete_model_config(
     try:
         body = await request.json()
         model_name = body.get("model_name")
-        if not model_name:
+        if not isinstance(model_name, str) or not model_name.strip():
             raise HTTPException(status_code=400, detail="缺少 model_name 字段")
 
-        # 读取现有配置
-        current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
-
-        if model_name not in current_config:
-            raise HTTPException(status_code=404, detail=f"模型 {model_name} 不存在")
-
-        # 删除配置
-        del current_config[model_name]
-
-        # 写入文件
-        await write_json_file(MODEL_ENDPOINT_MAP_FILE, current_config)
-
-        # 重新加载配置
-        await asyncio.to_thread(load_model_endpoint_map_func)
+        async with _MODEL_ENDPOINT_MAP_LOCK:
+            current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+            if model_name not in current_config:
+                raise HTTPException(status_code=404, detail=f"模型 {model_name} 不存在")
+            del current_config[model_name]
+            await write_json_file(MODEL_ENDPOINT_MAP_FILE, current_config)
+            await asyncio.to_thread(load_model_endpoint_map_func)
 
         await _invalidate_admin_stats_cache()
         return {"status": "success", "message": f"模型 {model_name} 已删除"}
@@ -239,31 +234,23 @@ async def reorder_models(
         data = await request.json()
         new_order = data.get("order")
         
-        if not new_order or not isinstance(new_order, list):
+        if (not isinstance(new_order, list) or not new_order
+                or not all(isinstance(name, str) for name in new_order)
+                or len(set(new_order)) != len(new_order)):
             raise HTTPException(status_code=400, detail="缺少有效的order参数")
         
-        # 读取现有配置
-        current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+        async with _MODEL_ENDPOINT_MAP_LOCK:
+            current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+            for model_name in new_order:
+                if model_name not in current_config:
+                    raise HTTPException(status_code=400, detail=f"模型 {model_name} 不存在于配置中")
 
-        # 校验所有模型名称都存在（允许只提交部分模型，如仅活跃模型）
-        for model_name in new_order:
-            if model_name not in current_config:
-                raise HTTPException(status_code=400, detail=f"模型 {model_name} 不存在于配置中")
-
-        # 创建新的有序字典：先按提交顺序排，未提交的模型（如归档区不参与拖拽）
-        # 按原顺序追加到末尾，保证前端只提交活跃区顺序时不会丢归档模型
-        reordered_config = {}
-        for model_name in new_order:
-            reordered_config[model_name] = current_config[model_name]
-        for model_name, model_config in current_config.items():
-            if model_name not in reordered_config:
-                reordered_config[model_name] = model_config
-
-        # 写入文件
-        await write_json_file(MODEL_ENDPOINT_MAP_FILE, reordered_config)
-
-        # 重新加载配置
-        await asyncio.to_thread(load_model_endpoint_map_func)
+            # 未提交的模型（包括归档模型）按原顺序保留。
+            reordered_config = {name: current_config[name] for name in new_order}
+            reordered_config.update({name: config for name, config in current_config.items()
+                                     if name not in reordered_config})
+            await write_json_file(MODEL_ENDPOINT_MAP_FILE, reordered_config)
+            await asyncio.to_thread(load_model_endpoint_map_func)
 
         logger.info(f"✅ 模型顺序已更新: {' -> '.join(new_order)}")
         await _invalidate_admin_stats_cache()
@@ -460,7 +447,9 @@ async def update_config(
         if content:
             # 源码编辑模式：整体覆盖，用户看到什么就写入什么
             try:
-                _parse_jsonc_func(content)
+                parsed = _parse_jsonc_func(content)
+                if not isinstance(parsed, dict):
+                    raise HTTPException(status_code=400, detail="配置根节点必须是 JSON 对象")
             except json.JSONDecodeError as e:
                 raise HTTPException(status_code=400, detail=f"配置格式错误: {e}")
             new_content = content

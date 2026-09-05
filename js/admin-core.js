@@ -222,59 +222,7 @@ function showConfigMessage(type, message) {
 }
 
 // ==================== JSONC 解析器 ====================
-function parseJsonc(content) {
-    let result = '';
-    let i = 0;
-    let inString = false;
-    let stringChar = '';
-    
-    while (i < content.length) {
-        const char = content[i];
-        const nextChar = content[i + 1];
-        
-        if (!inString && (char === '"' || char === "'")) {
-            inString = true;
-            stringChar = char;
-            result += char;
-            i++;
-            continue;
-        } else if (inString && char === stringChar && content[i - 1] !== '\\') {
-            inString = false;
-            result += char;
-            i++;
-            continue;
-        } else if (inString) {
-            result += char;
-            i++;
-            continue;
-        }
-        
-        if (char === '/' && nextChar === '/') {
-            while (i < content.length && content[i] !== '\n') {
-                i++;
-            }
-            continue;
-        }
-        
-        if (char === '/' && nextChar === '*') {
-            i += 2;
-            while (i < content.length - 1) {
-                if (content[i] === '*' && content[i + 1] === '/') {
-                    i += 2;
-                    break;
-                }
-                i++;
-            }
-            continue;
-        }
-        
-        result += char;
-        i++;
-    }
-    
-    result = result.replace(/,(\s*[}\]])/g, '$1');
-    return JSON.parse(result);
-}
+// parseJsonc / updateJsoncValues are provided by jsonc-utils.js.
 
 // ==================== 内存监控 ====================
 async function refreshMemoryInfo() {

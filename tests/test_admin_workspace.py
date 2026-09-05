@@ -35,6 +35,8 @@ def ui():
             path = urlparse(request.url).path
             if path == '/api/admin/overview':
                 return request_route.fulfill(json={'active_requests': [], 'stats': {}, 'mode': {}, 'total_models': len(models), 'total_tabs': 0})
+            if path == '/api/admin/config' and request.method == 'GET':
+                return request_route.fulfill(json={'content': '// keep this comment\n{"server_port": 5102, "connection_pool": {"total_limit": 200}, "unknown": "literal ,} text"}'})
             if path == '/api/admin/token_stats':
                 return request_route.fulfill(json={'model_stats': [], 'daily_stats': []})
             if path == '/api/admin/query_key_balance':
@@ -83,6 +85,37 @@ def test_filter_selection_and_protocol(ui):
     assert page.locator('.model-row:visible').count() == 1
     assert page.locator('#archive-section-body').is_visible()
     assert writes == []
+
+
+def test_config_mode_round_trip_preserves_edits_comments_and_literals(ui):
+    page, _, _, _ = ui
+    page.locator('[data-page="config"]').click()
+    page.wait_for_selector('#form-server_port')
+    page.locator('#form-server_port').fill('5200')
+    page.locator('#mode-form-btn').click()
+    assert page.locator('#form-server_port').input_value() == '5200'
+    page.locator('#mode-jsonc-btn').click()
+    text = page.locator('#config-editor').input_value()
+    assert '// keep this comment' in text
+    parsed = page.evaluate('text => parseJsonc(text)', text)
+    assert parsed['server_port'] == 5200
+    assert parsed['unknown'] == 'literal ,} text'
+    page.locator('#mode-form-btn').click()
+    assert page.locator('#form-server_port').input_value() == '5200'
+
+
+def test_config_parser_escaped_backslashes_and_form_snapshot(ui):
+    page, _, _, _ = ui
+    text = '// comment\n' + json.dumps({'path': 'C:\\folder\\', 'literal': ',}', 'number': -1.25e3})
+    assert page.evaluate('text => parseJsonc(text)', text) == json.loads(text.split('\n', 1)[1])
+    page.locator('[data-page="config"]').click()
+    page.wait_for_selector('#form-server_port')
+    assert page.evaluate('''() => {
+        const before = JSON.stringify(currentConfigData);
+        document.getElementById('form-connection_pool_total_limit').value = '777';
+        formToConfig();
+        return before === JSON.stringify(currentConfigData);
+    }''')
 
 
 def test_groups_zero_values_and_save(ui):

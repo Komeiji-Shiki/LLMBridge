@@ -59,17 +59,23 @@ def _invalid_key_response() -> JSONResponse:
     )
 
 
-def _extract_provided_key(request: Request, allow_x_api_key: bool = True) -> str | None:
+def _extract_provided_key(request: Request, allow_x_api_key: bool = True, allow_gemini_style: bool = False) -> str | None:
     """从 Authorization / x-api-key 头中提取客户端提交的 API Key"""
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        return auth_header.split(" ", 1)[1]
+    if auth_header and auth_header.lower().startswith("bearer "):
+        key = auth_header.split(" ", 1)[1].strip()
+        if key:
+            return key
 
     # Anthropic/Claude 客户端常用 x-api-key；与 Bearer 等效
     if allow_x_api_key:
         x_api_key = request.headers.get("x-api-key")
         if x_api_key:
             return x_api_key.strip()
+    if allow_gemini_style:
+        key = request.headers.get("x-goog-api-key") or request.query_params.get("key")
+        if key:
+            return key.strip()
     return None
 
 
@@ -129,7 +135,7 @@ async def get_models(MODEL_ENDPOINT_MAP: dict, MODEL_NAME_TO_ID_MAP: dict, allow
         )
 
 
-async def get_gemini_models(MODEL_ENDPOINT_MAP: dict):
+async def get_gemini_models(MODEL_ENDPOINT_MAP: dict, allowed_models: list = None):
     """
     提供Gemini v1beta格式的模型列表
 
@@ -144,6 +150,8 @@ async def get_gemini_models(MODEL_ENDPOINT_MAP: dict):
 
     if MODEL_ENDPOINT_MAP:
         for model_name, config in MODEL_ENDPOINT_MAP.items():
+            if allowed_models and model_name not in allowed_models:
+                continue
             # 归档模型不出现（与 get_models 的 _is_archived 语义一致，
             # 接收外层 config 而非列表内单个 cfg）
             if _is_archived(config):
@@ -223,11 +231,12 @@ async def get_gemini_models_endpoint(request: Request):
     if _is_blocked_user_agent(request):
         return {"models": []}
 
-    provided_key = _extract_provided_key(request, allow_x_api_key=False)
+    provided_key = _extract_provided_key(request, allow_gemini_style=True)
 
     global_api_key = CONFIG.get("api_key")
     has_guest_keys = api_key_manager.has_keys()
 
+    allowed_models = None
     # 只要配置了任何一种认证，就必须提供有效 key 才能获取模型列表，防止模型名泄露
     if global_api_key or has_guest_keys:
         if not provided_key:
@@ -237,10 +246,11 @@ async def get_gemini_models_endpoint(request: Request):
         if _matches_global_key(provided_key, global_api_key):
             is_valid = True
         elif has_guest_keys:
-            if api_key_manager.get_allowed_models(provided_key) is not None:
+            allowed_models = api_key_manager.get_allowed_models(provided_key)
+            if allowed_models is not None:
                 is_valid = True
 
         if not is_valid:
             return _invalid_key_response()
 
-    return await get_gemini_models(MODEL_ENDPOINT_MAP)
+    return await get_gemini_models(MODEL_ENDPOINT_MAP, allowed_models)

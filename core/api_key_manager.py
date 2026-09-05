@@ -115,6 +115,9 @@ class APIKeyManager:
                     return
                 data = json.loads(content)
 
+            if not isinstance(data, dict) or not all(isinstance(value, dict) for value in data.values()):
+                raise ValueError("API Key 配置必须是以 ID 为键、对象为值的 JSON 对象")
+
             with self._lock:
                 self._keys.clear()
                 self._secret_index.clear()
@@ -150,6 +153,10 @@ class APIKeyManager:
         tmp_path = API_KEYS_FILE + ".tmp"
         try:
             with self._save_lock:
+                # 管理请求在线程池并发执行。先取得写锁再取最新快照，
+                # 防止较早生成的快照较晚写入，恢复已删除/撤销的 Key。
+                with self._lock:
+                    payload, count = self._serialize_unsafe()
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     f.write(payload)
                 os.replace(tmp_path, API_KEYS_FILE)

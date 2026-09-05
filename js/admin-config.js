@@ -2,6 +2,8 @@
 
 // ==================== 配置编辑模式切换 ====================
 function switchConfigMode(mode) {
+    const previousMode = currentConfigMode;
+    if (mode === previousMode) return;
     currentConfigMode = mode;
     
     // 更新按钮状态
@@ -12,13 +14,18 @@ function switchConfigMode(mode) {
     if (mode === 'jsonc') {
         // 从表单模式切换过来时，先收集表单当前值并回写 textarea，
         // 防止用户在表单中的未保存修改因切换模式而丢失
-        if (currentConfigMode === 'form') {
+        if (previousMode === 'form') {
             try {
-                currentConfigData = formToConfig();
-                document.getElementById('config-editor').value = JSON.stringify(currentConfigData, null, 4);
+                const config = formToConfig();
+                const editor = document.getElementById('config-editor');
+                editor.value = updateJsoncValues(editor.value, config);
+                currentConfigData = config;
             } catch (e) {
-                // 收集失败时用已有 currentConfigData 兜底
-                document.getElementById('config-editor').value = JSON.stringify(currentConfigData, null, 4);
+                currentConfigMode = previousMode;
+                document.getElementById('mode-jsonc-btn').className = 'btn';
+                document.getElementById('mode-form-btn').className = 'btn btn-primary';
+                showConfigMessage('danger', '切换失败: ' + e.message);
+                return;
             }
         }
         document.getElementById('config-jsonc-editor').style.display = 'block';
@@ -123,7 +130,7 @@ function buildBasicConfig() {
             `<input type="text" class="form-input" id="form-version" value="${escapeHtml(currentConfigData.version || '')}" readonly style="padding: 6px 8px; font-size: 0.85rem;">`,
             '请不要手动修改'),
         buildCompactFormGroup('服务器端口号',
-            `<input type="number" class="form-input" id="form-server_port" value="${currentConfigData.server_port || 5102}" min="1" max="65535" style="padding: 6px 8px; font-size: 0.85rem;">`,
+            `<input type="number" class="form-input" id="form-server_port" value="${currentConfigData.server_port ?? 5102}" min="1" max="65535" style="padding: 6px 8px; font-size: 0.85rem;">`,
             '修改后需重启'),
         buildCompactFormGroup('Session ID',
             `<input type="text" class="form-input" id="form-session_id" value="${escapeHtml(currentConfigData.session_id || '')}" style="padding: 6px 8px; font-size: 0.85rem;">`,
@@ -167,13 +174,13 @@ function buildRetryConfig() {
                 启用空响应重试
             </label>
             ${buildCompactFormGroup('重试超时(秒)',
-                `<input type="number" class="form-input" id="form-retry_timeout_seconds" value="${currentConfigData.retry_timeout_seconds || 60}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
+                `<input type="number" class="form-input" id="form-retry_timeout_seconds" value="${currentConfigData.retry_timeout_seconds ?? 60}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
             ${buildCompactFormGroup('最大重试次数',
-                `<input type="number" class="form-input" id="form-empty_response_retry_max_retries" value="${retryConfig.max_retries || 5}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
+                `<input type="number" class="form-input" id="form-empty_response_retry_max_retries" value="${retryConfig.max_retries ?? 5}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
             ${buildCompactFormGroup('基础延迟(ms)',
-                `<input type="number" class="form-input" id="form-empty_response_retry_base_delay_ms" value="${retryConfig.base_delay_ms || 100}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
+                `<input type="number" class="form-input" id="form-empty_response_retry_base_delay_ms" value="${retryConfig.base_delay_ms ?? 100}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
             ${buildCompactFormGroup('最大延迟(ms)',
-                `<input type="number" class="form-input" id="form-empty_response_retry_max_delay_ms" value="${retryConfig.max_delay_ms || 3000}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
+                `<input type="number" class="form-input" id="form-empty_response_retry_max_delay_ms" value="${retryConfig.max_delay_ms ?? 3000}" style="padding: 6px 8px; font-size: 0.85rem;">`)}
         </div>
         <label style="display: flex; align-items: center; font-size: 0.85rem; margin-top: 8px;">
             <input type="checkbox" id="form-empty_response_retry_show_retry_info_to_client" ${retryConfig.show_retry_info_to_client ? 'checked' : ''} style="margin-right: 6px;">
@@ -237,7 +244,7 @@ function buildImageConfig() {
                         <option value="jpeg" ${localSaveFormat.format === 'jpeg' ? 'selected' : ''}>JPEG</option>
                         <option value="webp" ${localSaveFormat.format === 'webp' ? 'selected' : ''}>WebP</option>
                     </select>`)}
-                    ${buildCompactFormGroup('JPEG质量', `<input type="number" class="form-input" id="form-local_save_format_jpeg_quality" value="${localSaveFormat.jpeg_quality || 100}" min="1" max="100" style="padding: 4px; font-size: 0.8rem;">`)}
+                    ${buildCompactFormGroup('JPEG质量', `<input type="number" class="form-input" id="form-local_save_format_jpeg_quality" value="${localSaveFormat.jpeg_quality ?? 100}" min="1" max="100" style="padding: 4px; font-size: 0.8rem;">`)}
                 </div>
             </div>
             
@@ -267,9 +274,9 @@ function buildImageConfig() {
                     <label style="font-size: 0.8rem;"><input type="checkbox" id="form-image_optimization_convert_to_webp" ${imageOptimization.convert_to_webp ? 'checked' : ''} style="margin-right: 4px;">转WebP</label>
                 </div>
                 <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;">
-                    ${buildCompactFormGroup('WebP质量', `<input type="number" class="form-input" id="form-image_optimization_webp_quality" value="${imageOptimization.webp_quality || 70}" min="1" max="100" style="padding: 4px; font-size: 0.8rem;">`)}
-                    ${buildCompactFormGroup('最大宽', `<input type="number" class="form-input" id="form-image_optimization_max_width" value="${imageOptimization.max_width || 4096}" style="padding: 4px; font-size: 0.8rem;">`)}
-                    ${buildCompactFormGroup('最大高', `<input type="number" class="form-input" id="form-image_optimization_max_height" value="${imageOptimization.max_height || 4096}" style="padding: 4px; font-size: 0.8rem;">`)}
+                    ${buildCompactFormGroup('WebP质量', `<input type="number" class="form-input" id="form-image_optimization_webp_quality" value="${imageOptimization.webp_quality ?? 70}" min="1" max="100" style="padding: 4px; font-size: 0.8rem;">`)}
+                    ${buildCompactFormGroup('最大宽', `<input type="number" class="form-input" id="form-image_optimization_max_width" value="${imageOptimization.max_width ?? 4096}" style="padding: 4px; font-size: 0.8rem;">`)}
+                    ${buildCompactFormGroup('最大高', `<input type="number" class="form-input" id="form-image_optimization_max_height" value="${imageOptimization.max_height ?? 4096}" style="padding: 4px; font-size: 0.8rem;">`)}
                 </div>
             </div>
             
@@ -278,8 +285,8 @@ function buildImageConfig() {
                 <div style="font-size: 0.75rem; color: var(--text-dim); margin-bottom: 6px;">图像缓存</div>
                 <label style="font-size: 0.8rem;"><input type="checkbox" id="form-processed_image_cache_enabled" ${processedImageCache.enabled ? 'checked' : ''} style="margin-right: 4px;">启用缓存</label>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px;">
-                    ${buildCompactFormGroup('TTL(秒)', `<input type="number" class="form-input" id="form-processed_image_cache_ttl_seconds" value="${processedImageCache.ttl_seconds || 3600}" style="padding: 4px; font-size: 0.8rem;">`)}
-                    ${buildCompactFormGroup('最大大小', `<input type="number" class="form-input" id="form-processed_image_cache_max_size" value="${processedImageCache.max_size || 200}" style="padding: 4px; font-size: 0.8rem;">`)}
+                    ${buildCompactFormGroup('TTL(秒)', `<input type="number" class="form-input" id="form-processed_image_cache_ttl_seconds" value="${processedImageCache.ttl_seconds ?? 3600}" style="padding: 4px; font-size: 0.8rem;">`)}
+                    ${buildCompactFormGroup('最大大小', `<input type="number" class="form-input" id="form-processed_image_cache_max_size" value="${processedImageCache.max_size ?? 200}" style="padding: 4px; font-size: 0.8rem;">`)}
                 </div>
             </div>
         </div>
@@ -329,14 +336,14 @@ function buildPerformanceConfig() {
     // 超时配置
     const timeoutContent = `
         <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
-            ${buildCompactFormGroup('流响应(秒)', `<input type="number" class="form-input" id="form-stream_response_timeout_seconds" value="${currentConfigData.stream_response_timeout_seconds || 600}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('API调用(秒)', `<input type="number" class="form-input" id="form-api_call_timeout_seconds" value="${currentConfigData.api_call_timeout_seconds || 1200}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('首块(秒)', `<input type="number" class="form-input" id="form-first_chunk_timeout_seconds" value="${currentConfigData.first_chunk_timeout_seconds || 180}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('WebSocket(秒)', `<input type="number" class="form-input" id="form-websocket_send_timeout_seconds" value="${currentConfigData.websocket_send_timeout_seconds || 10}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('元数据(分)', `<input type="number" class="form-input" id="form-metadata_timeout_minutes" value="${currentConfigData.metadata_timeout_minutes || 30}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('活跃请求(分)', `<input type="number" class="form-input" id="form-active_request_timeout_minutes" value="${currentConfigData.active_request_timeout_minutes || 30}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('Tokenizer(秒)', `<input type="number" class="form-input" id="form-tokenizer_idle_timeout_seconds" value="${currentConfigData.tokenizer_idle_timeout_seconds || 600}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('负载锁(秒)', `<input type="number" class="form-input" id="form-load_balancer_lock_timeout_seconds" value="${currentConfigData.load_balancer_lock_timeout_seconds || 5}" step="0.1" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('流响应(秒)', `<input type="number" class="form-input" id="form-stream_response_timeout_seconds" value="${currentConfigData.stream_response_timeout_seconds ?? 600}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('API调用(秒)', `<input type="number" class="form-input" id="form-api_call_timeout_seconds" value="${currentConfigData.api_call_timeout_seconds ?? 1200}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('首块(秒)', `<input type="number" class="form-input" id="form-first_chunk_timeout_seconds" value="${currentConfigData.first_chunk_timeout_seconds ?? 180}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('WebSocket(秒)', `<input type="number" class="form-input" id="form-websocket_send_timeout_seconds" value="${currentConfigData.websocket_send_timeout_seconds ?? 10}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('元数据(分)', `<input type="number" class="form-input" id="form-metadata_timeout_minutes" value="${currentConfigData.metadata_timeout_minutes ?? 30}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('活跃请求(分)', `<input type="number" class="form-input" id="form-active_request_timeout_minutes" value="${currentConfigData.active_request_timeout_minutes ?? 30}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('Tokenizer(秒)', `<input type="number" class="form-input" id="form-tokenizer_idle_timeout_seconds" value="${currentConfigData.tokenizer_idle_timeout_seconds ?? 600}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('负载锁(秒)', `<input type="number" class="form-input" id="form-load_balancer_lock_timeout_seconds" value="${currentConfigData.load_balancer_lock_timeout_seconds ?? 5}" step="0.1" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
@@ -345,61 +352,61 @@ function buildPerformanceConfig() {
         <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
             <label style="font-size: 0.85rem; display: flex; align-items: center;"><input type="checkbox" id="form-use_default_ids_if_mapping_not_found" ${currentConfigData.use_default_ids_if_mapping_not_found ? 'checked' : ''} style="margin-right: 6px;">映射未找到时用默认ID</label>
             <div></div>
-            ${buildCompactFormGroup('验证冷却(秒)', `<input type="number" class="form-input" id="form-verification_cooldown_seconds" value="${currentConfigData.verification_cooldown_seconds || 25}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('流结束延迟(秒)', `<input type="number" class="form-input" id="form-stream_end_wait_delay_seconds" value="${currentConfigData.stream_end_wait_delay_seconds || 1.0}" step="0.1" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('最大转移次数', `<input type="number" class="form-input" id="form-max_request_transfers" value="${currentConfigData.max_request_transfers || 3}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('验证冷却(秒)', `<input type="number" class="form-input" id="form-verification_cooldown_seconds" value="${currentConfigData.verification_cooldown_seconds ?? 25}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('流结束延迟(秒)', `<input type="number" class="form-input" id="form-stream_end_wait_delay_seconds" value="${currentConfigData.stream_end_wait_delay_seconds ?? 1.0}" step="0.1" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('最大转移次数', `<input type="number" class="form-input" id="form-max_request_transfers" value="${currentConfigData.max_request_transfers ?? 3}" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
     // 后台任务
     const bgTaskContent = `
         <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
-            ${buildCompactFormGroup('配置监控(秒)', `<input type="number" class="form-input" id="form-config_monitor_interval" value="${backgroundTasks.config_monitor_interval || 30}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('内存监控(秒)', `<input type="number" class="form-input" id="form-memory_monitor_interval" value="${backgroundTasks.memory_monitor_interval || 60}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('过期清理(秒)', `<input type="number" class="form-input" id="form-stale_cleaner_interval" value="${backgroundTasks.stale_cleaner_interval || 60}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('配置监控(秒)', `<input type="number" class="form-input" id="form-config_monitor_interval" value="${backgroundTasks.config_monitor_interval ?? 30}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('内存监控(秒)', `<input type="number" class="form-input" id="form-memory_monitor_interval" value="${backgroundTasks.memory_monitor_interval ?? 60}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('过期清理(秒)', `<input type="number" class="form-input" id="form-stale_cleaner_interval" value="${backgroundTasks.stale_cleaner_interval ?? 60}" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
     // 下载和连接
     const downloadContent = `
         <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
-            ${buildCompactFormGroup('并发下载', `<input type="number" class="form-input" id="form-max_concurrent_downloads" value="${currentConfigData.max_concurrent_downloads || 3}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('连接超时(秒)', `<input type="number" class="form-input" id="form-download_timeout_connect" value="${downloadTimeout.connect || 10}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('读取超时(秒)', `<input type="number" class="form-input" id="form-download_timeout_sock_read" value="${downloadTimeout.sock_read || 20}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('总超时(秒)', `<input type="number" class="form-input" id="form-download_timeout_total" value="${downloadTimeout.total || 30}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('最大重试', `<input type="number" class="form-input" id="form-download_timeout_max_retries" value="${downloadTimeout.max_retries || 3}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('图床恢复(秒)', `<input type="number" class="form-input" id="form-filebed_recovery_time_seconds" value="${currentConfigData.filebed_recovery_time_seconds || 300}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('并发下载', `<input type="number" class="form-input" id="form-max_concurrent_downloads" value="${currentConfigData.max_concurrent_downloads ?? 3}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('连接超时(秒)', `<input type="number" class="form-input" id="form-download_timeout_connect" value="${downloadTimeout.connect ?? 10}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('读取超时(秒)', `<input type="number" class="form-input" id="form-download_timeout_sock_read" value="${downloadTimeout.sock_read ?? 20}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('总超时(秒)', `<input type="number" class="form-input" id="form-download_timeout_total" value="${downloadTimeout.total ?? 30}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('最大重试', `<input type="number" class="form-input" id="form-download_timeout_max_retries" value="${downloadTimeout.max_retries ?? 3}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('图床恢复(秒)', `<input type="number" class="form-input" id="form-filebed_recovery_time_seconds" value="${currentConfigData.filebed_recovery_time_seconds ?? 300}" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
     // 连接池
     const poolContent = `
         <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
-            ${buildCompactFormGroup('总限制', `<input type="number" class="form-input" id="form-connection_pool_total_limit" value="${connectionPool.total_limit || 200}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('每主机限制', `<input type="number" class="form-input" id="form-connection_pool_per_host_limit" value="${connectionPool.per_host_limit || 50}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('保持连接(秒)', `<input type="number" class="form-input" id="form-connection_pool_keepalive_timeout" value="${connectionPool.keepalive_timeout || 30}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('DNS缓存(秒)', `<input type="number" class="form-input" id="form-connection_pool_dns_cache_ttl" value="${connectionPool.dns_cache_ttl || 300}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('总限制', `<input type="number" class="form-input" id="form-connection_pool_total_limit" value="${connectionPool.total_limit ?? 200}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('每主机限制', `<input type="number" class="form-input" id="form-connection_pool_per_host_limit" value="${connectionPool.per_host_limit ?? 50}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('保持连接(秒)', `<input type="number" class="form-input" id="form-connection_pool_keepalive_timeout" value="${connectionPool.keepalive_timeout ?? 30}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('DNS缓存(秒)', `<input type="number" class="form-input" id="form-connection_pool_dns_cache_ttl" value="${connectionPool.dns_cache_ttl ?? 300}" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
     // 内存管理
     const memoryContent = `
         <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
-            ${buildCompactFormGroup('GC阈值(MB)', `<input type="number" class="form-input" id="form-memory_management_gc_threshold_mb" value="${memoryManagement.gc_threshold_mb || 500}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('图片缓存大小', `<input type="number" class="form-input" id="form-memory_management_image_cache_max_size" value="${memoryManagement.image_cache_max_size || 500}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('图片TTL(秒)', `<input type="number" class="form-input" id="form-memory_management_image_cache_ttl_seconds" value="${memoryManagement.image_cache_ttl_seconds || 3600}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('保留数量', `<input type="number" class="form-input" id="form-memory_management_image_cache_keep_size" value="${memoryManagement.image_cache_keep_size || 200}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('GC阈值(MB)', `<input type="number" class="form-input" id="form-memory_management_gc_threshold_mb" value="${memoryManagement.gc_threshold_mb ?? 500}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('图片缓存大小', `<input type="number" class="form-input" id="form-memory_management_image_cache_max_size" value="${memoryManagement.image_cache_max_size ?? 500}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('图片TTL(秒)', `<input type="number" class="form-input" id="form-memory_management_image_cache_ttl_seconds" value="${memoryManagement.image_cache_ttl_seconds ?? 3600}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('保留数量', `<input type="number" class="form-input" id="form-memory_management_image_cache_keep_size" value="${memoryManagement.image_cache_keep_size ?? 200}" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
     // 缓存配置
     const cacheContent = `
         <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px;">
-            ${buildCompactFormGroup('图床TTL', `<input type="number" class="form-input" id="form-cache_settings_filebed_url_cache_ttl" value="${cacheSettings.filebed_url_cache_ttl || 300}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('图床大小', `<input type="number" class="form-input" id="form-cache_settings_filebed_url_cache_max_size" value="${cacheSettings.filebed_url_cache_max_size || 500}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('图片缓存', `<input type="number" class="form-input" id="form-cache_settings_processed_image_cache_max_size" value="${cacheSettings.processed_image_cache_max_size || 200}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('Tiktoken', `<input type="number" class="form-input" id="form-cache_settings_tiktoken_cache_max_size" value="${cacheSettings.tiktoken_cache_max_size || 10}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('URL历史', `<input type="number" class="form-input" id="form-cache_settings_downloaded_urls_max_size" value="${cacheSettings.downloaded_urls_max_size || 5000}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('图床TTL', `<input type="number" class="form-input" id="form-cache_settings_filebed_url_cache_ttl" value="${cacheSettings.filebed_url_cache_ttl ?? 300}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('图床大小', `<input type="number" class="form-input" id="form-cache_settings_filebed_url_cache_max_size" value="${cacheSettings.filebed_url_cache_max_size ?? 500}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('图片缓存', `<input type="number" class="form-input" id="form-cache_settings_processed_image_cache_max_size" value="${cacheSettings.processed_image_cache_max_size ?? 200}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('Tiktoken', `<input type="number" class="form-input" id="form-cache_settings_tiktoken_cache_max_size" value="${cacheSettings.tiktoken_cache_max_size ?? 10}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('URL历史', `<input type="number" class="form-input" id="form-cache_settings_downloaded_urls_max_size" value="${cacheSettings.downloaded_urls_max_size ?? 5000}" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
@@ -437,7 +444,7 @@ function buildOtherConfig() {
                 <label style="font-size: 0.85rem;"><input type="checkbox" id="form-enable_idle_restart" ${currentConfigData.enable_idle_restart ? 'checked' : ''} style="margin-right: 6px;">启用空闲重启</label>
             </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                ${buildCompactFormGroup('URL显示长度', `<input type="number" class="form-input" id="form-url_display_length" value="${currentConfigData.url_display_length || 200}" style="padding: 4px; font-size: 0.8rem;">`)}
+                ${buildCompactFormGroup('URL显示长度', `<input type="number" class="form-input" id="form-url_display_length" value="${currentConfigData.url_display_length ?? 200}" style="padding: 4px; font-size: 0.8rem;">`)}
                 ${buildCompactFormGroup('空闲重启(秒)', `<input type="number" class="form-input" id="form-idle_restart_timeout_seconds" value="${currentConfigData.idle_restart_timeout_seconds || -1}" style="padding: 4px; font-size: 0.8rem;">`)}
             </div>
         </div>
@@ -452,7 +459,7 @@ function buildOtherConfig() {
 function formToConfig() {
     // 这个函数需要从所有表单字段收集数据
     // 由于字段太多，这里使用简化版本，保留原配置并更新表单字段
-    const config = Object.assign({}, currentConfigData);
+    const config = structuredClone(currentConfigData);
 
     // 🔧 数值安全解析：空输入框 parseFloat/parseInt 产出 NaN，
     // 旧版直接 assign 会写进 config.jsonc 并序列化成 null，打崩服务端 JSONC 解析。

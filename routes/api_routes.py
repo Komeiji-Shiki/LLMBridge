@@ -140,7 +140,7 @@ def _extract_client_api_key(request: Request, allow_gemini_style: bool = False) 
     - Gemini:    x-goog-api-key: <key> 或 ?key=<key>（仅 allow_gemini_style 时）
     """
     auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
+    if auth_header and auth_header.lower().startswith("bearer "):
         provided = auth_header.split(" ", 1)[1].strip()
         if provided:
             return provided
@@ -173,6 +173,13 @@ def _validate_request_api_key(request: Request, model_name: Optional[str],
 
     global_api_key = CONFIG.get("api_key")
     has_guest_keys = api_key_manager.has_keys()
+
+    # 未配置认证时，是否携带任意字符串都不能改变仅本机可用的边界。
+    if not global_api_key and not has_guest_keys:
+        client_host = request.client.host if request.client else ""
+        if client_host not in ("127.0.0.1", "::1", "localhost"):
+            raise AuthenticationError("未配置 API Key，仅允许本机访问。").to_http_exception()
+        return
 
     # 没提供 key：只在配置了任一认证方式时拦截
     if not provided_key:
@@ -221,8 +228,12 @@ async def _read_request_json_non_blocking(request: Request) -> Dict[str, Any]:
     """读取并解析请求 JSON；大 body（长上下文对话）才移入线程池，避免阻塞事件循环。"""
     body = await request.body()
     if len(body) > _JSON_OFFLOAD_THRESHOLD_BYTES:
-        return await asyncio.to_thread(json.loads, body)
-    return json.loads(body or b"")
+        data = await asyncio.to_thread(json.loads, body)
+    else:
+        data = json.loads(body or b"")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象。")
+    return data
 
 
 def _check_verification_cooldown() -> None:

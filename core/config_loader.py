@@ -84,6 +84,8 @@ def _replace_dict_no_gap(target: dict, new_data: dict) -> None:
     空字典（所有 CONFIG.get() 突然变成默认值）。改为先覆盖/新增、再删除
     过期键：读者最多短暂看到新旧混合值，不会读到缺失的配置。
     """
+    if not isinstance(new_data, dict):
+        raise ValueError("配置根节点必须是 JSON 对象")
     stale_keys = set(target) - set(new_data)
     target.update(new_data)
     for key in stale_keys:
@@ -188,7 +190,7 @@ def load_config(force_reload=False):
             # 打印关键配置状态
             logger.info(f"  - 酒馆模式 (Tavern Mode): {'✅ 启用' if CONFIG.get('tavern_mode_enabled') else '❌ 禁用'}")
             logger.info(f"  - 绕过模式 (Bypass Mode): {'✅ 启用' if CONFIG.get('bypass_enabled') else '❌ 禁用'}")
-        except (FileNotFoundError, json.JSONDecodeError) as e:
+        except (FileNotFoundError, ValueError) as e:
             # 解析失败（文件被改坏）保留旧配置继续运行，而不是清空让服务立刻失能。
             # 🔧 鉴权 fail-closed：但这是首次启动（CONFIG_LOADED 仍为 False，旧配置
             # 就是空 dict）时例外——空配置会让 WebAccessKeyMiddleware 把所有受保护
@@ -254,7 +256,7 @@ def load_model_endpoint_map(force_reload=False):
             return
     except FileNotFoundError:
         logger.warning(f"'{config_file}' 文件未找到。将使用空映射。")
-        MODEL_ENDPOINT_MAP.clear()
+        # 编辑器保存或文件暂时不可见时继续使用最后一次有效配置。
         return
     
     # 使用锁保护配置重载
@@ -281,7 +283,7 @@ def load_model_endpoint_map(force_reload=False):
             logger.warning("'model_endpoint_map.json' 文件未找到。将使用空映射。")
             if not MODEL_ENDPOINT_MAP:
                 CONFIG_FILE_MTIMES[config_file] = current_mtime
-        except json.JSONDecodeError as e:
+        except ValueError as e:
             # 🔧 修复：解析失败（文件被改坏）保留旧映射继续运行
             logger.error(f"加载或解析 'model_endpoint_map.json' 失败: {e}。保留当前映射。")
 
