@@ -7,12 +7,16 @@
     <script defer src="js/vendor/chart.umd.min.js"></script>
     <script defer src="js/vendor/Sortable.min.js"></script>
     <link rel="stylesheet" href="css/admin.css">
+    <link rel="stylesheet" href="css/admin-workspace.css">
     
     <!-- 拆分后的管理面板JS文件 -->
     <script defer src="js/admin-core.js"></script>
     <script defer src="js/admin-charts.js"></script>
     <script defer src="js/admin-overview.js"></script>
+    <script defer src="js/admin-models-options.js"></script>
+    <script defer src="js/admin-models-keys.js"></script>
     <script defer src="js/admin-models-edit.js"></script>
+    <script defer src="js/admin-models-workspace.js"></script>
     <script defer src="js/admin-models-list.js"></script>
     <script defer src="js/admin-models-capture.js"></script>
     <script defer src="js/admin-tokenizer.js"></script>
@@ -302,7 +306,7 @@
             <div id="models" class="page">
                 <div class="page-header">
                     <h2>模型端点管理</h2>
-                    <p>优先管理 Direct API 直连配置，LMArena 模式已弃用但仍保留兼容功能</p>
+                    <p>查找模型、管理上游连接，并为每个模型配置生成与计费选项。</p>
                 </div>
 
                 <div class="card">
@@ -323,7 +327,16 @@
                             </button>
                         </div>
                     </div>
-                    <div id="models-list"></div>
+                    <div class="models-toolbar">
+                        <label class="model-search-label">搜索模型<input id="models-query" class="form-input" type="search" placeholder="名称、模型 ID 或服务地址" oninput="applyModelFilters()"></label>
+                        <label>接口协议<select id="models-protocol" class="form-select" onchange="applyModelFilters()"><option value="">全部协议</option><option value="direct_api">OpenAI 兼容</option><option value="responses_native">Responses</option><option value="anthropic_native">Anthropic</option><option value="gemini_native">Gemini</option><option value="legacy">LMArena（兼容）</option></select></label>
+                        <label>服务地址<select id="models-provider" class="form-select" onchange="applyModelFilters()"><option value="">全部服务地址</option></select></label>
+                        <button class="btn" onclick="resetModelFilters()">清除筛选</button>
+                        <button class="btn" onclick="loadModels()">刷新列表</button>
+                    </div>
+                    <div id="models-summary" class="models-summary" role="status"></div>
+                    <div id="models-list" aria-label="模型列表"></div>
+                    <div id="models-no-results" class="empty-state" hidden>没有匹配的模型。试试其他关键词，或清除筛选。</div>
                 </div>
             </div>
 
@@ -727,810 +740,703 @@
     </div>
 
     <!-- 添加/编辑模型模态框 -->
-    <div id="model-modal" class="modal">
-        <div class="modal-content" style="max-width: 950px;">
-            <div class="modal-header">
-                <h3 id="modal-title">添加模型</h3>
-                <button class="close-btn" onclick="closeModelModal()">×</button>
-            </div>
-            <div class="modal-body" style="max-height: 75vh; overflow-y: auto;">
-                <div class="form-group">
-                    <label class="form-label">模型名称 *</label>
-                    <input type="text" id="model-name" class="form-input" placeholder="例如: claude-3-5-sonnet">
-                </div>
-                
-                <!-- 配置类型选择 -->
-                <div class="form-group">
-                    <label class="form-label">配置类型</label>
-                    <select id="config-type" class="form-select" onchange="toggleConfigType()">
-                        <option value="direct_api">Direct API 模式（默认/推荐）</option>
-                        <option value="lmarena">LMArena 模式（已弃用，保留兼容）</option>
-                    </select>
-                </div>
-                
-                <!-- LMArena 配置（已弃用，保留兼容） -->
-                <div id="lmarena-config" style="display: block;">
-                    <div class="alert alert-info" style="margin-bottom: 15px;">
-                        <span>⚠️</span>
-                        <div>
-                            <strong>LMArena 模式已弃用：</strong>该模式仅为兼容旧配置而保留，新增模型请优先使用 Direct API 模式。
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Session ID</label>
-                        <input type="text" id="session-id" class="form-input" placeholder="从LMArena获取的会话ID">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">模式</label>
-                        <select id="mode" class="form-select" onchange="toggleBattleTarget()">
-                            <option value="direct_chat">Direct Chat</option>
-                            <option value="battle">Battle</option>
-                        </select>
-                    </div>
-                    <div class="form-group" id="battle-target-group" style="display: none;">
-                        <label class="form-label">Battle Target</label>
-                        <select id="battle-target" class="form-select">
-                            <option value="A">A</option>
-                            <option value="B">B</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">模型类型</label>
-                        <select id="model-type" class="form-select">
-                            <option value="text">文本模型</option>
-                            <option value="image">图像模型</option>
-                        </select>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">显示名称</label>
-                        <input type="text" id="lmarena-display-name" class="form-input" placeholder="留空则使用模型名称">
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+<div aria-labelledby="modal-title" aria-modal="true" class="modal" id="model-modal" role="dialog">
+<div class="modal-content" style="">
+<div class="modal-header">
+<h3 id="modal-title">添加模型</h3>
+<button aria-label="关闭模型设置" class="close-btn" onclick="closeModelModal()">×</button>
+</div>
+<nav aria-label="模型设置分组" class="model-settings-nav"><button aria-controls="settings-connection" data-settings-page="connection" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">连接与身份</button><button aria-controls="settings-generation" data-settings-page="generation" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">生成与思考</button><button aria-controls="settings-messages" data-settings-page="messages" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">消息与兼容</button><button aria-controls="settings-reliability" data-settings-page="reliability" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">重试与图片</button><button aria-controls="settings-pricing" data-settings-page="pricing" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">计费与统计</button><button aria-controls="settings-advanced" data-settings-page="advanced" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">自定义参数</button></nav><div class="modal-body" style="">
+<!-- 配置类型选择 -->
+<!-- LMArena 配置（已弃用，保留兼容） -->
+<!-- Direct API 配置 -->
+<section class="model-settings-panel connection-grid" id="settings-connection"><h4>连接与身份</h4><p class="settings-description">设置客户端使用的名称、上游地址和 API Key。</p><div class="form-group connection-half">
+<label class="form-label" for="model-name">模型名称 *</label>
+<input class="form-input" id="model-name" placeholder="例如: claude-3-5-sonnet" type="text"/>
+</div><div class="form-group connection-half" data-direct-setting="">
+<label class="form-label" for="display-name">显示名称</label>
+<input class="form-input" id="display-name" placeholder="留空则使用模型名称" type="text"/>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             在统计中显示的名称
                         </small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">最高温度限制（可选）</label>
-                        <input type="number" step="0.1" min="0" max="2" id="lmarena-max-temperature" class="form-input" placeholder="留空则不限制">
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            如果请求的温度超过此值，将自动限制为此值。例如 Claude 最高温度为 1.0
-                        </small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">最大输出Token限制（可选）</label>
-                        <input type="number" step="1" min="1" id="lmarena-max-tokens" class="form-input" placeholder="留空则不限制">
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            如果请求的max_tokens超过此值，将自动限制为此值。不同模型最大输出Token不同，配置后可避免前端每次切换模型都要改
-                        </small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label" style="margin-bottom: 10px;">计费配置（可选）</label>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                            <div>
-                                <label style="font-size: 0.875rem; color: var(--text-dim);">输入单价</label>
-                                <input type="number" step="0.01" id="lmarena-pricing-input" class="form-input" placeholder="0.00">
-                            </div>
-                            <div>
-                                <label style="font-size: 0.875rem; color: var(--text-dim);">输出单价</label>
-                                <input type="number" step="0.01" id="lmarena-pricing-output" class="form-input" placeholder="0.00">
-                            </div>
-                            <div>
-                                <label style="font-size: 0.875rem; color: var(--text-dim);">计价单位</label>
-                                <input type="number" id="lmarena-pricing-unit" class="form-input" value="1000000" placeholder="1000000">
-                            </div>
-                            <div>
-                                <label style="font-size: 0.875rem; color: var(--text-dim);">货币</label>
-                                <select id="lmarena-pricing-currency" class="form-select">
-                                    <option value="USD">USD (美元)</option>
-                                    <option value="CNY">CNY (人民币)</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
-                                <input type="number" step="0.0001" id="lmarena-pricing-cached-input" class="form-input" placeholder="=输入单价">
-                            </div>
-                            <div></div>
-                        </div>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            配置计费后可以在统计中看到成本信息
-                        </small>
-                    </div>
-                </div>
-                
-                <!-- Direct API 配置 -->
-                <div id="direct-api-config" style="display: none;">
-                    <div class="alert alert-info" style="margin-bottom: 15px;">
-                        <span>ℹ️</span>
-                        <div>
-                            <strong>透传模式：</strong>请求和响应将原样转发，不做任何格式转换<br>
-                            <small style="opacity: 0.8;">适合OpenAI兼容的API（DeepSeek、智谱等）</small>
-                        </div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">API类型</label>
-                        <select id="api-type" class="form-select" onchange="toggleThinkingOptions()">
-                            <option value="direct_api">OpenAI兼容 (推荐)</option>
-                            <option value="responses_native">OpenAI Responses 原生格式（转换兼容）</option>
-                            <option value="gemini_native">Gemini原生格式</option>
-                            <option value="anthropic_native">Anthropic原生格式</option>
-                        </select>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</div><div class="form-group connection-half">
+<label class="form-label" for="config-type">配置类型</label>
+<select class="form-select" id="config-type" onchange="toggleConfigType()">
+<option value="direct_api">Direct API 模式（默认/推荐）</option>
+<option value="lmarena">LMArena 模式（已弃用，保留兼容）</option>
+</select>
+</div><div class="form-group connection-half" data-direct-setting="">
+<label class="form-label" for="api-type">API类型</label>
+<select class="form-select" id="api-type" onchange="changeModelApiType()">
+<option value="direct_api">OpenAI兼容 (推荐)</option>
+<option value="responses_native">OpenAI Responses 原生格式（转换兼容）</option>
+<option value="gemini_native">Gemini原生格式</option>
+<option value="anthropic_native">Anthropic原生格式</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             选择上游 API 接口格式。Responses 原生格式会把本地 Chat/Anthropic/Responses 请求转换到上游 <code>/responses</code>，再转换回客户端格式；Gemini原生使用Google官方 API；Anthropic原生透传 <code>/messages</code>
-                        </small>
-                    </div>
-
-                    <div id="responses-native-options" class="form-group" style="display: none; padding: 10px; background: var(--surface-2); border-radius: 6px;">
-                        <label style="display: flex; align-items: center; font-size: 0.85rem; margin-bottom: 8px;">
-                            <input type="checkbox" id="responses-store" style="margin-right: 6px;">
+</small>
+</div><div class="form-group" data-direct-setting="" id="responses-native-options" style="display: none; padding: 10px; background: var(--surface-2); border-radius: 6px;">
+<label style="display: flex; align-items: center; font-size: 0.85rem; margin-bottom: 8px;">
+<input id="responses-store" style="margin-right: 6px;" type="checkbox"/>
                             允许上游存储 Responses（store）
                         </label>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <label class="form-label">上游 reasoning.summary</label>
-                                <select id="responses-reasoning-summary" class="form-select">
-                                    <option value="">不指定</option>
-                                    <option value="auto">auto（自动摘要）</option>
-                                    <option value="concise">concise（简洁）</option>
-                                    <option value="detailed">detailed（详细）</option>
-                                </select>
-                            </div>
-                        </div>
-                        <small style="color: var(--text-dim); display: block; margin-top: 7px;">
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label" for="responses-reasoning-summary">上游 reasoning.summary</label>
+<select class="form-select" id="responses-reasoning-summary">
+<option value="">不指定</option>
+<option value="auto">auto（自动摘要）</option>
+<option value="concise">concise（简洁）</option>
+<option value="detailed">detailed（详细）</option>
+</select>
+</div>
+</div>
+<small style="color: var(--text-dim); display: block; margin-top: 7px;">
                             仅对上游 Responses API 生效。本地请求仍按无状态方式转发，不会自动复用 previous_response_id。
                         </small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">API Base URL</label>
-                        <input type="text" id="api-base-url" class="form-input" placeholder="http://127.0.0.1:7861 或 https://api.openai.com/v1">
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</div><div class="form-group" data-direct-setting="">
+<label class="form-label" for="api-base-url">API Base URL</label>
+<input class="form-input" id="api-base-url" placeholder="http://127.0.0.1:7861 或 https://api.openai.com/v1" type="text"/>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             API服务器地址。OpenAI兼容格式必填；Gemini原生格式可选（留空使用Google官方地址，填写可用于本地反代）
                         </small>
-                    </div>
-
-                    <div class="form-group" id="upstream-protocol-config" style="display: none;">
-                        <label class="form-label">上游协议（Gemini）</label>
-                        <select id="upstream-protocol" class="form-select">
-                            <option value="generate_content">generateContent（旧版，默认）</option>
-                            <option value="interactions">Interactions API（新版，gemini-3 系列推荐）</option>
-                        </select>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            Gemini 上游协议。旧版 <code>generateContent</code> 仍受支持；谷歌新 Interactions API（<code>/v1beta/interactions</code>）支持思考级别、思考签名回传等新特性，gemini-3 系列建议使用。仅 <code>gemini_native</code> 生效。
-                        </small>
-                    </div>
-
-                    <div class="form-group">
-                        <label class="form-label">模型端点（可选）</label>
-                        <input type="text" id="endpoint-path" class="form-input" placeholder="/chat/completions">
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            默认 <code>/chat/completions</code>（OpenAI兼容）；Responses 原生格式默认 <code>/responses</code>；Anthropic 原生模式默认 <code>/messages</code>。
-                        </small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">API Key（支持多Key轮询）</label>
-                        <div id="model-api-keys-list">
-                            <!-- 动态生成的 API Key 输入行 -->
-                        </div>
-                        <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
-                            <button type="button" class="btn btn-sm" onclick="addApiKeyRow()">
-                                ➕ 添加 API Key
-                            </button>
-                            <button type="button" class="btn btn-sm btn-success" id="test-keys-btn" onclick="testCurrentModelKeys()">
-                                🔑 测试所有 Key
-                            </button>
-                            <button type="button" class="btn btn-sm" id="query-balance-btn" onclick="queryKeyBalances()"
-                                style="background: var(--accent); color: #fff;">
-                                💰 查余额
-                            </button>
-                        </div>
-                        <div id="key-test-results" style="display: none; margin-top: 10px;"></div>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            可添加多个 API Key 实现自动轮询。本地反代等无需认证的场景可留空
-                        </small>
-                    </div>
-
-                    <div class="form-group" id="api-key-strategy-group">
-                        <label class="form-label">轮询策略</label>
-                        <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;">
-                            <select id="api-key-strategy" class="form-input" onchange="toggleApiKeyStrategyOptions()" style="max-width: 200px;">
-                                <option value="round_robin">逐Key轮询 (Round-Robin)</option>
-                                <option value="sticky">粘性轮询 (Sticky)</option>
-                            </select>
-                            <div id="api-key-cooldown-group" style="display: none; align-items: center; gap: 6px;">
-                                <label style="white-space: nowrap; font-size: 0.85rem; color: var(--text-dim);">冷却时长</label>
-                                <input type="number" id="api-key-cooldown" class="form-input"
-                                    placeholder="172800" min="0" step="3600" style="max-width: 110px;">
-                                <span style="font-size: 0.8rem; color: var(--text-dim); white-space: nowrap;">秒（48h=172800）</span>
-                            </div>
-                        </div>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            <strong>逐Key轮询</strong>：每次请求轮流使用下一个 Key。<br>
-                            <strong>粘性轮询</strong>：优先复用同一个 Key，额度不足时自动切换并冷却 48 小时。
-                        </small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">目标模型ID</label>
-                        <div style="display: flex; gap: 10px; margin-bottom: 5px;">
-                            <input type="text" id="model-id" class="form-input" placeholder="留空则使用模型名称">
-                            <button type="button" class="btn btn-primary" onclick="fetchModelsFromAPI(event)" style="white-space: nowrap; flex-shrink: 0;">
+</div><div class="form-group" data-direct-setting="">
+<label class="form-label" for="model-id">目标模型ID</label>
+<div style="display: flex; gap: 10px; margin-bottom: 5px;">
+<input class="form-input" id="model-id" placeholder="留空则使用模型名称" type="text"/>
+<button class="btn btn-primary" onclick="fetchModelsFromAPI(event)" style="white-space: nowrap; flex-shrink: 0;" type="button">
                                 📋 从API获取
                             </button>
-                        </div>
-                        <div id="model-select-container" style="display: none; margin-top: 10px;">
-                            <div style="position: relative; margin-bottom: 8px;">
-                                <input type="text" id="model-search" class="form-input" placeholder="🔍 搜索模型..." oninput="filterModelList()" style="padding-left: 10px;">
-                                <span id="model-search-count" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; color: var(--text-dim);"></span>
-                            </div>
-                            <select id="model-select" class="form-select" onchange="selectModelFromList()" size="8" style="height: auto; max-height: 240px;">
-                                <option value="">-- 选择模型 --</option>
-                            </select>
-                        </div>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</div>
+<div id="model-select-container" style="display: none; margin-top: 10px;">
+<div style="position: relative; margin-bottom: 8px;">
+<input class="form-input" id="model-search" oninput="filterModelList()" placeholder="🔍 搜索模型..." style="padding-left: 10px;" type="text"/>
+<span id="model-search-count" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; color: var(--text-dim);"></span>
+</div>
+<select class="form-select" id="model-select" onchange="selectModelFromList()" size="8" style="height: auto; max-height: 240px;">
+<option value="">-- 选择模型 --</option>
+</select>
+</div>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             发送给API的实际模型ID（如 gpt-4o）。点击"从API获取"可自动加载可用模型
                         </small>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label class="form-label">显示名称</label>
-                        <input type="text" id="display-name" class="form-input" placeholder="留空则使用模型名称">
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</div><div class="form-group" data-direct-setting="" id="upstream-protocol-config" style="display: none;">
+<label class="form-label" for="upstream-protocol">上游协议（Gemini）</label>
+<select class="form-select" id="upstream-protocol">
+<option value="generate_content">generateContent（旧版，默认）</option>
+<option value="interactions">Interactions API（新版，gemini-3 系列推荐）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            Gemini 上游协议。旧版 <code>generateContent</code> 仍受支持；谷歌新 Interactions API（<code>/v1beta/interactions</code>）支持思考级别、思考签名回传等新特性，gemini-3 系列建议使用。仅 <code>gemini_native</code> 生效。
+                        </small>
+</div><div class="form-group" data-direct-setting="">
+<label class="form-label" for="endpoint-path">模型端点（可选）</label>
+<input class="form-input" id="endpoint-path" placeholder="/chat/completions" type="text"/>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            默认 <code>/chat/completions</code>（OpenAI兼容）；Responses 原生格式默认 <code>/responses</code>；Anthropic 原生模式默认 <code>/messages</code>。
+                        </small>
+</div><div class="form-group" data-direct-setting="">
+<label class="form-label">API Key（支持多Key轮询）</label>
+<div id="model-api-keys-list">
+<!-- 动态生成的 API Key 输入行 -->
+</div>
+<div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
+<button class="btn btn-sm" onclick="addApiKeyRow()" type="button">
+                                ➕ 添加 API Key
+                            </button>
+<button class="btn btn-sm btn-success" id="test-keys-btn" onclick="testCurrentModelKeys()" type="button">
+                                🔑 测试所有 Key
+                            </button>
+<button class="btn btn-sm" id="query-balance-btn" onclick="queryKeyBalances()" style="background: var(--accent); color: #fff;" type="button">
+                                💰 查余额
+                            </button>
+</div>
+<div id="key-test-results" style="display: none; margin-top: 10px;"></div>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            可添加多个 API Key 实现自动轮询。本地反代等无需认证的场景可留空
+                        </small>
+</div><div class="form-group" data-direct-setting="" id="api-key-strategy-group">
+<label class="form-label" for="api-key-strategy">轮询策略</label>
+<div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;">
+<select class="form-input" id="api-key-strategy" onchange="toggleApiKeyStrategyOptions()" style="max-width: 200px;">
+<option value="round_robin">逐Key轮询 (Round-Robin)</option>
+<option value="sticky">粘性轮询 (Sticky)</option>
+</select>
+<div id="api-key-cooldown-group" style="display: none; align-items: center; gap: 6px;">
+<label style="white-space: nowrap; font-size: 0.85rem; color: var(--text-dim);">冷却时长</label>
+<input class="form-input" id="api-key-cooldown" min="0" placeholder="172800" step="3600" style="max-width: 110px;" type="number"/>
+<span style="font-size: 0.8rem; color: var(--text-dim); white-space: nowrap;">秒（48h=172800）</span>
+</div>
+</div>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+<strong>逐Key轮询</strong>：每次请求轮流使用下一个 Key。<br/>
+<strong>粘性轮询</strong>：优先复用同一个 Key，额度不足时自动切换并冷却 48 小时。
+                        </small>
+</div><div id="lmarena-config" style="display: block;">
+<div class="alert alert-info" style="margin-bottom: 15px;">
+<span>⚠️</span>
+<div>
+<strong>LMArena 模式已弃用：</strong>该模式仅为兼容旧配置而保留，新增模型请优先使用 Direct API 模式。
+                        </div>
+</div>
+<div class="form-group">
+<label class="form-label" for="session-id">Session ID</label>
+<input class="form-input" id="session-id" placeholder="从LMArena获取的会话ID" type="text"/>
+</div>
+<div class="form-group">
+<label class="form-label" for="mode">模式</label>
+<select class="form-select" id="mode" onchange="toggleBattleTarget()">
+<option value="direct_chat">Direct Chat</option>
+<option value="battle">Battle</option>
+</select>
+</div>
+<div class="form-group" id="battle-target-group" style="display: none;">
+<label class="form-label" for="battle-target">Battle Target</label>
+<select class="form-select" id="battle-target">
+<option value="A">A</option>
+<option value="B">B</option>
+</select>
+</div>
+<div class="form-group">
+<label class="form-label" for="model-type">模型类型</label>
+<select class="form-select" id="model-type">
+<option value="text">文本模型</option>
+<option value="image">图像模型</option>
+</select>
+</div>
+<div class="form-group">
+<label class="form-label" for="lmarena-display-name">显示名称</label>
+<input class="form-input" id="lmarena-display-name" placeholder="留空则使用模型名称" type="text">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             在统计中显示的名称
                         </small>
-                    </div>
-                    
-                    <div class="form-group" id="passthrough-config">
-                        <label class="form-label">
-                            <input type="checkbox" id="passthrough" checked style="margin-right: 8px;">
-                            启用透传模式（推荐）
-                        </label>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            完全透传请求和响应，零延迟。适用于 OpenAI 兼容 API
+</input></div>
+<div class="form-group">
+<label class="form-label" for="lmarena-max-temperature">最高温度限制（可选）</label>
+<input class="form-input" id="lmarena-max-temperature" max="2" min="0" placeholder="留空则不限制" step="0.1" type="number">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            如果请求的温度超过此值，将自动限制为此值。例如 Claude 最高温度为 1.0
                         </small>
-                    </div>
-
-                    <div class="form-group">
-                        <label class="form-label">
-                            <input type="checkbox" id="sanitize-recursive-schemas" checked style="margin-right: 8px;">
-                            清洗递归 JSON Schema（Codex 兼容）
-                        </label>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            转发前截断工具参数里的递归引用，并把 <code>strict</code> 降级。
-                            Codex 发的 MCP 工具常带自引用，不开会被上游直接 400 拒绝。
-                            关掉后原样透传（出 400 别怪我）
+</input></div>
+<div class="form-group">
+<label class="form-label" for="lmarena-max-tokens">最大输出Token限制（可选）</label>
+<input class="form-input" id="lmarena-max-tokens" min="1" placeholder="留空则不限制" step="1" type="number">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            如果请求的max_tokens超过此值，将自动限制为此值。不同模型最大输出Token不同，配置后可避免前端每次切换模型都要改
                         </small>
-                    </div>
-
-                    <div class="form-group">
-                        <label class="form-label">流式模式控制</label>
-                        <select id="force-stream" class="form-input">
-                            <option value="">不强制（透传客户端参数）</option>
-                            <option value="true">强制流式（Stream）</option>
-                            <option value="false">强制非流式（Non-Stream）</option>
-                        </select>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</input></div>
+<div class="form-group">
+<label class="form-label" for="lmarena-pricing-input" style="margin-bottom: 10px;">计费配置（可选）</label>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">输入单价</label>
+<input class="form-input" id="lmarena-pricing-input" placeholder="0.00" step="0.01" type="number">
+</input></div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">输出单价</label>
+<input class="form-input" id="lmarena-pricing-output" placeholder="0.00" step="0.01" type="number">
+</input></div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">计价单位</label>
+<input class="form-input" id="lmarena-pricing-unit" placeholder="1000000" type="number" value="1000000">
+</input></div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">货币</label>
+<select class="form-select" id="lmarena-pricing-currency">
+<option value="USD">USD (美元)</option>
+<option value="CNY">CNY (人民币)</option>
+</select>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
+<input class="form-input" id="lmarena-pricing-cached-input" placeholder="=输入单价" step="0.0001" type="number">
+</input></div>
+<div></div>
+</div>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            配置计费后可以在统计中看到成本信息
+                        </small>
+</div>
+</div></section><section class="model-settings-panel" id="settings-generation"><h4>生成与思考</h4><p class="settings-description">调整思考方式、输出长度和生成参数。</p><div class="form-group" data-direct-setting="">
+<label class="form-label" for="force-stream">流式模式控制</label>
+<select class="form-input" id="force-stream">
+<option value="">不强制（透传客户端参数）</option>
+<option value="true">强制流式（Stream）</option>
+<option value="false">强制非流式（Non-Stream）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             覆盖客户端传入的 stream 参数。适用于需要固定流式/非流式行为的 API（如某些反代仅支持流式）
                         </small>
-                    </div>
-
-                    <div id="anthropic-auto-cache-config" class="form-group" style="display: none;">
-                        <label class="form-label">
-                            <input type="checkbox" id="anthropic-auto-cache" style="margin-right: 8px;">
+</div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>🧠 思维链配置</h4>
+</div>
+<div class="collapsible-content">
+<div class="form-group">
+<label class="form-label" for="enable-thinking">思维链模式</label>
+<select class="form-input" id="enable-thinking" onchange="toggleThinkingOptions()">
+<option value="">不发送（透传客户端参数）</option>
+<option value="true">启用思考</option>
+<option value="adaptive">自适应思考（仅 Anthropic）</option>
+<option value="false">显式禁用</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    控制如何处理 thinking 参数。"不发送" 透传客户端原始参数不做修改；"启用" 注入 thinking.type=enabled + budget_tokens；"自适应" 将客户端 thinking.type=enabled 转为 adaptive（适用于 Claude Opus 4.7 / Mythos 5 等新模型）；"显式禁用" 注入 thinking.type=disabled
+                                </small>
+</div>
+<div class="form-group" id="verbosity-config" style="display: none;">
+<label class="form-label" for="oai-verbosity">输出详细度（Verbosity，OAI 兼容）</label>
+<select class="form-input" id="oai-verbosity">
+<option value="">不注入（透传客户端参数）</option>
+<option value="low">low（简短）</option>
+<option value="medium">medium（中等）</option>
+<option value="high">high（详细）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    GPT-5 系列 Chat Completions 顶层 verbosity 参数，控制回复长度，与是否启用思考无关。客户端已传时不覆盖；不支持该参数的上游可能报错，请留空
+                                </small>
+</div>
+<div id="thinking-options" style="display: none;">
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+<div class="form-group" id="thinking-control-config" style="margin-bottom: 0; display: none;">
+<label class="form-label" for="thinking-control">思考控制方式</label>
+<select class="form-input" id="thinking-control" onchange="toggleThinkingOptions()">
+<option value="budget">Token 预算（thinking_budget）</option>
+<option value="effort">强度等级（reasoning_effort）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            Token 预算适用于 Gemini 2.5/旧模型、Anthropic/OpenRouter；强度等级（low/medium/high）适用于 OpenAI 兼容上游和 Gemini 3（映射为 thinkingLevel）
+                                        </small>
+</div>
+<div class="form-group" id="thinking-budget-config" style="margin-bottom: 0;">
+<label class="form-label" for="thinking-budget">思维链Token预算</label>
+<input class="form-input" id="thinking-budget" placeholder="20000" type="number" value="20000">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            默认20000，仅在启用思考时生效
+                                        </small>
+</input></div>
+<div class="form-group" id="thinking-effort-config" style="margin-bottom: 0; display: none;">
+<label class="form-label" for="thinking-effort">思考强度（Effort）</label>
+<select class="form-input" id="thinking-effort">
+<option value="">留空（让模型自行决定）</option>
+<option value="none">none（不思考，GPT-5.1+ / OAI 兼容）</option>
+<option value="minimal">minimal（最少思考，OpenAI 风格）</option>
+<option value="low">low（低，简单问题可能跳过）</option>
+<option value="medium">medium（中等）</option>
+<option value="high">high（几乎总是思考）</option>
+<option value="xhigh">xhigh（超强，Opus 4.7+）</option>
+<option value="max">max（最大，Opus 4.6+）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            启用思考时注入 reasoning_effort（OAI 兼容）/ reasoning.effort（OpenRouter）/ output_config.effort（Anthropic）；Gemini 3 会映射为 generationConfig.thinkingConfig.thinkingLevel；自适应模式下留空则不注入
+                                        </small>
+</div>
+<div class="form-group" id="thinking-display-config" style="margin-bottom: 0; display: none;">
+<label class="form-label" for="thinking-display">思考内容显示（Display）</label>
+<select class="form-input" id="thinking-display">
+<option value="summarized">summarized（返回思维链摘要）</option>
+<option value="omitted">omitted（不返回思维链，仅签名）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            仅 Anthropic 原生格式生效（thinking.display 为 Messages API 专有字段）。Opus 4.7+ 默认 omitted（不返回思维链），设为 summarized 可看到思考内容
+                                        </small>
+</div>
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label" for="thinking-separator">思考内容分隔符</label>
+<input class="form-input" id="thinking-separator" placeholder="例如: 【思考结束】" type="text">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            分隔思考与正文，留空不分隔
+                                        </small>
+</input></div>
+<!-- OAI 兼容 Anthropic thinking 参数（仅 OpenAI 兼容上游显示） -->
+<div class="form-group" id="oai-thinking-type-config" style="margin-bottom: 0;">
+<label class="form-label" for="oai-thinking-type">🧩 OAI 兼容 thinking.type（Anthropic 格式）</label>
+<select class="form-input" id="oai-thinking-type">
+<option value="">不注入</option>
+<option value="enabled">enabled（启用思考 + budget_tokens）</option>
+<option value="adaptive">adaptive（自适应思考，Claude Opus 4.7+）</option>
+<option value="disabled">disabled（显式禁用）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            注入 <code>thinking.type</code>（Anthropic Messages API 格式）。通过 OAI 兼容端点调用 Claude 时使用；与上方 enable_thinking 顶层字段独立
+                                        </small>
+</div>
+<div class="form-group" id="oai-thinking-effort-config" style="margin-bottom: 0;">
+<label class="form-label" for="oai-thinking-effort">🧩 OAI 兼容 output_config.effort</label>
+<select class="form-input" id="oai-thinking-effort">
+<option value="">不注入</option>
+<option value="minimal">minimal</option>
+<option value="low">low</option>
+<option value="medium">medium</option>
+<option value="high">high</option>
+<option value="xhigh">xhigh（Opus 4.7+）</option>
+<option value="max">max（Opus 4.6+）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                            注入 <code>output_config.effort</code>，配合 thinking.type 使用。与上方 reasoning_effort 顶层字段独立
+                                        </small>
+</div>
+</div>
+</div>
+</div>
+</div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>⚙️ 参数限制</h4>
+</div>
+<div class="collapsible-content">
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label" for="max-temperature">最高温度限制</label>
+<input class="form-input" id="max-temperature" max="2" min="0" placeholder="留空则不限制" step="0.1" type="number">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        例如 Claude 最高温度为 1.0
+                                    </small>
+</input></div>
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label" for="max-tokens">最大输出Token限制</label>
+<input class="form-input" id="max-tokens" min="1" placeholder="留空则不限制" step="1" type="number">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                        不同模型最大输出Token不同
+                                    </small>
+</input></div>
+</div>
+<div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
+<label class="form-label" for="cached-tokens-mode">缓存Token统计模式</label>
+<select class="form-select" id="cached-tokens-mode">
+<option value="off">关闭 - 不处理缓存Token</option>
+<option value="forward">正向 - prompt + cached = 总输入（适合某些反代）</option>
+<option selected="" value="reverse">反向 - prompt已是总数，cached只记录（DeepSeek官方，默认）</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    不同API返回cached_tokens的方式不同：<br/>
+                                    • <strong>关闭</strong>：直接使用prompt_tokens，不处理缓存<br/>
+                                    • <strong>正向</strong>：某些反代把cached单独返回，需要相加得到总输入<br/>
+                                    • <strong>反向</strong>：DeepSeek官方API中prompt_tokens已包含全部，cached只是记录
+                                </small>
+</div>
+<div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
+<label class="form-label" for="token-stats-mode">Token统计来源</label>
+<select class="form-select" id="token-stats-mode">
+<option selected="" value="api">API返回 - 使用上游返回的usage统计（默认）</option>
+<option value="local">本地Tokenizer - 忽略上游usage，用本地分词器计算</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    上游usage不可信时（如输入恒为个位数的反代），选择“本地Tokenizer”用tiktoken等本地分词器估算输入/输出token
+                                </small>
+</div>
+<div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
+<label class="form-label" style="display: flex; align-items: center; margin-bottom: 0;">
+<input checked="" id="completion-tokens-mode" style="margin-right: 8px;" type="checkbox">
+<span>思考Token计入输出Token（相加返回）</span>
+</input></label>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    控制发给下游客户端的 <code>usage.completion_tokens</code> 口径（成本与监控统计永远按真实总输出计算，不受本项影响）：<br/>
+                                    • <strong>勾选（默认）</strong>：completion_tokens = 正文 + 思考，即总输出，与多数API的口径一致<br/>
+                                    • <strong>不勾选</strong>：completion_tokens 只算正文，思考量单独放在 <code>completion_tokens_details.reasoning_tokens</code><br/>
+                                    两种口径下 reasoning_tokens 都会保留，<code>total_tokens</code> 都等于「输入 + 正文 + 思考」的真实总量。<br/>
+                                    部分上游与中转把思考单列（total = prompt + completion + reasoning），不开本项时客户端读到的输出会明显偏小；
+                                    已经包含思考的标准 OpenAI 响应不会重复相加（按 total 算术关系自动识别）。
+                                </small>
+</div>
+</div>
+</div></section><section class="model-settings-panel" id="settings-messages"><h4>消息与兼容</h4><p class="settings-description">配置消息转换、预填充和提示词注入。</p><div class="form-group" data-direct-setting="" id="passthrough-config">
+<label class="form-label">
+<input checked="" id="passthrough" style="margin-right: 8px;" type="checkbox">
+                            启用透传模式（推荐）
+                        </input></label>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            启用 OpenAI 兼容透传路径。消息处理和参数覆盖仍受本页其他配置控制。
+                        </small>
+</div><div class="form-group" data-direct-setting="">
+<label class="form-label">
+<input checked="" id="sanitize-recursive-schemas" style="margin-right: 8px;" type="checkbox">
+                            清洗递归 JSON Schema（Codex 兼容）
+                        </input></label>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            转发前截断工具参数里的递归引用，并把 <code>strict</code> 降级。
+                            Codex 发的 MCP 工具常带自引用，不开会被上游直接 400 拒绝。
+                            关闭后保留原始 Schema，请确认上游支持该格式。
+                        </small>
+</div><div class="form-group" data-direct-setting="" id="anthropic-auto-cache-config" style="display: none;">
+<label class="form-label">
+<input id="anthropic-auto-cache" style="margin-right: 8px;" type="checkbox">
                             自动提示词缓存（Prompt Caching）
-                        </label>
-                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                        </input></label>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             自动为 tools / system / 最后两条 user 消息注入 <code>cache_control: ephemeral</code> 断点，
                             多轮对话可命中上游缓存大幅降低成本（缓存读取约为原价 10%，写入约 1.25 倍）。
                             客户端已自带 cache_control 时不重复注入。仅 Anthropic 原生格式生效
                         </small>
-                    </div>
-                    
-                    <!-- ===== 消息转换配置（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 15px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>🔄 消息转换</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <label class="form-label">
-                                    <input type="checkbox" id="convert-system-to-user" style="margin-right: 8px;">
+</div><div class="settings-block" data-direct-setting="" style="margin-top: 15px;">
+<div class="settings-block-title">
+<h4>🔄 消息转换</h4>
+</div>
+<div class="collapsible-content">
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label">
+<input id="convert-system-to-user" style="margin-right: 8px;" type="checkbox"/>
                                     将 System 消息转为 User 消息
                                 </label>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     将所有 <code>role: "system"</code> 的消息转换为 <code>role: "user"</code>。
                                     适用于不支持 system 角色的模型（如某些开源模型或特定API）
                                 </small>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- ===== 预填充/续写模式配置（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>📝 预填充/续写模式</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div class="form-group">
-                                <label class="form-label">
-                                    <input type="checkbox" id="enable-prefix" style="margin-right: 8px;">
+</div>
+</div>
+</div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>📝 预填充/续写模式</h4>
+</div>
+<div class="collapsible-content">
+<div class="form-group">
+<label class="form-label">
+<input id="enable-prefix" style="margin-right: 8px;" type="checkbox"/>
                                     启用 Prefix 模式（DeepSeek）
                                 </label>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     为最后一条assistant消息添加 <code>prefix: true</code> 参数（适用于DeepSeek等支持续写的模型）
                                 </small>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="form-label">
-                                    <input type="checkbox" id="enable-partial" style="margin-right: 8px;">
+</div>
+<div class="form-group">
+<label class="form-label">
+<input id="enable-partial" style="margin-right: 8px;" type="checkbox"/>
                                     启用 Partial 模式（Kimi K2）
                                 </label>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     为最后一条assistant消息添加 <code>"partial": true</code> 参数（适用于Kimi K2等模型的预填充续写）
                                 </small>
-                            </div>
-
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <label class="form-label">预填充内容（Assistant Prefill）</label>
-                                <textarea id="prefill-content" class="form-input" rows="3"
-                                    placeholder="在消息末尾追加一条 assistant 消息，用于跳过思考/引导输出。&#10;例如：&lt;think&gt;&#10;留空则不启用"
-                                    style="font-family: monospace; font-size: 0.85rem; margin-top: 5px;"></textarea>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</div>
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label" for="prefill-content">预填充内容（Assistant Prefill）</label>
+<textarea class="form-input" id="prefill-content" placeholder="在消息末尾追加一条 assistant 消息，用于跳过思考/引导输出。
+例如：&lt;think&gt;
+留空则不启用" rows="3" style="font-family: monospace; font-size: 0.85rem; margin-top: 5px;"></textarea>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     在此输入的内容将作为 <code>{"role": "assistant", "content": "..."}</code> 追加到消息列表末尾。
                                     常用于跳过模型思考阶段或预设回答开头。留空则不启用。
                                 </small>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- ===== 思维链配置（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>🧠 思维链配置</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div class="form-group">
-                                <label class="form-label">思维链模式</label>
-                                <select id="enable-thinking" class="form-input" onchange="toggleThinkingOptions()">
-                                    <option value="">不发送（透传客户端参数）</option>
-                                    <option value="true">启用思考</option>
-                                    <option value="adaptive">自适应思考（仅 Anthropic）</option>
-                                    <option value="false">显式禁用</option>
-                                </select>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    控制如何处理 thinking 参数。"不发送" 透传客户端原始参数不做修改；"启用" 注入 thinking.type=enabled + budget_tokens；"自适应" 将客户端 thinking.type=enabled 转为 adaptive（适用于 Claude Opus 4.7 / Mythos 5 等新模型）；"显式禁用" 注入 thinking.type=disabled
-                                </small>
-                            </div>
-
-                            <div id="verbosity-config" class="form-group" style="display: none;">
-                                <label class="form-label">输出详细度（Verbosity，OAI 兼容）</label>
-                                <select id="oai-verbosity" class="form-input">
-                                    <option value="">不注入（透传客户端参数）</option>
-                                    <option value="low">low（简短）</option>
-                                    <option value="medium">medium（中等）</option>
-                                    <option value="high">high（详细）</option>
-                                </select>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    GPT-5 系列 Chat Completions 顶层 verbosity 参数，控制回复长度，与是否启用思考无关。客户端已传时不覆盖；不支持该参数的上游可能报错，请留空
-                                </small>
-                            </div>
-
-                            <div id="thinking-options" style="display: none;">
-                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                                    <div id="thinking-control-config" class="form-group" style="margin-bottom: 0; display: none;">
-                                        <label class="form-label">思考控制方式</label>
-                                        <select id="thinking-control" class="form-input" onchange="toggleThinkingOptions()">
-                                            <option value="budget">Token 预算（thinking_budget）</option>
-                                            <option value="effort">强度等级（reasoning_effort）</option>
-                                        </select>
-                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            Token 预算适用于 Gemini 2.5/旧模型、Anthropic/OpenRouter；强度等级（low/medium/high）适用于 OpenAI 兼容上游和 Gemini 3（映射为 thinkingLevel）
-                                        </small>
-                                    </div>
-
-                                    <div id="thinking-budget-config" class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">思维链Token预算</label>
-                                        <input type="number" id="thinking-budget" class="form-input" value="20000" placeholder="20000">
-                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            默认20000，仅在启用思考时生效
-                                        </small>
-                                    </div>
-
-                                    <div id="thinking-effort-config" class="form-group" style="margin-bottom: 0; display: none;">
-                                        <label class="form-label">思考强度（Effort）</label>
-                                        <select id="thinking-effort" class="form-input">
-                                            <option value="">留空（让模型自行决定）</option>
-                                            <option value="none">none（不思考，GPT-5.1+ / OAI 兼容）</option>
-                                            <option value="minimal">minimal（最少思考，OpenAI 风格）</option>
-                                            <option value="low">low（低，简单问题可能跳过）</option>
-                                            <option value="medium">medium（中等）</option>
-                                            <option value="high">high（几乎总是思考）</option>
-                                            <option value="xhigh">xhigh（超强，Opus 4.7+）</option>
-                                            <option value="max">max（最大，Opus 4.6+）</option>
-                                        </select>
-                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            启用思考时注入 reasoning_effort（OAI 兼容）/ reasoning.effort（OpenRouter）/ output_config.effort（Anthropic）；Gemini 3 会映射为 generationConfig.thinkingConfig.thinkingLevel；自适应模式下留空则不注入
-                                        </small>
-                                    </div>
-
-                                    <div id="thinking-display-config" class="form-group" style="margin-bottom: 0; display: none;">
-                                        <label class="form-label">思考内容显示（Display）</label>
-                                        <select id="thinking-display" class="form-input">
-                                            <option value="summarized">summarized（返回思维链摘要）</option>
-                                            <option value="omitted">omitted（不返回思维链，仅签名）</option>
-                                        </select>
-                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            仅 Anthropic 原生格式生效（thinking.display 为 Messages API 专有字段）。Opus 4.7+ 默认 omitted（不返回思维链），设为 summarized 可看到思考内容
-                                        </small>
-                                    </div>
-
-                                    <div class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">思考内容分隔符</label>
-                                        <input type="text" id="thinking-separator" class="form-input" placeholder="例如: 【思考结束】">
-                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            分隔思考与正文，留空不分隔
-                                        </small>
-                                    </div>
-
-                                    <!-- OAI 兼容 Anthropic thinking 参数（仅 OpenAI 兼容上游显示） -->
-                                    <div id="oai-thinking-type-config" class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">🧩 OAI 兼容 thinking.type（Anthropic 格式）</label>
-                                        <select id="oai-thinking-type" class="form-input">
-                                            <option value="">不注入</option>
-                                            <option value="enabled">enabled（启用思考 + budget_tokens）</option>
-                                            <option value="adaptive">adaptive（自适应思考，Claude Opus 4.7+）</option>
-                                            <option value="disabled">disabled（显式禁用）</option>
-                                        </select>
-                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            注入 <code>thinking.type</code>（Anthropic Messages API 格式）。通过 OAI 兼容端点调用 Claude 时使用；与上方 enable_thinking 顶层字段独立
-                                        </small>
-                                    </div>
-
-                                    <div id="oai-thinking-effort-config" class="form-group" style="margin-bottom: 0;">
-                                        <label class="form-label">🧩 OAI 兼容 output_config.effort</label>
-                                        <select id="oai-thinking-effort" class="form-input">
-                                            <option value="">不注入</option>
-                                            <option value="minimal">minimal</option>
-                                            <option value="low">low</option>
-                                            <option value="medium">medium</option>
-                                            <option value="high">high</option>
-                                            <option value="xhigh">xhigh（Opus 4.7+）</option>
-                                            <option value="max">max（Opus 4.6+）</option>
-                                        </select>
-                                        <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            注入 <code>output_config.effort</code>，配合 thinking.type 使用。与上方 reasoning_effort 顶层字段独立
-                                        </small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- ===== 参数限制配置（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>⚙️ 参数限制</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label">最高温度限制</label>
-                                    <input type="number" step="0.1" min="0" max="2" id="max-temperature" class="form-input" placeholder="留空则不限制">
-                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                        例如 Claude 最高温度为 1.0
-                                    </small>
-                                </div>
-                                
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label">最大输出Token限制</label>
-                                    <input type="number" step="1" min="1" id="max-tokens" class="form-input" placeholder="留空则不限制">
-                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                        不同模型最大输出Token不同
-                                    </small>
-                                </div>
-                            </div>
-                            
-                            <div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
-                                <label class="form-label">缓存Token统计模式</label>
-                                <select id="cached-tokens-mode" class="form-select">
-                                    <option value="off">关闭 - 不处理缓存Token</option>
-                                    <option value="forward">正向 - prompt + cached = 总输入（适合某些反代）</option>
-                                    <option value="reverse" selected>反向 - prompt已是总数，cached只记录（DeepSeek官方，默认）</option>
-                                </select>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    不同API返回cached_tokens的方式不同：<br>
-                                    • <strong>关闭</strong>：直接使用prompt_tokens，不处理缓存<br>
-                                    • <strong>正向</strong>：某些反代把cached单独返回，需要相加得到总输入<br>
-                                    • <strong>反向</strong>：DeepSeek官方API中prompt_tokens已包含全部，cached只是记录
-                                </small>
-                            </div>
-
-                            <div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
-                                <label class="form-label">Token统计来源</label>
-                                <select id="token-stats-mode" class="form-select">
-                                    <option value="api" selected>API返回 - 使用上游返回的usage统计（默认）</option>
-                                    <option value="local">本地Tokenizer - 忽略上游usage，用本地分词器计算</option>
-                                </select>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    上游usage不可信时（如输入恒为个位数的反代），选择“本地Tokenizer”用tiktoken等本地分词器估算输入/输出token
-                                </small>
-                            </div>
-
-                            <div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
-                                <label class="form-label" style="display: flex; align-items: center; margin-bottom: 0;">
-                                    <input type="checkbox" id="completion-tokens-mode" checked style="margin-right: 8px;">
-                                    <span>思考Token计入输出Token（相加返回）</span>
-                                </label>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    控制发给下游客户端的 <code>usage.completion_tokens</code> 口径（成本与监控统计永远按真实总输出计算，不受本项影响）：<br>
-                                    • <strong>勾选（默认）</strong>：completion_tokens = 正文 + 思考，即总输出，与多数API的口径一致<br>
-                                    • <strong>不勾选</strong>：completion_tokens 只算正文，思考量单独放在 <code>completion_tokens_details.reasoning_tokens</code><br>
-                                    两种口径下 reasoning_tokens 都会保留，<code>total_tokens</code> 都等于「输入 + 正文 + 思考」的真实总量。<br>
-                                    部分上游与中转把思考单列（total = prompt + completion + reasoning），不开本项时客户端读到的输出会明显偏小；
-                                    已经包含思考的标准 OpenAI 响应不会重复相加（按 total 算术关系自动识别）。
-                                </small>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- ===== 自动重试配置（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>🔁 自动重试配置</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
-                                <span>ℹ️</span>
-                                <div>
-                                    遇到 <code>429/503</code> 或其他错误时自动重试。<strong>注意：仅对非流式请求生效；流式请求已返回 200 后无法触发重试。</strong>
-                                </div>
-                            </div>
-
-                            <div style="margin-bottom: 12px;">
-                                <label style="display: flex; align-items: center;">
-                                    <input type="checkbox" id="auto-retry-enabled" onchange="toggleAutoRetryOptions()" style="margin-right: 8px;">
-                                    <span>启用模型级自动重试</span>
-                                    <small style="color: var(--text-dim); display: block; margin-top: 2px; font-size: 0.75rem;">⚠️ 仅对非流式（stream=false）请求生效</small>
-                                </label>
-                            </div>
-
-                            <div id="auto-retry-options" style="display: none;">
-                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
-                                    <div>
-                                        <label style="font-size: 0.875rem; color: var(--text-dim);">最大重试次数</label>
-                                        <input type="number" id="auto-retry-max-retries" class="form-input" min="0" max="20" value="2">
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 0.875rem; color: var(--text-dim);">重试间隔(秒)</label>
-                                        <input type="number" id="auto-retry-delay-seconds" class="form-input" min="0" step="0.1" value="2">
-                                    </div>
-                                </div>
-
-                                <div style="display: grid; grid-template-columns: 1fr; gap: 8px;">
-                                    <label style="display: flex; align-items: center;">
-                                        <input type="checkbox" id="auto-retry-on-429" style="margin-right: 8px;" checked>
-                                        <span>429 Too Many Requests 时重试</span>
-                                    </label>
-                                    <label style="display: flex; align-items: center;">
-                                        <input type="checkbox" id="auto-retry-on-503" style="margin-right: 8px;" checked>
-                                        <span>503 Service Unavailable 时重试</span>
-                                    </label>
-                                    <label style="display: flex; align-items: center;">
-                                        <input type="checkbox" id="auto-retry-on-other-errors" style="margin-right: 8px;">
-                                        <span>其他错误（4xx/5xx）时也重试</span>
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- ===== 自定义参数（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>🔧 自定义参数</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div class="form-group" style="margin-bottom: 0;">
-                                <label class="form-label">自定义参数（JSON格式）</label>
-                                <textarea id="custom-params" class="form-input" rows="3" placeholder='例如: {"chat_template_kwargs": {"thinking": true}}'></textarea>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    输入JSON格式的额外参数，这些参数将直接传递给API
-                                </small>
-                            </div>
-                            <div class="form-group" style="margin-bottom: 0; margin-top: 10px;">
-                                <label class="form-label">附加主体参数（JSON格式）</label>
-                                <textarea id="extra-body-params" class="form-input" rows="3" placeholder='例如: {"top_p": 0.9, "provider": {"order": ["DeepInfra"]}}'></textarea>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    附加到请求主体的参数（如 top_p、OpenRouter provider 指定提供商等），在自定义参数之后合并，同名键优先
-                                </small>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- ===== 计费配置（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>💰 计费配置</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 10px;">
-                                <div>
-                                    <label style="font-size: 0.875rem; color: var(--text-dim);">输入单价</label>
-                                    <input type="number" step="0.01" id="pricing-input" class="form-input" placeholder="0.00">
-                                </div>
-                                <div>
-                                    <label style="font-size: 0.875rem; color: var(--text-dim);">输出单价</label>
-                                    <input type="number" step="0.01" id="pricing-output" class="form-input" placeholder="0.00">
-                                </div>
-                                <div>
-                                    <label style="font-size: 0.875rem; color: var(--text-dim);">计价单位</label>
-                                    <input type="number" id="pricing-unit" class="form-input" value="1000000" placeholder="1000000">
-                                </div>
-                                <div>
-                                    <label style="font-size: 0.875rem; color: var(--text-dim);">货币</label>
-                                    <select id="pricing-currency" class="form-select">
-                                        <option value="USD">USD</option>
-                                        <option value="CNY">CNY</option>
-                                    </select>
-                                </div>
-                                <div>
-                                    <label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
-                                    <input type="number" step="0.0001" id="pricing-cached-input" class="form-input" placeholder="=输入单价">
-                                </div>
-                            </div>
-                            <small style="color: var(--text-dim); display: block; margin-top: 8px;">
-                                例如：OpenAI GPT-4o 输入 2.5/百万token = 输入单价2.5, 单位1000000；缓存命中通常为输入的 1/2~1/10（如 1.25）
-                            </small>
-                        </div>
-                    </div>
-                    
-                    <!-- ===== 图片压缩配置（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>🖼️ 图片压缩配置</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div style="margin-bottom: 15px;">
-                                <label style="display: flex; align-items: center;">
-                                    <input type="checkbox" id="img-compression-enabled" style="margin-right: 8px;">
-                                    <span>启用模型级别图片压缩</span>
-                                </label>
-                                <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                    为此模型单独配置图片压缩规则，优先级高于全局配置
-                                </small>
-                            </div>
-                            
-                            <div id="img-compression-options" style="display: none;">
-                                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px;">
-                                    <div>
-                                        <label style="font-size: 0.875rem; color: var(--text-dim);">目标格式</label>
-                                        <select id="img-target-format" class="form-select">
-                                            <option value="">保持原格式</option>
-                                            <option value="jpg">JPG</option>
-                                            <option value="webp">WEBP</option>
-                                            <option value="png">PNG</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 0.875rem; color: var(--text-dim);">压缩质量</label>
-                                        <input type="number" id="img-quality" class="form-input" min="1" max="100" placeholder="80">
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 0.875rem; color: var(--text-dim);">目标大小(KB)</label>
-                                        <input type="number" id="img-target-size-kb" class="form-input" min="10" placeholder="500">
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 0.875rem; color: var(--text-dim);">最大宽度(px)</label>
-                                        <input type="number" id="img-max-width" class="form-input" min="100" placeholder="1920">
-                                    </div>
-                                </div>
-                                
-                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                                    <div>
-                                        <label style="font-size: 0.875rem; color: var(--text-dim);">最大高度(px)</label>
-                                        <input type="number" id="img-max-height" class="form-input" min="100" placeholder="1080">
-                                    </div>
-                                    <div style="display: flex; align-items: flex-end;">
-                                        <label style="display: flex; align-items: center;">
-                                            <input type="checkbox" id="img-convert-png-to-jpg" style="margin-right: 8px;">
-                                            <span style="font-size: 0.875rem;">PNG自动转JPG</span>
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- ===== 系统提示词注入（可折叠） ===== -->
-                    <div class="collapsible-section collapsed" style="margin-top: 10px;">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this)">
-                            <h4>🎭 系统提示词注入（伪装身份）</h4>
-                            <span class="collapsible-toggle">▼</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
-                                <span>💡</span>
-                                <div>
-                                    <strong>用途说明：</strong>通过在 system 消息中注入特定提示词，可以伪装成官方客户端（如 Antigravity），
+</div>
+</div>
+</div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>🎭 系统提示词注入（伪装身份）</h4>
+</div>
+<div class="collapsible-content">
+<div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
+<span>💡</span>
+<div>
+<strong>用途说明：</strong>通过在 system 消息中注入特定提示词，可以伪装成官方客户端（如 Antigravity），
                                     从而绕过某些 API 的身份验证检测。
                                 </div>
-                            </div>
-                            
-                            <div style="margin-bottom: 15px;">
-                                <label style="display: flex; align-items: center;">
-                                    <input type="checkbox" id="system-injection-enabled" style="margin-right: 8px;">
-                                    <span>启用系统提示词注入</span>
-                                </label>
-                            </div>
-                            
-                            <div id="system-injection-options" style="display: none;">
-                                <div class="form-group" style="margin-bottom: 15px;">
-                                    <label class="form-label">注入位置</label>
-                                    <select id="system-injection-position" class="form-select">
-                                        <option value="before_system">在 System 消息前（推荐）</option>
-                                        <option value="after_system">在 System 消息后</option>
-                                        <option value="replace_system">替换 System 消息</option>
-                                    </select>
-                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</div>
+<div style="margin-bottom: 15px;">
+<label style="display: flex; align-items: center;">
+<input id="system-injection-enabled" style="margin-right: 8px;" type="checkbox"/>
+<span>启用系统提示词注入</span>
+</label>
+</div>
+<div id="system-injection-options" style="display: none;">
+<div class="form-group" style="margin-bottom: 15px;">
+<label class="form-label" for="system-injection-position">注入位置</label>
+<select class="form-select" id="system-injection-position">
+<option value="before_system">在 System 消息前（推荐）</option>
+<option value="after_system">在 System 消息后</option>
+<option value="replace_system">替换 System 消息</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                         "前置"模式会将注入内容放在 system 消息的最前面，确保身份信息优先被匹配
                                     </small>
-                                </div>
-                                
-                                <div class="form-group" style="margin-bottom: 10px;">
-                                    <label class="form-label">预设模板</label>
-                                    <select id="system-injection-preset" class="form-select" onchange="applySystemInjectionPreset()">
-                                        <option value="">-- 选择预设 --</option>
-                                        <option value="antigravity">Antigravity 官方身份</option>
-                                        <option value="custom">自定义内容</option>
-                                    </select>
-                                </div>
-                                
-                                <div class="form-group" style="margin-bottom: 15px;">
-                                    <label class="form-label">注入内容</label>
-                                    <textarea id="system-injection-content" class="form-input" rows="4" placeholder="输入要注入的系统提示词内容..."></textarea>
-                                    <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+</div>
+<div class="form-group" style="margin-bottom: 10px;">
+<label class="form-label" for="system-injection-preset">预设模板</label>
+<select class="form-select" id="system-injection-preset" onchange="applySystemInjectionPreset()">
+<option value="">-- 选择预设 --</option>
+<option value="antigravity">Antigravity 官方身份</option>
+<option value="custom">自定义内容</option>
+</select>
+</div>
+<div class="form-group" style="margin-bottom: 15px;">
+<label class="form-label" for="system-injection-content">注入内容</label>
+<textarea class="form-input" id="system-injection-content" placeholder="输入要注入的系统提示词内容..." rows="4"></textarea>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                         这段内容会被注入到请求的 system 消息中
                                     </small>
-                                </div>
-
-                                <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label">🃏 伪造对话历史（整轮/多轮 + 思维链）</label>
-                                    <small style="color: var(--text-dim); display: block; margin-bottom: 8px;">
+</div>
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label">🃏 伪造对话历史（整轮/多轮 + 思维链）</label>
+<small style="color: var(--text-dim); display: block; margin-bottom: 8px;">
                                         在上游请求中插入伪造的历史对话，可携带 <code>reasoning_content</code> 伪造思维链（DeepSeek 等思考模型）。
                                         伪造消息会插入到 system 消息之后、真实对话之前。
                                         若携带了思维链而请求未带工具，会自动注入一个占位工具以触发 DeepSeek 历史思维链拼接（下游已有工具则不改动）。
                                     </small>
-                                    <div id="fake-conversation-list" style="margin-bottom: 8px;"></div>
-                                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                                        <button type="button" class="btn btn-sm" onclick="addFakeConvRow()">＋ 添加消息</button>
-                                        <button type="button" class="btn btn-sm" onclick="addFakeConvTurn()">＋ 添加一轮对话</button>
-                                        <button type="button" class="btn btn-sm" onclick="importFakeConversationFromJson()">📥 从 JSON 导入</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn" onclick="closeModelModal()">取消</button>
-                <button class="btn btn-primary" onclick="saveModel()">保存</button>
-            </div>
-        </div>
-    </div>
+<div id="fake-conversation-list" style="margin-bottom: 8px;"></div>
+<div style="display: flex; gap: 8px; flex-wrap: wrap;">
+<button class="btn btn-sm" onclick="addFakeConvRow()" type="button">＋ 添加消息</button>
+<button class="btn btn-sm" onclick="addFakeConvTurn()" type="button">＋ 添加一轮对话</button>
+<button class="btn btn-sm" onclick="importFakeConversationFromJson()" type="button">📥 从 JSON 导入</button>
+</div>
+</div>
+</div>
+</div>
+</div></section><section class="model-settings-panel" id="settings-reliability"><h4>重试与图片</h4><p class="settings-description">管理失败重试和图片压缩。</p><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>🔁 自动重试配置</h4>
+</div>
+<div class="collapsible-content">
+<div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
+<span>ℹ️</span>
+<div>
+                                    遇到 <code>429/503</code> 或其他错误时自动重试。<strong>注意：仅对非流式请求生效；流式请求已返回 200 后无法触发重试。</strong>
+</div>
+</div>
+<div style="margin-bottom: 12px;">
+<label style="display: flex; align-items: center;">
+<input id="auto-retry-enabled" onchange="toggleAutoRetryOptions()" style="margin-right: 8px;" type="checkbox"/>
+<span>启用模型级自动重试</span>
+<small style="color: var(--text-dim); display: block; margin-top: 2px; font-size: 0.75rem;">⚠️ 仅对非流式（stream=false）请求生效</small>
+</label>
+</div>
+<div id="auto-retry-options" style="display: none;">
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">最大重试次数</label>
+<input class="form-input" id="auto-retry-max-retries" max="20" min="0" type="number" value="2"/>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">重试间隔(秒)</label>
+<input class="form-input" id="auto-retry-delay-seconds" min="0" step="0.1" type="number" value="2"/>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: 1fr; gap: 8px;">
+<label style="display: flex; align-items: center;">
+<input checked="" id="auto-retry-on-429" style="margin-right: 8px;" type="checkbox"/>
+<span>429 Too Many Requests 时重试</span>
+</label>
+<label style="display: flex; align-items: center;">
+<input checked="" id="auto-retry-on-503" style="margin-right: 8px;" type="checkbox"/>
+<span>503 Service Unavailable 时重试</span>
+</label>
+<label style="display: flex; align-items: center;">
+<input id="auto-retry-on-other-errors" style="margin-right: 8px;" type="checkbox"/>
+<span>其他错误（4xx/5xx）时也重试</span>
+</label>
+</div>
+</div>
+</div>
+</div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>🖼️ 图片压缩配置</h4>
+</div>
+<div class="collapsible-content">
+<div style="margin-bottom: 15px;">
+<label style="display: flex; align-items: center;">
+<input id="img-compression-enabled" style="margin-right: 8px;" type="checkbox"/>
+<span>启用模型级别图片压缩</span>
+</label>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    为此模型单独配置图片压缩规则，优先级高于全局配置
+                                </small>
+</div>
+<div id="img-compression-options" style="display: none;">
+<div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">目标格式</label>
+<select class="form-select" id="img-target-format">
+<option value="">保持原格式</option>
+<option value="jpg">JPG</option>
+<option value="webp">WEBP</option>
+<option value="png">PNG</option>
+</select>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">压缩质量</label>
+<input class="form-input" id="img-quality" max="100" min="1" placeholder="80" type="number"/>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">目标大小(KB)</label>
+<input class="form-input" id="img-target-size-kb" min="10" placeholder="500" type="number"/>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">最大宽度(px)</label>
+<input class="form-input" id="img-max-width" min="100" placeholder="1920" type="number"/>
+</div>
+</div>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">最大高度(px)</label>
+<input class="form-input" id="img-max-height" min="100" placeholder="1080" type="number"/>
+</div>
+<div style="display: flex; align-items: flex-end;">
+<label style="display: flex; align-items: center;">
+<input id="img-convert-png-to-jpg" style="margin-right: 8px;" type="checkbox"/>
+<span style="font-size: 0.875rem;">PNG自动转JPG</span>
+</label>
+</div>
+</div>
+</div>
+</div>
+</div></section><section class="model-settings-panel" id="settings-pricing"><h4>计费与统计</h4><p class="settings-description">设置价格及 Token 统计口径。</p><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>💰 计费配置</h4>
+</div>
+<div class="collapsible-content">
+<div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 10px;">
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">输入单价</label>
+<input class="form-input" id="pricing-input" placeholder="0.00" step="0.01" type="number"/>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">输出单价</label>
+<input class="form-input" id="pricing-output" placeholder="0.00" step="0.01" type="number"/>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">计价单位</label>
+<input class="form-input" id="pricing-unit" placeholder="1000000" type="number" value="1000000"/>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">货币</label>
+<select class="form-select" id="pricing-currency">
+<option value="USD">USD</option>
+<option value="CNY">CNY</option>
+</select>
+</div>
+<div>
+<label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
+<input class="form-input" id="pricing-cached-input" placeholder="=输入单价" step="0.0001" type="number"/>
+</div>
+</div>
+<small style="color: var(--text-dim); display: block; margin-top: 8px;">
+                                例如：OpenAI GPT-4o 输入 2.5/百万token = 输入单价2.5, 单位1000000；缓存命中通常为输入的 1/2~1/10（如 1.25）
+                            </small>
+</div>
+</div></section><section class="model-settings-panel" id="settings-advanced"><h4>自定义参数</h4><p class="settings-description">按需配置传递给上游的 JSON 参数。</p><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
+<div class="settings-block-title">
+<h4>🔧 自定义参数</h4>
+</div>
+<div class="collapsible-content">
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label" for="custom-params">自定义参数（JSON格式）</label>
+<textarea class="form-input" id="custom-params" placeholder='例如: {"chat_template_kwargs": {"thinking": true}}' rows="3"></textarea>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    输入JSON格式的额外参数，这些参数将直接传递给API
+                                </small>
+</div>
+<div class="form-group" style="margin-bottom: 0; margin-top: 10px;">
+<label class="form-label" for="extra-body-params">附加主体参数（JSON格式）</label>
+<textarea class="form-input" id="extra-body-params" placeholder='例如: {"top_p": 0.9, "provider": {"order": ["DeepInfra"]}}' rows="3"></textarea>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    附加到请求主体的参数（如 top_p、OpenRouter provider 指定提供商等），在自定义参数之后合并，同名键优先
+                                </small>
+</div>
+</div>
+</div></section></div>
+<div class="modal-footer"><span id="model-save-status" role="status"></span>
+<button class="btn" onclick="closeModelModal()">取消</button>
+<button class="btn btn-primary" id="model-save-btn" onclick="saveModel()">保存模型</button>
+</div>
+</div>
+</div>
 
     <!-- 🎯 新增：捕获ID后的模型配置模态框 -->
     <div id="capture-config-modal" class="modal">

@@ -22,11 +22,23 @@ function updateArchiveButtons() {
     const archivedChecked = document.querySelectorAll('#archived-models-tbody .model-row input[type="checkbox"]:checked').length;
     if (archiveBtn) archiveBtn.disabled = activeChecked === 0;
     if (restoreBtn) restoreBtn.disabled = archivedChecked === 0;
+    if (archiveBtn) archiveBtn.textContent = activeChecked ? `归档所选（${activeChecked}）` : '归档所选';
+    for (const [tbodyId, headerId] of [['models-tbody', 'select-all-active'], ['archived-models-tbody', 'select-all-archived']]) {
+        const header = document.getElementById(headerId);
+        if (!header) continue;
+        const boxes = Array.from(document.querySelectorAll(`#${tbodyId} .model-row:not([hidden]) .model-checkbox`));
+        const selected = boxes.filter(box => box.checked).length;
+        header.checked = boxes.length > 0 && selected === boxes.length;
+        header.indeterminate = selected > 0 && selected < boxes.length;
+        header.disabled = boxes.length === 0;
+    }
 }
 
 // ==================== 列表加载 ====================
 
 async function loadModels() {
+    const request = ++modelWorkspace.request;
+    document.getElementById('models-summary').textContent = '正在加载模型…';
     try {
         const response = await fetch('/api/admin/models');
         
@@ -43,6 +55,9 @@ async function loadModels() {
         }
         
         const data = await response.json();
+        if (request !== modelWorkspace.request) return;
+        modelWorkspace.models = data.model_endpoint_map || {};
+        refreshModelProviders();
         
         const modelsHtml = Object.keys(data.model_endpoint_map).length > 0
             ? buildModelsTable(data.model_endpoint_map)
@@ -50,9 +65,11 @@ async function loadModels() {
         
         document.getElementById('models-list').innerHTML = modelsHtml;
         initModelsSortable();
-        updateArchiveButtons();
+        applyModelFilters();
         
     } catch (error) {
+        if (request !== modelWorkspace.request) return;
+        document.getElementById('models-summary').textContent = '加载失败，请点击刷新列表重试。';
         console.error('❌ 加载模型失败:', error);
         console.error('错误详情:', error.message);
         showMessage('danger', '加载模型失败: ' + error.message);
@@ -60,108 +77,26 @@ async function loadModels() {
 }
 
 function buildModelsRow(name, cfg, isArchived) {
-    const isDirectAPI = ['direct_api', 'responses_native', 'gemini_native', 'anthropic_native'].includes(cfg.api_type);
-    const autoRetryConfig = (cfg && typeof cfg === 'object') ? (cfg.auto_retry || {}) : {};
-    const autoRetryEnabled = !!autoRetryConfig.enabled;
-
-    let configInfo = '';
-    let modeInfo = '';
-
-    if (isDirectAPI) {
-        const baseUrl = cfg.api_base_url || '';
-        const displayUrl = escapeHtml(baseUrl.length > 30 ? baseUrl.substring(0, 30) + '...' : baseUrl);
-        const apiTypeLabels = {
-            direct_api: 'OpenAI兼容',
-            responses_native: 'Responses原生',
-            gemini_native: 'Gemini原生',
-            anthropic_native: 'Anthropic原生',
-        };
-        const apiTypeLabel = apiTypeLabels[cfg.api_type] || 'OpenAI兼容';
-        const defaultEndpoint = cfg.api_type === 'responses_native'
-            ? '/responses'
-            : (cfg.api_type === 'anthropic_native' ? '/messages' : '/chat/completions');
-        const endpointPath = escapeHtml(cfg.endpoint_path || defaultEndpoint);
-
-        // 🔧 多 API Key 轮询：显示 key 数量
-        let apiKeyDisplay = '';
-        if (cfg.api_keys && Array.isArray(cfg.api_keys) && cfg.api_keys.length > 0) {
-            apiKeyDisplay = `<div><strong>Key:</strong> ${cfg.api_keys.length} 个（轮询）</div>`;
-        } else if (cfg.api_key) {
-            const keyPreview = typeof cfg.api_key === 'string' && cfg.api_key.length > 10
-                ? cfg.api_key.substring(0, 4) + '...' + cfg.api_key.substring(cfg.api_key.length - 4)
-                : '***';
-            apiKeyDisplay = `<div><strong>Key:</strong> ${escapeHtml(keyPreview)}</div>`;
-        } else {
-            apiKeyDisplay = `<div><strong>Key:</strong> 无需认证</div>`;
-        }
-
-        configInfo = `
-            <div style="font-size: 0.875rem;">
-                <div><strong>类型:</strong> ${apiTypeLabel}</div>
-                <div><strong>URL:</strong> ${displayUrl || '(默认)'}</div>
-                <div><strong>端点:</strong> ${endpointPath}</div>
-                <div><strong>模型:</strong> ${escapeHtml(cfg.model_id || name)}</div>
-                ${apiKeyDisplay}
-                <div><strong>重试:</strong> ${autoRetryEnabled ? `开启（${autoRetryConfig.max_retries ?? 2}次, ${autoRetryConfig.retry_delay_seconds ?? 2}s）` : '关闭'}</div>
-                ${cfg.pricing ? `<div><strong>计费:</strong> ${escapeHtml(String(cfg.pricing.input))}/${escapeHtml(String(cfg.pricing.output))} ${escapeHtml(cfg.pricing.currency || '')}</div>` : ''}
-            </div>
-        `;
-        modeInfo = `
-            <span class="badge badge-success">Direct API</span>
-            ${cfg.api_type === 'direct_api' && cfg.passthrough ? '<span class="badge badge-info">透传</span>' : ''}
-            ${cfg.api_type === 'responses_native' ? '<span class="badge badge-info">Responses原生</span>' : ''}
-            ${cfg.api_type === 'anthropic_native' ? '<span class="badge badge-info">Anthropic原生</span>' : ''}
-            ${cfg.api_type === 'gemini_native' ? '<span class="badge badge-info">Gemini原生</span>' : ''}
-            ${autoRetryEnabled ? '<span class="badge" style="background: rgba(249, 115, 22, 0.2); color: #f97316; border-color: rgba(249, 115, 22, 0.3);">🔁重试</span>' : ''}
-            ${cfg.image_compression?.enabled ? '<span class="badge" style="background: rgba(147, 51, 234, 0.2); color: #a855f7; border-color: rgba(147, 51, 234, 0.3);">🖼️压缩</span>' : ''}
-        `;
-    } else {
-        configInfo = `
-            <div style="font-size: 0.875rem;">
-                <div><strong>Session:</strong> <code style="color: var(--accent);">...${escapeHtml(cfg.session_id?.slice(-8) || 'N/A')}</code></div>
-                <div><strong>状态:</strong> <span style="color: #f59e0b;">已弃用，保留兼容</span></div>
-                ${cfg.type ? `<div><strong>类型:</strong> ${escapeHtml(cfg.type)}</div>` : ''}
-            </div>
-        `;
-        modeInfo = `
-            <span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);">已弃用</span>
-            <span class="badge badge-info">${escapeHtml(cfg.mode || 'direct_chat')}</span>
-            ${cfg.battle_target ? `<span class="badge badge-info">${escapeHtml(cfg.battle_target)}</span>` : ''}
-        `;
-    }
-
-    // 配置 JSON 放入 data 属性（escapeHtml 转义后安全），点击时 JSON.parse 还原；
-    // 旧版把 JSON 直接拼进 onclick 单引号属性，HTML 不认反斜杠转义，
-    // 配置值含引号/尖括号时会打破属性边界
-    const nameAttr = escapeHtml(name);
-    const cfgAttr = escapeHtml(JSON.stringify(cfg));
-    const archiveAction = isArchived
-        ? `<button class="btn btn-sm" data-model-name="${nameAttr}" onclick="toggleModelArchive(this.dataset.modelName)" title="恢复后模型重新可请求、出现在模型列表">♻️ 恢复</button>`
-        : `<button class="btn btn-sm" data-model-name="${nameAttr}" onclick="toggleModelArchive(this.dataset.modelName)" title="归档后模型无法请求、从模型列表隐藏">🗄️ 归档</button>`;
-
-    return `
-        <tr class="model-row${isArchived ? ' model-row-archived' : ''}" data-model-name="${nameAttr}">
-            <td style="width: 36px;"><input type="checkbox" class="model-checkbox" onchange="updateArchiveButtons()" title="选择此模型"></td>
-            <td class="drag-handle" title="拖动排序">⠿</td>
-            <td><strong>${escapeHtml(name)}</strong>${isArchived ? ' <span class="badge" style="background: rgba(107, 114, 128, 0.2); color: #9ca3af; border-color: rgba(107, 114, 128, 0.3);">已归档</span>' : ''}</td>
-            <td>
-                <span class="badge ${isDirectAPI ? 'badge-success' : 'badge-info'}">
-                    ${isDirectAPI ? 'API' : 'LMArena（已弃用）'}
-                </span>
-            </td>
-            <td>${configInfo}</td>
-            <td>${modeInfo}</td>
-            <td>
-                <button class="btn btn-primary btn-sm" data-model-name="${nameAttr}" data-model-config="${cfgAttr}"
-                    onclick="editModel(this.dataset.modelName, JSON.parse(this.dataset.modelConfig))">编辑</button>
-                <button class="btn btn-sm" data-model-name="${nameAttr}" data-model-config="${cfgAttr}"
-                    onclick="copyModel(this.dataset.modelName, JSON.parse(this.dataset.modelConfig))" title="复制此模型配置">📋 复制</button>
-                ${archiveAction}
-                <button class="btn btn-danger btn-sm" data-model-name="${nameAttr}"
-                    onclick="deleteModel(this.dataset.modelName)">删除</button>
-            </td>
-        </tr>
-    `;
+    const protocol = modelProtocol(cfg);
+    const labels = { direct_api: 'OpenAI 兼容', responses_native: 'Responses', anthropic_native: 'Anthropic', gemini_native: 'Gemini', legacy: 'LMArena · 已弃用' };
+    const endpoint = cfg.endpoint_path || ({direct_api:'/chat/completions', responses_native:'/responses', anthropic_native:'/messages', gemini_native: cfg.upstream_protocol === 'interactions' ? '/v1beta/interactions' : 'generateContent'}[protocol] || '会话连接');
+    const attr = escapeHtml(name);
+    const keyCount = Array.isArray(cfg.api_keys) && cfg.api_keys.length ? cfg.api_keys.length : (cfg.api_key ? 1 : 0);
+    const flags = [cfg.auto_retry?.enabled ? '自动重试' : '', cfg.image_compression?.enabled ? '图片压缩' : '', cfg.enable_thinking ? '思考配置' : '', cfg.passthrough && protocol === 'direct_api' ? '透传' : ''].filter(Boolean);
+    return `<tr class="model-row${isArchived ? ' model-row-archived' : ''}" data-model-name="${attr}">
+        <td><input type="checkbox" class="model-checkbox" onchange="updateArchiveButtons()" aria-label="选择 ${attr}"></td>
+        <td class="drag-handle" title="拖动调整模型顺序">⠿</td>
+        <td class="model-identity"><button class="model-name" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">${attr}</button>
+            <div class="model-subtitle">${escapeHtml(cfg.display_name && cfg.display_name !== name ? cfg.display_name : cfg.model_id || name)}</div>
+            <div class="model-flags"><span class="badge ${isArchived ? 'badge-info' : 'badge-success'}">${isArchived ? '已归档' : '可用'}</span>${flags.map(flag => `<span class="badge badge-info">${flag}</span>`).join('')}</div></td>
+        <td class="model-connection"><span class="badge badge-info">${labels[protocol]}</span>
+            <div class="model-subtitle">${escapeHtml(modelService(cfg))}</div><div class="model-subtitle">${escapeHtml(endpoint)} · ${keyCount ? keyCount + ' 个 Key' : '无需认证'}</div></td>
+        <td><div class="model-actions"><button class="btn btn-primary btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">设置</button>
+            <details class="model-more"><summary class="btn btn-sm" aria-label="${attr} 的更多操作">更多</summary>
+                <button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName, true)">复制模型</button>
+                <button class="btn btn-sm" data-model-name="${attr}" onclick="toggleModelArchive(this.dataset.modelName)">${isArchived ? '恢复模型' : '归档模型'}</button>
+                <button class="btn btn-danger btn-sm" data-model-name="${attr}" onclick="deleteModel(this.dataset.modelName)">删除模型</button>
+            </details></div></td></tr>`;
 }
 
 function buildModelsTable(modelEndpointMap) {
@@ -184,15 +119,13 @@ function buildModelsTable(modelEndpointMap) {
                 <th style="width: 36px;"><input type="checkbox" id="select-all-active" title="全选活跃模型" onchange="toggleSelectAll(this, 'models-tbody')"></th>
                 <th style="width: 40px;"></th>
                 <th>模型名称</th>
-                <th>类型</th>
-                <th>配置信息</th>
-                <th>模式</th>
+                <th>上游连接</th>
                 <th>操作</th>
             </tr>
         </thead>
         <tbody id="models-tbody">`;
     if (activeEntries.length === 0) {
-        html += `<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 24px;">没有活跃模型${archivedEntries.length ? `（${archivedEntries.length} 个已归档）` : ''}</td></tr>`;
+        html += `<tr><td colspan="5" style="text-align: center; color: var(--text-dim); padding: 24px;">没有活跃模型${archivedEntries.length ? `（${archivedEntries.length} 个已归档）` : ''}</td></tr>`;
     } else {
         html += activeEntries.map(([name, cfg]) => buildModelsRow(name, cfg, false)).join('');
     }
@@ -202,11 +135,11 @@ function buildModelsTable(modelEndpointMap) {
     if (archivedEntries.length > 0) {
         html += `
         <div class="archive-section" style="margin-top: 18px; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden;">
-            <div class="archive-header" onclick="toggleArchiveSection()" style="display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; background: var(--surface-2); user-select: none;">
+            <button type="button" aria-expanded="false" class="archive-header" onclick="toggleArchiveSection()" style="display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; background: var(--surface-2); user-select: none;">
                 <span id="archive-toggle-icon">▶</span>
                 <strong>📦 已归档模型（${archivedEntries.length}）</strong>
                 <span style="color: var(--text-dim); font-size: 0.8rem;">点击展开/折叠 · 归档模型无法请求、不出现在模型列表</span>
-            </div>
+            </button>
             <div id="archive-section-body" style="display: none; border-top: 1px solid var(--line-strong);">
                 <div style="padding: 8px 14px; display: flex; gap: 10px; align-items: center; background: var(--surface-2);">
                     <button class="btn btn-sm" id="restore-selected-btn" disabled onclick="restoreSelectedModels()" title="恢复勾选的归档模型">♻️ 恢复所选</button>
@@ -218,9 +151,7 @@ function buildModelsTable(modelEndpointMap) {
                             <th style="width: 36px;"><input type="checkbox" id="select-all-archived" title="全选归档模型" onchange="toggleSelectAll(this, 'archived-models-tbody')"></th>
                             <th style="width: 40px;"></th>
                             <th>模型名称</th>
-                            <th>类型</th>
-                            <th>配置信息</th>
-                            <th>模式</th>
+                            <th>上游连接</th>
                             <th>操作</th>
                         </tr>
                     </thead>
@@ -244,12 +175,13 @@ function toggleArchiveSection() {
     const collapsed = body.style.display === 'none';
     body.style.display = collapsed ? 'block' : 'none';
     icon.textContent = collapsed ? '▼' : '▶';
+    document.querySelector('.archive-header').setAttribute('aria-expanded', String(collapsed));
 }
 
 function toggleSelectAll(checkbox, tbodyId) {
     const tbody = document.getElementById(tbodyId);
     if (!tbody) return;
-    tbody.querySelectorAll('input[type="checkbox"]').forEach(cb => { cb.checked = checkbox.checked; });
+    tbody.querySelectorAll('.model-row:not([hidden]) input[type="checkbox"]').forEach(cb => { cb.checked = checkbox.checked; });
     updateArchiveButtons();
 }
 
@@ -339,7 +271,6 @@ async function setModelsArchived(modelNames, archived) {
     } catch (error) {
         console.error('归档操作失败:', error);
         showMessage('danger', (archived ? '归档失败: ' : '恢复失败: ') + error.message);
-        throw error;
     }
 }
 
@@ -482,7 +413,7 @@ async function saveArchiveSettings() {
 function toggleConfigType() {
     const configType = document.getElementById('config-type').value;
     document.getElementById('lmarena-config').style.display = configType === 'direct_api' ? 'none' : 'block';
-    document.getElementById('direct-api-config').style.display = configType === 'direct_api' ? 'block' : 'none';
+    syncModelSettingsType();
 }
 
 function toggleBattleTarget() {

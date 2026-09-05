@@ -13,7 +13,7 @@
         if ((resp.status === 401 || resp.status === 403) && !_sessionInvalid) {
             _sessionInvalid = true;
             if (typeof showMessage === 'function') {
-                showMessage('登录会话已失效，请重新登录', 'error');
+                showMessage('danger', '登录会话已失效，请重新登录');
             }
             const banner = document.createElement('div');
             banner.id = 'admin-session-banner';
