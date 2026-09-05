@@ -649,5 +649,17 @@ class StatsDB:
             return None
         return estimate_current_prices(self.db_path, model_config)
 
+    async def get_token_stats_async(self, start_time=None, end_time=None, model_config=None, rpm_period=None):
+        """在线程池查询 Token 统计，避免阻塞请求事件循环。"""
+        return await asyncio.to_thread(self.get_token_stats, start_time, end_time, model_config, rpm_period)
+
+    async def get_request_stats_async(self, start_time=None, end_time=None):
+        """在线程池查询请求统计。"""
+        return await asyncio.to_thread(self.get_request_stats, start_time, end_time)
+
+    async def get_request_summary_async(self, start_time=None, end_time=None):
+        """在线程池查询概览汇总。"""
+        return await asyncio.to_thread(self.get_request_summary, start_time, end_time)
+
 # 创建全局实例
 stats_db = StatsDB()

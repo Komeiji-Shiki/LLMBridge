@@ -142,6 +142,10 @@ MCP 按官方 [Streamable HTTP](https://modelcontextprotocol.io/specification/20
 - 独立临时目录完成应用装配检查，新路由注册正常；未加载配置时返回 503，加载有效配置后能力接口返回 200。
 - 真实迁移摘要校验历史金额不变，迁移脚本重复执行为无变更。
 
+### 22:51 运行反馈后的回归修复
+
+用户反馈统计接口报 AttributeError。确认替换 `recalculate_costs` 时误删了紧随其后的三个异步包装方法；前述测试缺少真实 StatsDB 与管理路由组合的覆盖，因此未发现该回归。现已恢复 Token 统计、请求统计、概览汇总的线程池入口，并核对 StatsDB 方法清单与修改前一致。新增四项测试覆盖实际 SQLite 管理接口、参数传递、线程池执行及历史金额不变；完整测试结果更新为 283 项通过。
+
 - `python -m pytest tests -q --disable-warnings --maxfail=3`：279 项通过。
 - 128 个 Python 文件完成 AST 语法检查，17 个非 vendor JavaScript 文件完成 Node 语法检查；无重复模块级定义。
 - 独立临时目录完成应用装配检查，新路由注册正常；未加载配置时返回 503，加载有效配置后能力接口返回 200。
