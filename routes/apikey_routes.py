@@ -10,10 +10,17 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Request
 
-from core.api_key_manager import api_key_manager
+from core.api_key_manager import api_key_manager, KeyPersistenceError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["api-keys"])
+
+
+async def _mutate_key(method, *args, **kwargs):
+    try:
+        return await asyncio.to_thread(method, *args, **kwargs)
+    except KeyPersistenceError as error:
+        raise HTTPException(503, str(error)) from error
 
 
 def _validate_key_payload(data: dict, *, require_name: bool = True) -> dict:
@@ -79,7 +86,7 @@ async def create_api_key(request: Request):
     # 验证并清洗 payload
     cleaned = _validate_key_payload(data, require_name=True)
 
-    key_info = await asyncio.to_thread(
+    key_info = await _mutate_key(
         api_key_manager.create_key,
         name=cleaned["name"],
         allowed_models=cleaned.get("allowed_models", []),
@@ -94,7 +101,7 @@ async def create_api_key(request: Request):
 @router.post("/api/admin/api_keys/reload")
 async def reload_api_keys():
     """重新加载 API Key 配置"""
-    await asyncio.to_thread(api_key_manager.reload)
+    await _mutate_key(api_key_manager.reload)
     keys = await asyncio.to_thread(api_key_manager.list_keys)
     return {"success": True, "message": f"已重新加载 {len(keys)} 个 API Key", "total": len(keys)}
 
@@ -119,7 +126,7 @@ async def update_api_key(key_id: str, request: Request):
     # 验证并清洗 payload（更新时 name 非必填）
     cleaned = _validate_key_payload(data, require_name=False)
 
-    result = await asyncio.to_thread(api_key_manager.update_key, key_id, cleaned)
+    result = await _mutate_key(api_key_manager.update_key, key_id, cleaned)
     if result is None:
         raise HTTPException(status_code=404, detail=f"API Key '{key_id}' 不存在")
 
@@ -129,7 +136,7 @@ async def update_api_key(key_id: str, request: Request):
 @router.delete("/api/admin/api_keys/{key_id}")
 async def delete_api_key(key_id: str):
     """删除 API Key"""
-    if await asyncio.to_thread(api_key_manager.delete_key, key_id):
+    if await _mutate_key(api_key_manager.delete_key, key_id):
         return {"success": True, "message": f"API Key '{key_id}' 已删除"}
     else:
         raise HTTPException(status_code=404, detail=f"API Key '{key_id}' 不存在")

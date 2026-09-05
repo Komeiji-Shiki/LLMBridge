@@ -17,6 +17,9 @@ import re
 import time
 import uuid
 import base64
+import copy
+from core.request_context import current_request
+from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 from urllib.parse import quote
 
@@ -111,6 +114,7 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
 
 
 from services.sse import iter_sse_json_events as _iter_sse_json_events
+from services.request_execution import retry_before_output
 
 
 
@@ -132,6 +136,11 @@ class DirectAPIService:
             if not isinstance(tool, dict):
                 continue
             if tool.get("type") != "function":
+                native_key = GEMINI_TOOL_FIELDS.get(tool.get('type'))
+                if native_key:
+                    gemini_tools.append({native_key: {key: copy.deepcopy(value) for key, value in tool.items() if key != 'type'}})
+                elif any(key in tool for key in GEMINI_TOOL_FIELDS.values()):
+                    gemini_tools.append(copy.deepcopy(tool))
                 continue
             func_def = tool.get("function", {})
             if not isinstance(func_def, dict):
@@ -145,7 +154,7 @@ class DirectAPIService:
             # 转换 parameters（OAI JSON Schema → Gemini 支持的子集）
             params = func_def.get("parameters")
             if isinstance(params, dict):
-                declaration["parameters"] = DirectAPIService._convert_schema_for_gemini(params)
+                declaration["parametersJsonSchema"] = copy.deepcopy(params)
             
             function_declarations.append(declaration)
         
@@ -315,6 +324,7 @@ class DirectAPIService:
         if self._own_session and self.session:
             await self.session.close()
     
+    @retry_before_output
     async def call_api(
         self,
         base_url: str,
@@ -379,6 +389,10 @@ class DirectAPIService:
         logger.info(f"[DIRECT_API] 模型: {model}, 流式: {stream}")
         
         try:
+            context = current_request.get()
+            if context:
+                request_body = apply_native_tool_defaults(request_body, context.endpoint, 'chat')
+                context.upstream_request = copy.deepcopy(request_body)
             request_body_json = await asyncio.to_thread(
                 json.dumps,
                 request_body,
@@ -556,6 +570,7 @@ class DirectAPIService:
         
         return "stop"
     
+    @retry_before_output
     async def call_gemini_native_api(
         self,
         api_key: str,
@@ -772,6 +787,15 @@ class DirectAPIService:
             elif role == "assistant":
                 # 处理助手消息
                 parts = []
+                metadata = msg.get('provider_metadata')
+                native_parts = metadata.get('gemini_parts') if isinstance(metadata, dict) else None
+                if isinstance(native_parts, list):
+                    gemini_contents.append({'role': 'model', 'parts': copy.deepcopy(native_parts)})
+                    for part in native_parts:
+                        call = part.get('functionCall') if isinstance(part, dict) else None
+                        if isinstance(call, dict) and call.get('id'):
+                            tool_id_to_name[call['id']] = call.get('name', '')
+                    continue
                 
                 if isinstance(content, str) and content:
                     parts.append({"text": content})
@@ -886,6 +910,9 @@ class DirectAPIService:
             logger.info(f"[GEMINI_NATIVE] maxOutputTokens: {max_tokens}")
         
         try:
+            context = current_request.get()
+            if context:
+                request_body = apply_native_tool_defaults(request_body, context.endpoint, 'gemini')
             request_body_json = await asyncio.to_thread(
                 json.dumps,
                 request_body,
@@ -961,6 +988,7 @@ class DirectAPIService:
                 }
             }
 
+    @retry_before_output
     async def call_gemini_interactions_api(
         self,
         api_key: str,
@@ -1042,6 +1070,9 @@ class DirectAPIService:
             logger.info(f"[GEMINI_INTERACTIONS] generation_config: {request_body['generation_config']}")
 
         try:
+            context = current_request.get()
+            if context:
+                request_body = apply_native_tool_defaults(request_body, context.endpoint, 'interactions')
             request_body_json = await asyncio.to_thread(
                 json.dumps,
                 request_body,
@@ -1235,6 +1266,10 @@ class DirectAPIService:
             }
             
             delta = response["choices"][0]["delta"]
+            candidate = (gemini_response.get('candidates') or [{}])[0]
+            delta['provider_metadata'] = {'gemini_parts': copy.deepcopy((candidate.get('content') or {}).get('parts') or []),
+                                          'groundingMetadata': copy.deepcopy(candidate.get('groundingMetadata')),
+                                          'urlContextMetadata': copy.deepcopy(candidate.get('urlContextMetadata'))}
             if reasoning_content:
                 delta["reasoning_content"] = reasoning_content
             if content:
@@ -1245,6 +1280,10 @@ class DirectAPIService:
             return response
         else:
             message: Dict[str, Any] = {"role": "assistant"}
+            candidate = (gemini_response.get('candidates') or [{}])[0]
+            message['provider_metadata'] = {'gemini_parts': copy.deepcopy((candidate.get('content') or {}).get('parts') or []),
+                                            'groundingMetadata': copy.deepcopy(candidate.get('groundingMetadata')),
+                                            'urlContextMetadata': copy.deepcopy(candidate.get('urlContextMetadata'))}
             
             if reasoning_content:
                 message["reasoning_content"] = reasoning_content
@@ -1281,13 +1320,15 @@ class DirectAPIService:
         else:
             return error_json_str.encode('utf-8')
 
+    @retry_before_output
     async def call_api_passthrough(
         self,
         base_url: str,
         api_key: str,
         request_body: Dict[str, Any],
         headers: Optional[Dict[str, str]] = None,
-        endpoint_path: str = "/chat/completions"
+        endpoint_path: str = "/chat/completions",
+        stream_override: Optional[bool] = None,
     ) -> AsyncGenerator[bytes, None]:
         """
         透传模式：完全透传请求和响应
@@ -1326,8 +1367,11 @@ class DirectAPIService:
         # 合并额外的请求头
         if headers:
             request_headers.update(headers)
+            if 'x-goog-api-key' in headers:
+                request_headers['x-goog-api-key'] = api_key
+                request_headers.pop('Authorization', None)
         
-        is_stream = request_body.get("stream", False)
+        is_stream = request_body.get("stream", False) if stream_override is None else stream_override
         
         logger.info(f"[DIRECT_API_PASSTHROUGH] 透传模式调用API: {endpoint}")
         logger.info(f"[DIRECT_API_PASSTHROUGH] 模型: {request_body.get('model')}, 流式: {is_stream}")

@@ -16,7 +16,7 @@ import unittest
 from converters.gemini_interactions import (
     InteractionsStreamConverter,
     InteractionsToGeminiGCConverter,
-    _thought_signature_cache,
+    signature_cache,
     build_interactions_request_body,
     cache_thought_signatures,
     convert_gemini_gc_to_interactions,
@@ -29,12 +29,19 @@ from services.direct_api_service import DirectAPIService
 
 
 def setUpModule():
-    _thought_signature_cache.clear()
+    from core.request_context import RequestContext, current_request
+    global _test_context_token
+    _test_context_token = current_request.set(RequestContext(authenticated=True))
+
+
+def tearDownModule():
+    from core.request_context import current_request
+    current_request.reset(_test_context_token)
 
 
 class OaiMessagesToInteractionsTests(unittest.TestCase):
     def setUp(self):
-        _thought_signature_cache.clear()
+        signature_cache().clear()
 
     def test_system_user_assistant_tool(self):
         messages = [
@@ -127,7 +134,7 @@ class OaiMessagesToInteractionsTests(unittest.TestCase):
 
 class ThoughtSignatureCacheTests(unittest.TestCase):
     def setUp(self):
-        _thought_signature_cache.clear()
+        signature_cache().clear()
 
     def test_full_match(self):
         cache_thought_signatures([("AAAA ", "sig1"), ("BBBB", "sig2")])
@@ -136,17 +143,10 @@ class ThoughtSignatureCacheTests(unittest.TestCase):
         self.assertEqual(steps[0]["signature"], "sig1")
         self.assertEqual(steps[1]["signature"], "sig2")
 
-    def test_prefix_match_truncated(self):
+    def test_truncated_text_never_receives_a_signature(self):
         cache_thought_signatures([("AAAA ", "sig1"), ("BBBB", "sig2")])
-        # 客户端裁剪了思考尾部 → 只注入能匹配的前缀部分
-        steps = match_and_inject_thought_signatures("AAAA")
-        self.assertEqual(len(steps), 1)
-        self.assertEqual(steps[0]["signature"], "sig1")
-        # 客户端文本是片段自身的前缀
-        steps2 = match_and_inject_thought_signatures("AA")
-        self.assertEqual(len(steps2), 1)
-        self.assertEqual(steps2[0]["signature"], "sig1")
-        self.assertEqual(steps2[0]["summary"][0]["text"], "AA")
+        self.assertEqual(match_and_inject_thought_signatures("AAAA"), [])
+        self.assertEqual(match_and_inject_thought_signatures("AA"), [])
 
     def test_no_match(self):
         cache_thought_signatures([("AAAA ", "sig1")])
@@ -156,12 +156,12 @@ class ThoughtSignatureCacheTests(unittest.TestCase):
     def test_fragments_without_signature_not_cached(self):
         cache_thought_signatures([("AAAA ", ""), ("BBBB", "sig2")])
         # 无签名的片段整体不入缓存（valid 过滤后剩一个也不够完整，joined 非空则仍缓存）
-        self.assertEqual(len(_thought_signature_cache), 1)
+        self.assertEqual(len(signature_cache()), 1)
 
 
 class BuildRequestBodyTests(unittest.TestCase):
     def setUp(self):
-        _thought_signature_cache.clear()
+        signature_cache().clear()
 
     def test_basic_body(self):
         body = build_interactions_request_body(
@@ -259,7 +259,7 @@ class BuildRequestBodyTests(unittest.TestCase):
 
 class InteractionsToOpenaiResponseTests(unittest.TestCase):
     def setUp(self):
-        _thought_signature_cache.clear()
+        signature_cache().clear()
 
     def test_full_response(self):
         interaction = {
@@ -280,7 +280,7 @@ class InteractionsToOpenaiResponseTests(unittest.TestCase):
         # 思考 token 计入输出（#44 修复方向）
         self.assertEqual(resp["usage"]["completion_tokens"], 25)
         # 非流式响应也应捕获签名（供后续轮次注入）
-        self.assertEqual(len(_thought_signature_cache), 1)
+        self.assertEqual(len(signature_cache()), 1)
 
     def test_tool_calls_and_requires_action(self):
         interaction = {
@@ -301,7 +301,7 @@ class InteractionsToOpenaiResponseTests(unittest.TestCase):
 
 class InteractionsStreamConverterTests(unittest.TestCase):
     def setUp(self):
-        _thought_signature_cache.clear()
+        signature_cache().clear()
 
     def test_text_stream(self):
         conv = InteractionsStreamConverter("m", "req")
@@ -361,7 +361,7 @@ class InteractionsStreamConverterTests(unittest.TestCase):
         finish = [c for c in chunks if c.get("choices") and c["choices"][0].get("finish_reason")]
         self.assertEqual(finish[0]["choices"][0]["finish_reason"], "tool_calls")
         # 流式路径也应捕获思考签名
-        self.assertTrue(any("Reasoning..." in key for key in _thought_signature_cache))
+        self.assertTrue(any("Reasoning..." in key for key in signature_cache()))
 
     def test_error_event(self):
         conv = InteractionsStreamConverter("m", "req")
@@ -376,7 +376,7 @@ class InteractionsStreamConverterTests(unittest.TestCase):
 
 class GeminiGcInteractionsTests(unittest.TestCase):
     def setUp(self):
-        _thought_signature_cache.clear()
+        signature_cache().clear()
 
     def test_gc_to_interactions_request(self):
         gc = {

@@ -633,7 +633,7 @@ class PassthroughStreamSession:
         if self.reasoning_detail_chunks:
             try:
                 merged_details = merge_reasoning_detail_chunks(self.reasoning_detail_chunks)
-                store_reasoning_details(final_reasoning, merged_details)
+                await asyncio.to_thread(store_reasoning_details, final_reasoning, merged_details)
                 logger.info(
                     f"[DIRECT_API_REASONING] 已缓存 reasoning_details: "
                     f"{len(merged_details)} 块, 思考文本 {len(final_reasoning)} 字符")

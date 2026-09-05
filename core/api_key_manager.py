@@ -8,6 +8,7 @@ API Key 管理模块
 """
 
 import json
+import copy
 import logging
 import os
 import secrets
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 # API Key 数据文件路径
 API_KEYS_FILE = "api_keys.json"
+
+
+class KeyPersistenceError(RuntimeError):
+    """The requested key mutation was not durably saved."""
 
 
 class RateLimiter:
@@ -80,7 +85,32 @@ def _serialize_key_mutation(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with self._save_lock:
-            return method(self, *args, **kwargs)
+            if method.__name__ not in ('create_key', 'update_key', 'delete_key'):
+                return method(self, *args, **kwargs)
+            with self._lock:
+                before = copy.deepcopy(self._keys)
+            try:
+                return method(self, *args, **kwargs)
+            except KeyPersistenceError:
+                with self._lock:
+                    # Revocations remain effective in memory. Other configuration
+                    # changes roll back without discarding concurrent usage counters.
+                    if method.__name__ == 'create_key':
+                        for key_id in set(self._keys) - set(before):
+                            self._secret_index.pop(self._keys[key_id]['secret'], None)
+                            del self._keys[key_id]
+                    elif method.__name__ == 'update_key':
+                        for key_id, previous in before.items():
+                            current = self._keys.get(key_id)
+                            if current is not None:
+                                revoked = current.get('enabled') is False
+                                for field in ('name', 'allowed_models', 'rpm_limit', 'description', 'enabled'):
+                                    if field in previous:
+                                        current[field] = previous[field]
+                                if revoked:
+                                    current['enabled'] = False
+                    self._dirty = True
+                raise
     return wrapped
 
 
@@ -180,9 +210,12 @@ class APIKeyManager:
                     os.remove(tmp_path)
             except OSError:
                 pass
+            raise KeyPersistenceError('API Key 保存失败；普通配置修改已撤回，删除或禁用仍在当前进程生效，后台将重试保存。重启前请确认保存成功。') from e
 
     def reload(self):
         """重新加载配置"""
+        if self._dirty:
+            self.save_now()
         self._load()
 
     @staticmethod

@@ -3,6 +3,7 @@ Token计数模块 - 自定义分词器管理
 """
 
 from __future__ import annotations
+from core.tokenizer_trust import remote_code_allowed
 
 import json
 import logging
@@ -145,12 +146,12 @@ def add_custom_tokenizer(name:str,source_type:str,source:str,display_name:str=No
             warnings.filterwarnings('ignore')
             if source_type=='huggingface':
                 logger.info(f"[TOKEN_COUNTER] 正在从HuggingFace下载分词器: {source}")
-                tokenizer = AutoTokenizer.from_pretrained(source,trust_remote_code=True)
+                tokenizer = AutoTokenizer.from_pretrained(source,trust_remote_code=remote_code_allowed(source))
                 logger.info(f"[TOKEN_COUNTER] ✅ 成功下载分词器: {source}")
             elif source_type=='local':
                 if not os.path.exists(source):
                     return {'success':False,'error':f'本地路径不存在: {source}'}
-                tokenizer = AutoTokenizer.from_pretrained(source,local_files_only=True,trust_remote_code=True)
+                tokenizer = AutoTokenizer.from_pretrained(source,local_files_only=True,trust_remote_code=remote_code_allowed(source))
             else:
                 return {'success':False,'error':f'不支持的来源类型: {source_type}。支持: huggingface, local, tiktoken_model'}
     except ImportError:
@@ -216,9 +217,9 @@ def get_custom_tokenizer(name:str):
         import warnings
         warnings.filterwarnings('ignore')
         if source_type=='huggingface':
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],trust_remote_code=remote_code_allowed(tokenizer_config['source']))
         elif source_type=='local':
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],local_files_only=True,trust_remote_code=True)
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],local_files_only=True,trust_remote_code=remote_code_allowed(tokenizer_config['source']))
         else:
             return None,False
         _custom_tokenizers[name] = tokenizer

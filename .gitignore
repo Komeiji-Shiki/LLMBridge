@@ -58,6 +58,7 @@ node_modules/
 
 # ==================== 敏感配置（不提交，用 .example.json 模板） ====================
 api_keys.json
+/.migration_backups/
 model_endpoint_map.json
 custom_tokenizers.json
 config.jsonc
@@ -123,4 +124,3 @@ deepseek_v3_tokenizer/tokenizer_config.json
 data/deepseek-logprobs/
 data/
 *.jsonl.gz
-

@@ -47,6 +47,9 @@ def _purge_expired_logs(monitoring_service) -> None:
     """
     from modules.monitoring import MonitorConfig
 
+    if MonitorConfig.MAX_LOG_DAYS <= 0 and MonitorConfig.MAX_DB_DAYS <= 0:
+        return  # 用户批准永久保留业务日志，不能按日期自动删除。
+
     cutoff_str = (datetime.now() - timedelta(days=MonitorConfig.MAX_LOG_DAYS)).strftime("%Y%m%d")
     log_dir = Path(MonitorConfig.LOG_DIR)
     removed_dirs = 0
@@ -54,13 +57,13 @@ def _purge_expired_logs(monitoring_service) -> None:
     if log_dir.exists():
         for entry in log_dir.iterdir():
             # 只碰 8 位数字命名的日期目录，requests.db / stats.json 等文件不受影响
-            if entry.is_dir() and re.fullmatch(r"\d{8}", entry.name) and entry.name < cutoff_str:
+            if MonitorConfig.MAX_LOG_DAYS > 0 and entry.is_dir() and re.fullmatch(r"\d{8}", entry.name) and entry.name < cutoff_str:
                 shutil.rmtree(entry, ignore_errors=True)
                 removed_dirs += 1
 
     deleted_rows = 0
     sqlite_logger = getattr(monitoring_service.log_manager, "sqlite_logger", None)
-    if sqlite_logger is not None:
+    if sqlite_logger is not None and MonitorConfig.MAX_DB_DAYS > 0:
         deleted_rows = sqlite_logger.purge_old_records(MonitorConfig.MAX_DB_DAYS)
 
     if removed_dirs or deleted_rows:
@@ -105,6 +108,16 @@ async def api_key_stats_saver(interval_seconds: int = 300):
             await asyncio.to_thread(api_key_manager.save_if_dirty)
         except Exception as e:
             logger.error(f"[APIKEY_SAVER] 落盘失败: {e}", exc_info=True)
+
+
+async def conversation_cache_cleaner():
+    from core.conversation_store import conversation_store
+    while True:
+        try:
+            await asyncio.to_thread(conversation_store.cleanup)
+        except Exception:
+            logger.exception('会话缓存清理失败')
+        await asyncio.sleep(3600)
 
 
 async def stale_request_cleaner(monitoring_service, response_channels: Optional[dict] = None, request_metadata: Optional[dict] = None):

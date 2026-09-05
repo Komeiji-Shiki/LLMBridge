@@ -17,6 +17,7 @@ Gemini Interactions API ↔ OpenAI / Gemini generateContent 协议转换模块
   命中后把对应 signature 注入回传的 thought steps。
 """
 import json
+import copy
 import logging
 import mimetypes
 import time
@@ -44,109 +45,24 @@ __all__ = [
 # 思考签名缓存（响应侧捕获 → 请求侧前缀匹配注入）
 # ============================================================================
 
-# 结构：{joined_summary: {"fragments": [(fragment_text, signature), ...], "ts": float}}
-# 以"拼接后的完整思考文本"为键；匹配时对客户端 reasoning_content 做前缀匹配。
-_thought_signature_cache: Dict[str, Dict[str, Any]] = {}
-_SIGNATURE_CACHE_MAX_ENTRIES = 200
-_SIGNATURE_CACHE_TTL_SECONDS = 3600  # 1 小时
-
-
-def _cleanup_thought_signature_cache() -> None:
-    """清理过期与超容量的签名缓存（惰性调用，请求路径上不阻塞）"""
-    now = time.time()
-    expired = [
-        key for key, entry in _thought_signature_cache.items()
-        if now - entry.get("ts", 0) > _SIGNATURE_CACHE_TTL_SECONDS
-    ]
-    for key in expired:
-        del _thought_signature_cache[key]
-    # 超容量时淘汰最旧条目（dict 保持插入顺序）
-    while len(_thought_signature_cache) > _SIGNATURE_CACHE_MAX_ENTRIES:
-        _thought_signature_cache.pop(next(iter(_thought_signature_cache)))
+def signature_cache():
+    """Request-local signatures, loaded and persisted by the scoped transport."""
+    from core.request_context import current_request
+    context = current_request.get()
+    return context.artifacts.setdefault('gemini_thoughts', {}) if context and context.authenticated else {}
 
 
 def cache_thought_signatures(fragments: List[Tuple[str, str]]) -> None:
-    """缓存一轮思考的 (摘要片段, 签名) 列表。
-
-    Args:
-        fragments: [(thought_summary 文本片段, signature), ...]，按出现顺序。
-            流式：thought step 在 step.stop 时收尾调用一次；
-            非流式：遍历 Interaction.steps 中的 thought 步骤时调用。
-    """
-    if not fragments:
-        return
-    valid = [(text, sig) for text, sig in fragments if text and sig]
-    if not valid:
-        return
-    joined = "".join(text for text, _ in valid)
-    if not joined:
-        return
-    _thought_signature_cache[joined] = {
-        "fragments": valid,
-        "ts": time.time(),
-    }
-    _cleanup_thought_signature_cache()
-    logger.debug(f"[GEMINI_INTERACTIONS] 已缓存思考签名: {len(valid)} 片段, {len(joined)} 字符")
+    valid = [(text, signature) for text, signature in fragments if text and signature]
+    if valid:
+        signature_cache()["".join(text for text, _ in valid)] = valid
 
 
 def match_and_inject_thought_signatures(reasoning_content: str) -> List[dict]:
-    """对客户端回传的 reasoning_content 做前缀匹配，返回注入签名的 thought steps。
-
-    匹配策略（按缓存条目顺序切分客户端文本）：
-    - 客户端文本是缓存拼接文本的前缀（客户端裁剪了思考尾部）→ 注入能匹配的前缀部分
-    - 客户端文本完整等于缓存拼接文本 → 全部注入
-    - 无法匹配 → 返回空列表（不注入，对话仍可继续，仅丢失推理连续性）
-
-    Returns:
-        [{"type": "thought", "signature": ..., "summary": {"type": "text", "text": ...}}, ...]
-    """
-    if not reasoning_content or not reasoning_content.strip():
-        return []
-    _cleanup_thought_signature_cache()
-
-    best_key = None
-    best_joined = ""
-    for key in _thought_signature_cache:
-        # 键即拼接后的完整思考文本；前缀匹配：客户端文本是缓存的前缀，
-        # 或缓存是客户端文本的前缀（取更长的缓存项，信息更完整）
-        if reasoning_content.startswith(key) or key.startswith(reasoning_content):
-            if len(key) > len(best_joined):
-                best_joined = key
-                best_key = key
-    if best_key is None:
-        return []
-
-    entry = _thought_signature_cache[best_key]
-    steps: List[dict] = []
-    remaining = reasoning_content
-    for fragment, signature in entry["fragments"]:
-        if not remaining:
-            break
-        if remaining.startswith(fragment):
-            steps.append({
-                "type": "thought",
-                "signature": signature,
-                "summary": [{"type": "text", "text": fragment}],
-            })
-            remaining = remaining[len(fragment):]
-        elif fragment.startswith(remaining):
-            # 客户端文本是当前片段的前缀（尾部被裁剪）
-            steps.append({
-                "type": "thought",
-                "signature": signature,
-                "summary": [{"type": "text", "text": remaining}],
-            })
-            remaining = ""
-            break
-        else:
-            # 文本被改写或与片段不连续，放弃剩余部分的注入
-            logger.debug("[GEMINI_INTERACTIONS] 思考文本前缀匹配中断，放弃剩余签名注入")
-            break
-
-    if steps:
-        logger.info(
-            f"[GEMINI_INTERACTIONS] 前缀匹配命中，注入 {len(steps)} 个 thought 步骤的签名")
-    return steps
+    """Only exact text matches may restore a signed thought; never sign edited text."""
+    fragments = signature_cache().get(reasoning_content, [])
+    return [{"type": "thought", "signature": signature,
+             "summary": [{"type": "text", "text": text}]} for text, signature in fragments]
 
 
 # ============================================================================
@@ -322,6 +238,11 @@ def convert_oai_messages_to_interactions(
             continue
 
         if role == "assistant":
+            metadata = msg.get('provider_metadata')
+            native_steps = metadata.get('interactions_steps') if isinstance(metadata, dict) else None
+            if isinstance(native_steps, list):
+                steps.extend(copy.deepcopy(native_steps))
+                continue
             # 思考签名注入：thought steps 必须位于 model_output 之前（与上游输出顺序一致）
             reasoning = msg.get("reasoning_content")
             if reasoning:
@@ -657,7 +578,7 @@ def convert_interactions_to_openai_response(
         total_tokens=total_tokens,
     )
 
-    message: dict = {"role": "assistant"}
+    message: dict = {"role": "assistant", "provider_metadata": {"interactions_steps": copy.deepcopy(interaction.get("steps") or [])}}
     message["content"] = "".join(content_parts) if content_parts else None
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
@@ -878,6 +799,8 @@ class InteractionsStreamConverter:
             error = event.get("error") or {"message": "Unknown interactions error"}
             chunks.append({"error": error})
 
+        if event_type not in ('error', 'interaction.created', 'interaction.status_update'):
+            chunks.append(self._chunk({'choices': [{'index': 0, 'delta': {'provider_event': copy.deepcopy(event)}, 'finish_reason': None}]}))
         return chunks
 
     def finalize(self) -> List[dict]:

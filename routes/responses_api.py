@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import logging
+from core.endpoint_observer import observe_endpoint
 import re
 import time
 import uuid
@@ -308,7 +309,7 @@ def _apply_responses_sse_event(event: Any, stats: Dict[str, Any]) -> None:
         delta = event.get("delta")
         if isinstance(delta, str) and delta:
             stats["content_parts"].append(delta)
-    elif event_type == "response.reasoning_summary_text.delta":
+    elif event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
         delta = event.get("delta")
         if isinstance(delta, str) and delta:
             stats["reasoning_parts"].append(delta)
@@ -432,6 +433,7 @@ async def _complete_responses_monitoring(
     })
 
 
+@observe_endpoint
 async def _handle_responses_native_passthrough(
     *,
     responses_request: Dict[str, Any],
@@ -476,26 +478,7 @@ async def _handle_responses_native_passthrough(
     passthrough_body = copy.deepcopy(responses_request)
     passthrough_body["model"] = target_model_id
 
-    # Codex 等客户端下发的 tools / text.format 常带递归 $ref，上游会 400：
-    #   Recursive JSON schemas are not currently supported。
-    # 端点配置 sanitize_recursive_schemas=true（默认）时清洗：先截断真正的
-    # 递归环（非递归 $ref 原样保留，不膨胀体量），再把剩余 strict=True 全降级
-    # （非 strict 下递归是放行的）。管理面板模型编辑页可按模型开关。
-    if endpoint_config.get("sanitize_recursive_schemas", True):
-        try:
-            from utils.schema_sanitizer import (
-                force_all_strict_false_responses,
-                sanitize_responses_request,
-            )
-            washed = sanitize_responses_request(passthrough_body)
-            forced = force_all_strict_false_responses(passthrough_body)
-            if washed or forced:
-                logger.info(
-                    "[RESPONSES_NATIVE] 已处理 JSON Schema（清洗改写=%s，strict 降级数=%s）: model=%s",
-                    washed, forced, model,
-                )
-        except Exception as exc:
-            logger.warning("[RESPONSES_NATIVE] 递归 schema 清洗失败，原样透传: %s", exc)
+    # 工具 Schema、strict 与 required 保真转发。
 
     is_stream = bool(responses_request.get("stream", False))
     logger.info(

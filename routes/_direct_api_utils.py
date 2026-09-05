@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from core.endpoint_observer import observe_credential
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
@@ -138,6 +139,7 @@ def build_response_message(content, reasoning_content=None, tool_calls=None):
 _API_KEY_ROUND_ROBIN_INDEX: dict = {}
 
 
+@observe_credential
 async def get_round_robin_api_key(model_name: str, api_key_config) -> str:
     """获取轮询后的 API key（逐 key 轮询）"""
     if isinstance(api_key_config, str):
@@ -369,6 +371,7 @@ async def get_sticky_api_key(model_name: str, api_key_config, cooldown_seconds: 
         return best_key
 
 
+@observe_credential
 async def get_api_key(model_name: str, api_key_config, strategy: str = "round_robin", cooldown_seconds: int = 172800) -> str:
     """统一的 API key 获取入口，根据策略分发。
 

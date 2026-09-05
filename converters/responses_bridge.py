@@ -74,6 +74,8 @@ def _chat_content_to_responses(content: Any, role: str) -> List[Dict[str, Any]]:
 def _chat_tool_to_responses(tool: Any) -> Dict[str, Any]:
     if not isinstance(tool, dict):
         raise ResponsesBridgeError("Chat tools 中的每项必须是对象。")
+    if tool.get('type') not in (None, 'function'):
+        return copy.deepcopy(tool)
     function = tool.get("function")
     if not isinstance(function, dict):
         function = tool
@@ -160,6 +162,11 @@ def convert_chat_request_to_responses(
         role = message.get("role", "user")
         content = message.get("content", "")
 
+        native_output = (message.get('provider_metadata') or {}).get('responses_output') if isinstance(message.get('provider_metadata'), dict) else None
+        if role == 'assistant' and isinstance(native_output, list):
+            input_items.extend(copy.deepcopy(native_output))
+            continue
+
         if role in ("system", "developer"):
             text = _stringify(content)
             if text:
@@ -199,6 +206,9 @@ def convert_chat_request_to_responses(
         "stream": bool(chat_request.get("stream", False)),
         "store": bool(endpoint_config.get("responses_store", False)),
     }
+    from services.provider_capabilities import provider_name
+    if provider_name(endpoint_config) == 'deepseek':
+        request.pop('store', None)
     if instructions:
         request["instructions"] = "\n\n".join(instructions)
 
@@ -344,6 +354,9 @@ def convert_responses_response_to_chat(
     if not content and isinstance(responses_response.get("output_text"), str):
         content = responses_response["output_text"]
     message: Dict[str, Any] = {"role": "assistant", "content": content}
+    # Native output carries reasoning signatures, citations and server tool calls.
+    # Clients that retain this extension can return it verbatim on the next turn.
+    message['provider_metadata'] = {'responses_output': copy.deepcopy(output)}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
     if tool_calls:
@@ -558,6 +571,8 @@ class _ChatStreamBuilder:
                         },
                     }],
                 }))
+            if message.get('provider_metadata'):
+                chunks.append(self.chunk({'provider_metadata': message['provider_metadata']}))
             return chunks
 
         if event_type in ("response.created", "response.in_progress"):
@@ -566,7 +581,7 @@ class _ChatStreamBuilder:
         if event_type == "response.output_item.added":
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
             if item.get("type") != "function_call":
-                return []
+                return [self.chunk({'provider_event': {key: copy.deepcopy(value) for key, value in event.items() if key != '_event_type'}})]
             key, index = self._tool_index({**item, "output_index": event.get("output_index")})
             self.tool_ids[key] = item.get("call_id") or item.get("id") or "call_" + uuid.uuid4().hex[:24]
             self.tool_names[key] = item.get("name", "")
@@ -584,7 +599,7 @@ class _ChatStreamBuilder:
             delta = event.get("delta")
             return [self.chunk({"content": delta})] if isinstance(delta, str) and delta else []
 
-        if event_type == "response.reasoning_summary_text.delta":
+        if event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
             delta = event.get("delta")
             return [self.chunk({"reasoning_content": delta})] if isinstance(delta, str) and delta else []
 
@@ -631,7 +646,7 @@ class _ChatStreamBuilder:
                 self.finish_reason = "content_filter" if reason == "content_filter" else "length"
             else:
                 self.finish_reason = "tool_calls" if self.tool_indexes else "stop"
-            return []
+            return [self.chunk({'provider_metadata': {'responses_output': copy.deepcopy(response.get('output') or [])}})]
 
         if event_type in ("response.failed", "error"):
             self.failed = True
@@ -641,6 +656,8 @@ class _ChatStreamBuilder:
             error = error if isinstance(error, dict) else {"message": str(error or "上游 Responses 请求失败"), "type": "api_error"}
             payload = {"error": error}
             return [f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")]
+        if event_type.startswith('response.'):
+            return [self.chunk({'provider_event': {key: copy.deepcopy(value) for key, value in event.items() if key != '_event_type'}})]
         return []
 
     @staticmethod
@@ -718,8 +735,10 @@ async def collect_responses_stream_to_chat(
         event_type = event.get("_event_type") or event.get("type", "")
         if event_type == "response.output_text.delta" and isinstance(event.get("delta"), str):
             text_parts.append(event["delta"])
-        elif event_type == "response.reasoning_summary_text.delta" and isinstance(event.get("delta"), str):
+        elif event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta") and isinstance(event.get("delta"), str):
             reasoning_parts.append(event["delta"])
+        elif event_type in ('response.completed', 'response.incomplete'):
+            message['provider_metadata'] = {'responses_output': copy.deepcopy((event.get('response') or {}).get('output') or [])}
     message["content"] = "".join(text_parts)
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)

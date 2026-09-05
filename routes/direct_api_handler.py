@@ -10,6 +10,7 @@ Direct API处理模块 - 路由入口
 """
 import asyncio
 import logging
+from core.endpoint_observer import observe_endpoint
 import uuid
 from typing import Any, Optional
 
@@ -43,6 +44,7 @@ __all__ = [
 ]
 
 
+@observe_endpoint
 async def handle_direct_api_request(
     openai_req: dict,
     model_name: Optional[str],
@@ -275,6 +277,9 @@ async def handle_direct_api_request(
             return True
         return False
 
+    from core.request_context import current_request
+    if current_request.get() is not None:
+        max_attempts = 1  # transport 统一重试，路由只记录一次调用。
     for attempt in range(1, max_attempts + 1):
         try:
             if attempt > 1:

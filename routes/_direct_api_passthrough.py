@@ -104,7 +104,7 @@ async def handle_passthrough_direct(
 
     try:
         # --- 准备透传请求体 ---
-        passthrough_request = _prepare_passthrough_request(
+        passthrough_request = await asyncio.to_thread(_prepare_passthrough_request,
             openai_req, model_name, target_model_id, endpoint_config)
 
         try:
@@ -300,65 +300,20 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
 
         # OpenRouter：assistant 消息思考链回传
         # - 消息自带 reasoning_details（含签名）时原样透传；
-        # - 否则用思考文本查询本进程缓存（响应侧记录），命中则恢复原始 reasoning_details。
+        # - 否则用思考文本查询当前隔离会话缓存（响应侧记录），命中则恢复原始 reasoning_details。
         #   Anthropic 系模型的 thinking 块带加密签名，必须原样回传 reasoning_details
         #   才能通过校验；纯文本 reasoning 会被 OpenRouter 重建为无签名 thinking 块，
-        #   触发 "thinking blocks cannot be modified" 400 错误，
-        #   因此未命中缓存时对 Anthropic 系模型剥离思考字段。
-        # - 非 Anthropic 模型维持 reasoning_content → reasoning 文本回传
-        #   （OpenRouter 文档要求用 message.reasoning 保留 Qwen/DeepSeek 等模型的思考链）。
-        # 注意：openai_req.copy() 是浅拷贝，messages 内的 dict 是同一引用。
-        # 不能直接修改原 dict（会污染监控记录的 full_messages），只能对需要改的消息创建副本。
-        is_anthropic_model = any(
-            kw in (target_model_id or "").lower() for kw in ("claude", "anthropic"))
+        # 优先保留客户端字段；仅补充当前调用方、会话和上游下已保存的签名。
         if "messages" in passthrough_request:
             new_messages = []
-            restored_count = 0
-            stripped_count = 0
             for msg in passthrough_request["messages"]:
-                if not (isinstance(msg, dict) and msg.get("role") == "assistant"):
+                if not isinstance(msg, dict) or msg.get("role") != "assistant" or "reasoning_details" in msg:
                     new_messages.append(msg)
                     continue
-                if msg.get("reasoning_details"):
-                    # 客户端完整保留了 reasoning_details（含签名），原样透传
-                    new_messages.append(msg)
-                    continue
-                rc = msg.get("reasoning_content") or msg.get("reasoning")
-                if not rc or not isinstance(rc, str):
-                    new_messages.append(msg)
-                    continue
-                cached_details = lookup_reasoning_details(rc)
-                if cached_details:
-                    # 命中缓存：恢复原始 reasoning_details。
-                    # Anthropic 只认带签名的原始块，去掉纯文本思考字段；
-                    # 其他模型额外保留 reasoning 文本以兼容
-                    msg_copy = {k: v for k, v in msg.items()
-                                if k not in ("reasoning_content", "reasoning")}
-                    if not is_anthropic_model:
-                        msg_copy["reasoning"] = rc
-                    msg_copy["reasoning_details"] = cached_details
-                    new_messages.append(msg_copy)
-                    restored_count += 1
-                elif is_anthropic_model:
-                    # 未命中：无签名的思考文本发给 Anthropic 必然 400，剥离
-                    msg_copy = {k: v for k, v in msg.items()
-                                if k not in ("reasoning_content", "reasoning")}
-                    new_messages.append(msg_copy)
-                    stripped_count += 1
-                else:
-                    if "reasoning" not in msg:
-                        # 重命名：创建消息副本，带上 reasoning 字段，不带 reasoning_content
-                        msg_copy = {k: v for k, v in msg.items() if k != "reasoning_content"}
-                        msg_copy["reasoning"] = rc
-                        new_messages.append(msg_copy)
-                    else:
-                        new_messages.append(msg)
+                reasoning = msg.get("reasoning_content") or msg.get("reasoning")
+                details = lookup_reasoning_details(reasoning) if isinstance(reasoning, str) and reasoning else None
+                new_messages.append({**msg, "reasoning_details": details} if details else msg)
             passthrough_request["messages"] = new_messages
-            if restored_count or stripped_count:
-                logger.info(
-                    f"[DIRECT_API_REASONING] assistant 思考链回传处理: "
-                    f"恢复签名 {restored_count} 条, 剥离无签名思考 {stripped_count} 条 "
-                    f"(anthropic={is_anthropic_model})")
     else:
         # 非 OpenRouter：enable_thinking 和 reasoning_effort 独立注入
         # 仅处理布尔值，字符串值（adaptive/strip）由 Anthropic 原生模式处理
@@ -393,21 +348,7 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
         passthrough_request["verbosity"] = verbosity
         logger.info(f"[DIRECT_API_VERBOSITY] verbosity={verbosity}（已注入请求体顶层）")
 
-    # Codex 等客户端下发的 tools / response_format 常带递归 $ref，上游会 400：
-    #   Recursive JSON schemas are not currently supported。
-    # 端点配置 sanitize_recursive_schemas=true（默认）时清洗（管理面板可按模型开关）。
-    if endpoint_config.get("sanitize_recursive_schemas", True):
-        try:
-            from utils.schema_sanitizer import force_all_strict_false_chat, sanitize_chat_request
-            washed = sanitize_chat_request(passthrough_request)
-            forced = force_all_strict_false_chat(passthrough_request)
-            if washed or forced:
-                logger.info(
-                    "[DIRECT_API_PASSTHROUGH] 已处理递归 JSON Schema（清洗=%s，strict 降级=%s）",
-                    washed, forced,
-                )
-        except Exception as exc:
-            logger.warning("[DIRECT_API_PASSTHROUGH] 递归 schema 清洗失败，原样透传: %s", exc)
+    # 工具 Schema、strict 与 required 保真转发。
 
     return passthrough_request
 
@@ -707,7 +648,7 @@ async def _handle_passthrough_non_stream(
         normalize_response_tool_args(response_json)
 
         # 提取内容并应用思考分隔
-        content, reasoning_content, response_tool_calls, response_message, response_json = _extract_and_split_content(
+        content, reasoning_content, response_tool_calls, response_message, response_json = await asyncio.to_thread(_extract_and_split_content,
             response_json, thinking_separator, direct_api_service)
 
         local_stats = endpoint_config.get("token_stats_mode") == "local"

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from core.request_metadata import migrate_metadata, write_metadata, read_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,20 @@ class SQLiteLogger:
         self.db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
         self._write_lock = __import__('threading').Lock()  # 仅保护写操作串行化，不阻塞读
+        self._backup_before_metadata_migration()
         self._init_database()
+
+    def _backup_before_metadata_migration(self):
+        if not self.db_path.exists() or not self.db_path.stat().st_size:
+            return
+        with sqlite3.connect(str(self.db_path)) as source:
+            columns = {row[1] for row in source.execute('PRAGMA table_info(requests)')}
+            from core.request_metadata import COLUMNS
+            if columns and not set(COLUMNS).issubset(columns):
+                backup_path = self.db_path.with_name(self.db_path.name + '.before-request-metadata.bak')
+                if not backup_path.exists():
+                    with sqlite3.connect(str(backup_path)) as backup:
+                        source.backup(backup)
     
     def _get_connection(self) -> sqlite3.Connection:
         """获取写路径持久连接（仅供持有 _write_lock 的写操作与初始化使用）。
@@ -125,6 +139,7 @@ class SQLiteLogger:
             ]:
                 cursor.execute(idx_sql)
             
+            migrate_metadata(conn)
             conn.commit()
             logger.info(f"✅ SQLite数据库已初始化: {self.db_path}")
             
@@ -231,6 +246,7 @@ class SQLiteLogger:
                     input_cost, output_cost, cached_cost, total_cost, currency,
                     upstream_usage_json, system_fingerprint, stop_reason
                 ))
+                write_metadata(conn, log_entry['request_id'], log_entry)
                 conn.commit()
             
             logger.debug(f"已写入数据库: {str(request_id or '')[:8]}")
@@ -252,7 +268,8 @@ class SQLiteLogger:
                     input_tokens, output_tokens, total_tokens,
                     cached_tokens, cached_cost,
                     input_cost, output_cost, total_cost, currency,
-                    created_at, upstream_usage, system_fingerprint, stop_reason
+                    created_at, upstream_usage, system_fingerprint, stop_reason,
+                    caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot
                     FROM requests
                     WHERE request_id = ?
                 ''', (request_id,))
@@ -284,6 +301,7 @@ class SQLiteLogger:
                     'upstream_usage': self._parse_upstream_usage(row['upstream_usage']),
                     'system_fingerprint': row['system_fingerprint'],
                     'stop_reason': row['stop_reason'],
+                    **read_metadata(row),
                 }
             
             return None
@@ -335,6 +353,7 @@ class SQLiteLogger:
             'upstream_usage': SQLiteLogger._parse_upstream_usage(row['upstream_usage']),
             'system_fingerprint': row['system_fingerprint'],
             'stop_reason': row['stop_reason'],
+            **read_metadata(row),
         }
 
     def query_requests(self, limit: int = 50, offset: int = 0,
@@ -366,9 +385,9 @@ class SQLiteLogger:
                 escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 like = f"%{escaped}%"
                 where_clauses.append(
-                    "(request_id LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' OR error LIKE ? ESCAPE '\\')"
+                    "(request_id LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' OR error LIKE ? ESCAPE '\\' OR caller_id LIKE ? ESCAPE '\\' OR caller_name LIKE ? ESCAPE '\\' OR conversation_id LIKE ? ESCAPE '\\')"
                 )
-                params.extend([like, like, like])
+                params.extend([like] * 6)
 
             where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -385,7 +404,8 @@ class SQLiteLogger:
                         input_tokens, output_tokens, total_tokens,
                         cached_tokens, cached_cost,
                         input_cost, output_cost, total_cost, currency,
-                        upstream_usage, system_fingerprint, stop_reason
+                        upstream_usage, system_fingerprint, stop_reason,
+                        caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot
                     FROM requests{where_sql}
                     ORDER BY timestamp DESC
                     LIMIT ? OFFSET ?

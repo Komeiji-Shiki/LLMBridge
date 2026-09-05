@@ -166,6 +166,14 @@ async def update_model_config(
                         and config and all(isinstance(item, dict) for item in config)))):
             raise HTTPException(status_code=400, detail="缺少必要参数")
 
+        from services.provider_capabilities import validate_tool_config
+        for endpoint in config if isinstance(config, list) else [config]:
+            try:
+                validate_tool_config(endpoint)
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from error
+            endpoint['sanitize_recursive_schemas'] = False
+
         async with _MODEL_ENDPOINT_MAP_LOCK:
             # 读取现有配置
             current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)

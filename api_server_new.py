@@ -155,6 +155,7 @@ async def lifespan(app: FastAPI):
     spawn(monitors.log_retention_cleaner(monitoring_service), name="log-retention-cleaner")
     # 🔧 API Key 使用统计周期落盘（旧版只在优雅关闭时保存，强杀丢全部统计）
     spawn(monitors.api_key_stats_saver(), name="apikey-stats-saver")
+    spawn(monitors.conversation_cache_cleaner(), name="conversation-cache-cleaner")
     # 🔧 空闲重启监控：config.jsonc 与管理面板都暴露了 enable_idle_restart，
     # 但此前没有任何执行者，配置改了不生效
     from background_tasks.request_processor import idle_monitor
@@ -179,19 +180,7 @@ async def lifespan(app: FastAPI):
 
     spawn(_auto_archive_loop(), name="auto-archive-loop")
 
-    if stats_db.enabled and MODEL_ENDPOINT_MAP:
-        # 🔧 A3 修复：用 asyncio.to_thread 包装同步 SQLite 批量操作，不阻塞事件循环
-        async def _recalculate_costs_bg():
-            try:
-                logger.info("="*60)
-                logger.info("💰 开始重新计算所有请求的费用...")
-                recalculated = await asyncio.to_thread(stats_db.recalculate_costs, MODEL_ENDPOINT_MAP)
-                if recalculated:
-                    logger.info(f"✅ 费用重算完成: 更新了 {recalculated.get('updated_count', 0)} 条记录")
-                logger.info("="*60)
-            except Exception as e:
-                logger.error(f"❌ 费用重算失败: {e}", exc_info=True)
-        spawn(_recalculate_costs_bg(), name="recalculate-costs")
+    # Historical amounts are immutable; current-price analysis is a read-only admin operation.
 
     # 🔥 预热 admin 首屏缓存（异步后台，不阻塞启动）
     spawn(admin_routes.warmup_admin_cache(), name="warmup-admin-cache")
@@ -210,6 +199,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+from core.request_middleware import GatewayRequestMiddleware
+app.add_middleware(GatewayRequestMiddleware)
 
 # ==================== 中间件 ====================
 # add_middleware 后添加者在外层，实际执行顺序：
@@ -222,6 +213,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=['X-Bridge-Session-ID', 'X-Bridge-Request-ID'],
 )
 app.add_middleware(SelectiveGZipMiddleware, minimum_size=500)
 app.add_middleware(WebAccessKeyMiddleware)
@@ -240,6 +232,10 @@ app.include_router(admin_routes.router)       # /admin、/token_calculator、/ap
 app.include_router(monitor_routes.router)     # /monitor、/ws/monitor、/api/monitor/*
 app.include_router(auth_routes.router)        # /login、/auth/*
 app.include_router(apikey_routes.router)      # /api/admin/api_keys*
+from routes.gateway_workspace import router as gateway_workspace_router
+app.include_router(gateway_workspace_router)
+from routes.gateway_mcp import router as gateway_mcp_router
+app.include_router(gateway_mcp_router)
 
 # ==================== 主程序入口 ====================
 if __name__ == "__main__":

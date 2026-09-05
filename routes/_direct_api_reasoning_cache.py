@@ -1,57 +1,40 @@
-"""
-Direct API - OpenRouter reasoning_details 缓存
-
-Anthropic 系模型经 OpenRouter 输出的思考链（thinking 块）带有加密签名（signature），
-下一轮对话必须把 reasoning_details 原样回传，Anthropic 才能通过
-"thinking blocks cannot be modified" 校验。而 OpenAI 兼容客户端（酒馆等）
-只会保存 reasoning_content 纯文本，签名在客户端侧必然丢失。
-
-本模块维护进程内缓存：思考全文(hash) → reasoning_details（含签名）。
-- 响应侧：流式分片合并 / 非流式整体提取后写入缓存；
-- 请求侧：assistant 消息带思考文本回传时按文本 hash 命中，恢复原始签名。
-
-未命中（文本被用户编辑 / 服务重启）时由调用方决定降级策略
-（Anthropic 系剥离思考字段，避免上游 400）。
-"""
+"""Restore exact OpenRouter reasoning signatures within a scoped conversation."""
 import hashlib
-import threading
+import logging
 from collections import OrderedDict
 
-# 缓存条目上限（FIFO 淘汰，单条 reasoning_details 通常仅几 KB）
-_MAX_ENTRIES = 500
-
-_lock = threading.Lock()
-_cache: "OrderedDict[str, list]" = OrderedDict()
+logger = logging.getLogger(__name__)
 
 
 def _text_key(reasoning_text: str) -> str:
-    """思考全文 → 缓存键。strip 归一化以容忍客户端保存时的首尾空白差异。"""
-    normalized = (reasoning_text or "").strip()
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return hashlib.sha256((reasoning_text or '').encode('utf-8')).hexdigest()
 
 
 def store_reasoning_details(reasoning_text: str, reasoning_details: list) -> None:
-    """缓存一轮响应的 reasoning_details（键为思考全文 hash）。"""
-    if not reasoning_details or not (reasoning_text or "").strip():
+    from core.request_context import current_request, endpoint_identity
+    from core.conversation_store import conversation_store
+    context = current_request.get()
+    if not context or not context.authenticated or not reasoning_details or not reasoning_text:
         return
-    key = _text_key(reasoning_text)
-    with _lock:
-        _cache[key] = reasoning_details
-        _cache.move_to_end(key)
-        while len(_cache) > _MAX_ENTRIES:
-            _cache.popitem(last=False)
+    try:
+        session = context.cache_session()
+        conversation_store.touch(context.owner_id, session, context.model, endpoint_identity(context.endpoint), context.credential_fingerprint)
+        conversation_store.put(context.owner_id, session, 'reasoning:' + _text_key(reasoning_text), reasoning_details)
+    except Exception:
+        logger.exception('思考签名缓存保存失败，客户端原始响应仍继续返回')
 
 
 def lookup_reasoning_details(reasoning_text: str):
-    """按思考全文查询缓存的 reasoning_details，未命中返回 None。"""
-    if not (reasoning_text or "").strip():
+    from core.request_context import current_request
+    from core.conversation_store import conversation_store
+    context = current_request.get()
+    if not context or not context.authenticated or not reasoning_text:
         return None
-    key = _text_key(reasoning_text)
-    with _lock:
-        details = _cache.get(key)
-        if details is not None:
-            _cache.move_to_end(key)
-        return details
+    try:
+        return conversation_store.get(context.owner_id, context.cache_session(), 'reasoning:' + _text_key(reasoning_text))
+    except Exception:
+        logger.exception('思考签名缓存读取失败，保持客户端请求原样')
+        return None
 
 
 def merge_reasoning_detail_chunks(chunks: list) -> list:

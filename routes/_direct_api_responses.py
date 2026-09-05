@@ -430,23 +430,7 @@ async def handle_responses_native_direct(
     except ResponsesBridgeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # 上游 Responses 同样拒绝递归 schema，端点配置 sanitize_recursive_schemas=true
-    # （默认）时在转换后统一清洗（管理面板可按模型开关）。
-    if endpoint_config.get("sanitize_recursive_schemas", True):
-        try:
-            from utils.schema_sanitizer import (
-                force_all_strict_false_responses,
-                sanitize_responses_request,
-            )
-            washed = sanitize_responses_request(upstream_request)
-            forced = force_all_strict_false_responses(upstream_request)
-            if washed or forced:
-                logger.info(
-                    "[RESPONSES_NATIVE] 已处理递归 JSON Schema（chat->responses 转换结果，清洗=%s，strict 降级=%s）",
-                    washed, forced,
-                )
-        except Exception as exc:
-            logger.warning("[RESPONSES_NATIVE] 递归 schema 清洗失败，原样透传: %s", exc)
+    # 工具 Schema、strict 与 required 保真转发。
 
     monitoring_service.request_start(
         request_id=request_id,

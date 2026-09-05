@@ -10,8 +10,11 @@
 """
 import asyncio
 import copy
+from core.auth_observer import observe_authenticated_request
+from core.request_context import current_request
 import json
 import logging
+from core.endpoint_observer import observe_endpoint
 from utils.anthropic_params import set_output_effort
 import secrets
 import time
@@ -161,6 +164,7 @@ def _extract_client_api_key(request: Request, allow_gemini_style: bool = False) 
     return None
 
 
+@observe_authenticated_request
 def _validate_request_api_key(request: Request, model_name: Optional[str],
                               allow_gemini_style: bool = False) -> None:
     """
@@ -241,6 +245,9 @@ async def _read_request_json_non_blocking(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="messages 必须是消息对象列表。")
     if 'stream' in data and not isinstance(data['stream'], bool):
         raise HTTPException(status_code=400, detail="stream 必须是布尔值。")
+    context = current_request.get()
+    if context and not context.request_body:
+        context.request_body = copy.deepcopy(data)
     return data
 
 
@@ -717,6 +724,7 @@ def _extract_upstream_stream_error(chunk: bytes) -> Optional[Dict[str, Any]]:
     return obj if is_error_json(obj) else None
 
 
+@observe_endpoint
 async def _handle_anthropic_passthrough(
     anthropic_req: Dict[str, Any],
     model_name: str,
@@ -1096,3 +1104,21 @@ async def gemini_native_api_endpoint(model_name: str, request: Request):
         last_activity_time_setter=lambda dt: server_state.last_activity_time_ref.update({'time': dt}),
         aiohttp_session=server_state.aiohttp_session
     )
+
+
+@router.post('/v1beta/interactions')
+async def gemini_interactions_endpoint(request: Request):
+    from routes.gemini_v1beta_api import select_gemini_endpoint
+    from services.native_exchange import forward_native_exchange
+    _app_state.update_activity()
+    _check_verification_cooldown()
+    body = await _read_request_json_non_blocking(request)
+    model = body.get('model')
+    if not isinstance(model, str) or not model:
+        raise HTTPException(400, 'model 为必填项')
+    _validate_request_api_key(request, model, allow_gemini_style=True)
+    config = await select_gemini_endpoint(model, MODEL_ENDPOINT_MAP)
+    if config.get('upstream_protocol') != 'interactions':
+        raise HTTPException(400, '该模型未配置 Interactions 上游协议')
+    return await forward_native_exchange(body, config, model, _app_state.server.direct_api_service,
+                                         monitoring_service, stream=body.get('stream', False))

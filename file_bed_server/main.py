@@ -28,10 +28,11 @@ if __package__ in (None, ""):
 from utils.jsonc_edit import parse_jsonc
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 API_KEY = os.environ.get("FILE_BED_API_KEY", "")  # 从环境变量读取，不再硬编码
+MAX_UPLOAD_BYTES = int(os.environ.get('FILE_BED_MAX_UPLOAD_MB', '32')) * 1024 * 1024
 # 允许上传的文件扩展名白名单（防止 XSS：禁止 .html/.svg/.xml 等可执行类型）
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".pdf", ".txt", ".json", ".csv", ".zip"}
 CLEANUP_INTERVAL_MINUTES = 1 # 清理任务运行频率（分钟）
-FILE_MAX_AGE_MINUTES = 10 # 文件最大保留时间（分钟）
+FILE_MAX_AGE_MINUTES = 30 # 临时图床文件保留 30 分钟；对话归档不受此清理影响
 
 # --- 图片优化配置 ---
 def load_optimization_config():
@@ -97,6 +98,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+from core.body_limit import RequestBodyLimitMiddleware
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=((MAX_UPLOAD_BYTES + 2) // 3) * 4 + 4096)
+from core.body_limit import RequestBodyLimitMiddleware
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=((MAX_UPLOAD_BYTES + 2) // 3) * 4 + 4096)
 
 # --- 确保上传目录存在 ---
 if not os.path.exists(UPLOAD_DIR):
@@ -127,7 +132,11 @@ def upload_file(request: UploadRequest, http_request: Request):
         header, encoded_data = request.file_data.split(',', 1)
         
         # 2. 解码 base64 数据
+        if len(encoded_data) > ((MAX_UPLOAD_BYTES + 2) // 3) * 4:
+            raise HTTPException(413, '文件超过上传大小上限')
         file_data = base64.b64decode(encoded_data, validate=True)
+        if len(file_data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, '文件超过上传大小上限')
 
         # 3. 生成唯一文件名以避免冲突
         file_extension = os.path.splitext(request.file_name)[1]

@@ -14,6 +14,9 @@ import threading
 import gzip
 import queue
 import concurrent.futures
+import copy
+from contextvars import copy_context
+from core.request_context import current_request
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
@@ -48,11 +51,11 @@ class MonitorConfig:
     # 新版本：分层日志配置
     ENABLE_HIERARCHICAL_LOGS = True  # 是否启用新的分层日志系统
     ENABLE_LEGACY_LOGS = False  # 🔧 禁用JSONL日志（已使用SQLite和分层JSON）
-    USE_COMPRESSION = False  # 是否使用gzip压缩（.json.gz）
+    USE_COMPRESSION = True  # 新日志无损 gzip；读取同时支持历史 .json 与 .json.gz
     
     # 日志保留策略（由 background_tasks.monitors.log_retention_cleaner 每日执行）
-    MAX_LOG_DAYS = 30  # 保留最近N天的分层日志文件（每请求一个 JSON，是磁盘占用大头）
-    MAX_DB_DAYS = 365  # SQLite 请求记录保留天数（行很小，保留更久以支撑长期费用/token统计）
+    MAX_LOG_DAYS = 0  # 永久保留，只有管理员主动清理
+    MAX_DB_DAYS = 0
     MAX_LOGS_PER_HOUR = 10000  # 每小时最多保留的日志文件数
     
     # 其他配置
@@ -89,6 +92,12 @@ class RequestInfo:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    caller_id: str = 'unattributed'
+    caller_name: str = '历史未归属'
+    conversation_id: Optional[str] = None
+    gateway_request_id: Optional[str] = None
+    timings: Optional[dict] = None
+    pricing_snapshot: Optional[dict] = None
 
 @dataclass
 class Stats:
@@ -269,22 +278,9 @@ class LogManager:
             
             file_path = self._get_hierarchical_log_path(timestamp, request_id, log_type, model_name)
             
-            # 🔧 过滤 base64 图片数据
-            log_entry_filtered = log_entry.copy()
-            if 'request_messages' in log_entry_filtered and log_entry_filtered['request_messages']:
-                log_entry_filtered['request_messages'] = self._filter_base64_from_messages(
-                    log_entry_filtered['request_messages']
-                )
-            # 也过滤 response_content 中可能包含的 base64 图片（部分模型返回图片）
-            if 'response_content' in log_entry_filtered and log_entry_filtered['response_content']:
-                rc = log_entry_filtered['response_content']
-                if isinstance(rc, str) and 'data:image' in rc and 'base64' in rc:
-                    import re as _re
-                    log_entry_filtered['response_content'] = _re.sub(
-                        r'data:image/[^;]+;base64,[A-Za-z0-9+/=]{100,}',
-                        '[BASE64_IMAGE_FILTERED]', rc
-                    )
-            
+            # 无损归档，保留完整对话和图片内容。
+            log_entry_filtered = log_entry
+
             # 写入文件
             # 紧凑序列化，减少大响应日志写盘时的 CPU/GIL 占用
             json_data = json.dumps(log_entry_filtered, ensure_ascii=False, separators=(',', ':'))
@@ -403,7 +399,7 @@ class LogManager:
             if status == 'failed' and entry.get('success', entry.get('status') == 'success'):
                 return False
             if search_lower:
-                haystack = f"{entry.get('request_id', '')} {entry.get('model', '')} {entry.get('error', '')}".lower()
+                haystack = ' '.join(str(entry.get(key) or '') for key in ('request_id', 'model', 'error', 'caller_id', 'caller_name', 'conversation_id')).lower()
                 if search_lower not in haystack:
                     return False
             return True
@@ -460,7 +456,7 @@ class LogManager:
         """从分层日志读最近的日志。按小时从新到老扫描，凑够 limit 条即停，不全量遍历。"""
         import os as _os
         logs = []
-        ext = ".json.gz" if MonitorConfig.USE_COMPRESSION else ".json"
+        ext = ".json*"
         today = datetime.now()
         
         # 从今天开始，逐个小时往过去找
@@ -491,7 +487,7 @@ class LogManager:
                 file_entries = []
                 try:
                     for entry in _os.scandir(hour_dir):
-                        if entry.name.endswith(ext) and entry.is_file(follow_symlinks=False):
+                        if entry.name.endswith((".json", ".json.gz")) and entry.is_file(follow_symlinks=False):
                             try:
                                 file_entries.append((entry.stat(follow_symlinks=False).st_mtime, entry.name))
                             except OSError:
@@ -506,7 +502,7 @@ class LogManager:
                         break
                     filepath = hour_dir / filename
                     try:
-                        if MonitorConfig.USE_COMPRESSION:
+                        if filepath.suffix == ".gz":
                             with gzip.open(filepath, 'rt', encoding='utf-8') as f:
                                 log_entry = json.load(f)
                         else:
@@ -593,7 +589,7 @@ class MonitoringService:
                      messages: Optional[List[dict]] = None, params: Optional[dict] = None):
         """记录请求开始（非阻塞版：提交到串行事件池，不阻塞事件循环）"""
         self._event_pool.submit(
-            self._request_start_sync,
+            copy_context().run, self._request_start_sync,
             request_id, model, messages_count, session_id, mode, messages, params
         )
     
@@ -612,6 +608,7 @@ class MonitoringService:
             except Exception:
                 msg_preview = "[Messages List]"
         
+        context = current_request.get()
         request_info = RequestInfo(
             request_id=request_id,
             timestamp=time.time(),
@@ -622,7 +619,12 @@ class MonitoringService:
             mode=mode,
             request_messages_preview=msg_preview,
             request_params=params,
-            input_tokens=estimated_input_tokens
+            input_tokens=estimated_input_tokens,
+            caller_id=context.owner_id if context else 'unattributed',
+            caller_name=context.owner_name if context else '历史未归属',
+            conversation_id=context.session_id if context else None,
+            gateway_request_id=context.request_id if context else None,
+            pricing_snapshot=copy.deepcopy(context.endpoint.get('pricing') or {}) if context else None,
         )
         
         with self._lock:
@@ -654,7 +656,7 @@ class MonitoringService:
                     upstream_usage: Optional[dict] = None, system_fingerprint: Optional[str] = None):
         """记录请求结束（非阻塞版：提交到串行事件池，与 request_start 保持顺序）"""
         self._event_pool.submit(
-            self._request_end_sync,
+            copy_context().run, self._request_end_sync,
             request_id, success, error, response_content, reasoning_content,
             input_tokens, output_tokens, cached_tokens, cost_info, full_messages,
             response_message, response_tool_calls, upstream_usage, system_fingerprint
@@ -685,6 +687,9 @@ class MonitoringService:
             request_info.input_tokens = input_tokens
             request_info.output_tokens = output_tokens
             request_info.cached_tokens = cached_tokens
+            context = current_request.get()
+            if context:
+                request_info.timings = context.snapshot()
 
             model = request_info.model
             self.model_stats[model]['total'] += 1
@@ -740,6 +745,7 @@ class MonitoringService:
 
         log_entry = {
             'type': 'request_end',
+            **{name: request_dict_for_recent[name] for name in ('caller_id', 'caller_name', 'conversation_id', 'gateway_request_id', 'timings', 'pricing_snapshot')},
             'timestamp': _original_timestamp,
             'end_timestamp': time.time(),
             'request_id': request_id,
@@ -1146,7 +1152,7 @@ class MonitoringService:
         """从分层日志中查找请求详情（无timestamp时慢速遍历，从最近开始，找到即停）"""
         try:
             req_id_short = request_id[:8] if request_id else "unknown"
-            ext = ".json.gz" if MonitorConfig.USE_COMPRESSION else ".json"
+            ext = ".json*"
             
             today = datetime.now()
             for i in range(7):
@@ -1166,7 +1172,7 @@ class MonitoringService:
                         pattern = f"*_{req_id_short}{ext}"
                         for log_file in Path(hour_entry.path).glob(pattern):
                             try:
-                                if MonitorConfig.USE_COMPRESSION:
+                                if log_file.suffix == ".gz":
                                     with gzip.open(log_file, 'rt', encoding='utf-8') as f:
                                         log_entry = json.load(f)
                                 else:
@@ -1199,12 +1205,12 @@ class MonitoringService:
             if not hour_dir.exists():
                 return None
             
-            ext = ".json.gz" if MonitorConfig.USE_COMPRESSION else ".json"
+            ext = ".json*"
             pattern = f"*_{req_id_short}{ext}"
             
             for log_file in hour_dir.glob(pattern):
                 try:
-                    if MonitorConfig.USE_COMPRESSION:
+                    if log_file.suffix == ".gz":
                         with gzip.open(log_file, 'rt', encoding='utf-8') as f:
                             log_entry = json.load(f)
                     else:
