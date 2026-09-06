@@ -662,6 +662,12 @@ class _ChatStreamBuilder:
             error = event.get("error")
             if error is None and isinstance(event.get("response"), dict):
                 error = event["response"].get("error")
+            if error is None and event_type == "error" and event.get("message"):
+                # Responses stream errors place message/code/param at the top level.
+                error = {"message": event["message"], "type": "api_error"}
+                for key in ("code", "param"):
+                    if key in event:
+                        error[key] = event[key]
             error = error if isinstance(error, dict) else {"message": str(error or "上游 Responses 请求失败"), "type": "api_error"}
             payload = {"error": error}
             return [f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")]

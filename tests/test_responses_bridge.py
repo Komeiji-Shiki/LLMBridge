@@ -189,6 +189,33 @@ class ResponsesToChatStreamingTests(unittest.TestCase):
         usage = next(payload["usage"] for payload in payloads if payload.get("usage"))
         self.assertEqual(usage, {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5})
 
+    def test_stream_errors_preserve_top_level_and_nested_details(self):
+        cases = [
+            ({"type": "error", "message": "Codex backend stream ended before a terminal response.",
+              "code": "stream_ended", "param": None},
+             {"message": "Codex backend stream ended before a terminal response.",
+              "type": "api_error", "code": "stream_ended", "param": None}),
+            ({"type": "error", "message": "Codex backend stream idle timeout after 30m0s"},
+             {"message": "Codex backend stream idle timeout after 30m0s", "type": "api_error"}),
+            ({"type": "error", "message": "ignored", "error": {"message": "nested", "code": "nested_code"}},
+             {"message": "nested", "code": "nested_code"}),
+            ({"type": "response.failed", "response": {"error": {"message": "failed", "code": "server_error"}}},
+             {"message": "failed", "code": "server_error"}),
+            ({"type": "error"}, {"message": "上游 Responses 请求失败", "type": "api_error"}),
+        ]
+        for event, expected in cases:
+            with self.subTest(event=event):
+                upstream = ("data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n").encode()
+                response = build_chat_streaming_response_from_responses(
+                    Response(content=upstream, media_type="text/event-stream"), "public-model")
+                raw = asyncio.run(self._read_stream(response))
+                errors = [payload["error"] for payload in self._payloads(raw) if "error" in payload]
+                self.assertEqual(errors, [expected])
+                self.assertTrue(raw.rstrip().endswith(b"data: [DONE]"))
+                self.assertFalse(any(
+                    choice.get("finish_reason") == "stop"
+                    for payload in self._payloads(raw) for choice in payload.get("choices", [])))
+
     def test_converts_function_call_events(self):
         upstream = (
             b'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"","status":"in_progress"}}\n\n'
