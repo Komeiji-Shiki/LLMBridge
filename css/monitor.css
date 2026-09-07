@@ -927,3 +927,29 @@ th, td { padding: 13px 16px; }
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ===== 缓存对比（compareModal） ===== */
+#compareBody { padding: 24px; display: grid; gap: 18px; }
+.compare-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.compare-col-title { font-size: 12px; font-weight: 600; color: var(--accent); margin-bottom: 8px; }
+.compare-nums { display: grid; gap: 6px; padding: 12px; background: var(--surface-2); border: 1px solid var(--line-weak); border-radius: 8px; }
+.compare-nums > div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; }
+.compare-nums span { color: var(--text-dim); font-size: 12px; }
+.compare-nums strong { font-variant-numeric: tabular-nums; }
+.compare-context { margin: 0; padding: 12px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 Consolas, monospace; color: #b7cce8; background: var(--surface-2); border: 1px solid var(--line-weak); border-radius: 8px; }
+.diff-mark { display: inline-block; padding: 0 5px; margin: 0 2px; background: rgba(245,158,11,0.3); color: #fcd34d; border: 1px solid rgba(245,158,11,0.5); border-radius: 4px; font-weight: 700; }
+.compare-ok, .compare-bad, .compare-warn { padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.7; margin-bottom: 12px; }
+.compare-ok { background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); color: #6ee7b7; }
+.compare-bad { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; }
+.compare-warn { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.35); color: #fcd34d; }
+.compare-table pre { margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 Consolas, monospace; color: #b7cce8; }
+.compare-tps { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; font-size: 12px; color: var(--text-dim); padding: 8px 0; border-top: 1px solid #ffffff06; }
+.compare-tps strong { color: var(--text-main); font-variant-numeric: tabular-nums; }
+.compare-inference { margin: 0; padding-left: 20px; display: grid; gap: 8px; font-size: 13px; line-height: 1.7; }
+.compare-check { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
+#compare-select-all { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; vertical-align: middle; }
+#compare-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+@media (max-width: 760px) {
+    #compareBody { padding: 12px; gap: 12px; }
+    .compare-cols { grid-template-columns: 1fr; }
+}

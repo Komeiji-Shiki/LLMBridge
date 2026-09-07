@@ -373,6 +373,9 @@
                            style="min-width: 220px;"
                            onkeydown="if(event.key==='Enter') applyLogFilters()">
                     <button class="refresh-btn" onclick="applyLogFilters()" style="padding: 4px 14px; font-size: 13px;">筛选</button>
+                    <button class="refresh-btn" id="compare-btn" onclick="openCompareSelected()" disabled style="padding: 4px 14px; font-size: 13px;" title="勾选两条请求日志后对比缓存命中差异">对比选中 (0/2)</button>
+                    <button class="refresh-btn" onclick="clearCompareSelection()" style="padding: 4px 14px; font-size: 13px;" title="清空对比选择">清空选择</button>
+                    <span id="compare-hint" style="font-size: 12px; color: var(--text-dim);"></span>
                     <span id="filter-total" style="font-size: 12px; color: var(--text-dim); margin-left: auto;"></span>
                 </div>
 
@@ -386,6 +389,7 @@
                         <table>
                             <thead>
                                 <tr>
+                                    <th title="勾选两条进行缓存对比"><input type="checkbox" id="compare-select-all" onclick="toggleCompareSelectAll(this)" title="全选本页"></th>
                                     <th>时间</th>
                                     <th>请求ID</th>
                                     <th>模型</th>
@@ -399,7 +403,7 @@
                                 </tr>
                             </thead>
                             <tbody id="request-logs">
-                                <tr><td colspan="10" style="text-align: center;">加载中...</td></tr>
+                                <tr><td colspan="11" style="text-align: center;">加载中...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -438,6 +442,19 @@
         </div>
     </div>
     
+    <!-- 缓存对比模态框 -->
+    <div id="compareModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="compare-title">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div><p class="eyebrow">CACHE COMPARISON</p><h2 class="modal-title" id="compare-title">缓存命中对比</h2></div>
+                <button type="button" class="close" onclick="closeCompareModal()" aria-label="关闭缓存对比">&times;</button>
+            </div>
+            <div id="compareBody">
+                <div class="empty-state">加载中...</div>
+            </div>
+        </div>
+    </div>
+
     <script src="/js/monitor.js"></script>
 </body>
 </html>

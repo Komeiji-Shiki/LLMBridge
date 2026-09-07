@@ -1,31 +1,35 @@
 #!/usr/bin/env python3
-"""Compare OpenAI-compatible request logs and locate prompt-cache discontinuities."""
+"""Compare OpenAI-compatible request logs and locate prompt-cache discontinuities.
+
+Thin CLI wrapper over :mod:`utils.prompt_cache_compare` (which is also used
+by the monitor ``/api/monitor/compare`` route). Output format is kept
+compatible with the original standalone script.
+"""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import math
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-VOLATILE_FIELDS = {
-    "type", "timestamp", "end_timestamp", "request_id", "status", "success",
-    "duration", "error", "messages_count", "input_tokens", "output_tokens",
-    "cached_tokens", "response_content", "response_tool_calls", "reasoning_content",
-    "cost_info", "upstream_usage", "streaming",
-}
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-
-def canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=False)
-
-
-def short_hash(value: Any) -> str:
-    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()[:16]
+from utils.prompt_cache_compare import (  # noqa: E402
+    cached_tokens,
+    canonical,
+    compare,
+    compare_identity,
+    compare_messages,
+    compare_params,
+    compare_tools,
+    context_snippet as context,
+    first_text_difference,
+    gcd_nonzero,
+    short_hash,
+)
 
 
 def load_log(path: Path) -> dict[str, Any]:
@@ -34,138 +38,6 @@ def load_log(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{path}: JSON top level must be an object")
     return value
-
-
-def cached_tokens(log: dict[str, Any]) -> int:
-    direct = log.get("cached_tokens")
-    if isinstance(direct, int):
-        return direct
-    usage = log.get("upstream_usage") or {}
-    details = usage.get("prompt_tokens_details") or {}
-    value = details.get("cached_tokens")
-    return value if isinstance(value, int) else 0
-
-
-def first_text_difference(left: str, right: str) -> int | None:
-    for index, (a, b) in enumerate(zip(left, right)):
-        if a != b:
-            return index
-    return min(len(left), len(right)) if len(left) != len(right) else None
-
-
-def context(text: str, index: int, radius: int = 140) -> str:
-    return text[max(0, index - radius): index + radius].replace("\n", "\\n")
-
-
-def gcd_nonzero(values: Iterable[int]) -> int:
-    result = 0
-    for value in values:
-        if value:
-            result = math.gcd(result, abs(value))
-    return result
-
-
-def compare_messages(old: dict[str, Any], new: dict[str, Any]) -> tuple[bool, int | None]:
-    old_messages = old.get("request_messages") or []
-    new_messages = new.get("request_messages") or []
-    common = min(len(old_messages), len(new_messages))
-    first_difference = None
-
-    print("\n[Messages]")
-    print(f"old={len(old_messages)}, new={len(new_messages)}, common_count={common}")
-    for index in range(common):
-        old_text = canonical(old_messages[index])
-        new_text = canonical(new_messages[index])
-        if old_text != new_text:
-            first_difference = index
-            offset = first_text_difference(old_text, new_text)
-            print(f"FIRST DIFFERENCE: message[{index}], canonical_char={offset}")
-            print(f"  old role={old_messages[index].get('role')!r}, sha256={short_hash(old_messages[index])}")
-            print(f"  new role={new_messages[index].get('role')!r}, sha256={short_hash(new_messages[index])}")
-            if offset is not None:
-                print(f"  old context: {context(old_text, offset)}")
-                print(f"  new context: {context(new_text, offset)}")
-            break
-
-    strict_append = len(new_messages) >= len(old_messages) and old_messages == new_messages[:len(old_messages)]
-    if first_difference is None:
-        print("common messages are byte-for-byte identical after canonical JSON serialization")
-    print(f"new request is a strict append of old messages: {strict_append}")
-    if strict_append:
-        print("appended messages:")
-        for index, message in enumerate(new_messages[len(old_messages):], len(old_messages)):
-            print(
-                f"  [{index}] role={message.get('role')!r} name={message.get('name')!r} "
-                f"chars={len(canonical(message))} sha256={short_hash(message)}"
-            )
-    return strict_append, first_difference
-
-
-def compare_tools(old: dict[str, Any], new: dict[str, Any]) -> bool | None:
-    """比较工具定义。返回 True=相同，False=不同，None=未知（无记录可比）。
-
-    Responses 原生透传链路的日志不存 tools 全文（只记 tools_count / tools_sha256 /
-    tools_names）；旧日志连摘要都没有时不得谎报 identical，必须报 unknown。
-    """
-    old_tools = old.get("tools")
-    new_tools = new.get("tools")
-    if old_tools is not None or new_tools is not None:
-        old_list = old_tools or []
-        new_list = new_tools or []
-        same = canonical(old_list) == canonical(new_list)
-        print("\n[Tools]")
-        print(
-            f"old={len(old_list)}, new={len(new_list)}, identical={same}, "
-            f"old_sha256={short_hash(old_list)}, new_sha256={short_hash(new_list)}"
-        )
-        if not same:
-            for index, (left, right) in enumerate(zip(old_list, new_list)):
-                if canonical(left) != canonical(right):
-                    print(f"FIRST DIFFERENCE: tool[{index}]")
-                    print(f"  old={left.get('function', {}).get('name')!r}")
-                    print(f"  new={right.get('function', {}).get('name')!r}")
-                    break
-        return same
-    old_sha = old.get("tools_sha256")
-    new_sha = new.get("tools_sha256")
-    print("\n[Tools]")
-    if old_sha is None or new_sha is None:
-        print(
-            "UNKNOWN: neither log records tool definitions "
-            f"(tools_count old={old.get('tools_count')} new={new.get('tools_count')}). "
-            "Tool changes cannot be ruled out as the cache-break cause; "
-            "compare tools_sha256/tools_names in newer logs."
-        )
-        return None
-    same = old_sha == new_sha
-    print(
-        f"via tools_sha256: identical={same}, "
-        f"old_count={old.get('tools_count')} new_count={new.get('tools_count')}, "
-        f"old_sha256={old_sha}, new_sha256={new_sha}"
-    )
-    if not same:
-        old_names = old.get("tools_names") or []
-        new_names = new.get("tools_names") or []
-        print(f"  old names({len(old_names)}): {old_names[:20]}")
-        print(f"  new names({len(new_names)}): {new_names[:20]}")
-        print(f"  removed: {sorted(set(old_names) - set(new_names))[:20]}")
-        print(f"  added: {sorted(set(new_names) - set(old_names))[:20]}")
-        if set(old_names) == set(new_names):
-            print("  same name set but different hash: order or schemas changed")
-    return same
-
-
-def compare_request_parameters(old: dict[str, Any], new: dict[str, Any]) -> bool:
-    keys = sorted((set(old) | set(new)) - VOLATILE_FIELDS - {"request_messages", "tools"})
-    differences = []
-    print("\n[Cache-relevant request parameters]")
-    for key in keys:
-        if canonical(old.get(key)) != canonical(new.get(key)):
-            differences.append(key)
-            print(f"DIFFERENT {key}: old={old.get(key)!r}, new={new.get(key)!r}")
-    if not differences:
-        print("all recorded non-volatile parameters are identical")
-    return not differences
 
 
 def print_cache_summary(old: dict[str, Any], new: dict[str, Any]) -> None:
@@ -187,6 +59,101 @@ def print_cache_summary(old: dict[str, Any], new: dict[str, Any]) -> None:
     if old_start and new_start:
         print(f"start-to-start gap={new_start - old_start:.3f}s")
         print(f"previous-end-to-new-start gap={new_start - old_end:.3f}s")
+
+
+def report_messages(old: dict[str, Any], new: dict[str, Any]) -> tuple[bool, Any]:
+    result = compare_messages(old, new)
+    print("\n[Messages]")
+    print(f"old={result['old_count']}, new={result['new_count']}, common_count={result['common_count']}")
+    first = result["first_difference"]
+    if first is not None:
+        print(f"FIRST DIFFERENCE: message[{first['index']}], canonical_char={first['canonical_char_offset']}")
+        print(f"  old role={first['old_role']!r}, sha256={first['old_sha256']}")
+        print(f"  new role={first['new_role']!r}, sha256={first['new_sha256']}")
+        if first["canonical_char_offset"] is not None:
+            print(f"  old context: {first['old_context']}")
+            print(f"  new context: {first['new_context']}")
+
+    strict_append = result["strict_append"]
+    if first is None:
+        print("common messages are byte-for-byte identical after canonical JSON serialization")
+    print(f"new request is a strict append of old messages: {strict_append}")
+    if strict_append:
+        print("appended messages:")
+        for message in result["appended"]:
+            print(
+                f"  [{message['index']}] role={message['role']!r} name={message['name']!r} "
+                f"chars={message['chars']} sha256={message['sha256']}"
+            )
+    return strict_append, first
+
+
+def report_tools(old: dict[str, Any], new: dict[str, Any]) -> bool | None:
+    """Print the tools section; return True/False/None like the original script."""
+    result = compare_tools(old, new)
+    status = result["status"]
+    print("\n[Tools]")
+    if result["source"] == "tools":
+        same = status == "identical"
+        print(
+            f"old={result['old_count']}, new={result['new_count']}, identical={same}, "
+            f"old_sha256={result['old_sha256']}, new_sha256={result['new_sha256']}"
+        )
+        if not same and "first_difference" in result:
+            first = result["first_difference"]
+            print(f"FIRST DIFFERENCE: tool[{first['index']}]")
+            print(f"  old={first['old_name']!r}")
+            print(f"  new={first['new_name']!r}")
+        return same
+    if status == "unknown":
+        print(
+            "UNKNOWN: neither log records tool definitions "
+            f"(tools_count old={result.get('old_count')} new={result.get('new_count')}). "
+            "Tool changes cannot be ruled out as the cache-break cause; "
+            "compare tools_sha256/tools_names in newer logs."
+        )
+        return None
+    same = status == "identical"
+    print(
+        f"via tools_sha256: identical={same}, "
+        f"old_count={result.get('old_count')} new_count={result.get('new_count')}, "
+        f"old_sha256={result.get('old_sha256')}, new_sha256={result.get('new_sha256')}"
+    )
+    if not same:
+        old_names = old.get("tools_names") or []
+        new_names = new.get("tools_names") or []
+        print(f"  old names({len(old_names)}): {old_names[:20]}")
+        print(f"  new names({len(new_names)}): {new_names[:20]}")
+        print(f"  removed: {sorted(set(old_names) - set(new_names))[:20]}")
+        print(f"  added: {sorted(set(new_names) - set(old_names))[:20]}")
+        if set(old_names) == set(new_names):
+            print("  same name set but different hash: order or schemas changed")
+    return same
+
+
+def report_request_parameters(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    result = compare_params(old, new)
+    print("\n[Cache-relevant request parameters]")
+    for difference in result["differences"]:
+        print(f"DIFFERENT {difference['key']}: old={old.get(difference['key'])!r}, new={new.get(difference['key'])!r}")
+    if not result["differences"]:
+        print("all recorded non-volatile parameters are identical")
+    return result["same"]
+
+
+def report_identity(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    result = compare_identity(old, new)
+    print("\n[Identity (session/caller attribution)]")
+    if not result["fields"]:
+        print("neither log records attribution fields")
+        return True
+    for field in result["fields"]:
+        flag = "SAME" if field["same"] else "DIFFERENT"
+        print(f"{flag} {field['key']}: old={old.get(field['key'])!r}, new={new.get(field['key'])!r}")
+    if not result["same"]:
+        print("NOTE: cache namespaces are usually isolated per session/caller; "
+              "mismatched attribution may mean the two requests never shared cache.")
+    return result["same"]
 
 
 def infer(strict_append: bool | None, tools_same: bool | None, params_same: bool, old: dict[str, Any], new: dict[str, Any]) -> None:
@@ -263,10 +230,14 @@ def main() -> int:
     print(f"OLD: {args.old_log}")
     print(f"NEW: {args.new_log}\n")
     print_cache_summary(old, new)
-    strict_append, _ = compare_messages(old, new)
-    tools_same = compare_tools(old, new)
-    params_same = compare_request_parameters(old, new)
+    report_identity(old, new)
+    strict_append, _ = report_messages(old, new)
+    tools_same = report_tools(old, new)
+    params_same = report_request_parameters(old, new)
     infer(strict_append, tools_same, params_same, old, new)
+    # Structured result is available for programmatic use (also powers /api/monitor/compare).
+    _structured = compare(old, new)
+    assert _structured["messages"]["strict_append"] == strict_append
     if args.timeline_dir:
         timeline(args.timeline_dir, args.model or str(new.get("model") or ""))
     return 0

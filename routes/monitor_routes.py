@@ -399,6 +399,36 @@ async def get_request_details_endpoint(request_id: str):
         raise HTTPException(status_code=404, detail="请求详情未找到")
 
 
+async def compare_request_logs(monitoring_service, request_a: str, request_b: str):
+    """对比两条请求日志，定位缓存命中掉落的差异点（a/b 任选顺序，按时间排 old/new）"""
+    import asyncio
+    if not request_a or not request_b:
+        raise HTTPException(status_code=400, detail="需要两个请求ID参数 a 和 b")
+    if request_a == request_b:
+        raise HTTPException(status_code=400, detail="请选择两条不同的请求进行对比")
+    detail_a = await asyncio.to_thread(monitoring_service.get_request_details, request_a)
+    detail_b = await asyncio.to_thread(monitoring_service.get_request_details, request_b)
+    missing = [rid for rid, detail in ((request_a, detail_a), (request_b, detail_b)) if not detail]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"请求详情未找到: {', '.join(missing)}")
+    from utils.prompt_cache_compare import compare
+    timestamp_a = detail_a.get("timestamp") or 0
+    timestamp_b = detail_b.get("timestamp") or 0
+    if timestamp_a and timestamp_b and timestamp_b < timestamp_a:
+        old_detail, new_detail = detail_b, detail_a
+    else:
+        old_detail, new_detail = detail_a, detail_b
+    result = compare(old_detail, new_detail)
+    result["requested"] = {"a": request_a, "b": request_b}
+    return result
+
+
+@router.get("/api/monitor/compare")
+async def compare_request_logs_endpoint(a: str = "", b: str = ""):
+    """对比两条请求日志（返回结构化差异分析，前端缓存分析弹窗使用）"""
+    return await compare_request_logs(monitoring_service, a, b)
+
+
 @router.get("/api/logs/download")
 async def download_logs_endpoint(log_type: str = "requests"):
     """下载日志文件"""
