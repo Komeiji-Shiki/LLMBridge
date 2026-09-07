@@ -3,14 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LMArena Bridge 监控面板</title>
+    <title>Bridge · 监控中心</title>
 <link rel="stylesheet" href="/css/monitor.css">
 </head>
 <body>
     <header class="header">
-        <div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><h1>Bridge <span>监控中心</span></h1><p>请求、用量与服务状态，一目了然</p></div></div>
+        <div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><p class="eyebrow">LLM GATEWAY / OBSERVABILITY</p><h1>Bridge <span>监控中心</span></h1><p>实时请求 · 用量统计 · 缓存诊断</p></div></div>
         <div class="header-info">
-            <a href="/admin" style="padding: 8px 16px; background: var(--btn-bg); color: var(--text-main); border: 1px solid var(--btn-border); border-radius: 6px; text-decoration: none; font-size: 14px; transition: all 0.2s; margin-right: 16px;">📊 管理面板</a>
+            <a href="#request-log-section" class="header-link">查看请求 ↓</a>
+            <a href="/admin" class="header-link">管理面板 ↗</a>
             <div class="info-text" id="server-info">正在连接...</div>
             <div class="status-indicator">
                 <span class="status-dot" id="ws-status"></span>
@@ -18,242 +19,8 @@
             </div>
         </div>
     </header>
-    
+
     <div class="container">
-        <!-- API 文档 -->
-        <div class="section">
-            <div class="section-header">
-                <h2 class="section-title">📚 API 端点说明</h2>
-                <button class="refresh-btn" onclick="toggleApiDocs()">显示/隐藏</button>
-            </div>
-            <div id="api-docs-content" style="padding: 20px; display: none;">
-                <!-- 基础信息 -->
-                <div style="padding: 16px; background: var(--accent-faint); border: 1px solid var(--line-weak); border-radius: 8px; margin-bottom: 20px;">
-                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
-                        <span style="font-size: 20px;">🌐</span>
-                        <h3 style="color: var(--accent); margin: 0;">服务器基础信息</h3>
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-top: 12px;">
-                        <div>
-                            <span style="color: var(--text-dim); font-size: 13px;">API 地址：</span>
-                            <code style="background: var(--surface-2); color: var(--text-main); padding: 4px 8px; border-radius: 4px; font-size: 13px;">http://localhost:5102</code>
-                        </div>
-                        <div>
-                            <span style="color: var(--text-dim); font-size: 13px;">当前状态：</span>
-                            <span style="color: #10b981; font-weight: 500;">✅ 运行中</span>
-                        </div>
-                        <div>
-                            <span style="color: var(--text-dim); font-size: 13px;">协议版本：</span>
-                            <span style="font-weight: 500;">OpenAI API v1 兼容</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px;">
-                    <!-- AI API -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 8px; color: white;">
-                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>🤖</span>
-                            <span>核心 AI 接口</span>
-                        </h3>
-                        <div style="margin-bottom: 16px;">
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">POST /v1/chat/completions</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
-                                <strong>用途：</strong>与 AI 模型对话<br>
-                                <strong>支持：</strong>流式/非流式、多模态消息、文生图
-                            </div>
-                        </div>
-                        <div>
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /v1/models</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
-                                <strong>用途：</strong>获取可用模型列表<br>
-                                <strong>返回：</strong>所有配置的模型信息
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- 监控与健康 -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #10b981 0%, #047857 100%); padding: 20px; border-radius: 8px; color: white;">
-                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>📊</span>
-                            <span>监控与统计</span>
-                        </h3>
-                        <div style="margin-bottom: 12px;">
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /monitor</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">实时监控面板（当前页面）</div>
-                        </div>
-                        <div style="margin-bottom: 12px;">
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/monitor/stats</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">获取实时统计数据（JSON）</div>
-                        </div>
-                        <div>
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/monitor/active</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">查看当前活跃请求</div>
-                        </div>
-                    </div>
-                    
-                    <!-- 日志与详情 -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); padding: 20px; border-radius: 8px; color: white;">
-                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>📈</span>
-                            <span>日志与详情</span>
-                        </h3>
-                        <div style="margin-bottom: 12px;">
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/request/{request_id}</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">获取请求完整详情</div>
-                        </div>
-                        <div style="margin-bottom: 12px;">
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/monitor/logs/requests</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
-                                <strong>参数：</strong>limit=50（默认）<br>
-                                <strong>返回：</strong>最近的请求日志
-                            </div>
-                        </div>
-                        <div>
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">GET /api/logs/download</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
-                                <strong>参数：</strong>log_type=requests|errors<br>
-                                <strong>返回：</strong>JSONL格式日志文件
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- WebSocket -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); padding: 20px; border-radius: 8px; color: white;">
-                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>🔌</span>
-                            <span>WebSocket 连接</span>
-                        </h3>
-                        <div style="margin-bottom: 12px;">
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">WS /ws</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
-                                <strong>用途：</strong>油猴脚本通信<br>
-                                <strong>协议：</strong>双向消息传递
-                            </div>
-                        </div>
-                        <div>
-                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 4px;">WS /ws/monitor</div>
-                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
-                                <strong>用途：</strong>监控面板实时更新<br>
-                                <strong>数据：</strong>统计、活跃请求、事件
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- 使用示例 -->
-                <div style="margin-top: 30px;">
-                    <h3 style="margin-bottom: 16px; font-size: 18px; font-weight: 600;">💡 快速集成示例</h3>
-                    
-                    <!-- 多个示例标签 -->
-                    <div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
-                        <button class="example-tab active" onclick="switchExample('python')">Python</button>
-                        <button class="example-tab" onclick="switchExample('nodejs')">Node.js</button>
-                        <button class="example-tab" onclick="switchExample('curl')">cURL</button>
-                        <button class="example-tab" onclick="switchExample('javascript')">JavaScript</button>
-                    </div>
-                    
-                    <!-- Python 示例 -->
-                    <div id="example-python" class="example-content" style="display: block;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;"># Python - 使用 OpenAI SDK</div>
-                            <div style="color: #fbbf24;">from</div> openai <div style="display: inline; color: #fbbf24;">import</div> OpenAI<br>
-                            <br>
-                            <div style="color: #6b7280;"># 初始化客户端</div>
-                            client = OpenAI(<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;base_url=<span style="color: #34d399;">"http://localhost:5102/v1"</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;api_key=<span style="color: #34d399;">"sk-any-string-you-like"</span><br>
-                            )<br>
-                            <br>
-                            <div style="color: #6b7280;"># 发送请求</div>
-                            response = client.chat.completions.create(<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;model=<span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;messages=[<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;stream=<span style="color: #93c5fd;">True</span><br>
-                            )<br>
-                            <br>
-                            <div style="color: #6b7280;"># 处理流式响应</div>
-                            <div style="color: #fbbf24;">for</div> chunk <div style="display: inline; color: #fbbf24;">in</div> response:<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">print</div>(chunk.choices[0].delta.content, end=<span style="color: #34d399;">""</span>)
-                        </div>
-                    </div>
-                    
-                    <!-- Node.js 示例 -->
-                    <div id="example-nodejs" class="example-content" style="display: none;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;">// Node.js - 使用 OpenAI SDK</div>
-                            <div style="color: #fbbf24;">const</div> OpenAI = <div style="display: inline; color: #fbbf24;">require</div>(<span style="color: #34d399;">'openai'</span>);<br>
-                            <br>
-                            <div style="color: #6b7280;">// 初始化客户端</div>
-                            <div style="color: #fbbf24;">const</div> openai = <div style="display: inline; color: #fbbf24;">new</div> OpenAI({<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;baseURL: <span style="color: #34d399;">'http://localhost:5102/v1'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;apiKey: <span style="color: #34d399;">'sk-any-string-you-like'</span><br>
-                            });<br>
-                            <br>
-                            <div style="color: #6b7280;">// 发送请求</div>
-                            <div style="color: #fbbf24;">async function</div> chat() {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> openai.chat.completions.create({<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">true</span><br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;});<br>
-                            <br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #6b7280;">// 处理流式响应</div><br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">for await</div> (<div style="display: inline; color: #fbbf24;">const</div> chunk <div style="display: inline; color: #fbbf24;">of</div> response) {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;process.stdout.write(chunk.choices[0]?.delta?.content || <span style="color: #34d399;">''</span>);<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;}<br>
-                            }
-                        </div>
-                    </div>
-                    
-                    <!-- cURL 示例 -->
-                    <div id="example-curl" class="example-content" style="display: none;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;"># cURL - 命令行请求</div>
-                            curl <span style="color: #34d399;">http://localhost:5102/v1/chat/completions</span> \<br>
-                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Content-Type: application/json"</span> \<br>
-                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Authorization: Bearer sk-any-string-you-like"</span> \<br>
-                            &nbsp;&nbsp;-d '{<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"model"</span>: <span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"messages"</span>: [<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"stream"</span>: <span style="color: #93c5fd;">true</span><br>
-                            &nbsp;&nbsp;}'
-                        </div>
-                    </div>
-                    
-                    <!-- JavaScript 示例 -->
-                    <div id="example-javascript" class="example-content" style="display: none;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 8px; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;">// JavaScript - 浏览器/前端</div>
-                            <div style="color: #fbbf24;">async function</div> chatWithAPI() {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> fetch(<span style="color: #34d399;">'http://localhost:5102/v1/chat/completions'</span>, {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;method: <span style="color: #34d399;">'POST'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;headers: {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Content-Type'</span>: <span style="color: #34d399;">'application/json'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Authorization'</span>: <span style="color: #34d399;">'Bearer sk-any-string-you-like'</span><br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;},<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;body: JSON.stringify({<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">false</span><br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;})<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;});<br>
-                            <br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> data = <div style="display: inline; color: #fbbf24;">await</div> response.json();<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;console.log(data.choices[0].message.content);<br>
-                            }
-                        </div>
-                    </div>
-                    
-                </div>
-            </div>
-        </div>
-        
-        <!-- 统计卡片 -->
         <div class="stats-grid">
             <div class="stat-card">
                 <h3>活跃请求</h3>
@@ -286,54 +53,22 @@
                 <div class="stat-subtitle" id="mode-details">-</div>
             </div>
         </div>
-        
-        <!-- 标签页连接状态 -->
-        <div class="section">
-            <div class="section-header">
-                <h2 class="section-title">📋 标签页连接状态</h2>
-                <button class="refresh-btn" onclick="refreshTabConnections()">刷新</button>
-            </div>
-            <div id="tab-connections-container">
-                <div style="padding: 20px;">
-                    <div id="tab-summary" style="display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap;">
-                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--line-strong);">
-                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">连接标签页</div>
-                            <div style="font-size: 28px; font-weight: 600; color: #34d399;" id="total-tabs">0</div>
-                        </div>
-                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--line-strong);">
-                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">总并发能力</div>
-                            <div style="font-size: 28px; font-weight: 600; color: var(--accent);" id="total-capacity">0</div>
-                            <div style="font-size: 12px; color: var(--text-dim); margin-top: 4px;">每个标签页支持6个并发</div>
-                        </div>
-                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 8px; border: 1px solid var(--line-strong);">
-                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">当前使用</div>
-                            <div style="font-size: 28px; font-weight: 600; color: #fbbf24;" id="total-used">0</div>
-                            <div style="font-size: 12px; color: #f59e0b; margin-top: 4px;" id="capacity-usage">使用率: 0%</div>
-                        </div>
-                    </div>
-                    
-                    <div id="tabs-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px;">
-                        <div class="empty-state">暂无标签页连接</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
+
         <!-- 活跃请求 -->
         <div class="section">
             <div class="section-header">
-                <h2 class="section-title">⚡ 活跃请求</h2>
+                <h2 class="section-title">活跃请求</h2>
                 <button class="refresh-btn" onclick="refreshData()">刷新</button>
             </div>
             <div id="active-requests-list">
                 <div class="empty-state">暂无活跃请求</div>
             </div>
         </div>
-        
+
         <!-- 模型使用统计 -->
         <div class="section">
             <div class="section-header">
-                <h2 class="section-title">📊 模型使用统计</h2>
+                <h2 class="section-title">模型使用统计</h2>
                 <button class="refresh-btn" onclick="toggleModelStats()" id="toggle-model-stats-btn">显示统计</button>
             </div>
             <div id="model-stats-container" class="model-stats-hidden" style="padding: 20px;">
@@ -342,14 +77,14 @@
                 </div>
             </div>
         </div>
-        
+
         <!-- 请求日志 -->
-        <div class="section">
+        <div class="section" id="request-log-section">
             <div class="section-header">
-                <h2 class="section-title">📝 日志</h2>
+                <h2 class="section-title">请求与诊断</h2>
                 <div style="display: flex; align-items: center; gap: 12px;">
                     <button class="refresh-btn" onclick="toggleLogs()" id="toggle-logs-btn">隐藏日志</button>
-                    <select id="log-limit" class="filter-input" onchange="changeLogLimit()">
+                    <select id="log-limit" aria-label="每页日志条数" class="filter-input" onchange="changeLogLimit()">
                         <option value="20">每页 20 条</option>
                         <option value="50" selected>每页 50 条</option>
                         <option value="100">每页 100 条</option>
@@ -361,21 +96,18 @@
             <div id="logs-container">
                 <!-- 筛选工具栏 -->
                 <div id="log-filters" style="display: flex; align-items: center; gap: 10px; padding: 10px 0; flex-wrap: wrap;">
-                    <select id="filter-model" class="filter-input" onchange="applyLogFilters()">
+                    <select id="filter-model" aria-label="按模型筛选" class="filter-input" onchange="applyLogFilters()">
                         <option value="">全部模型</option>
                     </select>
-                    <select id="filter-status" class="filter-input" onchange="applyLogFilters()">
+                    <select id="filter-status" aria-label="按状态筛选" class="filter-input" onchange="applyLogFilters()">
                         <option value="">全部状态</option>
                         <option value="success">成功</option>
                         <option value="failed">失败</option>
                     </select>
-                    <input type="text" id="filter-search" class="filter-input" placeholder="搜索请求、模型、调用方、会话或错误..."
+                    <input type="text" id="filter-search" aria-label="搜索请求日志" class="filter-input" placeholder="搜索请求、模型、调用方、会话或错误..."
                            style="min-width: 220px;"
                            onkeydown="if(event.key==='Enter') applyLogFilters()">
                     <button class="refresh-btn" onclick="applyLogFilters()" style="padding: 4px 14px; font-size: 13px;">筛选</button>
-                    <button class="refresh-btn" id="compare-btn" onclick="openCompareSelected()" disabled style="padding: 4px 14px; font-size: 13px;" title="勾选两条请求日志后对比缓存命中差异">对比选中 (0/2)</button>
-                    <button class="refresh-btn" onclick="clearCompareSelection()" style="padding: 4px 14px; font-size: 13px;" title="清空对比选择">清空选择</button>
-                    <span id="compare-hint" style="font-size: 12px; color: var(--text-dim);"></span>
                     <span id="filter-total" style="font-size: 12px; color: var(--text-dim); margin-left: auto;"></span>
                 </div>
 
@@ -383,13 +115,21 @@
                     <div class="tab active" data-tab="requests" onclick="switchTab('requests')">请求日志 <span id="request-count" style="opacity: 0.7; font-size: 12px;"></span></div>
                     <div class="tab" data-tab="errors" onclick="switchTab('errors')">错误日志 <span id="error-log-count" style="opacity: 0.7; font-size: 12px;"></span></div>
                 </div>
-                
+
+                <div class="compare-toolbar" id="compare-toolbar">
+                    <span class="compare-toolbar-label">缓存对比</span>
+                    <div id="compare-slots" aria-label="已选请求"></div>
+                    <button class="refresh-btn" id="compare-btn" onclick="MonitorCompare.openCompareSelected()" disabled title="勾选两条请求日志后对比缓存命中差异">对比选中 (0/2)</button>
+                    <button class="refresh-btn" id="compare-clear" onclick="MonitorCompare.clearCompareSelection()" disabled title="清空对比选择">清空选择</button>
+                    <span id="compare-hint" role="status"></span>
+                </div>
+
                 <div id="requests-tab" class="tab-content">
                     <div class="table-container">
                         <table>
                             <thead>
                                 <tr>
-                                    <th title="勾选两条进行缓存对比"><input type="checkbox" id="compare-select-all" onclick="toggleCompareSelectAll(this)" title="全选本页"></th>
+                                    <th title="勾选两条进行缓存对比"><input type="checkbox" id="compare-select-all" onclick="MonitorCompare.toggleCompareSelectAll(this)" title="选择本页前两条；再次点击清空选择" aria-label="选择本页前两条"></th>
                                     <th>时间</th>
                                     <th>请求ID</th>
                                     <th>模型</th>
@@ -420,7 +160,7 @@
                         <button id="pagination-next" class="refresh-btn" onclick="changePage(1)" style="padding: 4px 12px; font-size: 13px;">下一页</button>
                     </div>
                 </div>
-                
+
                 <div id="errors-tab" class="tab-content" style="display: none;">
                     <div style="padding: 20px;" id="error-logs">
                         <div class="empty-state">暂无错误日志</div>
@@ -428,7 +168,275 @@
                 </div>
         </div>
     </div>
-    
+
+        <!-- API 文档 -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">API 端点说明</h2>
+                <button class="refresh-btn" onclick="toggleApiDocs()">显示/隐藏</button>
+            </div>
+            <div id="api-docs-content" style="padding: 20px; display: none;">
+                <!-- 基础信息 -->
+                <div style="padding: 16px; background: var(--accent-faint); border: 1px solid var(--line-weak); border-radius: 0; margin-bottom: 20px;">
+                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                        <span style="font-size: 20px;">🌐</span>
+                        <h3 style="color: var(--accent); margin: 0;">服务器基础信息</h3>
+                    </div>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-top: 12px;">
+                        <div>
+                            <span style="color: var(--text-dim); font-size: 13px;">API 地址：</span>
+                            <code style="background: var(--surface-2); color: var(--text-main); padding: 4px 8px; border-radius: 0; font-size: 13px;">http://localhost:5102</code>
+                        </div>
+                        <div>
+                            <span style="color: var(--text-dim); font-size: 13px;">当前状态：</span>
+                            <span style="color: #10b981; font-weight: 500;">✅ 运行中</span>
+                        </div>
+                        <div>
+                            <span style="color: var(--text-dim); font-size: 13px;">协议版本：</span>
+                            <span style="font-weight: 500;">OpenAI API v1 兼容</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px;">
+                    <!-- AI API -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 0; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>🤖</span>
+                            <span>核心 AI 接口</span>
+                        </h3>
+                        <div style="margin-bottom: 16px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">POST /v1/chat/completions</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>与 AI 模型对话<br>
+                                <strong>支持：</strong>流式/非流式、多模态消息、文生图
+                            </div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">GET /v1/models</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>获取可用模型列表<br>
+                                <strong>返回：</strong>所有配置的模型信息
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 监控与健康 -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #10b981 0%, #047857 100%); padding: 20px; border-radius: 0; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>📊</span>
+                            <span>监控与统计</span>
+                        </h3>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">GET /monitor</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">实时监控面板（当前页面）</div>
+                        </div>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">GET /api/monitor/stats</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">获取实时统计数据（JSON）</div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">GET /api/monitor/active</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">查看当前活跃请求</div>
+                        </div>
+                    </div>
+
+                    <!-- 日志与详情 -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); padding: 20px; border-radius: 0; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>📈</span>
+                            <span>日志与详情</span>
+                        </h3>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">GET /api/request/{request_id}</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">获取请求完整详情</div>
+                        </div>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">GET /api/monitor/logs/requests</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>参数：</strong>limit=50（默认）<br>
+                                <strong>返回：</strong>最近的请求日志
+                            </div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">GET /api/logs/download</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>参数：</strong>log_type=requests|errors<br>
+                                <strong>返回：</strong>JSONL格式日志文件
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- WebSocket -->
+                    <div class="api-info" style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); padding: 20px; border-radius: 0; color: white;">
+                        <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
+                            <span>🔌</span>
+                            <span>WebSocket 连接</span>
+                        </h3>
+                        <div style="margin-bottom: 12px;">
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">WS /ws</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>油猴脚本通信<br>
+                                <strong>协议：</strong>双向消息传递
+                            </div>
+                        </div>
+                        <div>
+                            <div class="api-endpoint" style="font-family: monospace; font-weight: 600; background: rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 0;">WS /ws/monitor</div>
+                            <div style="font-size: 13px; margin-top: 6px; opacity: 0.95;">
+                                <strong>用途：</strong>监控面板实时更新<br>
+                                <strong>数据：</strong>统计、活跃请求、事件
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 使用示例 -->
+                <div style="margin-top: 30px;">
+                    <h3 style="margin-bottom: 16px; font-size: 18px; font-weight: 600;">💡 快速集成示例</h3>
+
+                    <!-- 多个示例标签 -->
+                    <div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+                        <button class="example-tab active" onclick="switchExample('python')">Python</button>
+                        <button class="example-tab" onclick="switchExample('nodejs')">Node.js</button>
+                        <button class="example-tab" onclick="switchExample('curl')">cURL</button>
+                        <button class="example-tab" onclick="switchExample('javascript')">JavaScript</button>
+                    </div>
+
+                    <!-- Python 示例 -->
+                    <div id="example-python" class="example-content" style="display: block;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;"># Python - 使用 OpenAI SDK</div>
+                            <div style="color: #fbbf24;">from</div> openai <div style="display: inline; color: #fbbf24;">import</div> OpenAI<br>
+                            <br>
+                            <div style="color: #6b7280;"># 初始化客户端</div>
+                            client = OpenAI(<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;base_url=<span style="color: #34d399;">"http://localhost:5102/v1"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;api_key=<span style="color: #34d399;">"sk-any-string-you-like"</span><br>
+                            )<br>
+                            <br>
+                            <div style="color: #6b7280;"># 发送请求</div>
+                            response = client.chat.completions.create(<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;model=<span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;messages=[<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;stream=<span style="color: #93c5fd;">True</span><br>
+                            )<br>
+                            <br>
+                            <div style="color: #6b7280;"># 处理流式响应</div>
+                            <div style="color: #fbbf24;">for</div> chunk <div style="display: inline; color: #fbbf24;">in</div> response:<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">print</div>(chunk.choices[0].delta.content, end=<span style="color: #34d399;">""</span>)
+                        </div>
+                    </div>
+
+                    <!-- Node.js 示例 -->
+                    <div id="example-nodejs" class="example-content" style="display: none;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;">// Node.js - 使用 OpenAI SDK</div>
+                            <div style="color: #fbbf24;">const</div> OpenAI = <div style="display: inline; color: #fbbf24;">require</div>(<span style="color: #34d399;">'openai'</span>);<br>
+                            <br>
+                            <div style="color: #6b7280;">// 初始化客户端</div>
+                            <div style="color: #fbbf24;">const</div> openai = <div style="display: inline; color: #fbbf24;">new</div> OpenAI({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;baseURL: <span style="color: #34d399;">'http://localhost:5102/v1'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;apiKey: <span style="color: #34d399;">'sk-any-string-you-like'</span><br>
+                            });<br>
+                            <br>
+                            <div style="color: #6b7280;">// 发送请求</div>
+                            <div style="color: #fbbf24;">async function</div> chat() {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> openai.chat.completions.create({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">true</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;});<br>
+                            <br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #6b7280;">// 处理流式响应</div><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">for await</div> (<div style="display: inline; color: #fbbf24;">const</div> chunk <div style="display: inline; color: #fbbf24;">of</div> response) {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;process.stdout.write(chunk.choices[0]?.delta?.content || <span style="color: #34d399;">''</span>);<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;}<br>
+                            }
+                        </div>
+                    </div>
+
+                    <!-- cURL 示例 -->
+                    <div id="example-curl" class="example-content" style="display: none;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;"># cURL - 命令行请求</div>
+                            curl <span style="color: #34d399;">http://localhost:5102/v1/chat/completions</span> \<br>
+                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Content-Type: application/json"</span> \<br>
+                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Authorization: Bearer sk-any-string-you-like"</span> \<br>
+                            &nbsp;&nbsp;-d '{<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"model"</span>: <span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"messages"</span>: [<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"stream"</span>: <span style="color: #93c5fd;">true</span><br>
+                            &nbsp;&nbsp;}'
+                        </div>
+                    </div>
+
+                    <!-- JavaScript 示例 -->
+                    <div id="example-javascript" class="example-content" style="display: none;">
+                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: #6b7280; margin-bottom: 8px;">// JavaScript - 浏览器/前端</div>
+                            <div style="color: #fbbf24;">async function</div> chatWithAPI() {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> fetch(<span style="color: #34d399;">'http://localhost:5102/v1/chat/completions'</span>, {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;method: <span style="color: #34d399;">'POST'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;headers: {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Content-Type'</span>: <span style="color: #34d399;">'application/json'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Authorization'</span>: <span style="color: #34d399;">'Bearer sk-any-string-you-like'</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;},<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;body: JSON.stringify({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">false</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;})<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;});<br>
+                            <br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> data = <div style="display: inline; color: #fbbf24;">await</div> response.json();<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;console.log(data.choices[0].message.content);<br>
+                            }
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+        <!-- 统计卡片 -->
+        <!-- 标签页连接状态 -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">标签页连接状态</h2>
+                <button class="refresh-btn" onclick="refreshTabConnections()">刷新</button>
+            </div>
+            <div id="tab-connections-container">
+                <div style="padding: 20px;">
+                    <div id="tab-summary" style="display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap;">
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 0; border: 1px solid var(--line-strong);">
+                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">连接标签页</div>
+                            <div style="font-size: 28px; font-weight: 600; color: #34d399;" id="total-tabs">0</div>
+                        </div>
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 0; border: 1px solid var(--line-strong);">
+                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">总并发能力</div>
+                            <div style="font-size: 28px; font-weight: 600; color: var(--accent);" id="total-capacity">0</div>
+                            <div style="font-size: 12px; color: var(--text-dim); margin-top: 4px;">每个标签页支持6个并发</div>
+                        </div>
+                        <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 0; border: 1px solid var(--line-strong);">
+                            <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">当前使用</div>
+                            <div style="font-size: 28px; font-weight: 600; color: #fbbf24;" id="total-used">0</div>
+                            <div style="font-size: 12px; color: #f59e0b; margin-top: 4px;" id="capacity-usage">使用率: 0%</div>
+                        </div>
+                    </div>
+
+                    <div id="tabs-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px;">
+                        <div class="empty-state">暂无标签页连接</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
     <!-- 请求详情模态框 -->
     <div id="detailModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="detail-title">
         <div class="modal-content">
@@ -441,13 +449,13 @@
             </div>
         </div>
     </div>
-    
+
     <!-- 缓存对比模态框 -->
     <div id="compareModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="compare-title">
         <div class="modal-content">
             <div class="modal-header">
                 <div><p class="eyebrow">CACHE COMPARISON</p><h2 class="modal-title" id="compare-title">缓存命中对比</h2></div>
-                <button type="button" class="close" onclick="closeCompareModal()" aria-label="关闭缓存对比">&times;</button>
+                <button type="button" class="close" onclick="MonitorCompare.closeCompareModal()" aria-label="关闭缓存对比">&times;</button>
             </div>
             <div id="compareBody">
                 <div class="empty-state">加载中...</div>
@@ -455,6 +463,7 @@
         </div>
     </div>
 
+    <script src="/js/monitor-compare.js"></script>
     <script src="/js/monitor.js"></script>
 </body>
 </html>

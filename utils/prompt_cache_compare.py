@@ -10,11 +10,13 @@ TPS terminology used here and in the monitor detail view:
 
 - ``decode_tps``: ``output_tokens / output_s`` where ``output_s`` comes from
   ``timings.output_ms`` (first business event -> finish). For streaming
-  responses this is the real decode speed.
+  responses this is an average over the recorded output phase, which can
+  include reasoning, tool events and transport overhead.
 - ``e2e_tps``: ``output_tokens / duration_s`` where ``duration_s`` is the
   wall-clock request duration. Always available when tokens and duration
   are recorded.
-- ``ttft_s``: ``timings.first_business_ms / 1000`` (time to first token).
+- ``ttft_s``: legacy key for ``timings.first_business_ms / 1000`` (time to
+  first business event, not necessarily the first text token).
 """
 from __future__ import annotations
 
@@ -31,7 +33,7 @@ VOLATILE_FIELDS = frozenset({
     "type", "timestamp", "end_timestamp", "request_id", "status", "success",
     "duration", "error", "messages_count", "input_tokens", "output_tokens",
     "cached_tokens", "response_content", "response_tool_calls", "reasoning_content",
-    "cost_info", "upstream_usage", "streaming",
+    "cost_info", "upstream_usage", "streaming", "stream", "response_message",
     # Performance measurements / derived values: differ on every run.
     "timings", "total_tokens",
     "cached_cost", "input_cost", "output_cost", "total_cost", "currency",
@@ -45,10 +47,8 @@ VOLATILE_FIELDS = frozenset({
     "request_params",
 })
 
-# Attribution fields: they do not change the prompt bytes, but cache
-# namespaces are usually isolated per session/caller, so a mismatch here
-# means the two requests may never have shared cache in the first place.
-# Compared separately in compare_identity(), not in compare_params().
+# Attribution fields describe the gateway caller/session, not the upstream's
+# cache namespace. Compare them separately from the recorded prompt content.
 IDENTITY_FIELDS = ("conversation_id", "session_id", "user_id", "caller_id", "caller_name")
 
 #: Radius (chars) of the context window shown around the first difference.
@@ -165,6 +165,7 @@ def compare_messages(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]
     candidate break point, everything after it cannot hit cache even when
     identical.
     """
+    available = all(isinstance(log.get("request_messages"), list) for log in (old, new))
     old_messages = old.get("request_messages") or []
     new_messages = new.get("request_messages") or []
     common = min(len(old_messages), len(new_messages))
@@ -188,8 +189,8 @@ def compare_messages(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]
             break
 
     strict_append = (
-        len(new_messages) >= len(old_messages)
-        and old_messages == new_messages[:len(old_messages)]
+        available and len(new_messages) >= len(old_messages)
+        and first_difference is None
     )
     appended = []
     if strict_append:
@@ -203,10 +204,11 @@ def compare_messages(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]
             })
 
     return {
+        "available": available,
         "old_count": len(old_messages),
         "new_count": len(new_messages),
         "common_count": common,
-        "common_identical": first_difference is None,
+        "common_identical": available and first_difference is None,
         "first_difference": first_difference,
         "strict_append": strict_append,
         "appended": appended,
@@ -221,9 +223,10 @@ def compare_tools(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     logs only keep counts/hashes, older logs keep nothing), so a tool change
     cannot be ruled out as the cache-break cause.
     """
+    old, new = (_parameter_view(log) for log in (old, new))
     old_tools = old.get("tools")
     new_tools = new.get("tools")
-    if old_tools is not None or new_tools is not None:
+    if old_tools is not None and new_tools is not None:
         old_list = old_tools or []
         new_list = new_tools or []
         same = canonical(old_list) == canonical(new_list)
@@ -238,8 +241,8 @@ def compare_tools(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
         if not same:
             for index, (left, right) in enumerate(zip(old_list, new_list)):
                 if canonical(left) != canonical(right):
-                    left_fn = left.get("function", {}) if isinstance(left, dict) else {}
-                    right_fn = right.get("function", {}) if isinstance(right, dict) else {}
+                    left_fn = left.get("function", left) if isinstance(left, dict) else {}
+                    right_fn = right.get("function", right) if isinstance(right, dict) else {}
                     result["first_difference"] = {
                         "index": index,
                         "old_name": left_fn.get("name") if isinstance(left_fn, dict) else None,
@@ -274,7 +277,10 @@ def compare_tools(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
 
 def compare_params(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Compare all non-volatile top-level fields except messages/tools/identity."""
-    keys = sorted((set(old) | set(new)) - VOLATILE_FIELDS - {"request_messages", "tools"} - set(IDENTITY_FIELDS))
+    old, new = (_parameter_view(log) for log in (old, new))
+    keys = sorted((set(old) | set(new)) - VOLATILE_FIELDS - {
+        "request_messages", "tools", "tools_sha256", "tools_names", "tools_count",
+    } - set(IDENTITY_FIELDS))
     differences = []
     for key in keys:
         if canonical(old.get(key)) != canonical(new.get(key)):
@@ -284,6 +290,15 @@ def compare_params(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
                 "new": short_repr(new.get(key)),
             })
     return {"same": not differences, "differences": differences}
+
+
+def _parameter_view(log: dict[str, Any]) -> dict[str, Any]:
+    """Include legacy nested parameters and the logger's collision prefixes."""
+    view = dict(log.get("request_params") or {})
+    view.update(log)
+    view.update({key[len("request_param_"):]: value for key, value in log.items()
+                 if key.startswith("request_param_")})
+    return {key: value for key, value in view.items() if not key.startswith("request_param_")}
 
 
 def compare_identity(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
@@ -313,24 +328,27 @@ def infer(messages: dict[str, Any], tools: dict[str, Any],
     if not identity.get("same", True):
         differing = [f["key"] for f in identity.get("fields", []) if not f["same"]]
         conclusions.append(
-            f"两条请求的归属不同（{', '.join(differing)}），缓存空间可能本来就不共享，跨请求命中本就难以期待。"
+            f"两条请求的归属不同（{', '.join(differing)}）；日志中的归属不能直接确定上游缓存空间是否共享。"
         )
+    if not messages.get("available", True):
+        conclusions.append("至少一条日志未记录完整请求消息，无法判断共享前缀是否保留。")
     if tools_status == "unknown":
-        conclusions.append("工具定义未被记录：不能排除工具变化导致缓存断裂。")
+        conclusions.append("工具定义记录不完整：不能排除工具变化影响缓存命中。")
     if new_cached < old_cached:
-        if messages.get("strict_append") and tools_status is not False and params.get("same"):
-            conclusions.append("记录的消息历史没有破坏共享 prompt 前缀。")
-            if tools_status == "unknown":
-                conclusions.append("但工具定义未记录：已记录消息之外的上游工具变化仍可能是原因。")
-            conclusions.append("缓存断裂发生在模型生成之前、上游侧，而非已记录的消息历史内部。")
-            conclusions.append("最可能的原因：缓存分片/后端重分配、部分缓存淘汰或提供商侧缓存过期。")
-            conclusions.append("非零残留前缀意味着更早的共享前缀块仍在，而靠后的会话相关块已不在。")
-            conclusions.append("仅凭日志无法区分分片重分配与淘汰，因为没有记录缓存节点/分片/指纹。")
-        else:
-            if messages.get("common_identical") and messages.get("first_difference") is None:
-                conclusions.append("公共消息前缀逐字节一致，缓存下降来自请求长度、归属或上游侧因素，而非消息内容被改动。")
-            else:
-                conclusions.append("缓存下降的同时请求内容也发生了变化，上方第一个差异点即为候选断裂位置。")
+        if tools_status == "different":
+            conclusions.append("工具定义发生变化，可能影响共享 prompt 前缀，是缓存下降的候选原因。")
+        if not params.get("same"):
+            conclusions.append("已记录的请求参数发生变化，需要结合参数差异判断缓存影响。")
+        if messages.get("first_difference") is not None:
+            conclusions.append("请求消息发生变化，上方第一个差异点即为候选断裂位置。")
+        elif messages.get("strict_append"):
+            conclusions.append("已记录的消息保留了旧请求前缀。")
+        elif messages.get("common_identical"):
+            conclusions.append("公共消息前缀一致，但新请求的消息历史被截短，输入长度变化可能影响命中数。")
+        if (messages.get("strict_append") and tools_status == "identical"
+                and params.get("same") and identity.get("same")):
+            conclusions.append("已记录内容中未发现共享前缀变化；上游侧路由变化、缓存淘汰或过期均是可能原因。")
+        conclusions.append("日志只反映已记录内容和命中数量，无法据此确定上游缓存节点、有效期或实际命中的前缀。")
     else:
         conclusions.append("两条日志之间未检测到缓存回退。")
     return conclusions
@@ -364,7 +382,7 @@ def _positive_number(value: Any) -> Optional[float]:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if number > 0 else None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def compute_tps(details: dict[str, Any]) -> dict[str, Any]:
@@ -402,8 +420,11 @@ def compute_tps(details: dict[str, Any]) -> dict[str, Any]:
     # business event, which makes decode_tps look absurdly high. Flag it so
     # the UI can point at the end-to-end number instead.
     caveat: Optional[str] = None
-    if decode_tps is not None and duration_s and output_s and output_s < duration_s / 10:
-        caveat = "输出阶段远短于总耗时（多为非流式响应），解码速度仅供参考，以端到端速度为准。"
+    streaming = details.get("streaming", details.get("stream"))
+    if streaming is False:
+        caveat = "非流式响应无法测得解码速度；输出阶段速度仅为收尾阶段比值，请参考端到端速度。"
+    elif decode_tps is not None and duration_s and output_s and output_s < duration_s / 10:
+        caveat = "输出阶段远短于总耗时，其平均速度可能偏高，请结合端到端速度判断。"
 
     return {
         "output_tokens": output_tokens,

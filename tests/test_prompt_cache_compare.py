@@ -1,5 +1,6 @@
 """Tests for utils.prompt_cache_compare and the monitor compare route."""
 import time
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -116,10 +117,10 @@ def test_cache_summary_hit_rate_and_delta():
 
 
 def test_infer_upstream_break_when_history_intact():
-    old = _log("a", [{"role": "user", "content": "hi"}], cached=500)
+    old = _log("a", [{"role": "user", "content": "hi"}], cached=500, tools=[])
     new = _log("b", [{"role": "user", "content": "hi"},
                      {"role": "assistant", "content": "yo"},
-                     {"role": "user", "content": "again"}], cached=100)
+                     {"role": "user", "content": "again"}], cached=100, tools=[])
     result = compare(old, new)
     assert any("上游侧" in line for line in result["inference"])
     assert result["summary"]["cached_delta"] == -400
@@ -192,3 +193,67 @@ def test_compare_endpoint_wired_on_router():
     response = client.get("/api/monitor/compare?a=x&b=x")
     assert response.status_code == 400
     assert "不同" in response.json()["detail"]
+
+
+def test_changed_tools_do_not_imply_cache_eviction():
+    old = _log('a', [], cached=500, tools=[{'type': 'function', 'name': 'old'}])
+    new = _log('b', [], cached=100, tools=[{'type': 'function', 'name': 'new'}])
+    result = compare(old, new)
+    assert result['tools']['first_difference']['new_name'] == 'new'
+    assert any('工具定义发生变化' in line for line in result['inference'])
+    assert not any('淘汰' in line for line in result['inference'])
+    assert result['params']['same']
+
+
+def test_missing_messages_and_one_sided_tools_are_unknown():
+    old, new = _log('a', [], cached=500, tools=[]), _log('b', [], cached=100)
+    old.pop('request_messages')
+    result = compare(old, new)
+    assert result['messages']['available'] is False
+    assert result['messages']['strict_append'] is False
+    assert result['tools']['status'] == 'unknown'
+    assert not any('淘汰' in line for line in result['inference'])
+
+
+def test_serialization_order_cannot_be_both_different_and_strict_append():
+    result = compare_messages(_log('a', [{'role': 'user', 'content': 'hello'}]),
+                              _log('b', [{'content': 'hello', 'role': 'user'}]))
+    assert result['first_difference'] is not None
+    assert result['strict_append'] is False
+
+
+def test_params_exclude_response_and_compare_legacy_nested_values():
+    old = _log('a', [], response_message={'content': 'first'},
+               request_params={'top_p': .5, 'stream': True})
+    new = _log('b', [], response_message={'content': 'second'}, top_p=.9, stream=False)
+    assert compare_params(old, new)['differences'] == [{'key': 'top_p', 'old': '0.5', 'new': '0.9'}]
+    old['request_param_top_p'] = .9
+    assert compare_params(old, new)['same']
+
+
+@pytest.mark.parametrize('output_ms', [50, 2000, None])
+def test_explicit_nonstreaming_always_explains_speed_limits(output_ms):
+    tps = compute_tps({'streaming': False, 'output_tokens': 200, 'duration': 10,
+                       'timings': {'output_ms': output_ms}})
+    assert '非流式响应无法测得解码速度' in tps['caveat']
+    assert tps['e2e_tps'] == 20
+
+
+def test_compare_cpu_work_runs_outside_event_loop(monkeypatch):
+    import asyncio
+    import threading
+    from routes import monitor_routes
+    from utils import prompt_cache_compare
+    event_loop_thread = threading.get_ident()
+
+    def worker_compare(old, new):
+        assert threading.get_ident() != event_loop_thread
+        return {'old_ref': old, 'new_ref': new}
+
+    class FakeMonitoring:
+        def get_request_details(self, request_id):
+            return {'request_id': request_id}
+
+    monkeypatch.setattr(prompt_cache_compare, 'compare', worker_compare)
+    result = asyncio.run(monitor_routes.compare_request_logs(FakeMonitoring(), 'a', 'b'))
+    assert result['requested'] == {'a': 'a', 'b': 'b'}

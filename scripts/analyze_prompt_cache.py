@@ -75,7 +75,9 @@ def report_messages(old: dict[str, Any], new: dict[str, Any]) -> tuple[bool, Any
             print(f"  new context: {first['new_context']}")
 
     strict_append = result["strict_append"]
-    if first is None:
+    if not result['available']:
+        print("UNKNOWN: complete request messages are missing")
+    elif first is None:
         print("common messages are byte-for-byte identical after canonical JSON serialization")
     print(f"new request is a strict append of old messages: {strict_append}")
     if strict_append:
@@ -135,7 +137,7 @@ def report_request_parameters(old: dict[str, Any], new: dict[str, Any]) -> bool:
     result = compare_params(old, new)
     print("\n[Cache-relevant request parameters]")
     for difference in result["differences"]:
-        print(f"DIFFERENT {difference['key']}: old={old.get(difference['key'])!r}, new={new.get(difference['key'])!r}")
+        print(f"DIFFERENT {difference['key']}: old={difference['old']}, new={difference['new']}")
     if not result["differences"]:
         print("all recorded non-volatile parameters are identical")
     return result["same"]
@@ -151,29 +153,16 @@ def report_identity(old: dict[str, Any], new: dict[str, Any]) -> bool:
         flag = "SAME" if field["same"] else "DIFFERENT"
         print(f"{flag} {field['key']}: old={old.get(field['key'])!r}, new={new.get(field['key'])!r}")
     if not result["same"]:
-        print("NOTE: cache namespaces are usually isolated per session/caller; "
+        print("NOTE: gateway attribution alone does not identify upstream cache namespaces; "
               "mismatched attribution may mean the two requests never shared cache.")
     return result["same"]
 
 
 def infer(strict_append: bool | None, tools_same: bool | None, params_same: bool, old: dict[str, Any], new: dict[str, Any]) -> None:
-    old_cached = cached_tokens(old)
-    new_cached = cached_tokens(new)
+    """Keep the legacy entry point while sharing the monitor's evidence rules."""
     print("\n[Inference]")
-    if tools_same is None:
-        print("Tool definitions were NOT recorded: tool changes cannot be ruled out.")
-    if strict_append and tools_same is not False and params_same and new_cached < old_cached:
-        print("The recorded message history did not break the shared prompt prefix.")
-        if tools_same is None:
-            print("BUT tool definitions are unrecorded: a tool change upstream of the logged messages can still be the cause.")
-        print("The cache discontinuity occurred upstream, before model generation, not inside the logged message history.")
-        print("Most likely causes: cache-shard/backend reassignment, partial cache eviction, or provider-side cache expiration.")
-        print("A surviving non-zero prefix means an earlier/shared prefix block was present while later conversation-specific blocks were absent.")
-        print("The log alone cannot distinguish shard reassignment from eviction because no cache node/shard/fingerprint is recorded.")
-    elif new_cached < old_cached:
-        print("The cache fell and the request payload also changed. Inspect the first difference above as the candidate break point.")
-    else:
-        print("No cache regression was detected between these files.")
+    for conclusion in compare(old, new)["inference"]:
+        print(conclusion)
 
 
 def timeline(directory: Path, model: str | None) -> None:

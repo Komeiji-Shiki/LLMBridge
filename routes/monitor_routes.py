@@ -418,7 +418,7 @@ async def compare_request_logs(monitoring_service, request_a: str, request_b: st
         old_detail, new_detail = detail_b, detail_a
     else:
         old_detail, new_detail = detail_a, detail_b
-    result = compare(old_detail, new_detail)
+    result = await asyncio.to_thread(compare, old_detail, new_detail)
     result["requested"] = {"a": request_a, "b": request_b}
     return result
 
