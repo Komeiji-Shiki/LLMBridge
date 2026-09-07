@@ -18,7 +18,7 @@ import time
 import uuid
 import base64
 import copy
-from core.request_context import current_request
+from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 from urllib.parse import quote
@@ -120,7 +120,18 @@ from services.request_execution import retry_before_output
 
 class DirectAPIService:
     """Direct API调用服务"""
-    
+
+    @classmethod
+    def _apply_context_upstream_headers(cls, request_headers: Dict[str, str]) -> None:
+        """转发客户端提供的端到端请求头，不为缺失字段生成替代值。"""
+        context = current_request.get()
+        context_headers = getattr(context, 'upstream_headers', None) if context else None
+        if not isinstance(context_headers, dict):
+            return
+        for name, value in context_headers.items():
+            if str(name).lower() not in UPSTREAM_HEADER_EXCLUSIONS:
+                request_headers[name] = value
+
     @staticmethod
     def _convert_oai_tools_to_gemini(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -384,6 +395,7 @@ class DirectAPIService:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
+        self._apply_context_upstream_headers(headers)
         
         logger.info(f"[DIRECT_API] 调用API: {endpoint}")
         logger.info(f"[DIRECT_API] 模型: {model}, 流式: {stream}")
@@ -1363,6 +1375,8 @@ class DirectAPIService:
             if endpoint_lower.endswith("/messages") or endpoint_lower == "/messages":
                 request_headers["x-api-key"] = api_key
                 request_headers.setdefault("anthropic-version", "2023-06-01")
+
+        self._apply_context_upstream_headers(request_headers)
         
         # 合并额外的请求头
         if headers:

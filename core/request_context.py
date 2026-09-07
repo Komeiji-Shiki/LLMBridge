@@ -7,6 +7,17 @@ import time
 import uuid
 
 
+UPSTREAM_HEADER_EXCLUSIONS = frozenset({
+    # 连接级/代理级头不能跨越到上游连接
+    'connection', 'content-encoding', 'content-length', 'content-md5',
+    'digest', 'expect', 'host', 'keep-alive', 'proxy-authenticate',
+    'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade',
+    # 桥接层本地凭据和控制信息
+    'authorization', 'cookie', 'x-api-key', 'x-goog-api-key',
+    'x-web-access-key', 'x-bridge-request-id', 'x-bridge-session-id',
+})
+
+
 @dataclass
 class RequestContext:
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -25,6 +36,7 @@ class RequestContext:
     transport_depth: int = 0
     credential_fingerprint: str = ''
     artifacts: dict = field(default_factory=dict)
+    upstream_headers: dict = field(default_factory=dict)
     upstream_request: dict = field(default_factory=dict)
     outcome: dict = field(default_factory=dict)
     responses_history: object | None = None

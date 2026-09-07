@@ -9,11 +9,15 @@ import logging
 import re
 from starlette.responses import JSONResponse
 from core.config_loader import get_setting
-from core.request_context import RequestContext, current_request, endpoint_identity
+from core.request_context import RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request, endpoint_identity
 from core.conversation_store import conversation_store
 from services.protocol_events import payloads, is_business_event
 
 logger = logging.getLogger(__name__)
+
+def _should_capture_upstream_header(name: str) -> bool:
+    """保留端到端请求头，只过滤代理控制和不可复用的传输头。"""
+    return name.lower() not in UPSTREAM_HEADER_EXCLUSIONS
 
 
 class GatewayRequestMiddleware:
@@ -29,6 +33,11 @@ class GatewayRequestMiddleware:
         if session and not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', session):
             return await JSONResponse({'error': {'message': 'Invalid X-Bridge-Session-ID'}}, 400)(scope, receive, send)
         context = RequestContext()
+        context.upstream_headers = {
+            name.decode('ascii').lower(): value.decode('latin-1')
+            for name, value in headers.items()
+            if _should_capture_upstream_header(name.decode('ascii'))
+        }
         if session:
             context.session_id, context.explicit_session = session, True
         token = current_request.set(context)
