@@ -344,9 +344,11 @@ async function clearTokenizerCache() {
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', () => {
     initNavigation();
+    initializeUsageDateRange();
 
     // 🔧 优化：后端查询已异步化（asyncio.to_thread），所有请求可以并行发起
-    refreshOverview();
+    refreshOverview({ includeRates: false });
+    refreshTokenStats();
     refreshMemoryInfo();
     refreshRequestStats();
     

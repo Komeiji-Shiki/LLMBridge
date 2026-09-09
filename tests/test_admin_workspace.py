@@ -400,7 +400,7 @@ def test_codex_usage_source_controls_charts_rows_and_export(ui):
     assert 'Codex' in page.locator('#codex-usage-status').inner_text()
     page.locator('#usage-source').select_option('codex')
     page.wait_for_function("document.getElementById('total-tokens-value').textContent === '110'")
-    assert page.locator('#total-cost-value').inner_text() == '未提供'
+    assert page.locator('#total-cost-value').inner_text() == '未定价'
     assert page.locator('.model-stat-checkbox').count() == 0
     assert page.locator('#token-stats-table tbody button').count() == 0
     assert page.locator('#costTrendChart').is_hidden()
@@ -417,3 +417,73 @@ def test_codex_usage_source_controls_charts_rows_and_export(ui):
     assert page.locator('.model-stat-checkbox').count() == 1
     assert page.locator('#total-cost-value').inner_text() == '$1.0000'
     assert page.locator('#costTrendChart').is_visible()
+
+
+def test_estimated_cost_currency_chart_reuse_and_mobile_layout(ui):
+    from core.codex_pricing import price_metadata
+    page, _, _, _ = ui
+    data = {'source': 'all', 'cost_scope': 'combined_estimate', 'unpriced_tokens': 10,
+            'model_stats': [{'model': 'gpt-6-astra', 'source': 'codex', 'cost_kind': 'estimated',
+                             'input_tokens': 100000, 'output_tokens': 1000, 'total_tokens': 101000,
+                             'request_count': 0, 'event_count': 1, 'total_cost': 1, 'currency': 'USD'}],
+            'daily_stats': [{'date': '2026-09-08', 'input_tokens': 100000, 'output_tokens': 1000,
+                             'total_tokens': 101000, 'cost_usd': 1, 'cost_cny': 7.2}],
+            'total_tokens': 101000, 'total_input_tokens': 100000, 'total_output_tokens': 1000,
+            'cost_usd': {'total_cost': 1, 'input_cost': .5, 'cached_cost': .1, 'output_cost': .4},
+            'cost_cny': {'total_cost': 7.2, 'input_cost': 3.6, 'cached_cost': .72, 'output_cost': 2.88},
+            'pricing': {**price_metadata(), 'unpriced_models': ['codex-auto-review']}}
+    page.route('**/api/admin/token_stats?*', lambda route: route.fulfill(json=data))
+    page.locator('[data-page="overview"]').click()
+    page.evaluate('refreshTokenStats()')
+    page.wait_for_function("document.getElementById('total-cost-value').textContent === '≥ $1.0000'")
+    assert page.locator('#total-cost-value').inner_text() == '≥ $1.0000'
+    assert page.locator('#cached-cost-value').inner_text() == '$0.1000'
+    page.locator('.pricing-details summary').click()
+    assert 'codex-auto-review' in page.locator('#codex-pricing-details').inner_text()
+    stable = page.evaluate('''async () => {
+        const before = tokenInputBarChart;
+        await refreshTokenStats();
+        return tokenInputBarChart === before;
+    }''')
+    assert stable
+    page.locator('#cost-currency-cny').click()
+    assert page.locator('#total-cost-value').inner_text() == '≥ ¥7.2000'
+    assert page.evaluate('costTrendChart.data.datasets[0].data[0]') == 7.2
+    page.locator('[data-view="pie"]').click()
+    assert page.locator('#tokenInputPieChart').is_visible()
+    assert page.locator('#tokenInputBarChart').is_hidden()
+    page.set_viewport_size({'width': 390, 'height': 844})
+    assert page.evaluate('document.documentElement.scrollWidth') <= 390
+    assert page.locator('#token-stats-table .table-scroll').evaluate('el => el.scrollWidth > el.clientWidth')
+
+
+def test_home_statistics_do_not_wait_for_overview_and_quick_ranges(ui):
+    from datetime import date, timedelta
+    from urllib.parse import parse_qs
+    page, _, _, _ = ui
+    queries, pending = [], []
+    def stats(route):
+        queries.append(parse_qs(urlparse(route.request.url).query))
+        route.fulfill(json={'total_tokens': 12345, 'model_stats': [], 'daily_stats': []})
+    page.route('**/api/admin/token_stats?*', stats)
+    page.route('**/api/admin/overview', lambda route: pending.append(route))
+    page.reload(wait_until='domcontentloaded')
+    page.wait_for_function("document.getElementById('total-tokens-value').textContent === '12.3K'")
+    assert pending
+    today = date.today()
+    assert queries[-1]['start_date'] == [(today - timedelta(days=29)).isoformat()]
+    assert queries[-1]['background'] == ['true']
+    for days in (7, 1):
+        with page.expect_request('**/api/admin/token_stats?*'):
+            page.locator(f'.usage-range [data-days="{days}"]').click()
+        assert page.locator('#token-start-date').input_value() == (today - timedelta(days=days - 1)).isoformat()
+        assert page.locator('#token-end-date').input_value() == today.isoformat()
+    with page.expect_request('**/api/admin/token_stats?*') as request:
+        page.locator('.usage-range [data-days="all"]').click()
+    assert 'start_date' not in parse_qs(urlparse(request.value.url).query)
+    assert page.locator('#token-start-date').input_value() == ''
+    token_chart = page.locator('#tokenTrendChart').bounding_box()
+    cost_chart = page.locator('#costTrendChart').bounding_box()
+    assert cost_chart['y'] > token_chart['y'] + token_chart['height']
+    for route in pending:
+        route.fulfill(json={'active_requests': [], 'stats': {}, 'mode': {}, 'total_models': 0, 'total_tabs': 0})

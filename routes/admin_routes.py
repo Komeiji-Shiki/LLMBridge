@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from core.config_loader import (
@@ -21,6 +21,7 @@ from core.model_archive import (
 from core.app_state import get_app_state
 from core.db_stats import stats_db, get_exchange_rates
 from .admin_usage import selected_usage, usage_csv
+from utils.async_singleflight import AsyncSingleFlight
 from modules.monitoring import monitoring_service, MonitorConfig
 from modules.token_counter import (
     estimate_message_tokens, estimate_tokens, get_token_counter_info,
@@ -89,6 +90,7 @@ async def write_text_file(path: str, content: str) -> None:
 
 # 🔧 性能修复：改为 asyncio.Lock，避免在 async 函数中阻塞事件循环
 _ADMIN_STATS_CACHE_LOCK = asyncio.Lock()
+_TOKEN_STATS_QUERIES = AsyncSingleFlight()
 
 # 改用 TTLCache 防止缓存无限增长（旧版裸 dict 无上限，换区间永久留一条）
 from cachetools import TTLCache
@@ -118,6 +120,7 @@ async def _set_admin_cached_response(cache_name: str, cache_key: str, value):
 async def _invalidate_admin_stats_cache():
     """模型写操作后清空统计缓存：改价/改模型立即在面板生效，不用等 TTL。"""
     async with _ADMIN_STATS_CACHE_LOCK:
+        _TOKEN_STATS_QUERIES.invalidate()
         for bucket in _ADMIN_STATS_CACHE.values():
             bucket.clear()
 
@@ -986,12 +989,17 @@ async def get_token_stats(
     filter_start = start_time or start_date
     filter_end = end_time or end_date
 
-    cache_key = _build_admin_cache_key(filter_start, filter_end, rpm_period, stats_db.enabled)
+    cache_key = _build_admin_cache_key(filter_start, filter_end, rpm_period, stats_db.enabled, _TOKEN_STATS_QUERIES.generation)
     cached_response = await _get_admin_cached_response("token_stats", cache_key)
     if cached_response is not None:
         logger.debug("[TOKEN_STATS] 命中短时缓存")
         return cached_response
 
+    return await _TOKEN_STATS_QUERIES.run(cache_key, lambda: _query_token_stats(
+        stats_db, monitoring_service, MODEL_ENDPOINT_MAP, filter_start, filter_end, rpm_period, cache_key))
+
+
+async def _query_token_stats(stats_db, monitoring_service, MODEL_ENDPOINT_MAP, filter_start, filter_end, rpm_period, cache_key):
     # 优先使用 SQLite 数据库
     # 🔧 修复：旧版只在 SQLite 命中时 return，未启用 / 查询为空 / 抛异常时
     # 分别落到函数末尾隐式返回 None（前端拿到 null 后 data.total_tokens 直接
@@ -1618,7 +1626,8 @@ async def set_sticky_key_endpoint(request: Request):
 @router.get("/api/admin/token_stats")
 async def get_token_stats_endpoint(start_date: Optional[str] = None, end_date: Optional[str] = None,
                                    start_time: Optional[str] = None, end_time: Optional[str] = None,
-                                   rpm_period: Optional[str] = None, source: str = 'all', force: bool = False):
+                                   rpm_period: Optional[str] = None, source: str = 'all', force: bool = False,
+                                   background: bool = False):
     if source not in ('all', 'bridge', 'codex'):
         raise HTTPException(status_code=422, detail='用量来源必须是 all、bridge 或 codex')
     filter_start, filter_end = start_time or start_date, end_time or end_date
@@ -1634,7 +1643,7 @@ async def get_token_stats_endpoint(start_date: Optional[str] = None, end_date: O
         start_date, end_date, start_time, end_time, rpm_period, stats_db,
         monitoring_service, MODEL_ENDPOINT_MAP, estimate_message_tokens, estimate_tokens
     )
-    return await selected_usage(bridge, source, filter_start, filter_end, force)
+    return await selected_usage(bridge, source, filter_start, filter_end, force, background)
 
 
 @router.get("/api/admin/export_report")
@@ -1674,12 +1683,14 @@ async def warmup_admin_cache():
     await asyncio.sleep(0.5)
     try:
         logger.info("🔥 预热 admin 首屏缓存...")
-        # 预热 overview（含 SQLite 汇总查询）
-        await get_overview_endpoint()
-        # 预热 token_stats（最重的查询：多个 GROUP BY + 成本计算）
-        await get_token_stats_endpoint(rpm_period='day')
-        # 预热 request_stats
-        await get_request_stats_endpoint()
+        # 与首页默认范围一致，独立查询并行预热，Codex 扫描不阻塞首屏。
+        end = datetime.now().date()
+        start = (end - timedelta(days=29)).isoformat()
+        await asyncio.gather(
+            get_overview_endpoint(),
+            get_token_stats_endpoint(start_date=start, end_date=end.isoformat(), rpm_period='day', background=True),
+            get_request_stats_endpoint(start_date=start, end_date=end.isoformat()),
+        )
         logger.info("🔥 admin 首屏缓存预热完成")
     except Exception as e:
         logger.warning(f"⚠️ admin 缓存预热失败（不影响使用）: {e}")

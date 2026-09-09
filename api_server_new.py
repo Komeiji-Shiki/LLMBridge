@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # 内部模块导入
 from modules.monitoring import monitoring_service  # noqa: E402
-from utils.task_registry import spawn  # noqa: E402
+from utils.task_registry import spawn, cancel_background_tasks  # noqa: E402
 
 # Core模块
 from core.config_loader import (  # noqa: E402
@@ -185,17 +185,20 @@ async def lifespan(app: FastAPI):
     # 🔥 预热 admin 首屏缓存（异步后台，不阻塞启动）
     spawn(admin_routes.warmup_admin_cache(), name="warmup-admin-cache")
 
-    yield
-
-    # 保存 API Key 统计数据
-    api_key_manager.save_now()
-
-    if server_state.direct_api_service:
-        await server_state.direct_api_service.close()
-    if server_state.aiohttp_session:
-        await server_state.aiohttp_session.close()
-    logger.info("服务器正在关闭。")
-    shutdown_async_logging()
+    try:
+        yield
+    finally:
+        # 后台任务停止后再关闭共享连接，避免关闭期间继续发起请求。
+        await cancel_background_tasks()
+        try:
+            await asyncio.to_thread(api_key_manager.save_now)
+        finally:
+            if server_state.direct_api_service:
+                await server_state.direct_api_service.close()
+            if server_state.aiohttp_session:
+                await server_state.aiohttp_session.close()
+            logger.info("服务器正在关闭。")
+            shutdown_async_logging()
 
 
 app = FastAPI(lifespan=lifespan)

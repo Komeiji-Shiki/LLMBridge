@@ -8,6 +8,7 @@ let currentCostCurrency = 'USD';
 
 // 缓存最新的 token stats 数据（用于货币切换时无需重新请求）
 let latestTokenStatsData = null;
+const tokenStatsRefresh = { serial: 0, controller: null, pollTimer: null };
 
 // 汇率常量（与后端保持一致）
 const EXCHANGE_RATE = { USD_TO_CNY: 7.2, CNY_TO_USD: 1.0 / 7.2 };
@@ -15,6 +16,7 @@ const EXCHANGE_RATE = { USD_TO_CNY: 7.2, CNY_TO_USD: 1.0 / 7.2 };
 // 切换成本显示货币
 function switchCostCurrency(currency) {
     currentCostCurrency = currency;
+    costCurrencyDisplay = currency;
     
     // 更新按钮样式
     document.getElementById('cost-currency-usd').className =
@@ -26,16 +28,19 @@ function switchCostCurrency(currency) {
     if (latestTokenStatsData) {
         updateCostDisplay(latestTokenStatsData);
         renderTokenStatsTable(latestTokenStatsData.model_stats);
+        renderCostTrendChart(latestTokenStatsData.daily_stats || []);
     }
+    const title = document.getElementById('cost-trend-title');
+    if (title) title.textContent = `每日金额 (${currency})`;
 }
 
 // 更新成本卡片显示（根据当前选中货币）
 function updateCostDisplay(data) {
     if (data.cost_scope === 'unavailable') {
-        for (const id of ['total-cost-value', 'input-cost-value', 'output-cost-value']) {
-            document.getElementById(id).textContent = '未提供';
+        for (const id of ['total-cost-value', 'input-cost-value', 'cached-cost-value', 'output-cost-value']) {
+            document.getElementById(id).textContent = '未定价';
         }
-        document.getElementById('total-cost-currency').textContent = 'Codex 本地日志无账单金额';
+        document.getElementById('total-cost-currency').textContent = '没有可用的公开标准价格';
         return;
     }
     const symbol = currentCostCurrency === 'CNY' ? '¥' : '$';
@@ -64,9 +69,12 @@ function updateCostDisplay(data) {
         }
     }
     
-    document.getElementById('total-cost-value').textContent = symbol + totalCost.toFixed(4);
+    const qualifier = data.unpriced_tokens ? '≥ ' : data.cost_scope?.includes('estimate') ? '≈ ' : '';
+    document.getElementById('total-cost-value').textContent = qualifier + symbol + totalCost.toFixed(4);
     document.getElementById('total-cost-currency').textContent = currLabel;
     document.getElementById('input-cost-value').textContent = symbol + inputCost.toFixed(4);
+    const cachedCost = (currentCostCurrency === 'CNY' ? data.cost_cny?.cached_cost : data.cost_usd?.cached_cost) || 0;
+    document.getElementById('cached-cost-value').textContent = symbol + cachedCost.toFixed(4);
     document.getElementById('output-cost-value').textContent = symbol + outputCost.toFixed(4);
 }
 
@@ -131,6 +139,7 @@ function updateOverallRatesFromCachedData() {
 
 async function refreshOverview(options = {}) {
     const { includeRates = true } = options;
+    if (includeRates) refreshTokenStats();
     try {
         const response = await fetch('/api/admin/overview');
         
@@ -173,7 +182,7 @@ async function refreshOverview(options = {}) {
                 </div>
                 <div><strong>浏览器状态:</strong> <span class="badge ${data.browser_connected ? 'badge-success' : 'badge-danger'}">${data.browser_connected ? '在线' : '离线'}</span></div>
                 <div><strong>标签页数量:</strong> ${data.total_tabs}</div>
-                <div><strong>失败请求:</strong> ${data.stats.failed_requests}</div>
+                <div><strong>失败请求:</strong> ${data.stats.failed_requests || 0}</div>
             </div>
         `;
         document.getElementById('status-details').innerHTML = statusHtml;
@@ -203,10 +212,6 @@ async function refreshOverview(options = {}) {
         
         document.getElementById('active-requests-list').innerHTML = requestsHtml;
         
-        // 🔧 优化：refreshTokenStats 会同时更新 RPM/TPM 卡片
-        if (includeRates) {
-            refreshTokenStats();
-        }
         
     } catch (error) {
         console.error('❌ 刷新概览失败:', error);
@@ -216,6 +221,32 @@ async function refreshOverview(options = {}) {
 }
 
 // ==================== Token 统计 ====================
+function usageLocalDate(date) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function setUsageRange(days, refresh = true) {
+    const end = new Date();
+    const start = new Date(end);
+    if (days !== 'all') start.setDate(start.getDate() - Number(days) + 1);
+    currentStartDate = days === 'all' ? null : usageLocalDate(start);
+    currentEndDate = days === 'all' ? null : usageLocalDate(end);
+    document.getElementById('token-start-date').value = currentStartDate || '';
+    document.getElementById('token-end-date').value = currentEndDate || '';
+    document.querySelectorAll('.usage-range button').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.days === String(days)));
+    });
+    if (refresh) refreshTokenStats();
+}
+
+function initializeUsageDateRange() {
+    setUsageRange(30, false);
+    currentRequestStartDate = currentStartDate;
+    currentRequestEndDate = currentEndDate;
+    document.getElementById('request-start-date').value = currentRequestStartDate;
+    document.getElementById('request-end-date').value = currentRequestEndDate;
+}
+
 function applyDateFilter() {
     const startDate = document.getElementById('token-start-date').value;
     const endDate = document.getElementById('token-end-date').value;
@@ -227,23 +258,26 @@ function applyDateFilter() {
     
     currentStartDate = startDate || null;
     currentEndDate = endDate || null;
+    document.querySelectorAll('.usage-range button').forEach(button => button.setAttribute('aria-pressed', 'false'));
     refreshTokenStats();
 }
 
 function clearDateFilter() {
-    document.getElementById('token-start-date').value = '';
-    document.getElementById('token-end-date').value = '';
-    currentStartDate = null;
-    currentEndDate = null;
-    refreshTokenStats();
+    setUsageRange('all');
 }
 
 async function refreshTokenStats(force = false) {
+    const serial = ++tokenStatsRefresh.serial;
+    clearTimeout(tokenStatsRefresh.pollTimer);
+    tokenStatsRefresh.controller?.abort();
+    tokenStatsRefresh.controller = new AbortController();
+    for (const id of ['usage-refresh', 'usage-export']) document.getElementById(id).disabled = true;
     const source = document.getElementById('usage-source')?.value || 'all';
     try {
         let url = '/api/admin/token_stats';
         const params = new URLSearchParams();
         params.set('source', source);
+        params.set('background', 'true');
         if (force) params.set('force', 'true');
         const status = document.getElementById('codex-usage-status');
         if (status && source !== 'bridge') status.textContent = '正在读取 Codex 用量，首次扫描历史日志可能需要一些时间…';
@@ -257,7 +291,7 @@ async function refreshTokenStats(force = false) {
         
         if (params.toString()) url += '?' + params.toString();
         
-        const response = await fetch(url);
+        const response = await fetch(url, { signal: tokenStatsRefresh.controller.signal });
         
         if (!response.ok) {
             const errorText = await response.text();
@@ -273,24 +307,35 @@ async function refreshTokenStats(force = false) {
         
         const data = await response.json();
         // 来源切换后忽略旧请求，避免较慢的扫描覆盖当前选择。
-        if (source !== (document.getElementById('usage-source')?.value || 'all')) return;
+        if (serial !== tokenStatsRefresh.serial) return;
         if (status) {
             const usage = data.codex_usage;
             if (!usage) status.textContent = '';
             else if (usage.status?.errors?.length) {
                 status.textContent = 'Codex 部分数据读取失败，当前统计可能不完整。' + usage.status.errors.map(item => item.error).join('；');
+            } else if (usage.status?.refreshing && !usage.status?.available) {
+                status.textContent = 'Codex 正在首次导入，已先显示网关统计；导入完成后自动补齐。';
             } else if (!usage.status?.available) {
                 status.textContent = '服务所在机器未发现 Codex 会话日志。可通过 CODEX_HOME 或 CODEX_USAGE_HOMES 指定目录。';
             } else {
-                status.textContent = `Codex：${formatNumber(usage.total_tokens || 0)} Tokens · ${usage.session_count || 0} 个会话 · ${usage.event_count || 0} 条用量事件\n缓存输入 ${formatNumber(usage.cached_tokens || 0)} · 推理输出 ${formatNumber(usage.reasoning_tokens || 0)} · 缓存写入 ${formatNumber(usage.cache_write_tokens || 0)} · 已扫描 ${usage.status.files} 个日志文件 · ${new Date(usage.status.scanned_at * 1000).toLocaleString()}`;
+                const updated = usage.status.scanned_at ? new Date(usage.status.scanned_at * 1000).toLocaleString() : '已有本地索引';
+                status.textContent = `Codex · ${usage.session_count || 0} 个会话 · ${usage.event_count || 0} 条用量事件 · ${updated}\n缓存输入 ${formatNumber(usage.cached_tokens || 0)} · 推理输出 ${formatNumber(usage.reasoning_tokens || 0)}`;
+                if (usage.status.refreshing) status.textContent += ' · 正在后台检查更新';
                 status.title = (usage.status.directories || []).join('\n');
                 if (usage.excluded_usage?.event_count) {
                     status.textContent += `\n合计已排除经 LLMBridge 转发的 ${usage.excluded_usage.event_count} 条事件，共 ${formatNumber(usage.excluded_usage.total_tokens)} Tokens；Codex 单独视图保留完整用量。`;
                 }
             }
         }
+        if (data.codex_usage?.status?.refreshing) {
+            tokenStatsRefresh.pollTimer = setTimeout(() => {
+                if (!document.hidden && document.getElementById('overview').classList.contains('active')) refreshTokenStats();
+            }, 1500);
+        }
         const costNote = document.getElementById('usage-cost-note');
-        if (costNote) costNote.textContent = source === 'bridge' ? '' : '成本与请求成功率、RPM/TPM 仅统计 LLMBridge。Codex 缓存属于输入、推理属于输出，不重复相加；用量事件不等于网关请求。';
+        if (costNote) costNote.textContent = source === 'bridge' ? '金额采用网关记录中的历史价格。' : 'Codex 按当前公开标准 API 单价估算，不代表订阅实际扣费；快模式、工具和地区附加费未计入。未定价模型保留 Token，金额合计仅含已知价格部分。';
+        document.getElementById('total-cost-label').textContent = source === 'all' ? '已记录 + Codex 估算' : source === 'codex' ? 'Codex 估算金额' : '网关已记录金额';
+        renderCodexPricing(data);
         
         // 更新总计卡片
         const totalTokens = data.total_tokens || 0;
@@ -317,25 +362,27 @@ async function refreshTokenStats(force = false) {
         updateCostDisplay(data);
         
         // 渲染图表
-        renderTokenInputPieChart(data.model_stats);
-        renderTokenOutputPieChart(data.model_stats);
-        renderTokenInputBarChart(data.model_stats);
-        renderTokenOutputBarChart(data.model_stats);
+        renderTokenDistribution(data.model_stats);
         renderTokenTrendChart(data.daily_stats || []);
-        renderCostTrendChart(data.daily_stats || []);
-        const costChart = document.getElementById('costTrendChart');
-        if (costChart) costChart.parentElement.hidden = source === 'codex';
+        const costPanel = document.getElementById('cost-trend-panel');
+        if (costPanel) costPanel.hidden = data.cost_scope === 'unavailable';
+        if (!costPanel?.hidden) renderCostTrendChart(data.daily_stats || []);
         renderTokenStatsTable(data.model_stats);
         
         // 🔧 优化：从 Token 统计数据中直接推算总体 RPM/TPM，不再重复请求
         updateOverallRatesFromCachedData();
         
     } catch (error) {
+        if (error.name === 'AbortError' || serial !== tokenStatsRefresh.serial) return;
         const status = document.getElementById('codex-usage-status');
         if (status) status.textContent = '用量加载失败：' + error.message;
         console.error('❌ 刷新Token统计失败:', error);
         console.error('错误详情:', error.message);
         showMessage('danger', '刷新Token统计失败: ' + error.message);
+    } finally {
+        if (serial === tokenStatsRefresh.serial) {
+            for (const id of ['usage-refresh', 'usage-export']) document.getElementById(id).disabled = false;
+        }
     }
 
 }
@@ -583,4 +630,18 @@ async function deleteModelStats(modelName) {
         console.error('删除模型统计失败:', error);
         showMessage('danger', '删除失败: ' + error.message);
     }
+}
+
+function renderCodexPricing(data) {
+    const container = document.getElementById('codex-pricing-details');
+    const pricing = data.pricing;
+    container.parentElement.hidden = !pricing?.rates;
+    if (!pricing?.rates) return;
+    const unknown = pricing.unpriced_models || [];
+    const rows = Object.entries(pricing.rates).map(([model, rate]) => `
+        <tr><td><a href="https://developers.openai.com/api/docs/models/${encodeURIComponent(model)}" target="_blank" rel="noopener noreferrer">${escapeHtml(model)}</a></td>
+        <td>${rate.input}</td><td>${rate.cached_input}</td><td>${rate.output}</td><td>${rate.long_context ? '>272K' : '—'}</td></tr>`).join('');
+    container.innerHTML = `<p>价格核对日期：${escapeHtml(pricing.verified_at)}，单位 USD / 百万 Token。长上下文按模型规则计价，缓存属于输入、推理属于输出，不重复相加。</p>
+        ${unknown.length ? `<p>未定价：${unknown.map(escapeHtml).join('、')}，共 ${formatNumber(data.unpriced_tokens || 0)} Tokens。</p>` : '<p>当前所选范围的 Codex 模型均有公开价格。</p>'}
+        <table class="table"><thead><tr><th>模型 / 官方来源</th><th>普通输入</th><th>缓存输入</th><th>输出</th><th>长上下文</th></tr></thead><tbody>${rows}</tbody></table>`;
 }

@@ -47,3 +47,15 @@ def spawn(coro: Coroutine[Any, Any, Any], *, name: Optional[str] = None) -> "asy
 def pending_task_count() -> int:
     """当前仍在运行的后台任务数（用于监控/调试）。"""
     return len(_BACKGROUND_TASKS)
+
+
+async def cancel_background_tasks() -> None:
+    """关闭服务依赖前停止当前事件循环中的已注册后台任务。"""
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    tasks = [task for task in tuple(_BACKGROUND_TASKS)
+             if task is not current and task.get_loop() is loop]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)

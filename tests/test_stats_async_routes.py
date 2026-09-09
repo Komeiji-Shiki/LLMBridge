@@ -56,3 +56,19 @@ def test_admin_statistics_use_real_sqlite_instead_of_fallback(tmp_path, monkeypa
     fallback.assert_not_called()
     assert writer.get_request_details('actual-sqlite-row')['total_cost'] == 7.25
     writer.close()
+
+
+def test_concurrent_token_queries_share_database_work(monkeypatch):
+    from types import SimpleNamespace
+    from routes import admin_routes
+    async def query(*args):
+        await asyncio.sleep(.01)
+        return {'model_stats': [], 'total_tokens': 123}
+    database = SimpleNamespace(enabled=True, get_token_stats_async=AsyncMock(side_effect=query))
+    monkeypatch.setattr(admin_routes, '_get_admin_cached_response', AsyncMock(return_value=None))
+    monkeypatch.setattr(admin_routes, '_set_admin_cached_response', AsyncMock())
+    async def run():
+        return await asyncio.gather(*(admin_routes.get_token_stats(
+            None, None, None, None, 'day', database, None, {}, None, None) for _ in range(20)))
+    assert all(item['total_tokens'] == 123 for item in asyncio.run(run()))
+    database.get_token_stats_async.assert_awaited_once()

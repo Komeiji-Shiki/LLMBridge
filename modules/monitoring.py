@@ -25,7 +25,6 @@ import logging
 from pathlib import Path
 
 from utils.monitor_params import MONITOR_PARAM_EXCLUDED_KEYS
-from utils.task_registry import spawn
 
 logger = logging.getLogger(__name__)
 # 导入SQLite扩展
@@ -434,19 +433,18 @@ class LogManager:
         if not log_path.exists():
             return logs
         try:
-            with open(log_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-                for line in reversed(lines):
-                    if len(logs) >= limit:
-                        break
-                    try:
-                        log_entry = json.loads(line.strip())
-                        if log_type == "requests" and log_entry.get('type') == 'request_end':
-                            logs.append(log_entry)
-                        elif log_type == "errors":
-                            logs.append(log_entry)
-                    except json.JSONDecodeError:
-                        continue
+            from utils.jsonl_tail import reverse_lines
+            for line in reverse_lines(log_path):
+                if len(logs) >= limit:
+                    break
+                try:
+                    log_entry = json.loads(line.strip())
+                    if log_type == "requests" and log_entry.get('type') == 'request_end':
+                        logs.append(log_entry)
+                    elif log_type == "errors":
+                        logs.append(log_entry)
+                except (json.JSONDecodeError, UnicodeError):
+                    continue
         except Exception as e:
             logger.error(f"读取日志失败: {e}")
         return logs
@@ -510,7 +508,7 @@ class LogManager:
                                 log_entry = json.load(f)
                         if log_type == "request" and log_entry.get('type') == 'request_end':
                             logs.append(log_entry)
-                        elif log_type == "error":
+                        elif log_type == "error" and log_entry.get('error'):
                             logs.append(log_entry)
                     except Exception as e:
                         logger.warning(f"读取日志文件失败 {filepath}: {e}")
@@ -542,6 +540,8 @@ class MonitoringService:
         
         # WebSocket客户端管理
         self.monitor_clients = set()
+        from modules.monitor_broadcast import MonitorBroadcaster
+        self._monitor_broadcaster = MonitorBroadcaster(self.monitor_clients, MonitorConfig.MONITOR_SEND_TIMEOUT_SECONDS)
         
         # 统计持久化节流，避免每个请求结束都同步写 stats.json
         self._last_persist_time = 0.0
@@ -958,29 +958,9 @@ class MonitoringService:
             'recent_errors_count': len(self.recent_errors)
         }
     
-    async def _send_to_monitor_client(self, client, data: dict):
-        """向单个监控客户端发送消息；超时或失败时自动剔除并关闭连接，触发前端重连"""
-        try:
-            await asyncio.wait_for(
-                client.send_json(data),
-                timeout=MonitorConfig.MONITOR_SEND_TIMEOUT_SECONDS
-            )
-        except Exception:
-            self.monitor_clients.discard(client)
-            # 关闭连接让浏览器 onclose 触发，否则前端永远不知道已被剔除
-            try:
-                await asyncio.wait_for(client.close(code=1011), timeout=2)
-            except Exception:
-                pass
-
     async def broadcast_to_monitors(self, data: dict):
-        """向所有监控客户端广播数据（非阻塞主请求链路）"""
-        if not self.monitor_clients:
-            return
-
-        # 监控广播不应阻塞正常请求；后台发送，慢客户端超时后自动剔除
-        for client in list(self.monitor_clients):
-            spawn(self._send_to_monitor_client(client, data), name="monitor-broadcast")
+        """非阻塞入队；每个客户端按顺序发送，慢客户端自动断开重连。"""
+        self._monitor_broadcaster.publish(data)
     
     def add_monitor_client(self, websocket):
         """添加监控客户端"""
@@ -989,7 +969,7 @@ class MonitoringService:
     
     def remove_monitor_client(self, websocket):
         """移除监控客户端"""
-        self.monitor_clients.discard(websocket)
+        self._monitor_broadcaster.remove(websocket)
         logger.debug(f"监控客户端已断开，当前客户端数: {len(self.monitor_clients)}")
     
     def _store_request_details(self, request_id: str, request_info: RequestInfo,

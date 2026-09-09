@@ -8,6 +8,7 @@
     <script defer src="js/vendor/Sortable.min.js"></script>
     <link rel="stylesheet" href="css/admin.css">
     <link rel="stylesheet" href="css/admin-workspace.css">
+    <link rel="stylesheet" href="css/admin-overview.css">
     <link rel="stylesheet" href="css/admin-gateway.css">
     
     <!-- 拆分后的管理面板JS文件 -->
@@ -96,220 +97,186 @@
         <div class="main-content">
             <!-- 概览页面 -->
             <div id="overview" class="page active">
-                <div class="page-header">
-                    <h2>系统概览</h2>
-                    <p>实时监控系统状态和运行情况</p>
+                <div class="page-header overview-header">
+                    <div><span class="eyebrow">LLMBRIDGE / ANALYTICS</span><h2>用量概览</h2><p>网关运行状态、模型用量与 Codex 估算金额</p></div>
+                    <a class="btn" href="/monitor">查看请求监控 ↗</a>
                 </div>
+                <div class="stats-grid overview-summary">
 
-                <!-- 总体TPM/RPM统计卡片 -->
-                <div class="card" style="margin-bottom: 20px;">
-                    <div class="card-header">
-                        <h3>总体速率统计</h3>
-                        <div style="display: flex; gap: 10px; align-items: center;">
-                            <button id="rate-period-day" class="btn btn-primary btn-sm" onclick="switchRatePeriod('day')">
+<div class="stat-card" id="models-stat">
+<div class="stat-card-label">配置模型</div>
+<div class="stat-card-value">-</div>
+<div class="stat-card-detail">总计</div>
+</div>
+<div class="stat-card" id="requests-stat">
+<div class="stat-card-label">活跃请求</div>
+<div class="stat-card-value">-</div>
+<div class="stat-card-detail">正在处理</div>
+</div>
+<div class="stat-card" id="total-requests-stat">
+<div class="stat-card-label">网关总请求</div>
+<div class="stat-card-value">-</div>
+<div class="stat-card-detail">成功率: -</div>
+</div>
+<div class="stat-card" id="token-stat">
+<div class="stat-card-label">所选来源 Token</div>
+<div class="stat-card-value" id="total-tokens-value">-</div>
+<div class="stat-card-detail" id="token-ratio">输入/输出: -</div>
+</div>
+</div>
+                <div class="card rate-card" style="margin-bottom: 20px;">
+<div class="card-header">
+<h3>网关速率</h3>
+<div style="display: flex; gap: 10px; align-items: center;">
+<button class="btn btn-primary btn-sm" id="rate-period-day" onclick="switchRatePeriod('day')">
                                 📅 一天
                             </button>
-                            <button id="rate-period-hour" class="btn btn-sm" onclick="switchRatePeriod('hour')">
+<button class="btn btn-sm" id="rate-period-hour" onclick="switchRatePeriod('hour')">
                                 ⏰ 一小时
                             </button>
-                        </div>
-                    </div>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; padding: 20px;">
-                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
-                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 RPM</div>
-                            <div id="overall-rpm-value" style="font-size: 1.8rem; font-weight: bold; color: #10b981;">-</div>
-                            <div id="overall-rpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">请求/分钟</div>
-                        </div>
-                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
-                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 TPM</div>
-                            <div id="overall-tpm-value" style="font-size: 1.8rem; font-weight: bold; color: #3b82f6;">-</div>
-                            <div id="overall-tpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">Token/分钟</div>
-                        </div>
-                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
-                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">统计时段</div>
-                            <div id="rate-period-display" style="font-size: 1.8rem; font-weight: bold; color: var(--accent);">24小时</div>
-                            <div style="font-size: 0.75rem; color: var(--text-dim);">时间范围</div>
-                        </div>
-                        <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
-                            <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总请求数</div>
-                            <div id="rate-total-requests" style="font-size: 1.8rem; font-weight: bold; color: #a855f7;">-</div>
-                            <div id="rate-period-range" style="font-size: 0.75rem; color: var(--text-dim);">在统计时段内</div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="stats-grid">
-                    <div class="stat-card" id="browser-stat">
-                        <div class="stat-card-label">浏览器连接</div>
-                        <div class="stat-card-value">-</div>
-                        <div class="stat-card-detail">标签页数量</div>
-                    </div>
-                    <div class="stat-card" id="models-stat">
-                        <div class="stat-card-label">配置模型</div>
-                        <div class="stat-card-value">-</div>
-                        <div class="stat-card-detail">总计</div>
-                    </div>
-                    <div class="stat-card" id="requests-stat">
-                        <div class="stat-card-label">活跃请求</div>
-                        <div class="stat-card-value">-</div>
-                        <div class="stat-card-detail">正在处理</div>
-                    </div>
-                    <div class="stat-card" id="total-requests-stat">
-                        <div class="stat-card-label">总请求数</div>
-                        <div class="stat-card-value">-</div>
-                        <div class="stat-card-detail">成功率: -</div>
-                    </div>
-                    <div class="stat-card" id="token-stat">
-                        <div class="stat-card-label">Token 用量</div>
-                        <div class="stat-card-value" id="total-tokens-value">-</div>
-                        <div class="stat-card-detail" id="token-ratio">输入/输出: -</div>
-                    </div>
-                </div>
-
-                <div class="card">
+</div>
+</div>
+<div class="metric-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; padding: 20px;">
+<div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+<div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 RPM</div>
+<div id="overall-rpm-value" style="font-size: 1.8rem; font-weight: bold; color: #10b981;">-</div>
+<div id="overall-rpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">请求/分钟</div>
+</div>
+<div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+<div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 TPM</div>
+<div id="overall-tpm-value" style="font-size: 1.8rem; font-weight: bold; color: #3b82f6;">-</div>
+<div id="overall-tpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">Token/分钟</div>
+</div>
+<div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+<div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">统计时段</div>
+<div id="rate-period-display" style="font-size: 1.8rem; font-weight: bold; color: var(--accent);">24小时</div>
+<div style="font-size: 0.75rem; color: var(--text-dim);">时间范围</div>
+</div>
+<div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+<div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总请求数</div>
+<div id="rate-total-requests" style="font-size: 1.8rem; font-weight: bold; color: #a855f7;">-</div>
+<div id="rate-period-range" style="font-size: 0.75rem; color: var(--text-dim);">在统计时段内</div>
+</div>
+</div>
+</div>
+                <section class="card usage-card">
                     <div class="card-header">
-                        <h3>运行状态</h3>
-                        <button class="btn btn-primary btn-sm" onclick="refreshOverview()">
-                            🔄 刷新
-                        </button>
-                    </div>
-                    <div id="status-details"></div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Token 用量统计</h3>
-                        <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
-                            <select id="usage-source" class="form-select" aria-label="用量来源" onchange="refreshTokenStats()" style="width: auto; border-radius: 0;">
-                                <option value="all">全部来源</option>
-                                <option value="bridge">LLMBridge</option>
-                                <option value="codex">Codex</option>
-                            </select>
-                            <input type="date" id="token-start-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
-                            <span style="color: var(--text-dim);">至</span>
-                            <input type="date" id="token-end-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
-                            <button class="btn btn-primary btn-sm" onclick="applyDateFilter()">
+<h3>用量与金额</h3>
+<div class="usage-toolbar" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+<select aria-label="用量来源" class="form-select" id="usage-source" onchange="refreshTokenStats()" style="width: auto; border-radius: 0;">
+<option value="all">全部来源</option>
+<option value="bridge">LLMBridge</option>
+<option value="codex">Codex</option>
+</select>
+<div class="usage-range" aria-label="用量日期快捷选择">
+    <button class="btn btn-sm" data-days="30" aria-pressed="true" onclick="setUsageRange(30)" title="最近 30 个自然日，包含今天">30d</button>
+    <button class="btn btn-sm" data-days="7" aria-pressed="false" onclick="setUsageRange(7)" title="最近 7 个自然日，包含今天">7d</button>
+    <button class="btn btn-sm" data-days="1" aria-pressed="false" onclick="setUsageRange(1)" title="今天">1d</button>
+    <button class="btn btn-sm" data-days="all" aria-pressed="false" onclick="setUsageRange('all')">所有日期</button>
+</div>
+<input class="form-input" id="token-start-date" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" type="date"/>
+<span style="color: var(--text-dim);">至</span>
+<input class="form-input" id="token-end-date" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" type="date"/>
+<button class="btn btn-primary btn-sm" onclick="applyDateFilter()">
                                 📅 应用
                             </button>
-                            <button class="btn btn-sm" onclick="clearDateFilter()">
+<button class="btn btn-sm" onclick="clearDateFilter()">
                                 ✖️ 清除
                             </button>
-                            <button class="btn btn-sm" onclick="refreshTokenStats(true)">
+<button class="btn btn-sm" id="usage-refresh" onclick="refreshTokenStats(true)">
                                 🔄 刷新
                             </button>
-                            <button class="btn btn-sm" onclick="exportTokenReport()" title="导出CSV报告" style="background: #166534; border-color: #22c55e; color: #bbf7d0;">
+<button class="btn btn-sm" id="usage-export" onclick="exportTokenReport()" style="background: #166534; border-color: #22c55e; color: #bbf7d0;" title="导出CSV报告">
                                 📥 导出CSV
                             </button>
-                        </div>
-                    </div>
-                    
-                    <p id="codex-usage-status" role="status" style="padding: 0 20px; color: var(--text-dim); white-space: pre-line;"></p>
-                    <p id="usage-cost-note" style="padding: 0 20px; color: var(--text-dim);"></p>
-                    <!-- 🔧 成本信息统计卡片（支持 USD/CNY 切换） -->
-                    <div style="padding: 20px; border-bottom: 1px solid var(--line-weak);">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                            <h4 style="color: var(--text-main); margin: 0;">💰 成本统计</h4>
-                            <div style="display: flex; gap: 6px;">
-                                <button id="cost-currency-usd" class="btn btn-primary btn-sm" onclick="switchCostCurrency('USD')">
+</div>
+</div>
+                    <p class="usage-status" id="codex-usage-status" role="status" style="padding: 0 20px; color: var(--text-dim); white-space: pre-line;"></p>
+                    <div class="usage-costs" style="padding: 20px; border-bottom: 1px solid var(--line-weak);">
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+<h4 id="usage-cost-heading" style="color: var(--text-main); margin: 0;">金额概览</h4>
+<div style="display: flex; gap: 6px;">
+<button class="btn btn-primary btn-sm" id="cost-currency-usd" onclick="switchCostCurrency('USD')">
                                     $ USD
                                 </button>
-                                <button id="cost-currency-cny" class="btn btn-sm" onclick="switchCostCurrency('CNY')">
+<button class="btn btn-sm" id="cost-currency-cny" onclick="switchCostCurrency('CNY')">
                                     ¥ CNY
                                 </button>
-                            </div>
-                        </div>
-                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
-                            <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
-                                <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总成本</div>
-                                <div id="total-cost-value" style="font-size: 1.5rem; font-weight: bold; color: var(--accent);">-</div>
-                                <div id="total-cost-currency" style="font-size: 0.75rem; color: var(--text-dim);">-</div>
-                            </div>
-                            <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
-                                <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">输入成本</div>
-                                <div id="input-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #2aa8ff;">-</div>
-                            </div>
-                            <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
-                                <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">输出成本</div>
-                                <div id="output-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #10b981;">-</div>
-                            </div>
-                        </div>
+</div>
+</div>
+<div class="metric-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+<div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+<div id="total-cost-label" style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总成本</div>
+<div id="total-cost-value" style="font-size: 1.5rem; font-weight: bold; color: var(--accent);">-</div>
+<div id="total-cost-currency" style="font-size: 0.75rem; color: var(--text-dim);">-</div>
+</div>
+<div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+<div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">普通输入金额</div>
+<div id="input-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #2aa8ff;">-</div>
+</div><div><div>缓存输入金额</div><div class="cost-value" id="cached-cost-value">-</div></div>
+<div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
+<div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">输出成本</div>
+<div id="output-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #10b981;">-</div>
+</div>
+</div>
+</div>
+                    <p id="usage-cost-note" style="padding: 0 20px; color: var(--text-dim);"></p>
+                    <details class="pricing-details"><summary>计价依据与未定价模型</summary><div id="codex-pricing-details"></div></details>
+                    <div class="usage-charts-header"><h3>模型分布</h3><div id="token-chart-view" class="segmented-control" aria-label="图表类型">
+                        <button type="button" class="btn btn-sm" data-view="bar" aria-pressed="true" onclick="setTokenChartView('bar')">柱状图</button>
+                        <button type="button" class="btn btn-sm" data-view="pie" aria-pressed="false" onclick="setTokenChartView('pie')">占比图</button>
+                    </div></div>
+                    <div class="distribution-grid" id="token-bar-panels">
+                        <section><h4>输入 Token</h4><div class="chart-shell"><canvas id="tokenInputBarChart"></canvas></div></section>
+                        <section><h4>输出 Token</h4><div class="chart-shell"><canvas id="tokenOutputBarChart"></canvas></div></section>
                     </div>
-                    <!-- 第一行：输入/输出饼状图 -->
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-                        <div>
-                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输入 Token 分布（饼状图）</h4>
-                            <canvas id="tokenInputPieChart" style="max-height: 300px;"></canvas>
-                        </div>
-                        <div>
-                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输出 Token 分布（饼状图）</h4>
-                            <canvas id="tokenOutputPieChart" style="max-height: 300px;"></canvas>
-                        </div>
+                    <div class="distribution-grid" id="token-pie-panels" hidden>
+                        <section><h4>输入占比</h4><div class="chart-shell"><canvas id="tokenInputPieChart"></canvas></div></section>
+                        <section><h4>输出占比</h4><div class="chart-shell"><canvas id="tokenOutputPieChart"></canvas></div></section>
                     </div>
-                    
-                    <!-- 第二行：输入/输出条形图 -->
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-                        <div>
-                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输入 Tokens（条形图）</h4>
-                            <canvas id="tokenInputBarChart" style="max-height: 300px;"></canvas>
-                        </div>
-                        <div>
-                            <h4 style="margin-bottom: 15px; color: var(--text-main); text-align: center;">输出 Tokens（条形图）</h4>
-                            <canvas id="tokenOutputBarChart" style="max-height: 300px;"></canvas>
-                        </div>
-                    </div>
-                    
-                    <!-- 第三行：每日趋势折线图 -->
-                    <div style="margin-bottom: 20px;">
-                        <div style="display: flex; justify-content: center; align-items: center; gap: 12px; margin-bottom: 15px;">
-                            <h4 style="color: var(--text-main); margin: 0;">每日 Token 使用趋势</h4>
-                            <button id="toggle-output-axis-btn" class="btn btn-sm" onclick="toggleOutputAxis()" title="切换输出Token的Y轴模式">
-                                🔄 合并Y轴
-                            </button>
-                        </div>
-                        <canvas id="tokenTrendChart" style="max-height: 300px;"></canvas>
-                    </div>
-                    <div style="margin-bottom: 20px;">
-                        <div style="display: flex; justify-content: center; align-items: center; gap: 12px; margin-bottom: 15px;">
-                            <h4 style="color: var(--text-main); margin: 0;">每日成本趋势 (USD)</h4>
-                            <button id="toggle-cost-currency-btn" class="btn btn-sm" onclick="toggleCostCurrency()" title="切换成本货币显示">
-                                💱 USD/CNY
-                            </button>
-                        </div>
-                        <canvas id="costTrendChart" style="max-height: 300px;"></canvas>
+                    <div class="trend-grid">
+                        <section><div class="usage-charts-header"><h3>每日 Token 趋势</h3><button id="toggle-output-axis-btn" class="btn btn-sm" onclick="toggleOutputAxis()">合并 Y 轴</button></div><div class="chart-shell"><canvas id="tokenTrendChart"></canvas></div></section>
+                        <section id="cost-trend-panel"><div class="usage-charts-header"><h3 id="cost-trend-title">每日金额 (USD)</h3><button id="toggle-cost-currency-btn" class="btn btn-sm" onclick="toggleCostCurrency()">USD / CNY</button></div><div class="chart-shell"><canvas id="costTrendChart"></canvas></div></section>
                     </div>
                     <div id="token-stats-table"></div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3>请求次数趋势</h3>
-                        <div style="display: flex; gap: 10px; align-items: center;">
-                            <input type="date" id="request-start-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
-                            <span style="color: var(--text-dim);">至</span>
-                            <input type="date" id="request-end-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
-                            <button class="btn btn-primary btn-sm" onclick="applyRequestDateFilter()">
+                </section>
+                <div class="card request-trend-card">
+<div class="card-header">
+<h3>请求次数趋势</h3>
+<div class="usage-toolbar" style="display: flex; gap: 10px; align-items: center;">
+<input class="form-input" id="request-start-date" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" type="date"/>
+<span style="color: var(--text-dim);">至</span>
+<input class="form-input" id="request-end-date" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" type="date"/>
+<button class="btn btn-primary btn-sm" onclick="applyRequestDateFilter()">
                                 📅 应用
                             </button>
-                            <button class="btn btn-sm" onclick="clearRequestDateFilter()">
+<button class="btn btn-sm" onclick="clearRequestDateFilter()">
                                 ✖️ 清除
                             </button>
-                            <button class="btn btn-sm" onclick="refreshRequestStats()">
+<button class="btn btn-sm" onclick="refreshRequestStats()">
                                 🔄 刷新
                             </button>
-                        </div>
-                    </div>
-                    <div style="margin-bottom: 20px;">
-                        <canvas id="requestCountChart" style="max-height: 400px;"></canvas>
-                    </div>
-                    <div id="request-stats-summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);"></div>
-                </div>
+</div>
+</div>
+<div class="chart-shell request-chart" style="margin-bottom: 20px;">
+<canvas id="requestCountChart" style="max-height: 400px;"></canvas>
+</div>
+<div id="request-stats-summary" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);"></div>
+</div>
+                <div class="card active-request-card">
+<div class="card-header">
+<h3>活跃请求</h3>
+</div>
+<div id="active-requests-list"></div>
+</div>
+                <details class="card runtime-details"><summary>运行信息与浏览器连接</summary><div class="runtime-grid"><div class="stat-card" id="browser-stat">
+<div class="stat-card-label">浏览器连接</div>
+<div class="stat-card-value">-</div>
+<div class="stat-card-detail">标签页数量</div>
+</div><div class="runtime-details-content">
 
-                <div class="card">
-                    <div class="card-header">
-                        <h3>活跃请求</h3>
-                    </div>
-                    <div id="active-requests-list"></div>
-                </div>
+<div id="status-details"></div>
+</div></div></details>
             </div>
 
             <!-- 模型端点管理页面 -->

@@ -43,7 +43,6 @@ async def monitor_websocket(
 ):
     """监控面板的WebSocket连接"""
     await websocket.accept()
-    monitoring_service.add_monitor_client(websocket)
 
     try:
         # 发送初始数据
@@ -60,6 +59,8 @@ async def monitor_websocket(
                 "target": CONFIG.get("id_updater_battle_target", "A")
             }
         })
+        # 初始快照发送完成后再参与广播，避免同一连接并发 send_json。
+        monitoring_service.add_monitor_client(websocket)
 
         while True:
             # 保持连接

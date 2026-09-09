@@ -1,11 +1,15 @@
 """只读扫描 Codex 会话日志，持久化可重建的用量索引。"""
 
 import hashlib
+import asyncio
 import json
+import logging
 import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -101,16 +105,23 @@ class CodexUsageIndex:
         self.db_path = Path(db_path)
         self.homes = homes
         self._lock = threading.Lock()
+        self._scan_lock = threading.Lock()
+        self._refresh_task = None
+        self._schema_ready = False
         self._last_scan = 0
         self._status = {}
+        self._cache = OrderedDict()
 
     def _connect(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        if self._schema_ready:
+            return conn
         conn.executescript('''
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, size INTEGER, mtime INTEGER);
+            CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE IF NOT EXISTS events(
                 path TEXT, event_id TEXT, timestamp REAL, date TEXT, model TEXT,
                 session TEXT, provider TEXT, input_tokens INTEGER, cached_tokens INTEGER,
@@ -122,6 +133,7 @@ class CodexUsageIndex:
                     PARTITION BY event_id ORDER BY path) AS copy_number FROM events)
                 WHERE copy_number = 1;
         ''')
+        self._schema_ready = True
         return conn
 
     def _scan(self, conn, force):
@@ -166,45 +178,70 @@ class CodexUsageIndex:
                 for key in known.keys() - found:
                     conn.execute('DELETE FROM events WHERE path = ?', (key,))
                     conn.execute('DELETE FROM files WHERE path = ?', (key,))
-        self._status = {'scanned_at': time.time(), 'files': len(found), 'changed_files': changed,
-                        'directories': roots, 'errors': errors, 'available': bool(found)}
-        self._last_scan = time.monotonic()
-
-    def stats(self, start=None, end=None, force=False, exclude_providers=()):
-        from core.db_stats import StatsDB
+                    changed += 1
+        status = {'scanned_at': time.time(), 'files': len(found), 'changed_files': changed,
+                  'directories': roots, 'errors': errors, 'available': bool(found)}
+        with conn:
+            conn.execute('INSERT OR REPLACE INTO metadata VALUES (?, ?)', ('status', json.dumps(status)))
         with self._lock:
+            if changed:
+                self._cache.clear()
+            self._status = status
+            self._last_scan = time.monotonic()
+
+    def refresh(self, force=False):
+        with self._scan_lock:
             conn = self._connect()
             try:
                 self._scan(conn, force)
-                where, params = [], []
-                for bound, operator, is_end in ((start, '>=', False), (end, '<', True)):
-                    if bound:
-                        where.append(f'timestamp {operator} ?')
-                        params.append(StatsDB._parse_time_bound(bound, is_end))
-                excluded = {'event_count': 0, 'total_tokens': 0, 'providers': list(exclude_providers)}
-                if exclude_providers:
-                    placeholders = ','.join('?' for _ in exclude_providers)
-                    excluded_clause = ' WHERE ' + ' AND '.join(where + [f'provider IN ({placeholders})'])
-                    excluded.update(dict(conn.execute(
-                        'SELECT COUNT(*) AS event_count, COALESCE(SUM(total_tokens), 0) AS total_tokens '
-                        f'FROM unique_events {excluded_clause}', params + list(exclude_providers)).fetchone()))
-                    where.append(f'provider NOT IN ({placeholders})')
-                    params.extend(exclude_providers)
-                clause = ' WHERE ' + ' AND '.join(where) if where else ''
-                fields = ('input_tokens', 'cached_tokens', 'output_tokens', 'reasoning_tokens',
-                          'total_tokens', 'cache_write_tokens')
-                sums = ', '.join(f'COALESCE(SUM({field}), 0) AS {field}' for field in fields)
-                models = [dict(row) for row in conn.execute(
-                    f'SELECT model, {sums}, COUNT(*) AS event_count, COUNT(DISTINCT session) AS session_count '
-                    f'FROM unique_events {clause} GROUP BY model ORDER BY total_tokens DESC', params)]
-                daily = [dict(row) for row in conn.execute(
-                    f'SELECT date, {sums} FROM unique_events {clause} GROUP BY date ORDER BY date', params)]
-                totals = dict(conn.execute(f'SELECT {sums}, COUNT(DISTINCT session) AS session_count, '
-                                          f'COUNT(*) AS event_count FROM unique_events {clause}', params).fetchone())
-                return {'model_stats': models, 'daily_stats': daily, **totals,
-                        'excluded_usage': excluded, 'status': dict(self._status)}
             finally:
                 conn.close()
+
+    def schedule_refresh(self):
+        """首页先读已保存索引，后台单独扫描；同一时刻最多一个扫描任务。"""
+        from utils.task_registry import spawn
+        if self._scan_lock.locked() or self._refresh_task and not self._refresh_task.done():
+            return True
+        if self._status and time.monotonic() - self._last_scan < 60:
+            return False
+        async def run():
+            try:
+                await asyncio.to_thread(self.refresh)
+            except Exception:
+                logging.getLogger(__name__).exception('Codex 后台扫描失败')
+                with self._lock:
+                    self._status['errors'] = [{'error': '后台扫描失败，请查看服务日志'}]
+                    self._last_scan = time.monotonic()
+        self._refresh_task = spawn(run(), name='codex-usage-refresh')
+        return True
+
+    def stats(self, start=None, end=None, force=False, exclude_providers=(), refresh=True):
+        from core.db_stats import StatsDB
+        from core.codex_usage_summary import summarize
+        start_ts = StatsDB._parse_time_bound(start) if start else None
+        end_ts = StatsDB._parse_time_bound(end, True) if end else None
+        key = (start_ts, end_ts, tuple(sorted(exclude_providers)))
+        if refresh and (force or not self._status or time.monotonic() - self._last_scan >= 60):
+            self.refresh(force)
+        with self._lock:
+            conn = None
+            try:
+                if not self._status:
+                    conn = self._connect()
+                    saved = conn.execute("SELECT value FROM metadata WHERE key='status'").fetchone()
+                    count = conn.execute('SELECT COUNT(*) FROM files').fetchone()[0]
+                    self._status = json.loads(saved[0]) if saved else {'available': bool(count), 'files': count,
+                                                                    'scanned_at': None, 'errors': []}
+                if key not in self._cache:
+                    conn = conn or self._connect()
+                    self._cache[key] = summarize(conn, start_ts, end_ts, exclude_providers)
+                    if len(self._cache) > 64:
+                        self._cache.popitem(last=False)
+                self._cache.move_to_end(key)
+                return {**deepcopy(self._cache[key]), 'status': deepcopy(self._status)}
+            finally:
+                if conn is not None:
+                    conn.close()
 
 
 codex_usage_index = CodexUsageIndex()

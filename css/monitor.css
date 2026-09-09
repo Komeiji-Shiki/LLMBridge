@@ -987,3 +987,21 @@ button:disabled { opacity: .4; cursor: not-allowed; }
     #compare-slots { flex-basis: 100%; }
     .compare-table th, .compare-table td { padding: 8px 6px; }
 }
+
+/* 保持请求诊断可见，降低空状态和窄屏指标卡的占用。 */
+:root { color-scheme: dark; }
+.stat-value { font-variant-numeric: tabular-nums; }
+#active-requests-list > .empty-state { padding: 24px 16px; }
+#request-log-section { scroll-margin-top: 16px; }
+#request-log-section .table-container { max-height: min(68vh, 720px); overflow: auto; scrollbar-gutter: stable; }
+#request-log-section thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-2, #101925); }
+.log-filter-bar { min-width: 0; }
+@media (max-width: 760px) {
+    .header { padding: 16px; gap: 14px; }
+    .header-info { gap: 8px; }
+    .stats-grid { gap: 10px; margin-bottom: 16px; }
+    .stat-card { padding: 14px; }
+    .stat-card h3 { margin-bottom: 10px; }
+    .stat-value { font-size: 24px; margin-bottom: 8px; }
+    .section-header { padding: 14px 16px; gap: 10px; flex-wrap: wrap; }
+}

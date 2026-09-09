@@ -9,6 +9,43 @@ let tokenTrendChart = null;
 let requestCountChart = null;
 let outputAxisSeparate = true; // 输出Token是否使用独立Y轴
 
+// 复用 Chart 实例，保留图例选择；更新数据时不重建画布和动画。
+function updateAdminChart(current, canvas, config) {
+    config.options = { ...config.options, animation: false, maintainAspectRatio: false };
+    if (current && current.config.type === config.type) {
+        const visibility = new Map(current.data.datasets.map((series, i) => [series.label, current.isDatasetVisible(i)]));
+        for (const series of config.data.datasets) {
+            if (visibility.has(series.label)) series.hidden = !visibility.get(series.label);
+        }
+        current.data = config.data;
+        current.options = config.options;
+        current.update('none');
+        return current;
+    }
+    if (current) current.destroy();
+    return new Chart(canvas, config);
+}
+
+function setTokenChartView(view) {
+    document.querySelectorAll('#token-chart-view button').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.view === view));
+    });
+    document.getElementById('token-bar-panels').hidden = view !== 'bar';
+    document.getElementById('token-pie-panels').hidden = view !== 'pie';
+    if (latestTokenStatsData) renderTokenDistribution(latestTokenStatsData.model_stats);
+}
+
+function renderTokenDistribution(modelStats) {
+    const view = document.querySelector('#token-chart-view [aria-pressed="true"]')?.dataset.view || 'bar';
+    if (view === 'pie') {
+        renderTokenInputPieChart(modelStats);
+        renderTokenOutputPieChart(modelStats);
+    } else {
+        renderTokenInputBarChart(modelStats);
+        renderTokenOutputBarChart(modelStats);
+    }
+}
+
 // 将模型统计聚合为 Top N + Other
 function getTopModelsWithOther(modelStats, tokenField, topN = 10) {
     const sortedStats = [...(modelStats || [])].sort((a, b) => (b[tokenField] || 0) - (a[tokenField] || 0));
@@ -61,14 +98,13 @@ function renderTokenInputPieChart(modelStats) {
     const ctx = document.getElementById('tokenInputPieChart');
     if (!ctx) return;
     
-    if (tokenInputPieChart) tokenInputPieChart.destroy();
     
     const { labels, dataValues } = getTopModelsWithOther(modelStats, 'input_tokens', 10);
 
     // 有 Other 时 count 会是 11（前10+Other）
     const colors = getTopModelsWithOtherColor(labels.length);
     
-    tokenInputPieChart = new Chart(ctx, {
+    tokenInputPieChart = updateAdminChart(tokenInputPieChart, ctx, {
         type: 'pie',
         data: {
             labels: labels,
@@ -113,14 +149,13 @@ function renderTokenOutputPieChart(modelStats) {
     const ctx = document.getElementById('tokenOutputPieChart');
     if (!ctx) return;
     
-    if (tokenOutputPieChart) tokenOutputPieChart.destroy();
     
     const { labels, dataValues } = getTopModelsWithOther(modelStats, 'output_tokens', 10);
 
     // 有 Other 时 count 会是 11（前10+Other）
     const colors = getTopModelsWithOtherColor(labels.length);
     
-    tokenOutputPieChart = new Chart(ctx, {
+    tokenOutputPieChart = updateAdminChart(tokenOutputPieChart, ctx, {
         type: 'pie',
         data: {
             labels: labels,
@@ -166,12 +201,11 @@ function renderTokenInputBarChart(modelStats) {
     const ctx = document.getElementById('tokenInputBarChart');
     if (!ctx) return;
     
-    if (tokenInputBarChart) tokenInputBarChart.destroy();
     
     const { labels, dataValues } = getTopModelsWithOther(modelStats, 'input_tokens', 10);
     const barColors = labels.map(label => label === 'Other' ? 'rgba(148, 163, 184, 0.85)' : 'rgba(42, 168, 255, 0.8)');
     
-    tokenInputBarChart = new Chart(ctx, {
+    tokenInputBarChart = updateAdminChart(tokenInputBarChart, ctx, {
         type: 'bar',
         data: {
             labels: labels,
@@ -191,12 +225,11 @@ function renderTokenOutputBarChart(modelStats) {
     const ctx = document.getElementById('tokenOutputBarChart');
     if (!ctx) return;
     
-    if (tokenOutputBarChart) tokenOutputBarChart.destroy();
     
     const { labels, dataValues } = getTopModelsWithOther(modelStats, 'output_tokens', 10);
     const barColors = labels.map(label => label === 'Other' ? 'rgba(148, 163, 184, 0.85)' : 'rgba(16, 185, 129, 0.8)');
     
-    tokenOutputBarChart = new Chart(ctx, {
+    tokenOutputBarChart = updateAdminChart(tokenOutputBarChart, ctx, {
         type: 'bar',
         data: {
             labels: labels,
@@ -249,10 +282,9 @@ function renderTokenTrendChart(dailyStats) {
     const ctx = document.getElementById('tokenTrendChart');
     if (!ctx) return;
     
-    if (tokenTrendChart) tokenTrendChart.destroy();
     
     if (!dailyStats || dailyStats.length === 0) {
-        tokenTrendChart = new Chart(ctx, {
+        tokenTrendChart = updateAdminChart(tokenTrendChart, ctx, {
             type: 'line',
             data: { labels: [], datasets: [] },
             options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { display: false } } }
@@ -260,7 +292,7 @@ function renderTokenTrendChart(dailyStats) {
         return;
     }
     
-    dailyStats.sort((a, b) => a.date.localeCompare(b.date));
+    dailyStats = [...dailyStats].sort((a, b) => a.date.localeCompare(b.date));
     
     // 计算每日输出/输入比（保留4位精度）
     const ratioDataRaw = dailyStats.map(s => {
@@ -287,7 +319,7 @@ function renderTokenTrendChart(dailyStats) {
         return ratioMax !== undefined && v > ratioMax ? ratioMax : v;
     });
     
-    tokenTrendChart = new Chart(ctx, {
+    tokenTrendChart = updateAdminChart(tokenTrendChart, ctx, {
         type: 'line',
         data: {
             labels: dailyStats.map(s => s.date),
@@ -405,10 +437,9 @@ function renderRequestCountChart(dailyStats) {
     const ctx = document.getElementById('requestCountChart');
     if (!ctx) return;
     
-    if (requestCountChart) requestCountChart.destroy();
     
     if (!dailyStats || dailyStats.length === 0) {
-        requestCountChart = new Chart(ctx, {
+        requestCountChart = updateAdminChart(requestCountChart, ctx, {
             type: 'line',
             data: { labels: [], datasets: [] },
             options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { display: false } } }
@@ -416,9 +447,9 @@ function renderRequestCountChart(dailyStats) {
         return;
     }
     
-    dailyStats.sort((a, b) => a.date.localeCompare(b.date));
+    dailyStats = [...dailyStats].sort((a, b) => a.date.localeCompare(b.date));
     
-    requestCountChart = new Chart(ctx, {
+    requestCountChart = updateAdminChart(requestCountChart, ctx, {
         type: 'line',
         data: {
             labels: dailyStats.map(s => s.date),
@@ -594,7 +625,7 @@ function renderTokenStatsTable(modelStats) {
     }).join('');
     
     container.innerHTML = `
-        <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
+        <div class="stat-actions">
             <button class="btn btn-sm" onclick="toggleAllModelStats()">
                 <span id="toggle-all-text">全选</span>
             </button>
@@ -606,7 +637,7 @@ function renderTokenStatsTable(modelStats) {
             </button>
             <span id="selected-count-display" style="color: var(--text-dim); margin-left: auto;">已选择: 0</span>
         </div>
-        <table class="table">
+        <div class="table-scroll" tabindex="0" aria-label="模型用量明细，可横向滚动"><table class="table">
             <thead>
                 <tr>
                     <th style="width: 40px;">
@@ -676,7 +707,7 @@ function renderTokenStatsTable(modelStats) {
                             </td>
                             <td>
                                 <strong>${escapeHtml(stat.display_name || stat.model)}</strong>
-                                <small>${stat.source === 'codex' ? 'Codex' : 'LLMBridge'}</small>
+                                <small class="stat-source">${stat.source === 'codex' ? 'Codex · ' + (stat.cost_kind === 'estimated' ? '估算金额' : '未定价') : 'LLMBridge'}</small>
                                 ${stat.display_name && stat.display_name !== stat.model ? `<br><small style="color: var(--text-dim);">(${escapeHtml(stat.model)})</small>` : ''}
                             </td>
                             <td><span style="color: var(--accent);">${formatNumber(stat.total_tokens)}</span></td>
@@ -688,7 +719,7 @@ function renderTokenStatsTable(modelStats) {
                             <td>${stat.request_count > 0 ? formatNumber(Math.round(stat.total_tokens / stat.request_count)) : '-'}</td>
                             <td>${rpmDisplay}</td>
                             <td>${tpmDisplay}</td>
-                            <td${costTooltip ? ` title="${costTooltip}"` : ''}>${stat.source === 'codex' ? '未提供' : costDisplay}</td>
+                            <td${costTooltip ? ` title="${costTooltip}"` : ''}>${stat.source === 'codex' && stat.cost_kind !== 'estimated' ? '未定价' : (stat.source === 'codex' ? '≈ ' : '') + costDisplay}</td>
                             <td>
                                 ${stat.source === 'codex' ? '<small>日志只读</small>' : `<button class="btn btn-danger btn-sm" data-model="${escapeHtml(stat.model)}" onclick="deleteModelStats(this.dataset.model)">删除</button>`}
                             </td>
@@ -696,7 +727,7 @@ function renderTokenStatsTable(modelStats) {
                     `;
                 }).join('')}
             </tbody>
-        </table>
+        </table></div>
     `;
     // 恢复排序前的勾选状态
     if (checkedModels.size > 0) {
@@ -714,10 +745,9 @@ function renderCostTrendChart(dailyStats) {
     const ctx = document.getElementById('costTrendChart');
     if (!ctx) return;
 
-    if (costTrendChart) costTrendChart.destroy();
 
     if (!dailyStats || dailyStats.length === 0) {
-        costTrendChart = new Chart(ctx, {
+        costTrendChart = updateAdminChart(costTrendChart, ctx, {
             type: 'line',
             data: { labels: [], datasets: [] },
             options: { responsive: true, maintainAspectRatio: true, plugins: { legend: { display: false } } }
@@ -725,14 +755,14 @@ function renderCostTrendChart(dailyStats) {
         return;
     }
 
-    dailyStats.sort((a, b) => a.date.localeCompare(b.date));
+    dailyStats = [...dailyStats].sort((a, b) => a.date.localeCompare(b.date));
 
     const costField = costCurrencyDisplay === 'CNY' ? 'cost_cny' : 'cost_usd';
     const currencySymbol = costCurrencyDisplay === 'CNY' ? '¥' : '$';
     const costColor = costCurrencyDisplay === 'CNY' ? 'rgba(245, 158, 11, 1)' : 'rgba(34, 197, 94, 1)';
     const costBg = costCurrencyDisplay === 'CNY' ? 'rgba(245, 158, 11, 0.15)' : 'rgba(34, 197, 94, 0.15)';
 
-    costTrendChart = new Chart(ctx, {
+    costTrendChart = updateAdminChart(costTrendChart, ctx, {
         type: 'bar',
         data: {
             labels: dailyStats.map(s => s.date),
@@ -788,13 +818,9 @@ function renderCostTrendChart(dailyStats) {
 
 // 切换成本货币显示
 function toggleCostCurrency() {
-    costCurrencyDisplay = costCurrencyDisplay === 'USD' ? 'CNY' : 'USD';
+    switchCostCurrency(costCurrencyDisplay === 'USD' ? 'CNY' : 'USD');
     const btn = document.getElementById('toggle-cost-currency-btn');
     if (btn) {
         btn.textContent = costCurrencyDisplay === 'USD' ? '💱 切换CNY' : '💱 切换USD';
-    }
-    // 重新渲染（从缓存数据中取）
-    if (typeof latestTokenStatsData !== 'undefined' && latestTokenStatsData) {
-        renderCostTrendChart(latestTokenStatsData.daily_stats || []);
     }
 }

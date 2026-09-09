@@ -169,6 +169,16 @@ def test_http_sources_csv_and_gateway_totals(index, tmp_path, monkeypatch):
         assert external['总成本(原币)'] == ''
         assert external['请求数'] == ''
         assert external['推理Tokens'] == '3'
+        write_log(tmp_path / 'home/sessions/a.jsonl', metadata('gpt-6-astra') + [event(usage(100), usage(100))])
+        priced = client.get('/api/admin/token_stats?source=all&force=true').json()
+        assert priced['total_cost'] == pytest.approx(1.00132)
+        assert priced['cost_usd']['cached_cost'] == pytest.approx(.00002)
+        assert priced['pricing']['complete'] is True
+        report = client.get('/api/admin/export_report?source=codex')
+        external = list(csv.DictReader(io.StringIO(report.content.decode('utf-8-sig'))))[0]
+        assert external['总成本(原币)'] == '0.00132'
+        assert external['金额口径'] == '标准API估算'
+        assert external['货币'] == 'USD'
     writer.close()
 
 

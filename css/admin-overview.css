@@ -1,0 +1,81 @@
+/* 长图表允许收缩，长表格只在自身容器内滚动。 */
+:root { color-scheme: dark; }
+.overview-header { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.eyebrow { color: var(--accent); font-size: .66rem; letter-spacing: .18em; font-weight: 600; }
+.overview-header h2 { margin-top: 5px; }
+.overview-header p { color: var(--text-dim); font-size: .85rem; }
+#overview, #overview .card { min-width: 0; }
+#overview .card { box-shadow: none; }
+.overview-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+.overview-summary .stat-card { padding: 18px 20px; border-top: 2px solid var(--line-strong); }
+.overview-summary #token-stat { border-top-color: var(--accent); }
+.overview-summary .stat-card-value { font-size: clamp(1.45rem, 2.2vw, 2rem); font-variant-numeric: tabular-nums; }
+.overview-summary .stat-card-detail { overflow-wrap: anywhere; font-size: .73rem; }
+.metric-grid { display: grid !important; grid-template-columns: repeat(4, minmax(0, 1fr)) !important; gap: 12px !important; }
+.metric-grid > div { min-width: 0; padding: 14px 16px !important; border: 1px solid var(--line-weak); background: var(--surface-2); }
+.rate-card .card-header { margin-bottom: 0; padding: 12px 18px; }
+.rate-card { padding: 0; }
+.rate-card .card-header h3 { font-size: .88rem; }
+.rate-card .metric-grid { padding: 14px 18px !important; }
+.rate-card .metric-grid [style*="1.8rem"] { font-size: 1.35rem !important; }
+.usage-card { padding: 0; }
+.usage-card > .card-header { margin: 0; padding: 20px; }
+.usage-toolbar { display: flex; flex-wrap: wrap; gap: 8px !important; align-items: center; min-width: 0; }
+.usage-toolbar .form-input, .usage-toolbar .form-select { color-scheme: dark; min-width: 0; max-width: 100%; font-size: .8rem; min-height: 36px; }
+.usage-status { padding: 14px 20px !important; font-size: .78rem; line-height: 1.65; border-bottom: 1px solid var(--line-weak); overflow-wrap: anywhere; }
+.usage-status:empty { display: none; }
+.usage-costs { padding: 18px 20px !important; }
+.usage-costs .metric-grid > div > div:first-child { color: var(--text-dim); font-size: .78rem !important; }
+.usage-costs .metric-grid [id$="cost-value"], .cost-value { font-size: clamp(1.05rem, 1.8vw, 1.45rem) !important; font-weight: 650; color: var(--accent); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+#usage-cost-note { padding: 12px 20px !important; font-size: .78rem; line-height: 1.7; }
+.pricing-details { margin: 0 20px 20px; border: 1px solid var(--line-weak); font-size: .8rem; }
+.pricing-details summary, .runtime-details summary { padding: 12px 16px; cursor: pointer; color: var(--text-dim); }
+#codex-pricing-details { padding: 0 16px 14px; color: var(--text-dim); overflow-x: auto; }
+#codex-pricing-details a { color: var(--accent); }
+#codex-pricing-details table { min-width: 520px; font-size: .75rem; }
+.usage-charts-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; padding: 16px 20px; }
+.usage-charts-header h3 { font-size: .9rem; }
+.segmented-control { display: inline-flex; gap: 0; }
+.segmented-control .btn { background: transparent; color: var(--text-dim); }
+.segmented-control [aria-pressed="true"] { background: var(--accent-faint); color: var(--accent); border-color: var(--accent); }
+.distribution-grid, .trend-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; gap: 20px; padding: 0 20px 20px; }
+.trend-grid { grid-template-columns: minmax(0, 1fr); }
+.usage-range { display: flex; flex-wrap: wrap; gap: 0; }
+.usage-range [aria-pressed="true"] { background: var(--accent-faint); color: var(--accent); border-color: var(--accent); }
+.distribution-grid > section, .trend-grid > section { min-width: 0; border: 1px solid var(--line-weak); padding: 16px; background: var(--surface-2); }
+.distribution-grid h4 { font-size: .83rem; font-weight: 500; margin-bottom: 14px; color: var(--text-dim); }
+.trend-grid .usage-charts-header { padding: 0 0 14px; }
+.chart-shell { position: relative; min-width: 0; width: 100%; height: 260px; }
+.chart-shell canvas { max-width: 100%; }
+.request-chart { height: 280px; }
+#token-stats-table { padding: 0 20px 20px; min-width: 0; }
+.table-scroll { overflow: auto; max-width: 100%; max-height: 560px; scrollbar-gutter: stable; border: 1px solid var(--line-weak); }
+.table-scroll .table { min-width: 1100px; margin: 0; }
+.table-scroll thead th { position: sticky; top: 0; background: var(--surface-2); z-index: 1; }
+#token-stats-table .table td { font-size: .78rem; font-variant-numeric: tabular-nums; }
+#token-stats-table .table td:nth-child(2) { min-width: 175px; max-width: 250px; overflow-wrap: anywhere; }
+.stat-source { display: block; margin-top: 4px; color: var(--text-dim); font-size: .7rem; }
+.stat-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.runtime-grid { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); gap: 20px; padding: 0 18px 18px; }
+.runtime-details-content { min-width: 0; }
+.runtime-details-content #status-details > div { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+.active-request-card .empty-state { padding: 20px; }
+.active-request-card .empty-state-icon { display: none; }
+#active-requests-list { overflow-x: auto; }
+.request-trend-card .card-header { flex-wrap: wrap; }
+@media (max-width: 1200px) { .trend-grid { grid-template-columns: minmax(0, 1fr); } .usage-card > .card-header { align-items: flex-start; } }
+@media (max-width: 760px) {
+    .overview-header { align-items: flex-start; flex-direction: column; gap: 12px; }
+    .overview-summary, .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 10px !important; }
+    .overview-summary .stat-card { padding: 14px; }
+    .usage-card > .card-header, .usage-costs { padding: 14px !important; }
+    .usage-toolbar { width: 100%; }
+    .usage-toolbar input[type="date"] { flex: 1 1 120px; width: 120px !important; padding: 6px !important; }
+    .distribution-grid, .trend-grid { grid-template-columns: minmax(0, 1fr); padding: 0 12px 14px; gap: 12px; }
+    .chart-shell { height: 240px; }
+    .usage-charts-header { padding: 14px; }
+    #token-stats-table { padding: 0 12px 14px; }
+    .runtime-grid { grid-template-columns: minmax(0, 1fr); }
+    .runtime-details-content #status-details > div { grid-template-columns: minmax(0, 1fr) !important; }
+    .pricing-details { margin: 0 14px 14px; }
+}

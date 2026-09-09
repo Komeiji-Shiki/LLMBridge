@@ -497,7 +497,7 @@ MIT License
 Made with Shiki and Gray
 ## Codex 本地用量统计
 
-管理面板的「Token 用量统计」支持「全部来源 / LLMBridge / Codex」，默认合计 Token。日期筛选、模型分布、每日趋势和 CSV 导出使用同一个来源选择。Codex 的缓存输入和推理输出分别属于输入和输出，不额外加入总 Token。
+管理面板的「用量与金额」支持「全部来源 / LLMBridge / Codex」，默认合计 Token，首页默认最近 30 天。30d / 7d / 1d / 所有日期可一键切换，按本机自然日统计，1d 表示今天。日期筛选、模型分布、上下排列的每日趋势和 CSV 导出使用同一个范围。Codex 的缓存输入和推理输出分别属于输入和输出，不额外加入总 Token。
 
 服务读取其所在机器的 `CODEX_HOME`（未设置时为 `~/.codex`）下的 `sessions/`、`archived_sessions/`，并发现 JetBrains 的 Codex 缓存目录。额外 Codex home 可通过 `CODEX_USAGE_HOMES` 指定，Windows 用分号分隔，Linux/macOS 用冒号分隔。例如 PowerShell 在启动服务前设置：
 
@@ -505,10 +505,12 @@ Made with Shiki and Gray
 $env:CODEX_USAGE_HOMES = 'D:\CodexHome;E:\AnotherCodexHome'
 ```
 
-用量索引保存在 `logs/codex_usage.db`，只包含时间、模型、会话标识、来源路径和 Token 计数，不保存对话正文或凭据。页面自动刷新时最多每 60 秒检查日志变化，只重读有变化的文件；「刷新」按钮可强制重扫。首次扫描大量历史日志可能需要一些时间。读取失败会显示数据不完整提示。
+用量索引保存在 `logs/codex_usage.db`，只包含时间、模型、会话标识、来源路径和 Token 计数，不保存对话正文或凭据。首页先读取已保存的索引，再在后台检查日志变化，扫描不阻塞已有统计；完全首次导入时先显示网关统计，并在导入完成后自动补齐。自动检查最多每 60 秒一次，只重读有变化的文件；「刷新」按钮可强制重扫，CSV 导出等待扫描完成。读取失败会显示数据不完整提示。
 
 累计用量按差值导入，同一事件的归档、复制与分叉历史不会重复计算。统计覆盖当前可读取的本地日志；没有日志的云端或其他机器用量不会自动出现。合计时排除 provider 为 `local-lmarenabridge` 的 Codex 日志，由网关记录提供这部分统计；Codex 单独视图仍保留完整用量，页面显示合计排除的事件数与 Token 数。其他经本网关转发的 provider 可加入 `config.jsonc` 的 `codex_usage.bridge_providers` 数组。此规则按来源排除，不依赖跨来源请求 ID 匹配；若网关历史记录已缺失，合计也不会补入被排除的 Codex 日志。
 
-Codex 日志不提供订阅账单金额，因此其成本显示「未提供」，合计成本只包含 LLMBridge。网关请求数、成功率、RPM/TPM 继续统计网关请求；Codex 单独展示会话数、用量事件数、缓存输入、推理输出和缓存写入。Codex 模型行只读，不能用网关的删除或合并操作修改源日志。
+Codex 金额按当前公开标准 API 单价折算，明确标为估算，不代表订阅扣费。默认合计包含网关已记录金额与 Codex 估算；网关历史价格和数据库记录不变。价格核对日期、官方来源和未定价模型可在页面展开查看。未公开价格的模型显示「未定价」，Token 仍计入总量，金额只累计已定价部分。网关请求数、成功率、RPM/TPM 仍只统计网关请求。Codex 模型行只读，不能用网关的删除或合并操作修改源日志。
+
+标准价格表在 `core/codex_pricing.py`，当前核对日期为 2026-09-09，覆盖 Astra、Sol、Terra、Luna、GPT-5.5、GPT-5.4、GPT-5.4 mini、GPT-5.3-Codex 和 GPT-5.2-Codex。金额按普通输入、缓存输入和输出拆分，独立缓存写入按有明确报价的模型处理；超过 272K 输入的长上下文按对应模型的单次请求或完整会话规则加价。使用的是标准模式价格快照，不包含快模式、工具及地区附加费；更新价格表后需重启服务。详细依据与优化记录见 [性能与布局优化说明](docs/OPTIMIZATION_2026-09-09.md)。
 
 实现思路参考 [codex-usage](https://github.com/DhWU-coder/codex-usage) 的本地 JSONL 扫描、累计差分和文件指纹缓存，以 Python 接入现有统计系统，无需另外启动该工具。
