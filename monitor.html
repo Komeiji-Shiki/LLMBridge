@@ -106,11 +106,19 @@
                     </select>
                     <input type="text" id="filter-search" aria-label="搜索请求日志" class="filter-input" placeholder="搜索请求、模型、调用方、会话或错误..."
                            style="min-width: 220px;"
-                           onkeydown="if(event.key==='Enter') applyLogFilters()">
+                           oninput="applyLogFilters()" onkeydown="if(event.key==='Enter') applyLogFilters()">
+                    <label>开始日期 <input type="date" id="filter-from" class="filter-input" onchange="applyLogFilters()"></label>
+                    <label>结束日期 <input type="date" id="filter-to" class="filter-input" onchange="applyLogFilters()"></label>
                     <button class="refresh-btn" onclick="applyLogFilters()" style="padding: 4px 14px; font-size: 13px;">筛选</button>
+                    <button class="refresh-btn" onclick="resetLogFilters()">重置筛选</button>
                     <span id="filter-total" style="font-size: 12px; color: var(--text-dim); margin-left: auto;"></span>
                 </div>
 
+                <div class="log-load-toolbar">
+                    <span id="log-load-state" role="status" aria-live="polite"></span>
+                    <button class="refresh-btn" id="log-refresh-toggle" onclick="toggleLogRefresh()" aria-pressed="false">暂停自动刷新</button>
+                    <button class="refresh-btn" onclick="refreshLogs()">刷新日志</button>
+                </div>
                 <div class="tabs">
                     <div class="tab active" data-tab="requests" onclick="switchTab('requests')">请求日志 <span id="request-count" style="opacity: 0.7; font-size: 12px;"></span></div>
                     <div class="tab" data-tab="errors" onclick="switchTab('errors')">错误日志 <span id="error-log-count" style="opacity: 0.7; font-size: 12px;"></span></div>
@@ -464,6 +472,7 @@
     </div>
 
     <script src="/js/monitor-compare.js"></script>
+    <script src="/js/monitor-logs.js"></script>
     <script src="/js/monitor.js"></script>
 </body>
 </html>

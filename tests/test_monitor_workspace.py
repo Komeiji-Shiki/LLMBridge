@@ -12,6 +12,87 @@ playwright = pytest.importorskip('playwright.sync_api')
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize('stale_failure', [False, True])
+def test_log_queries_coalesce_and_ignore_cancelled_results(monitor_ui, stale_failure):
+    page, _ = monitor_ui
+    result = page.evaluate('''async staleFailure => {
+        let resolveOld, rejectOld, resolveNew;
+        const signals = [], pending = [new Promise((resolve, reject) => {resolveOld = resolve; rejectOld = reject;}),
+            new Promise(resolve => {resolveNew = resolve;})];
+        apiGet = (url, options) => {signals.push(options.signal); return pending.shift();};
+        document.getElementById('filter-search').value = 'old';
+        const first = refreshRequestLogs(), duplicate = refreshRequestLogs();
+        document.getElementById('filter-search').value = 'new';
+        const second = refreshRequestLogs();
+        resolveNew({json: async () => ({total: 0, items: [], notice: 'CURRENT RESULT'})});
+        await second;
+        if (staleFailure) rejectOld(new Error('STALE FAILURE'));
+        else resolveOld({json: async () => ({total: 0, items: [], notice: 'STALE RESULT'})});
+        await first;
+        return {calls: signals.length, same: first === duplicate, cancelled: signals[0].aborted,
+            status: document.getElementById('log-load-state').textContent};
+    }''', stale_failure)
+    assert result == {'calls': 2, 'same': True, 'cancelled': True, 'status': 'CURRENT RESULT'}
+
+
+def test_log_date_filter_pause_errors_and_summary_badges(monitor_ui):
+    page, logs = monitor_ui
+    queries = []
+    logs[0]['has_reasoning'] = True
+    logs[0]['has_tool_calls'] = True
+    def query(route):
+        queries.append(parse_qs(urlparse(route.request.url).query))
+        route.fulfill(json={'items': logs, 'total': len(logs)})
+    page.route('**/api/monitor/logs/requests/query?*', query)
+    page.locator('#filter-from').fill('2026-09-09')
+    page.locator('#filter-to').fill('2026-09-09')
+    page.get_by_role('button', name='筛选', exact=True).click()
+    page.wait_for_function("document.getElementById('log-load-state').textContent.startsWith('最近更新')")
+    assert queries[-1]['start_date'] == queries[-1]['end_date'] == ['2026-09-09']
+    assert queries[-1]['include_models'] == ['false']
+    assert page.locator('#request-logs [title="含思维链内容"]').count() == 1
+    assert page.locator('#request-logs [title="含工具调用"]').count() == 1
+    page.locator('#log-refresh-toggle').click()
+    previous = len(queries)
+    page.evaluate('refreshLogs(true)')
+    assert len(queries) == previous
+    page.get_by_role('button', name='刷新日志', exact=True).click()
+    page.wait_for_function("document.getElementById('log-load-state').textContent === '自动刷新已暂停。'")
+    assert len(queries) > previous
+    page.route('**/api/monitor/logs/requests/query?*', lambda route: route.fulfill(status=503, body='temporarily unavailable'))
+    page.get_by_role('button', name='刷新日志', exact=True).click()
+    page.wait_for_selector('#log-load-state.log-load-error')
+    assert '503' in page.locator('#log-load-state').inner_text()
+    assert page.locator('.compare-check').count() == len(logs)
+    page.set_viewport_size({'width': 390, 'height': 900})
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+
+
+def test_log_validation_clears_loading_and_hidden_tab_cannot_replace_status(monitor_ui):
+    page, _ = monitor_ui
+    result = page.evaluate('''async () => {
+        let finish;
+        apiGet = () => new Promise(resolve => {finish = resolve;});
+        document.getElementById('filter-search').value = 'request';
+        const pending = refreshRequestLogs();
+        currentTab = 'errors';
+        logLoadState('ERROR LOG STATUS');
+        finish({json: async () => ({total: 0, items: [], notice: 'REQUEST STATUS'})});
+        await pending;
+        const status = document.getElementById('log-load-state').textContent;
+        currentTab = 'requests';
+        document.getElementById('filter-from').value = '2026-09-10';
+        document.getElementById('filter-to').value = '2026-09-09';
+        applyLogFilters();
+        clearTimeout(searchDebounceTimer);
+        await refreshRequestLogs();
+        return {status, busy: document.getElementById('requests-tab').getAttribute('aria-busy'),
+            error: document.getElementById('log-load-state').textContent};
+    }''')
+    assert result['status'] == 'ERROR LOG STATUS'
+    assert result['busy'] == 'false' and '开始日期不能晚于结束日期' in result['error']
+
+
 @pytest.fixture
 def monitor_ui():
     logs = [

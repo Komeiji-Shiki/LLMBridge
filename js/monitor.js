@@ -27,8 +27,8 @@ function isPageActive() {
 // "undefined" 和全空数据，且从不提示重新登录。
 let _sessionInvalid = false;
 
-async function apiGet(url) {
-    const resp = await fetch(url);
+async function apiGet(url, options) {
+    const resp = await fetch(url, options);
     if (!resp.ok) {
         if (resp.status === 401 || resp.status === 403) {
             if (!_sessionInvalid) {
@@ -134,7 +134,7 @@ function scheduleLogsRefresh() {
     if (_logsRefreshTimer) return;
     _logsRefreshTimer = setTimeout(() => {
         _logsRefreshTimer = null;
-        if (isPageActive()) refreshLogs();
+        if (isPageActive()) refreshLogs(true);
     }, _LOGS_REFRESH_DEBOUNCE_MS);
 }
 
@@ -204,7 +204,7 @@ function updateAllData(data) {
         updateMode(data.mode);
     }
     refreshStats();
-    refreshLogs();
+    refreshLogs(true);
 }
 
 // 更新模式显示
@@ -413,213 +413,6 @@ function updateModelStats(modelStats) {
     });
 }
 
-// 刷新日志
-async function refreshLogs() {
-    // 如果日志是隐藏的，不刷新
-    if (!logsVisible) {
-        return;
-    }
-
-    if (currentTab === 'requests') {
-        await refreshRequestLogs();
-    } else {
-        await refreshErrorLogs();
-    }
-}
-
-// 当前日志限制
-let currentLogLimit = 50;
-let currentLogPage = 0;
-let currentLogTotal = 0;
-let searchDebounceTimer = null;
-
-// 加载模型下拉列表
-async function loadModelFilter() {
-    try {
-        const resp = await apiGet('/api/monitor/logs/requests/query?limit=1&offset=0');
-        const data = await resp.json();
-        const models = data.models || [];
-        const sel = document.getElementById('filter-model');
-        while (sel.options.length > 1) sel.remove(1);
-        models.forEach(m => {
-            const opt = document.createElement('option');
-            opt.value = m;
-            opt.textContent = m;
-            sel.appendChild(opt);
-        });
-    } catch (e) {
-        console.error('加载模型列表失败:', e);
-    }
-}
-
-// 改变日志显示数量
-function changeLogLimit() {
-    currentLogLimit = parseInt(document.getElementById('log-limit').value) || 50;
-    currentLogPage = 0;
-    refreshLogs();
-}
-
-// 应用筛选（防抖 300ms）
-function applyLogFilters() {
-    clearTimeout(searchDebounceTimer);
-    searchDebounceTimer = setTimeout(() => {
-        currentLogPage = 0;
-        refreshLogs();
-    }, 300);
-}
-
-// 翻页
-function changePage(delta) {
-    const maxPage = Math.max(0, Math.ceil(currentLogTotal / currentLogLimit) - 1);
-    currentLogPage = Math.max(0, Math.min(currentLogPage + delta, maxPage));
-    refreshLogs();
-}
-
-// 跳转到指定页（输入框回车/失焦触发）
-function jumpToPage() {
-    const input = document.getElementById('pagination-page-input');
-    const totalPages = Math.max(1, Math.ceil(currentLogTotal / currentLogLimit));
-    const page = Math.max(1, Math.min(parseInt(input.value, 10) || 1, totalPages));
-    input.value = page;
-    if (page - 1 === currentLogPage) return;
-    currentLogPage = page - 1;
-    refreshLogs();
-}
-
-function _renderPagination() {
-    const totalPages = Math.max(1, Math.ceil(currentLogTotal / currentLogLimit));
-    document.getElementById('log-pagination').style.display = currentLogTotal > currentLogLimit ? 'flex' : 'none';
-    document.getElementById('pagination-prev').disabled = currentLogPage <= 0;
-    document.getElementById('pagination-next').disabled = currentLogPage >= totalPages - 1;
-    const pageInput = document.getElementById('pagination-page-input');
-    pageInput.value = currentLogPage + 1;
-    pageInput.max = totalPages;
-    document.getElementById('pagination-total-pages').textContent = totalPages;
-    document.getElementById('pagination-total-count').textContent = currentLogTotal.toLocaleString();
-}
-
-// 刷新请求日志
-let _requestLogsSequence = 0;
-async function refreshRequestLogs() {
-    const sequence = ++_requestLogsSequence;
-    try {
-        const model = document.getElementById('filter-model')?.value || '';
-        const status = document.getElementById('filter-status')?.value || '';
-        const search = document.getElementById('filter-search')?.value.trim() || '';
-        const limit = currentLogLimit;
-        const offset = currentLogPage * limit;
-        const params = new URLSearchParams({ limit, offset });
-        if (model) params.set('model', model);
-        if (status) params.set('status', status);
-        if (search) params.set('search', search);
-
-        const response = await apiGet(`/api/monitor/logs/requests/query?${params}`);
-        const data = await response.json();
-        if (sequence !== _requestLogsSequence) return;
-        const logs = data.items || [];
-        const exRate = data.exchange_rate || { USD_TO_CNY: 7.2, CNY_TO_USD: 1 / 7.2 };
-        currentLogTotal = data.total || 0;
-
-        // 更新计数
-        document.getElementById('request-count').textContent = `(${currentLogTotal})`;
-        document.getElementById('filter-total').textContent = currentLogTotal ? `共 ${currentLogTotal} 条` : '';
-        _renderPagination();
-
-        const tbody = document.getElementById('request-logs');
-
-        if (logs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="11" style="text-align: center;">暂无匹配的请求日志</td></tr>';
-            MonitorCompare.updateCompareButton();
-            return;
-        }
-
-        tbody.innerHTML = logs.map(log => {
-            const time = new Date(log.timestamp * 1000).toLocaleString();
-            const statusClass = log.status === 'success' ? 'success' : 'failed';
-            const duration = log.duration ? formatDuration(log.duration) : '-';
-            const inTokens = log.input_tokens ? log.input_tokens.toLocaleString() : '-';
-            const outTokens = log.output_tokens ? log.output_tokens.toLocaleString() : '-';
-            // 按记录自身的货币显示符号，CNY 计价的费用不再被误标成美元
-            const costCurrency = log.currency || 'USD';
-            const costSymbol = costCurrency === 'CNY' ? '¥' : '$';
-            const costVal = log.total_cost != null ? Number(log.total_cost).toFixed(6) : '';
-            const costDisplay = costVal ? costSymbol + costVal : '-';
-            const costTitle = (costVal && costCurrency === 'CNY')
-                ? `${costVal} CNY ≈ $${(Number(costVal) * exRate.CNY_TO_USD).toFixed(6)} USD`
-                : (costVal ? `${costVal} ${costCurrency}` : '');
-
-            // 🔧 显示思维链/工具调用标记
-            let featureBadges = '';
-            if (log.reasoning_content) {
-                featureBadges += '<span style="display:inline-block;padding:1px 5px;background:rgba(42,168,255,0.15);color:#7dd3fc;border-radius:3px;font-size:10px;margin-right:3px;" title="含思维链内容">🧠</span>';
-            }
-            const hasRequestToolCalls = log.request_messages && log.request_messages.some(m => m.tool_calls);
-            const hasResponseToolCalls = Boolean(
-                log.response_tool_calls || (log.response_message && log.response_message.tool_calls)
-            );
-            if (hasRequestToolCalls || hasResponseToolCalls) {
-                featureBadges += '<span style="display:inline-block;padding:1px 5px;background:rgba(245,158,11,0.15);color:#fcd34d;border-radius:3px;font-size:10px;" title="含工具调用">🔧</span>';
-            }
-
-            return `
-                <tr>
-                    <td><input type="checkbox" class="compare-check" aria-label="加入缓存对比" data-request-id="${escapeHtml(log.request_id || '')}" onchange="MonitorCompare.toggleCompareSelection(this.dataset.requestId, this.checked)" ${log.request_id && MonitorCompare.has(log.request_id) ? 'checked' : ''} ${log.request_id ? '' : 'disabled title="该记录无请求ID"'}></td>
-                    <td>${time}</td>
-                    <td style="font-family: monospace; font-size: 12px;">${escapeHtml(log.request_id?.substring(0, 8) || 'N/A')}...</td>
-                    <td>${escapeHtml(log.model)}${featureBadges ? ' ' + featureBadges : ''}<div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div></td>
-                    <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span></td>
-                    <td title="${escapeHtml(renderPhaseTimings(log.timings))}">${duration}${log.timings?.first_business_ms != null ? `<div style="font-size:11px;opacity:.7">首事件 ${(Number(log.timings.first_business_ms) / 1000).toFixed(2)}s</div>` : ""}</td>
-                    <td>${inTokens}</td>
-                    <td>${outTokens}</td>
-                    <td style="white-space: nowrap;">${formatStopReason(log.stop_reason || (log.cost_info && log.cost_info.stop_reason))}</td>
-                    <td style="font-family: monospace; font-size: 11px;" title="${escapeHtml(costTitle)}">${escapeHtml(costDisplay)}</td>
-                    <td>
-                        <button class="detail-btn" data-request-id="${escapeHtml(log.request_id || '')}" onclick="viewRequestDetails(this.dataset.requestId)">查看详细</button>
-                    </td>
-                </tr>
-            `;
-        }).join('');
-        MonitorCompare.updateCompareButton();
-
-    } catch (error) {
-        console.error('获取请求日志失败:', error);
-    }
-}
-
-// 刷新错误日志
-async function refreshErrorLogs() {
-    try {
-        const limit = currentLogLimit === 10000 ? 1000 : Math.min(currentLogLimit, 100);
-        const response = await apiGet(`/api/monitor/logs/errors?limit=${limit}`);
-        const logs = await response.json();
-
-        // 更新计数显示
-        var badge = document.getElementById('error-log-count');
-        if (badge) badge.textContent = '(' + logs.length + ')';
-
-        const container = document.getElementById('error-logs');
-
-        if (logs.length === 0) {
-            container.innerHTML = '<div class="empty-state">暂无错误日志</div>';
-            return;
-        }
-
-        container.innerHTML = logs.map(log => {
-            const time = new Date(log.timestamp * 1000).toLocaleString();
-
-            return `
-                <div class="error-log">
-                    <div class="error-message">${escapeHtml(log.error)}</div>
-                    <div class="error-time">${time} - 模型: ${escapeHtml(log.model)} - 请求ID: ${escapeHtml(log.request_id || 'N/A')}</div>
-                </div>
-            `;
-        }).join('');
-
-    } catch (error) {
-        console.error('获取错误日志失败:', error);
-    }
-}
-
 // 刷新活跃请求
 async function refreshActiveRequests() {
     try {
@@ -634,6 +427,7 @@ async function refreshActiveRequests() {
 // 切换标签页
 function switchTab(tab) {
     currentTab = tab;
+    document.getElementById('log-filters').style.display = tab === 'requests' ? 'flex' : 'none';
 
     // 更新标签样式
     document.querySelectorAll('.tab').forEach(t => {
@@ -666,9 +460,7 @@ setInterval(() => {
 
 setInterval(() => {
     if (!isPageActive()) return;
-    if (logsVisible && currentTab === 'requests') {
-        refreshRequestLogs();
-    }
+    if (logsVisible) refreshLogs(true);
 }, 10000); // 每10秒刷新日志（仅在显示状态）
 
 setInterval(() => {
@@ -1139,8 +931,11 @@ window.onclick = function(event) {
 
 // 初始化
 connectWebSocket();
+(() => {
+    const search = new URLSearchParams(location.search).get('search');
+    if (search) document.getElementById('filter-search').value = search;
+})();
 refreshData();
-loadModelFilter();
 
 // 初始化时设置各个面板的隐藏状态
 document.addEventListener('DOMContentLoaded', function() {
@@ -1214,7 +1009,6 @@ function toggleLogs() {
     if (logsVisible) {
         container.classList.remove('logs-hidden');
         btn.textContent = '隐藏日志';
-        loadModelFilter().catch(e => console.error('模型筛选下拉加载失败:', e)); // 加载模型筛选下拉
         refreshLogs(); // 显示时刷新日志
     } else {
         container.classList.add('logs-hidden');

@@ -155,7 +155,9 @@ def test_monitor_keeps_newest_query_and_supports_programmatic_tabs(ui):
         let olderResolve, newerResolve;
         const pending = [new Promise(resolve => olderResolve = resolve), new Promise(resolve => newerResolve = resolve)];
         apiGet = async () => { const response = pending.shift(); return {json: () => response}; };
+        document.getElementById('filter-search').value = 'older';
         const older = refreshRequestLogs();
+        document.getElementById('filter-search').value = 'newer';
         const newer = refreshRequestLogs();
         newerResolve({total: 1, items: [{request_id: 'new', model: 'new', status: 'success', timestamp: 1,
             currency: 'USD" onmouseover="window.auditInjected=true', total_cost: 1}]});

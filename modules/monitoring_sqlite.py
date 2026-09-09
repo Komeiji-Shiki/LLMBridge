@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 from core.request_metadata import migrate_metadata, write_metadata, read_metadata
+from utils.log_query import LogQuery
+from utils.request_features import request_features
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +122,8 @@ class SQLiteLogger:
                     ('upstream_usage', 'ALTER TABLE requests ADD COLUMN upstream_usage TEXT'),
                     ('system_fingerprint', 'ALTER TABLE requests ADD COLUMN system_fingerprint TEXT'),
                     ('stop_reason', 'ALTER TABLE requests ADD COLUMN stop_reason TEXT'),
+                    ('has_reasoning', 'ALTER TABLE requests ADD COLUMN has_reasoning INTEGER'),
+                    ('has_tool_calls', 'ALTER TABLE requests ADD COLUMN has_tool_calls INTEGER'),
                 ]
                 for col_name, ddl in migrations:
                     if col_name not in columns:
@@ -226,6 +230,7 @@ class SQLiteLogger:
             cached_cost = cost_info.get('cached_cost', 0.0)
             total_cost = cost_info.get('total_cost', 0.0)
             currency = cost_info.get('currency') or None  # 失败请求不写货币，避免污染统计
+            features = request_features(log_entry)
             
             # 🔧 用写锁串行化 SQLite 写操作（连接获取也在锁内，避免首次建连竞态）
             with self._write_lock:
@@ -237,14 +242,15 @@ class SQLiteLogger:
                         duration, error, mode, session_id, messages_count,
                         input_tokens, output_tokens, total_tokens, cached_tokens,
                         input_cost, output_cost, cached_cost, total_cost, currency,
-                        upstream_usage, system_fingerprint, stop_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        upstream_usage, system_fingerprint, stop_reason, has_reasoning, has_tool_calls
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     request_id, timestamp, date, model, status, success,
                     duration, error, mode, session_id, messages_count,
                     input_tokens, output_tokens, total_tokens, cached_tokens,
                     input_cost, output_cost, cached_cost, total_cost, currency,
-                    upstream_usage_json, system_fingerprint, stop_reason
+                    upstream_usage_json, system_fingerprint, stop_reason,
+                    features['has_reasoning'], features['has_tool_calls']
                 ))
                 write_metadata(conn, log_entry['request_id'], log_entry)
                 conn.commit()
@@ -261,50 +267,14 @@ class SQLiteLogger:
             with self._read_connection() as conn:
                 cursor = conn.cursor()
 
-                cursor.execute('''
-                SELECT
-                    request_id, timestamp, date, model, status, success,
-                    duration, error, mode, session_id, messages_count,
-                    input_tokens, output_tokens, total_tokens,
-                    cached_tokens, cached_cost,
-                    input_cost, output_cost, total_cost, currency,
-                    created_at, upstream_usage, system_fingerprint, stop_reason,
-                    caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot,
-                    cache_write_tokens, cache_write_1h_tokens, cache_write_cost, cache_write_extra_cost, cache_mode
-                    FROM requests
-                    WHERE request_id = ?
-                ''', (request_id,))
-
+                cursor.execute('SELECT * FROM requests WHERE request_id = ?', (request_id,))
                 row = cursor.fetchone()
-
             if row:
-                return {
-                    'request_id': row['request_id'],
-                    'timestamp': row['timestamp'],
-                    'date': row['date'],
-                    'model': row['model'],
-                    'status': row['status'],
-                    'success': bool(row['success']),
-                    'duration': row['duration'],
-                    'error': row['error'],
-                    'mode': row['mode'],
-                    'session_id': row['session_id'],
-                    'messages_count': row['messages_count'],
-                    'input_tokens': row['input_tokens'],
-                    'output_tokens': row['output_tokens'],
-                    'total_tokens': row['total_tokens'],
-                    'cached_tokens': row['cached_tokens'] or 0,
-                    'cached_cost': row['cached_cost'] or 0.0,
-                    'input_cost': row['input_cost'],
-                    'output_cost': row['output_cost'],
-                    'total_cost': row['total_cost'],
-                    'currency': row['currency'],
-                    'upstream_usage': self._parse_upstream_usage(row['upstream_usage']),
-                    'system_fingerprint': row['system_fingerprint'],
-                    'stop_reason': row['stop_reason'],
-                    **read_metadata(row),
-                }
-            
+                result = self._row_to_request_dict(row)
+                result.pop('type')
+                result['date'] = row['date']
+                return result
+
             return None
             
         except Exception as e:
@@ -313,8 +283,10 @@ class SQLiteLogger:
     
     def get_recent_requests(self, limit: int = 50) -> List[Dict]:
         """从SQLite快速获取最近的N条请求摘要（走timestamp索引，O(log n + limit)）"""
-        result = self.query_requests(limit=limit, offset=0)
-        return result.get('items', [])
+        LogQuery(limit=limit)
+        with self._read_connection() as conn:
+            rows = conn.execute('SELECT * FROM requests ORDER BY timestamp DESC, rowid DESC LIMIT ?', (limit,))
+            return [self._row_to_request_dict(row) for row in rows]
 
     @staticmethod
     def _parse_upstream_usage(raw) -> Optional[Dict]:
@@ -354,71 +326,27 @@ class SQLiteLogger:
             'upstream_usage': SQLiteLogger._parse_upstream_usage(row['upstream_usage']),
             'system_fingerprint': row['system_fingerprint'],
             'stop_reason': row['stop_reason'],
+            # 旧记录没有这些标记时保留未知状态，不扫描历史正文来补算。
+            'has_reasoning': bool(row['has_reasoning']) if row['has_reasoning'] is not None else None,
+            'has_tool_calls': bool(row['has_tool_calls']) if row['has_tool_calls'] is not None else None,
             **read_metadata(row),
         }
 
     def query_requests(self, limit: int = 50, offset: int = 0,
                        model: Optional[str] = None, status: Optional[str] = None,
-                       search: Optional[str] = None) -> Dict:
-        """分页 + 过滤查询请求日志。
-
-        Args:
-            limit/offset: 分页参数
-            model: 按模型名精确过滤
-            status: 'success' / 'failed'（其他值忽略）
-            search: 在 request_id / model / error 中模糊搜索
-
-        Returns:
-            {'total': 总条数, 'items': 日志列表}
-        """
-        try:
-            where_clauses = []
-            params: list = []
-            if model:
-                where_clauses.append("model = ?")
-                params.append(model)
-            if status == 'success':
-                where_clauses.append("success = 1")
-            elif status == 'failed':
-                where_clauses.append("success = 0")
-            if search:
-                # 🔧 转义 LIKE 通配符，避免搜索 % / _ 时匹配全表
-                escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                like = f"%{escaped}%"
-                where_clauses.append(
-                    "(request_id LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\' OR error LIKE ? ESCAPE '\\' OR caller_id LIKE ? ESCAPE '\\' OR caller_name LIKE ? ESCAPE '\\' OR conversation_id LIKE ? ESCAPE '\\')"
-                )
-                params.extend([like] * 6)
-
-            where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-
-            with self._read_connection() as conn:
-                cursor = conn.cursor()
-
-                cursor.execute(f"SELECT COUNT(*) FROM requests{where_sql}", params)
-                total = cursor.fetchone()[0]
-
-                cursor.execute(f'''
-                    SELECT
-                        request_id, timestamp, date, model, status, success,
-                        duration, error, mode, session_id, messages_count,
-                        input_tokens, output_tokens, total_tokens,
-                        cached_tokens, cached_cost,
-                        input_cost, output_cost, total_cost, currency,
-                        upstream_usage, system_fingerprint, stop_reason,
-                        caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot,
-                    cache_write_tokens, cache_write_1h_tokens, cache_write_cost, cache_write_extra_cost, cache_mode
-                    FROM requests{where_sql}
-                    ORDER BY timestamp DESC
-                    LIMIT ? OFFSET ?
-                ''', params + [limit, offset])
-
-                items = [self._row_to_request_dict(row) for row in cursor.fetchall()]
-            return {'total': total, 'items': items}
-
-        except Exception as e:
-            logger.error(f"过滤查询请求日志失败: {e}", exc_info=True)
-            return {'total': 0, 'items': []}
+                       search: Optional[str] = None, start_date=None, end_date=None) -> Dict:
+        """同一读取快照内统计与分页，时间相同时按写入顺序稳定排序。"""
+        query = LogQuery(limit, offset, model, status, search, start_date, end_date)
+        where_sql, params = query.sql()
+        with self._read_connection() as conn:
+            conn.execute('BEGIN')
+            total = conn.execute(f'SELECT COUNT(*) FROM requests{where_sql}', params).fetchone()[0]
+            rows = conn.execute(
+                f'SELECT * FROM requests{where_sql} ORDER BY timestamp DESC, rowid DESC LIMIT ? OFFSET ?',
+                params + [limit, offset])
+            items = [self._row_to_request_dict(row) for row in rows]
+        # 查询失败交给 LogManager 选择文件回退，不能伪装成没有记录。
+        return {'total': total, 'items': items}
 
     def get_distinct_models(self) -> List[str]:
         """获取日志中出现过的所有模型名（用于前端筛选下拉）"""

@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from typing import Optional
 import psutil
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from core.app_state import get_app_state
@@ -117,12 +117,17 @@ async def get_request_logs(limit: int, monitoring_service):
 
 async def query_request_logs(monitoring_service, limit: int = 50, offset: int = 0,
                              model: Optional[str] = None, status: Optional[str] = None,
-                             search: Optional[str] = None):
+                             search: Optional[str] = None, start_date=None, end_date=None,
+                             include_models=True):
     """分页 + 过滤查询请求日志（监控面板增强版）"""
     import asyncio
-    result = await asyncio.to_thread(
-        monitoring_service.log_manager.query_request_logs,
-        limit, offset, model or None, status or None, search or None)
+    try:
+        result = await asyncio.to_thread(
+            monitoring_service.log_manager.query_request_logs,
+            limit, offset, model or None, status or None, search or None,
+            start_date, end_date, include_models)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
     # 附带汇率：前端展示 CNY 计价模型的费用时可换算出 USD 参考值
     if isinstance(result, dict):
         from core.db_stats import get_exchange_rates
@@ -326,22 +331,25 @@ async def get_active_requests_endpoint():
 
 
 @router.get("/api/monitor/logs/requests")
-async def get_request_logs_endpoint(limit: int = 50):
+async def get_request_logs_endpoint(limit: int = Query(50, ge=1, le=1000)):
     return await get_request_logs(limit, monitoring_service)
 
 
 @router.get("/api/monitor/logs/requests/query")
-async def query_request_logs_endpoint(limit: int = 50, offset: int = 0,
+async def query_request_logs_endpoint(limit: int = Query(50, ge=1, le=1000), offset: int = Query(0, ge=0),
                                       model: Optional[str] = None,
                                       status: Optional[str] = None,
-                                      search: Optional[str] = None):
+                                      search: Optional[str] = None,
+                                      start_date: Optional[str] = None,
+                                      end_date: Optional[str] = None,
+                                      include_models: bool = True):
     """分页 + 过滤查询请求日志（返回 {total, items, models}）"""
     return await query_request_logs(
-        monitoring_service, limit, offset, model, status, search)
+        monitoring_service, limit, offset, model, status, search, start_date, end_date, include_models)
 
 
 @router.get("/api/monitor/logs/errors")
-async def get_error_logs_endpoint(limit: int = 30):
+async def get_error_logs_endpoint(limit: int = Query(30, ge=1, le=1000)):
     return await get_error_logs(limit, monitoring_service)
 
 

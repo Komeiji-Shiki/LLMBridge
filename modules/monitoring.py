@@ -371,45 +371,34 @@ class LogManager:
     
     def query_request_logs(self, limit: int = 50, offset: int = 0,
                            model: Optional[str] = None, status: Optional[str] = None,
-                           search: Optional[str] = None) -> dict:
-        """分页 + 过滤查询请求日志（供监控面板使用）。
-
-        SQLite 优先（走索引 + SQL 过滤）；不可用时回退内存过滤。
-        Returns: {'total': int, 'items': [...], 'models': [模型名列表]}
-        """
+                           search: Optional[str] = None, start_date=None, end_date=None,
+                           include_models=True) -> dict:
+        """SQLite 优先；文件回退明确标注最多检索最近 1000 条。"""
+        from utils.log_query import LogQuery
+        from utils.request_features import request_features
+        query = LogQuery(limit, offset, model, status, search, start_date, end_date)
         if self.sqlite_logger:
             try:
                 result = self.sqlite_logger.query_requests(
-                    limit=limit, offset=offset, model=model, status=status, search=search)
-                result['models'] = self.sqlite_logger.get_distinct_models()
-                return result
-            except Exception as e:
-                logger.warning(f"SQLite 过滤查询失败，回退内存过滤: {e}")
+                    limit=limit, offset=offset, model=model, status=status, search=search,
+                    start_date=start_date, end_date=end_date)
+                if include_models:
+                    result['models'] = self.sqlite_logger.get_distinct_models()
+                return {**result, 'limited': False}
+            except Exception as error:
+                logger.warning(f'SQLite 过滤查询失败，回退最近日志: {error}')
 
-        # 回退：读最近日志后在内存中过滤
-        logs = self.read_recent_logs("requests", 1000)
-        search_lower = (search or "").lower()
-
-        def _match(entry: dict) -> bool:
-            if model and entry.get('model') != model:
-                return False
-            if status == 'success' and not entry.get('success', entry.get('status') == 'success'):
-                return False
-            if status == 'failed' and entry.get('success', entry.get('status') == 'success'):
-                return False
-            if search_lower:
-                haystack = ' '.join(str(entry.get(key) or '') for key in ('request_id', 'model', 'error', 'caller_id', 'caller_name', 'conversation_id')).lower()
-                if search_lower not in haystack:
-                    return False
-            return True
-
-        filtered = [entry for entry in logs if _match(entry)]
-        models = sorted({m for entry in logs if (m := entry.get('model'))})
-        return {
+        logs = self.read_recent_logs('requests', 1000)
+        filtered = [entry for entry in logs if query.matches(entry)]
+        result = {
             'total': len(filtered),
-            'items': filtered[offset:offset + limit],
-            'models': models,
+            'items': [{**entry, **request_features(entry)} for entry in filtered[offset:offset + limit]],
+            'limited': True,
+            'notice': '当前使用最近 1000 条日志进行筛选，结果不代表完整历史。',
         }
+        if include_models:
+            result['models'] = sorted({entry['model'] for entry in logs if entry.get('model')})
+        return result
 
     def read_recent_logs(self, log_type: str = "requests", limit: int = 50) -> List[dict]:
         """读取最近的日志。SQLite优先（O(log n)走索引），分层日志兜底，JSONL最后"""
