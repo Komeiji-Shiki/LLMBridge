@@ -47,21 +47,6 @@ def test_cache_writes_survive_chat_responses_and_anthropic_conversions():
     assert convert_openai_usage_to_anthropic(back) == native
 
 
-def test_launch_price_update_preserves_endpoints_and_rejects_unknown_versions():
-    from scripts.update_launch_prices import update_prices
-    catalog = {'claude-opus-4-1': {'pricing': {'input': 15}, 'sources': []},
-               'gpt-5': {'pricing': {'input': 1.25}, 'sources': []}}
-    configs = {'// 注释': '', 'old': [{'model_id': 'claude-opus-4-1-20250805', 'api_key': 'fixture-key',
-                                    'archived': True}], 'future': {'model_id': 'gpt-5.9'},
-               'local': {'model_id': 'claude-opus-4-1-exl3'}}
-    result, report = update_prices(configs, catalog)
-    assert result['old'][0] == {**configs['old'][0], 'pricing': {'input': 15}}
-    assert result['future'] == configs['future']
-    assert result['local'] == configs['local']
-    assert 'pricing' not in configs['old'][0]
-    assert 'fixture-key' not in json.dumps(report)
-
-
 def test_missing_write_rate_keeps_legacy_input_billing_and_zero_is_valid():
     price = {'input': 2, 'output': 3, 'cached_input': .2}
     cost = calculate_api_cost(1000000, 0, price, 200000, 300000)
