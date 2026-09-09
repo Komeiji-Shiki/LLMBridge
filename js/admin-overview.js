@@ -31,6 +31,13 @@ function switchCostCurrency(currency) {
 
 // 更新成本卡片显示（根据当前选中货币）
 function updateCostDisplay(data) {
+    if (data.cost_scope === 'unavailable') {
+        for (const id of ['total-cost-value', 'input-cost-value', 'output-cost-value']) {
+            document.getElementById(id).textContent = '未提供';
+        }
+        document.getElementById('total-cost-currency').textContent = 'Codex 本地日志无账单金额';
+        return;
+    }
     const symbol = currentCostCurrency === 'CNY' ? '¥' : '$';
     const currLabel = currentCostCurrency;
     
@@ -94,7 +101,7 @@ function updateOverallRatesFromCachedData() {
         }
 
         // “总体速率统计”卡片只统计当前 24小时/1小时周期，不能使用 model_stats 的全量 request_count
-        const rateStats = data.rate_stats;
+        const rateStats = data.gateway_rate_stats || data.rate_stats;
         const minutes = rateStats.minutes || (currentRatePeriod === 'day' ? 1440 : 60);
         const totalRequests = rateStats.request_count || 0;
         const totalTokens = rateStats.total_tokens || 0;
@@ -231,10 +238,15 @@ function clearDateFilter() {
     refreshTokenStats();
 }
 
-async function refreshTokenStats() {
+async function refreshTokenStats(force = false) {
+    const source = document.getElementById('usage-source')?.value || 'all';
     try {
         let url = '/api/admin/token_stats';
         const params = new URLSearchParams();
+        params.set('source', source);
+        if (force) params.set('force', 'true');
+        const status = document.getElementById('codex-usage-status');
+        if (status && source !== 'bridge') status.textContent = '正在读取 Codex 用量，首次扫描历史日志可能需要一些时间…';
         
         // 日期筛选器用于 Token 统计、成本统计等
         if (currentStartDate) params.append('start_date', currentStartDate);
@@ -260,6 +272,25 @@ async function refreshTokenStats() {
         }
         
         const data = await response.json();
+        // 来源切换后忽略旧请求，避免较慢的扫描覆盖当前选择。
+        if (source !== (document.getElementById('usage-source')?.value || 'all')) return;
+        if (status) {
+            const usage = data.codex_usage;
+            if (!usage) status.textContent = '';
+            else if (usage.status?.errors?.length) {
+                status.textContent = 'Codex 部分数据读取失败，当前统计可能不完整。' + usage.status.errors.map(item => item.error).join('；');
+            } else if (!usage.status?.available) {
+                status.textContent = '服务所在机器未发现 Codex 会话日志。可通过 CODEX_HOME 或 CODEX_USAGE_HOMES 指定目录。';
+            } else {
+                status.textContent = `Codex：${formatNumber(usage.total_tokens || 0)} Tokens · ${usage.session_count || 0} 个会话 · ${usage.event_count || 0} 条用量事件\n缓存输入 ${formatNumber(usage.cached_tokens || 0)} · 推理输出 ${formatNumber(usage.reasoning_tokens || 0)} · 缓存写入 ${formatNumber(usage.cache_write_tokens || 0)} · 已扫描 ${usage.status.files} 个日志文件 · ${new Date(usage.status.scanned_at * 1000).toLocaleString()}`;
+                status.title = (usage.status.directories || []).join('\n');
+                if (usage.excluded_usage?.event_count) {
+                    status.textContent += `\n合计已排除经 LLMBridge 转发的 ${usage.excluded_usage.event_count} 条事件，共 ${formatNumber(usage.excluded_usage.total_tokens)} Tokens；Codex 单独视图保留完整用量。`;
+                }
+            }
+        }
+        const costNote = document.getElementById('usage-cost-note');
+        if (costNote) costNote.textContent = source === 'bridge' ? '' : '成本与请求成功率、RPM/TPM 仅统计 LLMBridge。Codex 缓存属于输入、推理属于输出，不重复相加；用量事件不等于网关请求。';
         
         // 更新总计卡片
         const totalTokens = data.total_tokens || 0;
@@ -292,12 +323,16 @@ async function refreshTokenStats() {
         renderTokenOutputBarChart(data.model_stats);
         renderTokenTrendChart(data.daily_stats || []);
         renderCostTrendChart(data.daily_stats || []);
+        const costChart = document.getElementById('costTrendChart');
+        if (costChart) costChart.parentElement.hidden = source === 'codex';
         renderTokenStatsTable(data.model_stats);
         
         // 🔧 优化：从 Token 统计数据中直接推算总体 RPM/TPM，不再重复请求
         updateOverallRatesFromCachedData();
         
     } catch (error) {
+        const status = document.getElementById('codex-usage-status');
+        if (status) status.textContent = '用量加载失败：' + error.message;
         console.error('❌ 刷新Token统计失败:', error);
         console.error('错误详情:', error.message);
         showMessage('danger', '刷新Token统计失败: ' + error.message);
@@ -311,6 +346,7 @@ function exportTokenReport() {
     const endDate = document.getElementById('token-end-date').value;
     
     let url = '/api/admin/export_report?';
+    url += 'source=' + encodeURIComponent(document.getElementById('usage-source')?.value || 'all') + '&';
     if (startDate) url += 'start_date=' + encodeURIComponent(startDate) + '&';
     if (endDate) url += 'end_date=' + encodeURIComponent(endDate) + '&';
     

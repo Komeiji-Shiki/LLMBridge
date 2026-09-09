@@ -1,17 +1,15 @@
 """Isolated CSV/JSONC/file-bed regressions; never opens user configuration."""
-import asyncio
 import base64
 import importlib.util
 import io
 import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, mock_open, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, PngImagePlugin
-from routes.admin_routes import export_report
+from routes.admin_usage import usage_csv
 from utils.jsonc_edit import parse_jsonc
 
 
@@ -48,12 +46,9 @@ def test_csv_labels_cannot_be_formulas(text):
     assert csv_safe_text(text).startswith("'")
 
 
-@pytest.mark.parametrize('enabled', [True, False])
-def test_csv_has_actual_bom_and_does_not_mislabel_cny(enabled):
-    db = SimpleNamespace(enabled=enabled, get_token_stats_async=AsyncMock(return_value={
-        'model_stats': [{'model': '模型', 'currency': 'CNY', 'total_cost': 12}]}))
-    monitor = SimpleNamespace(get_model_stats=lambda: [{'model': '模型'}])
-    response = asyncio.run(export_report(db, monitor, {}))
+@pytest.mark.parametrize('source', ['bridge', 'codex'])
+def test_csv_has_actual_bom_and_does_not_mislabel_cny(source):
+    response = usage_csv({'model_stats': [{'source': source, 'model': '模型', 'currency': 'CNY', 'total_cost': 12}]})
     assert response.body.startswith(b'\xef\xbb\xbf')
     text = response.body.decode('utf-8-sig')
     assert '模型' in text

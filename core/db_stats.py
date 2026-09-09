@@ -103,7 +103,10 @@ class StatsDB:
           配合 SQL 的 timestamp < end_ts（半开区间），确保结束日整天数据不丢。
         """
         try:
-            return datetime.fromisoformat(time_str.replace("Z", "+00:00")).timestamp()
+            dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            if is_end and len(time_str) == 10:
+                dt += timedelta(days=1)
+            return dt.timestamp()
         except (ValueError, AttributeError):
             dt = datetime.strptime(time_str, "%Y-%m-%d")
             if is_end:

@@ -365,3 +365,55 @@ def test_monitor_large_detail_only_expands_on_demand(ui):
     assert page.locator('#lazy-test img').count() == 0
     page.locator('#lazy-test button').click()
     assert len(page.locator('#lazy-test').inner_text()) < 4100
+
+
+def test_codex_usage_source_controls_charts_rows_and_export(ui):
+    from urllib.parse import parse_qs
+    from core.combined_usage import combine_usage
+    page, _, _, _ = ui
+    bridge = {'model_stats': [{'model': 'demo', 'request_count': 1, 'input_tokens': 40,
+                              'output_tokens': 5, 'total_tokens': 45, 'total_cost': 1}],
+              'daily_stats': [], 'total_tokens': 45, 'total_input_tokens': 40,
+              'total_output_tokens': 5, 'total_cached_tokens': 0,
+              'total_cost': 1, 'input_cost': 1, 'output_cost': 0,
+              'rate_stats': {'request_count': 1, 'total_tokens': 45, 'minutes': 60}}
+    codex = {'model_stats': [{'model': 'demo', 'input_tokens': 100, 'output_tokens': 10,
+                             'total_tokens': 110, 'cached_tokens': 20, 'reasoning_tokens': 3,
+                             'event_count': 1}], 'daily_stats': [], 'input_tokens': 100,
+             'output_tokens': 10, 'total_tokens': 110, 'cached_tokens': 20, 'reasoning_tokens': 3,
+             'event_count': 1, 'session_count': 1,
+             'status': {'available': True, 'files': 1, 'scanned_at': 1, 'directories': [], 'errors': []}}
+    queries = []
+
+    def token_route(route):
+        params = parse_qs(urlparse(route.request.url).query)
+        queries.append(params)
+        route.fulfill(json=combine_usage(bridge, codex, params.get('source', ['all'])[0]))
+
+    page.route('**/api/admin/token_stats?*', token_route)
+    page.locator('[data-page="overview"]').click()
+    page.evaluate('refreshTokenStats()')
+    assert page.locator('#usage-source').input_value() == 'all'
+    assert page.locator('#total-tokens-value').inner_text() == '155'
+    assert page.locator('#token-stats-table tbody tr').count() == 2
+    assert page.locator('.model-stat-checkbox').count() == 1
+    assert 'Codex' in page.locator('#codex-usage-status').inner_text()
+    page.locator('#usage-source').select_option('codex')
+    page.wait_for_function("document.getElementById('total-tokens-value').textContent === '110'")
+    assert page.locator('#total-cost-value').inner_text() == '未提供'
+    assert page.locator('.model-stat-checkbox').count() == 0
+    assert page.locator('#token-stats-table tbody button').count() == 0
+    assert page.locator('#costTrendChart').is_hidden()
+    page.evaluate('refreshTokenStats(true)')
+    assert queries[-1]['force'] == ['true']
+    page.route('**/api/admin/export_report?*', lambda route: route.fulfill(
+        body='来源,模型\ncodex,demo\n', content_type='text/csv',
+        headers={'Content-Disposition': 'attachment; filename=token_report.csv'}))
+    with page.expect_download(timeout=5000) as download:
+        page.get_by_role('button', name='📥 导出CSV').click()
+    assert parse_qs(urlparse(download.value.url).query)['source'] == ['codex']
+    page.locator('#usage-source').select_option('bridge')
+    page.wait_for_function("document.getElementById('total-tokens-value').textContent === '45'")
+    assert page.locator('.model-stat-checkbox').count() == 1
+    assert page.locator('#total-cost-value').inner_text() == '$1.0000'
+    assert page.locator('#costTrendChart').is_visible()

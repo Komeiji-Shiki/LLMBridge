@@ -179,7 +179,12 @@
                 <div class="card">
                     <div class="card-header">
                         <h3>Token 用量统计</h3>
-                        <div style="display: flex; gap: 10px; align-items: center;">
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+                            <select id="usage-source" class="form-select" aria-label="用量来源" onchange="refreshTokenStats()" style="width: auto; border-radius: 0;">
+                                <option value="all">全部来源</option>
+                                <option value="bridge">LLMBridge</option>
+                                <option value="codex">Codex</option>
+                            </select>
                             <input type="date" id="token-start-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
                             <span style="color: var(--text-dim);">至</span>
                             <input type="date" id="token-end-date" class="form-input" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" />
@@ -189,7 +194,7 @@
                             <button class="btn btn-sm" onclick="clearDateFilter()">
                                 ✖️ 清除
                             </button>
-                            <button class="btn btn-sm" onclick="refreshTokenStats()">
+                            <button class="btn btn-sm" onclick="refreshTokenStats(true)">
                                 🔄 刷新
                             </button>
                             <button class="btn btn-sm" onclick="exportTokenReport()" title="导出CSV报告" style="background: #166534; border-color: #22c55e; color: #bbf7d0;">
@@ -198,6 +203,8 @@
                         </div>
                     </div>
                     
+                    <p id="codex-usage-status" role="status" style="padding: 0 20px; color: var(--text-dim); white-space: pre-line;"></p>
+                    <p id="usage-cost-note" style="padding: 0 20px; color: var(--text-dim);"></p>
                     <!-- 🔧 成本信息统计卡片（支持 USD/CNY 切换） -->
                     <div style="padding: 20px; border-bottom: 1px solid var(--line-weak);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">

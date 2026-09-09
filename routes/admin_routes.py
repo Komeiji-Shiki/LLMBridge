@@ -20,6 +20,7 @@ from core.model_archive import (
 )
 from core.app_state import get_app_state
 from core.db_stats import stats_db, get_exchange_rates
+from .admin_usage import selected_usage, usage_csv
 from modules.monitoring import monitoring_service, MonitorConfig
 from modules.token_counter import (
     estimate_message_tokens, estimate_tokens, get_token_counter_info,
@@ -31,7 +32,6 @@ from utils.jsonc_edit import (
     atomic_write_json, atomic_write_text, set_jsonc_value, set_jsonc_values,
 )
 from ._direct_api_utils import set_sticky_current_key
-from utils.csv_export import csv_safe_text
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.responses import Response
@@ -1071,83 +1071,6 @@ async def _build_memory_token_stats(monitoring_service, rpm_period: Optional[str
 
 
 
-async def export_report(
-    stats_db,
-    monitoring_service,
-    MODEL_ENDPOINT_MAP: dict,
-    start_date: str = None,
-    end_date: str = None
-):
-    """导出Token使用/成本报告为CSV文件"""
-    import csv
-    import io
-
-    try:
-        # 优先使用SQLite
-        if stats_db.enabled:
-            db_stats = await stats_db.get_token_stats_async(start_date, end_date, MODEL_ENDPOINT_MAP, 'day')
-            if db_stats and db_stats.get('model_stats'):
-                model_stats = db_stats['model_stats']
-                output = io.StringIO()
-                writer = csv.writer(output)
-                # 写入表头
-                writer.writerow([
-                    '模型', '请求数', '输入Tokens', '输出Tokens', '缓存命中Tokens',
-                    '总Tokens', '输入成本(原币)', '缓存成本(原币)', '输出成本(原币)', '总成本(原币)',
-                    '货币', '平均Token/请求'
-                ])
-                for stat in model_stats:
-                    writer.writerow([
-                        csv_safe_text(stat.get('display_name', stat.get('model', ''))),
-                        stat.get('request_count', 0),
-                        stat.get('input_tokens', 0),
-                        stat.get('output_tokens', 0),
-                        stat.get('cached_tokens', 0),
-                        stat.get('total_tokens', 0),
-                        round(stat.get('input_cost', 0), 6),
-                        round(stat.get('cached_cost', 0), 6),
-                        round(stat.get('output_cost', 0), 6),
-                        round(stat.get('total_cost', 0), 6),
-                        csv_safe_text(stat.get('currency', 'USD')),
-                        stat.get('request_count', 0) > 0 and round(stat.get('total_tokens', 0) / stat.get('request_count', 0)) or 0
-                    ])
-
-                csv_content = output.getvalue()
-                output.close()
-                return Response(
-                    content=csv_content.encode('utf-8-sig'),
-                    media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": "attachment; filename=token_report.csv"}
-                )
-
-        # 回退：从内存中的模型统计导出
-        # 🔧 性能修复：用 asyncio.to_thread 包装，避免 threading.Lock 阻塞事件循环
-        model_stats = await asyncio.to_thread(monitoring_service.get_model_stats)
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow([
-            '模型', '总请求数', '成功请求数', '失败请求数', '平均耗时(ms)'
-        ])
-        for stat in model_stats:
-            writer.writerow([
-                csv_safe_text(stat.get('model', '')),
-                stat.get('total_requests', 0),
-                stat.get('success_requests', 0),
-                stat.get('failed_requests', 0),
-                round(stat.get('avg_duration', 0) * 1000, 2)
-            ])
-        csv_content = output.getvalue()
-        output.close()
-        return Response(
-            content=csv_content.encode('utf-8-sig'),
-            media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": "attachment; filename=token_report.csv"}
-        )
-    except Exception as e:
-        logger.error(f"导出报告失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 async def add_custom_tokenizer_api(
     request: Request,
     add_custom_tokenizer_func
@@ -1695,18 +1618,29 @@ async def set_sticky_key_endpoint(request: Request):
 @router.get("/api/admin/token_stats")
 async def get_token_stats_endpoint(start_date: Optional[str] = None, end_date: Optional[str] = None,
                                    start_time: Optional[str] = None, end_time: Optional[str] = None,
-                                   rpm_period: Optional[str] = None):
-    return await get_token_stats(
+                                   rpm_period: Optional[str] = None, source: str = 'all', force: bool = False):
+    if source not in ('all', 'bridge', 'codex'):
+        raise HTTPException(status_code=422, detail='用量来源必须是 all、bridge 或 codex')
+    filter_start, filter_end = start_time or start_date, end_time or end_date
+    from core.db_stats import StatsDB
+    try:
+        start_ts = StatsDB._parse_time_bound(filter_start) if filter_start else None
+        end_ts = StatsDB._parse_time_bound(filter_end, True) if filter_end else None
+        if start_ts is not None and end_ts is not None and start_ts >= end_ts:
+            raise ValueError('开始时间必须早于结束时间')
+    except (ValueError, TypeError, OverflowError) as error:
+        raise HTTPException(status_code=422, detail='日期范围无效') from error
+    bridge = await get_token_stats(
         start_date, end_date, start_time, end_time, rpm_period, stats_db,
         monitoring_service, MODEL_ENDPOINT_MAP, estimate_message_tokens, estimate_tokens
     )
+    return await selected_usage(bridge, source, filter_start, filter_end, force)
 
 
 @router.get("/api/admin/export_report")
-async def export_report_endpoint(start_date: Optional[str] = None, end_date: Optional[str] = None):
-    return await export_report(
-        stats_db, monitoring_service, MODEL_ENDPOINT_MAP, start_date, end_date
-    )
+async def export_report_endpoint(start_date: Optional[str] = None, end_date: Optional[str] = None,
+                                 source: str = 'all'):
+    return usage_csv(await get_token_stats_endpoint(start_date=start_date, end_date=end_date, source=source))
 
 
 @router.get("/api/admin/request_stats")

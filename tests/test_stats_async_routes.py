@@ -45,7 +45,7 @@ def test_admin_statistics_use_real_sqlite_instead_of_fallback(tmp_path, monkeypa
     app = FastAPI()
     app.include_router(admin_routes.router)
     client = TestClient(app)
-    token_response = client.get('/api/admin/token_stats')
+    token_response = client.get('/api/admin/token_stats?source=bridge')
     request_response = client.get('/api/admin/request_stats')
     assert token_response.status_code == 200
     assert token_response.json()['total_input_tokens'] == 100

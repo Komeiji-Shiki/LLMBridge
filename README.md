@@ -495,3 +495,20 @@ MIT License
 ---
 
 Made with Shiki and Gray
+## Codex 本地用量统计
+
+管理面板的「Token 用量统计」支持「全部来源 / LLMBridge / Codex」，默认合计 Token。日期筛选、模型分布、每日趋势和 CSV 导出使用同一个来源选择。Codex 的缓存输入和推理输出分别属于输入和输出，不额外加入总 Token。
+
+服务读取其所在机器的 `CODEX_HOME`（未设置时为 `~/.codex`）下的 `sessions/`、`archived_sessions/`，并发现 JetBrains 的 Codex 缓存目录。额外 Codex home 可通过 `CODEX_USAGE_HOMES` 指定，Windows 用分号分隔，Linux/macOS 用冒号分隔。例如 PowerShell 在启动服务前设置：
+
+```powershell
+$env:CODEX_USAGE_HOMES = 'D:\CodexHome;E:\AnotherCodexHome'
+```
+
+用量索引保存在 `logs/codex_usage.db`，只包含时间、模型、会话标识、来源路径和 Token 计数，不保存对话正文或凭据。页面自动刷新时最多每 60 秒检查日志变化，只重读有变化的文件；「刷新」按钮可强制重扫。首次扫描大量历史日志可能需要一些时间。读取失败会显示数据不完整提示。
+
+累计用量按差值导入，同一事件的归档、复制与分叉历史不会重复计算。统计覆盖当前可读取的本地日志；没有日志的云端或其他机器用量不会自动出现。合计时排除 provider 为 `local-lmarenabridge` 的 Codex 日志，由网关记录提供这部分统计；Codex 单独视图仍保留完整用量，页面显示合计排除的事件数与 Token 数。其他经本网关转发的 provider 可加入 `config.jsonc` 的 `codex_usage.bridge_providers` 数组。此规则按来源排除，不依赖跨来源请求 ID 匹配；若网关历史记录已缺失，合计也不会补入被排除的 Codex 日志。
+
+Codex 日志不提供订阅账单金额，因此其成本显示「未提供」，合计成本只包含 LLMBridge。网关请求数、成功率、RPM/TPM 继续统计网关请求；Codex 单独展示会话数、用量事件数、缓存输入、推理输出和缓存写入。Codex 模型行只读，不能用网关的删除或合并操作修改源日志。
+
+实现思路参考 [codex-usage](https://github.com/DhWU-coder/codex-usage) 的本地 JSONL 扫描、累计差分和文件指纹缓存，以 Python 接入现有统计系统，无需另外启动该工具。

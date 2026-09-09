@@ -16,7 +16,7 @@ function getTopModelsWithOther(modelStats, tokenField, topN = 10) {
     const otherModels = sortedStats.slice(topN);
 
     const otherValue = otherModels.reduce((sum, item) => sum + (item[tokenField] || 0), 0);
-    const labels = topModels.map(s => s.model);
+    const labels = topModels.map(s => s.source === 'codex' ? `${s.model} (Codex)` : s.model);
     const dataValues = topModels.map(s => s[tokenField] || 0);
 
     if (otherValue > 0) {
@@ -519,6 +519,7 @@ const TOKEN_STATS_COLUMNS = [
     ['input_tokens', '输入 Tokens'],
     ['output_tokens', '输出 Tokens'],
     ['cached_tokens', '命中缓存'],
+    ['reasoning_tokens', 'Codex 推理'],
     ['request_count', '请求数'],
     ['avg_tokens', '平均 Token/请求'],
     ['rpm', 'RPM'],
@@ -671,23 +672,25 @@ function renderTokenStatsTable(modelStats) {
                     return `
                         <tr>
                             <td>
-                                <input type="checkbox" class="model-stat-checkbox" data-model="${escapeHtml(stat.model)}" onchange="updateSelectedCount()" style="cursor: pointer;">
+                                ${stat.source === 'codex' ? '' : `<input type="checkbox" class="model-stat-checkbox" data-model="${escapeHtml(stat.model)}" onchange="updateSelectedCount()" style="cursor: pointer;">`}
                             </td>
                             <td>
                                 <strong>${escapeHtml(stat.display_name || stat.model)}</strong>
+                                <small>${stat.source === 'codex' ? 'Codex' : 'LLMBridge'}</small>
                                 ${stat.display_name && stat.display_name !== stat.model ? `<br><small style="color: var(--text-dim);">(${escapeHtml(stat.model)})</small>` : ''}
                             </td>
                             <td><span style="color: var(--accent);">${formatNumber(stat.total_tokens)}</span></td>
                             <td>${formatNumber(stat.input_tokens)}</td>
                             <td>${formatNumber(stat.output_tokens)}</td>
                             <td>${cachedDisplay}</td>
-                            <td>${stat.request_count}</td>
+                            <td>${stat.source === 'codex' ? formatNumber(stat.reasoning_tokens || 0) : '-'}</td>
+                            <td>${stat.source === 'codex' ? `${stat.event_count} 条用量事件` : stat.request_count}</td>
                             <td>${stat.request_count > 0 ? formatNumber(Math.round(stat.total_tokens / stat.request_count)) : '-'}</td>
                             <td>${rpmDisplay}</td>
                             <td>${tpmDisplay}</td>
-                            <td${costTooltip ? ` title="${costTooltip}"` : ''}>${costDisplay}</td>
+                            <td${costTooltip ? ` title="${costTooltip}"` : ''}>${stat.source === 'codex' ? '未提供' : costDisplay}</td>
                             <td>
-                                <button class="btn btn-danger btn-sm" data-model="${escapeHtml(stat.model)}" onclick="deleteModelStats(this.dataset.model)">删除</button>
+                                ${stat.source === 'codex' ? '<small>日志只读</small>' : `<button class="btn btn-danger btn-sm" data-model="${escapeHtml(stat.model)}" onclick="deleteModelStats(this.dataset.model)">删除</button>`}
                             </td>
                         </tr>
                     `;
