@@ -14,6 +14,91 @@ playwright = pytest.importorskip('playwright.sync_api')
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_playground_keeps_endpoint_drafts_tool_parameters_and_trust_edits(ui):
+    page, _, _, _ = ui
+    catalog = [{'model': 'Beta', 'endpoint': 0, 'provider': 'openai', 'protocol': 'responses',
+                'native_tools': ['web_search'], 'configured_tools': [], 'docs': '', 'issues': []},
+               {'model': 'Gemini', 'endpoint': 1, 'provider': 'google', 'protocol': 'gemini',
+                'native_tools': ['google_search'], 'configured_tools': [], 'docs': '', 'issues': []}]
+    page.route('**/api/admin/capabilities', lambda route: route.fulfill(json={'models': catalog}))
+    page.locator('[data-page="gateway-workspace"]').click()
+    page.wait_for_selector('#gw-model option[value="1"]', state='attached')
+    body = {'input': '保留草稿', 'tools': [{'type': 'function', 'name': 'local_tool', 'parameters': {'type': 'object'}},
+            {'type': 'web_search', 'filters': {'allowed_domains': ['example.test']}}]}
+    page.locator('#gw-body').fill(json.dumps(body))
+    page.locator('#gw-session').fill('response-session')
+    page.locator('#gw-stream').uncheck()
+    page.locator('#gw-tools input').check()
+    page.locator('#gw-insert-tools').click()
+    assert json.loads(page.locator('#gw-body').input_value()) == body
+    page.locator('#gw-model').select_option('1')
+    gemini = {'contents': [], 'tools': [{'functionDeclarations': [{'name': 'custom'}], 'googleSearch': {'custom_parameter': 1}}]}
+    page.locator('#gw-body').fill(json.dumps(gemini))
+    page.locator('#gw-tools input').check()
+    page.locator('#gw-insert-tools').click()
+    assert json.loads(page.locator('#gw-body').input_value()) == gemini
+    page.locator('#gw-model').select_option('0')
+    assert json.loads(page.locator('#gw-body').input_value()) == body
+    assert page.locator('#gw-session').input_value() == 'response-session'
+    assert not page.locator('#gw-stream').is_checked()
+    page.locator('#gw-trust').fill('local/unsaved-tokenizer')
+    page.locator('#gw-refresh').click()
+    page.evaluate('gatewayWorkspace.load()')
+    assert page.locator('#gw-trust').input_value() == 'local/unsaved-tokenizer'
+    assert json.loads(page.locator('#gw-body').input_value()) == body
+    page.locator('#gw-model').select_option('1')
+    assert json.loads(page.locator('#gw-body').input_value()) == gemini
+
+
+def test_playground_metadata_does_not_block_next_run_or_overwrite_its_result(ui):
+    page, _, _, _ = ui
+    page.locator('[data-page="gateway-workspace"]').click()
+    page.wait_for_selector('#gw-tools input')
+    page.evaluate('''() => {
+        const original = window.fetch; let index = 0;
+        window.finishRuns = [];
+        window.fetch = (url, options) => {
+            if (url === '/api/admin/playground/run') {
+                return Promise.resolve(new Response('data: {"type":"response.completed"}\\n\\n',
+                    {headers: {'X-Bridge-Request-ID': 'run-' + (++index)}}));
+            }
+            if (url.startsWith('/api/admin/playground/runs/')) return new Promise(resolve => finishRuns.push(resolve));
+            return original(url, options);
+        };
+    }''')
+    page.locator('#gw-run').click()
+    page.wait_for_function('finishRuns.length === 1')
+    assert page.locator('#gw-run').is_enabled()
+    page.locator('#gw-run').click()
+    page.wait_for_function('finishRuns.length === 2')
+    page.evaluate('''async () => {
+        finishRuns[1](new Response(JSON.stringify({timings: {total_ms: 22}, outcome: {status: 'success'}})));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        finishRuns[0](new Response(JSON.stringify({timings: {total_ms: 999}, outcome: {status: 'failed'}})));
+    }''')
+    page.wait_for_function("document.getElementById('gw-state').textContent === '请求成功完成'")
+    assert '0.022' in page.locator('#gw-timing').inner_text()
+    assert '0.999' not in page.locator('#gw-timing').inner_text()
+    assert page.locator('#gw-log').get_attribute('href') == '/monitor?search=run-2'
+
+
+def test_playground_catalog_survives_trust_failure_and_formats_json(ui):
+    page, _, writes, _ = ui
+    page.route('**/api/admin/tokenizer_trust', lambda route: route.fulfill(status=503, json={'detail': 'trust unavailable'}))
+    page.locator('[data-page="gateway-workspace"]').click()
+    page.wait_for_selector('#gw-tools input')
+    assert page.locator('#gw-run').is_enabled()
+    assert 'trust unavailable' in page.locator('#gw-trust-state').inner_text()
+    page.locator('#gw-body').fill('[1,2]')
+    page.locator('#gw-format').click()
+    assert 'JSON 对象' in page.locator('#gw-state').inner_text()
+    page.locator('#gw-run').click()
+    assert not writes
+    page.locator('#gw-body').fill('{"input":"hello"}')
+    page.locator('#gw-format').click()
+    assert '\n' in page.locator('#gw-body').input_value()
+
+
 @pytest.fixture
 def ui():
     models = {

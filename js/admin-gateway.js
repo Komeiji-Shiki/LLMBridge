@@ -19,7 +19,8 @@
         <label><input type="checkbox" id="gw-stream" checked> 流式响应</label>
         <label for="gw-body">原生 JSON 请求，可编辑所有供应商字段</label>
         <textarea id="gw-body" class="form-textarea gateway-json" spellcheck="false" rows="14"></textarea>
-        <div class="gateway-actions"><button class="btn" id="gw-template">恢复协议示例</button><button class="btn" id="gw-insert-tools">把选中工具写入请求</button><button class="btn btn-primary" id="gw-run">发送请求</button><button class="btn" id="gw-cancel" disabled>中断请求</button><button class="btn" id="gw-download" disabled>下载完整响应</button></div>
+        <div class="gateway-actions"><button class="btn" id="gw-template">恢复协议示例</button><button class="btn" id="gw-format">格式化 JSON</button><button class="btn" id="gw-insert-tools">把选中工具写入请求</button><button class="btn btn-primary" id="gw-run">发送请求</button><button class="btn" id="gw-cancel" disabled>中断请求</button><button class="btn" id="gw-download" disabled>下载完整响应</button><a id="gw-log" target="_blank" rel="noopener noreferrer" hidden>在监控中查看请求</a></div>
+        <p id="gw-draft-state">切换端点时保留本页草稿；关闭或刷新页面后清除。Ctrl / ⌘ + Enter 发送请求。</p>
         <p id="gw-state" role="status">发送会调用真实上游，并按供应商规则产生费用。</p>
         <div id="gw-timing" class="gateway-metrics"></div>
         <pre id="gw-output" class="gateway-output" aria-label="原始响应"></pre>
@@ -34,9 +35,33 @@
     document.querySelector('.main-content').append(page);
     const el = id => document.getElementById('gw-' + id);
     let models = [], controller = null, raw = '', renderFrame = 0, loadVersion = 0, analysisVersion = 0;
+    let draftKey = null, runVersion = 0, trustDirty = false, trustRevision = 0;
+    const drafts = new Map();
     const selected = () => models[Number(el('model').value)];
+    const modelKey = model => model ? JSON.stringify([model.model, model.endpoint, model.protocol]) : null;
+    function saveDraft() {
+        if (draftKey) drafts.set(draftKey, {body: el('body').value, stream: el('stream').checked,
+            session: el('session').value, tools: [...el('tools').querySelectorAll('input:checked')].map(input => input.value)});
+    }
+    function restoreDraft() {
+        draftKey = modelKey(selected());
+        const draft = drafts.get(draftKey);
+        if (draft) {
+            el('body').value = draft.body; el('stream').checked = draft.stream; el('session').value = draft.session;
+            for (const input of el('tools').querySelectorAll('input')) input.checked = draft.tools.includes(input.value);
+        } else {
+            template(); el('session').value = ''; el('stream').checked = true;
+        }
+        el('run').disabled = !selected() || Boolean(controller);
+    }
+    function readBody() {
+        const body = JSON.parse(el('body').value);
+        if (!body || Array.isArray(body) || typeof body !== 'object') throw new Error('请求必须为 JSON 对象');
+        return body;
+    }
     async function json(url, options) {
         const response = await fetch(url, options);
+        if (response.status === 401 || response.status === 403) throw new Error('登录已失效，请重新登录管理面板');
         const result = await response.json();
         if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : JSON.stringify(result));
         return result;
@@ -44,7 +69,7 @@
     function showCapabilities() {
         const model = selected();
         el('tools').replaceChildren();
-        if (!model) { el('diagnosis').textContent = '没有可用模型'; return; }
+        if (!model) { el('diagnosis').textContent = '没有可用模型'; el('docs').hidden = true; return; }
         el('diagnosis').textContent = `${model.provider} · ${model.protocol} · 文档与配置诊断（尚未实测）\n` + model.issues.map(issue => issue.message).join('\n');
         el('docs').hidden = !model.docs;
         if (model.docs) el('docs').href = model.docs;
@@ -63,15 +88,41 @@
     }
     function insertTools() {
         try {
-            const body = JSON.parse(el('body').value), model = selected();
+            const body = readBody(), model = selected();
             if (!model) throw new Error('请先选择模型');
             const names = [...el('tools').querySelectorAll('input:checked')].map(input => input.value);
             const mapping = {google_search: 'googleSearch', url_context: 'urlContext', code_execution: 'codeExecution', google_maps: 'googleMaps', file_search: 'fileSearch'};
             if (model.protocol === 'chat' && model.provider === 'qwen') body.enable_search = names.includes('web_search');
-            else body.tools = names.map(type => model.protocol === 'gemini' ? {[mapping[type]]: {}} : {type,
-                ...(type === 'code_interpreter' && model.provider === 'openai' ? {container: {type: 'auto'}} : {}),
-                ...(type === 'shell' && model.provider === 'openai' ? {environment: {type: 'container_auto'}} : {})});
+            else {
+                if (body.tools != null && !Array.isArray(body.tools)) throw new Error('tools 必须为数组，请先修正请求 JSON');
+                const present = new Set(), gemini = model.protocol === 'gemini';
+                // 只更新面板管理的原生工具，保留函数定义、未知工具及已填写的参数。
+                body.tools = (body.tools || []).filter(tool => {
+                    if (!tool || typeof tool !== 'object' || Array.isArray(tool)) throw new Error('tools 中的每个工具必须为对象');
+                    if (gemini) {
+                        for (const name of model.native_tools) {
+                            const key = mapping[name];
+                            if (key && Object.hasOwn(tool, key)) {
+                                if (names.includes(name)) present.add(name);
+                                else delete tool[key];
+                            }
+                        }
+                        return Object.keys(tool).length > 0;
+                    }
+                    if (!model.native_tools.includes(tool.type)) return true;
+                    if (!names.includes(tool.type)) return false;
+                    present.add(tool.type); return true;
+                });
+                for (const type of names) {
+                    if (present.has(type)) continue;
+                    if (gemini && !mapping[type]) throw new Error('该工具尚无可用的 Gemini 请求示例：' + type);
+                    body.tools.push(gemini ? {[mapping[type]]: {}} : {type,
+                        ...(type === 'code_interpreter' && model.provider === 'openai' ? {container: {type: 'auto'}} : {}),
+                        ...(type === 'shell' && model.provider === 'openai' ? {environment: {type: 'container_auto'}} : {})});
+                }
+            }
             el('body').value = JSON.stringify(body, null, 2);
+            saveDraft();
             el('state').textContent = '已写入工具字段；需要文件库、MCP 地址等参数的工具，请在 JSON 中填写。';
         } catch (error) { el('state').textContent = error.message; }
     }
@@ -99,10 +150,11 @@
     async function run() {
         if (controller) return;
         let body;
-        try { body = JSON.parse(el('body').value); if (!body || Array.isArray(body) || typeof body !== 'object') throw new Error('请求必须为 JSON 对象'); }
+        try { body = readBody(); }
         catch (error) { el('state').textContent = error.message; return; }
         const model = selected(); if (!model) return;
-        controller = new AbortController(); raw = ''; el('output').textContent = ''; el('timing').replaceChildren();
+        const version = ++runVersion, activeController = new AbortController();
+        controller = activeController; raw = ''; el('output').textContent = ''; el('timing').replaceChildren(); el('log').hidden = true;
         el('run').disabled = true; el('model').disabled = true; el('cancel').disabled = false; el('download').disabled = true;
         el('state').textContent = '正在请求上游…';
         let requestId;
@@ -110,7 +162,9 @@
             const response = await fetch('/api/admin/playground/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, signal: controller.signal,
                 body: JSON.stringify({model: model.model, endpoint: model.endpoint, request: body, stream: el('stream').checked, session_id: el('session').value.trim()})});
             requestId = response.headers.get('X-Bridge-Request-ID');
+            if (requestId) { el('log').href = '/monitor?search=' + encodeURIComponent(requestId); el('log').hidden = false; }
             if (response.headers.get('X-Bridge-Session-ID')) el('session').value = response.headers.get('X-Bridge-Session-ID');
+            saveDraft();
             const reader = response.body.getReader(), decoder = new TextDecoder();
             try { while (true) { const {done, value} = await reader.read(); if (done) break; raw += decoder.decode(value, {stream: true}); renderOutput(); } raw += decoder.decode(); }
             finally { reader.releaseLock(); }
@@ -118,16 +172,22 @@
         } catch (error) { el('state').textContent = error.name === 'AbortError' ? '已中断请求，已有输出保留。' : error.message; }
         finally {
             el('cancel').disabled = true; el('download').disabled = !raw; renderOutput(true);
+            // 响应收尾信息独立读取，不让慢查询一直禁用发送按钮。
+            controller = null; el('run').disabled = !selected(); el('model').disabled = false;
             if (requestId) {
+                const resultController = new AbortController();
+                const timeout = setTimeout(() => resultController.abort(), 5000);
                 try {
-                    const result = await json('/api/admin/playground/runs/' + encodeURIComponent(requestId));
+                    const result = await json('/api/admin/playground/runs/' + encodeURIComponent(requestId), {signal: resultController.signal});
+                    if (version !== runVersion) return;
                     timing(result.timings);
                     const states = {success: '请求成功完成', failed: '上游请求失败或响应中断，错误详情见原始响应', cancelled: '请求已中断，已有输出保留', incomplete: '上游返回未完整完成，具体原因见终态事件'};
-                    if (result.outcome?.status) el('state').textContent = states[result.outcome.status] || el('state').textContent;
+                    if (result.outcome?.status && !activeController.signal.aborted) el('state').textContent = states[result.outcome.status] || el('state').textContent;
                     if (result.outcome?.observed_native_tools?.length) el('state').textContent += '；已观察到工具输出：' + result.outcome.observed_native_tools.join(', ');
-                } catch (error) { el('state').textContent += '；阶段耗时读取失败：' + error.message; }
+                } catch (error) {
+                    if (version === runVersion) el('state').textContent += error.name === 'AbortError' ? '；阶段耗时读取超时，可在监控中查看。' : '；阶段耗时读取失败：' + error.message;
+                } finally { clearTimeout(timeout); }
             }
-            controller = null; el('run').disabled = false; el('model').disabled = false;
         }
     }
     async function analysis(prices) {
@@ -147,27 +207,45 @@
         } catch (error) { if (version === analysisVersion) el('analysis').textContent = error.message; }
     }
     async function load() {
-        const version = ++loadVersion, prior = selected();
-        try {
-            const [catalog, trust] = await Promise.all([json('/api/admin/capabilities'), json('/api/admin/tokenizer_trust')]);
-            if (version !== loadVersion || controller) return;
-            models = catalog.models; el('model').replaceChildren();
+        const version = ++loadVersion, revision = trustRevision;
+        const [catalog, trust] = await Promise.allSettled([json('/api/admin/capabilities'), json('/api/admin/tokenizer_trust')]);
+        if (version !== loadVersion) return;
+        if (catalog.status === 'fulfilled' && !controller) {
+            const prior = selected(); saveDraft();
+            models = catalog.value.models; el('model').replaceChildren();
             models.forEach((item, index) => el('model').add(new Option(`${item.model} · 端点 ${item.endpoint + 1} · ${item.protocol}`, String(index))));
             const same = models.findIndex(item => item.model === prior?.model && item.endpoint === prior.endpoint);
             if (same >= 0) el('model').value = String(same);
-            showCapabilities(); if (!el('body').value) template();
-            if (document.activeElement !== el('trust')) el('trust').value = trust.sources.join('\n');
-        } catch (error) { el('diagnosis').textContent = error.message; }
+            showCapabilities(); restoreDraft();
+        } else if (catalog.status === 'rejected') el('diagnosis').textContent = catalog.reason.message;
+        if (revision === trustRevision && !trustDirty) {
+            if (trust.status === 'fulfilled') el('trust').value = trust.value.sources.join('\n');
+            else el('trust-state').textContent = '读取来源列表失败：' + trust.reason.message;
+        }
     }
-    el('model').addEventListener('change', () => { showCapabilities(); template(); });
-    el('refresh').addEventListener('click', load); el('template').addEventListener('click', template);
+    el('model').addEventListener('change', () => { saveDraft(); showCapabilities(); restoreDraft(); });
+    el('refresh').addEventListener('click', load); el('template').addEventListener('click', () => { template(); saveDraft(); });
+    el('format').addEventListener('click', () => {
+        try { el('body').value = JSON.stringify(readBody(), null, 2); saveDraft(); el('state').textContent = 'JSON 格式正确，已排版。'; }
+        catch (error) { el('state').textContent = error.message; }
+    });
+    el('body').addEventListener('keydown', event => {
+        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); run(); }
+    });
     el('insert-tools').addEventListener('click', insertTools); el('run').addEventListener('click', run);
     el('cancel').addEventListener('click', () => controller?.abort());
     el('usage').addEventListener('click', () => analysis(false)); el('prices').addEventListener('click', () => analysis(true));
     el('download').addEventListener('click', () => { const url = URL.createObjectURL(new Blob([raw], {type: 'text/plain;charset=utf-8'})), link = document.createElement('a'); link.href = url; link.download = 'gateway-response.txt'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); });
     el('save-trust').addEventListener('click', async () => {
-        try { const result = await json('/api/admin/tokenizer_trust', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sources: el('trust').value.split('\n').map(value => value.trim()).filter(Boolean)})}); el('trust-state').textContent = result.message; }
+        const value = el('trust').value; ++trustRevision; el('save-trust').disabled = true;
+        try {
+            const result = await json('/api/admin/tokenizer_trust', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sources: value.split('\n').map(value => value.trim()).filter(Boolean)})});
+            if (el('trust').value === value) trustDirty = false;
+            el('trust-state').textContent = result.message;
+        }
         catch (error) { el('trust-state').textContent = error.message; }
+        finally { el('save-trust').disabled = false; }
     });
+    el('trust').addEventListener('input', () => { trustDirty = true; ++trustRevision; });
     window.gatewayWorkspace = {load};
 })();
