@@ -269,7 +269,8 @@ class SQLiteLogger:
                     cached_tokens, cached_cost,
                     input_cost, output_cost, total_cost, currency,
                     created_at, upstream_usage, system_fingerprint, stop_reason,
-                    caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot
+                    caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot,
+                    cache_write_tokens, cache_write_1h_tokens, cache_write_cost, cache_write_extra_cost, cache_mode
                     FROM requests
                     WHERE request_id = ?
                 ''', (request_id,))
@@ -405,7 +406,8 @@ class SQLiteLogger:
                         cached_tokens, cached_cost,
                         input_cost, output_cost, total_cost, currency,
                         upstream_usage, system_fingerprint, stop_reason,
-                        caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot
+                        caller_id, caller_name, conversation_id, gateway_request_id, timings, pricing_snapshot,
+                    cache_write_tokens, cache_write_1h_tokens, cache_write_cost, cache_write_extra_cost, cache_mode
                     FROM requests{where_sql}
                     ORDER BY timestamp DESC
                     LIMIT ? OFFSET ?

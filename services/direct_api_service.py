@@ -1525,59 +1525,22 @@ class DirectAPIService:
             yield self._format_error_bytes(error_response, is_stream)
     
     def calculate_cost(
-        self,
-        input_tokens: int,
-        output_tokens: int,
-        pricing: Dict[str, Any],
-        cached_tokens: int = 0
+        self, input_tokens: int, output_tokens: int, pricing: Dict[str, Any],
+        cached_tokens: int = 0, cache_write_tokens: int = 0,
+        cache_write_1h_tokens: int = 0, upstream_usage: Optional[dict] = None,
     ) -> Dict[str, Any]:
-        """
-        计算API调用成本
-        """
+        """复用共享计费逻辑，输入总量已经包含缓存读取和写入。"""
+        from utils.api_pricing import calculate_api_cost, uses_explicit_cache
+        from core.request_context import current_request
         try:
-            input_price = pricing.get("input", 0)
-            output_price = pricing.get("output", 0)
-            cached_input_price = pricing.get("cached_input")  # None 表示未配置
-            unit = pricing.get("unit", 1000000)
-            currency = pricing.get("currency", "USD")
-            
-            if cached_input_price is not None:
-                # 已配置缓存价格：拆分计算
-                uncached_input_tokens = max(0, input_tokens - cached_tokens)
-                input_cost = (uncached_input_tokens / unit) * input_price
-                cached_cost = (cached_tokens / unit) * cached_input_price
-            else:
-                # 未配置缓存价格：全部输入token按输入价格计，缓存不单独列出
-                input_cost = (input_tokens / unit) * input_price
-                cached_cost = 0.0
-            output_cost = (output_tokens / unit) * output_price
-            total_cost = input_cost + cached_cost + output_cost
-            
-            return {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cached_tokens": cached_tokens,
-                "total_tokens": input_tokens + output_tokens,
-                "input_cost": round(input_cost, 6),
-                "cached_cost": round(cached_cost, 6),
-                "output_cost": round(output_cost, 6),
-                "total_cost": round(total_cost, 6),
-                "currency": currency,
-                "pricing": {
-                    "input_price_per_unit": input_price,
-                    "output_price_per_unit": output_price,
-                    "cached_input_price_per_unit": cached_input_price,
-                    "unit": unit
-                }
-            }
-        except Exception as e:
-            logger.error(f"[DIRECT_API] 成本计算失败: {e}")
-            return {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens,
-                "error": str(e)
-            }
+            context = current_request.get()
+            explicit = uses_explicit_cache(context.upstream_request) if context else False
+            return calculate_api_cost(input_tokens, output_tokens, pricing, cached_tokens,
+                                      cache_write_tokens, cache_write_1h_tokens, upstream_usage, explicit)
+        except Exception as exc:
+            logger.error(f"[DIRECT_API] 成本计算失败: {exc}")
+            return {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens, "error": str(exc)}
 
 
 # 全局服务实例（将在api_server.py中初始化）

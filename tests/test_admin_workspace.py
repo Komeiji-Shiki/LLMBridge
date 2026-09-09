@@ -189,6 +189,30 @@ def test_groups_zero_values_and_save(ui):
     assert writes[-1]['config']['pricing']['output'] == 3
 
 
+def test_cache_write_prices_round_trip_and_cost_breakdown(ui):
+    page, models, writes, _ = ui
+    models['Alpha']['pricing'].update(cache_write=3.75, cache_write_1h=6,
+                                      input_tiers=[{'min_input_tokens': 200001, 'cache_write': 7.5}])
+    page.evaluate('loadModels()')
+    page.locator('.model-name', has_text='Alpha').click()
+    page.locator('[data-settings-page="pricing"]').click()
+    assert page.locator('#pricing-cache-write').input_value() == '3.75'
+    assert page.locator('#pricing-cache-write-1h').input_value() == '6'
+    page.locator('#pricing-cache-write').fill('0')
+    page.locator('#pricing-cache-write-1h').fill('')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    price = writes[-1]['config']['pricing']
+    assert price['cache_write'] == 0
+    assert 'cache_write_1h' not in price
+    assert price['input_tiers'] == [{'min_input_tokens': 200001, 'cache_write': 7.5}]
+    page.evaluate("currentCostCurrency = 'USD'; updateCostDisplay({cost_usd: {total_cost: 3, input_cost: 1, output_cost: .75, cache_write_cost: 1.25, cache_write_extra_cost: .25}})")
+    assert page.locator('#cache-write-cost-value').text_content() == '$1.2500'
+    assert page.locator('#cache-write-extra-cost-value').text_content() == '$0.2500'
+    page.evaluate("updateCostDisplay({cost_scope: 'unavailable'})")
+    assert page.locator('#cache-write-cost-value').text_content() == '未定价'
+
+
 def test_dirty_guard_and_fresh_defaults(ui):
     page, _, _, _ = ui
     page.locator('.model-name', has_text='Alpha').click()

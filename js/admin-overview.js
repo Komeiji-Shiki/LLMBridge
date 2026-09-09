@@ -37,7 +37,8 @@ function switchCostCurrency(currency) {
 // 更新成本卡片显示（根据当前选中货币）
 function updateCostDisplay(data) {
     if (data.cost_scope === 'unavailable') {
-        for (const id of ['total-cost-value', 'input-cost-value', 'cached-cost-value', 'output-cost-value']) {
+        for (const id of ['total-cost-value', 'input-cost-value', 'cached-cost-value', 'output-cost-value',
+                          'cache-write-cost-value', 'cache-write-extra-cost-value']) {
             document.getElementById(id).textContent = '未定价';
         }
         document.getElementById('total-cost-currency').textContent = '没有可用的公开标准价格';
@@ -75,6 +76,9 @@ function updateCostDisplay(data) {
     document.getElementById('input-cost-value').textContent = symbol + inputCost.toFixed(4);
     const cachedCost = (currentCostCurrency === 'CNY' ? data.cost_cny?.cached_cost : data.cost_usd?.cached_cost) || 0;
     document.getElementById('cached-cost-value').textContent = symbol + cachedCost.toFixed(4);
+    const writeCosts = currentCostCurrency === 'CNY' ? data.cost_cny : data.cost_usd;
+    document.getElementById('cache-write-cost-value').textContent = symbol + (writeCosts?.cache_write_cost || 0).toFixed(4);
+    document.getElementById('cache-write-extra-cost-value').textContent = symbol + (writeCosts?.cache_write_extra_cost || 0).toFixed(4);
     document.getElementById('output-cost-value').textContent = symbol + outputCost.toFixed(4);
 }
 

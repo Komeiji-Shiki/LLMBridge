@@ -3,6 +3,11 @@ import json
 
 COLUMNS = {
     'caller_id': "TEXT DEFAULT 'unattributed'", 'caller_name': "TEXT DEFAULT '历史未归属'",
+    'cache_write_tokens': 'INTEGER DEFAULT 0',
+    'cache_write_1h_tokens': 'INTEGER DEFAULT 0',
+    'cache_write_cost': 'REAL DEFAULT 0',
+    'cache_write_extra_cost': 'REAL DEFAULT 0',
+    'cache_mode': 'TEXT',
     'conversation_id': 'TEXT', 'gateway_request_id': 'TEXT', 'timings': 'TEXT', 'pricing_snapshot': 'TEXT',
 }
 
@@ -16,9 +21,16 @@ def migrate_metadata(connection):
 
 
 def write_metadata(connection, request_id, record):
+    from utils.api_pricing import cache_write_usage
+    writes, one_hour = cache_write_usage(record.get('upstream_usage'))
+    usage_counts = {'cache_write_tokens': writes, 'cache_write_1h_tokens': one_hour}
     values = []
     for name in COLUMNS:
         value = record.get(name)
+        if name.startswith('cache_write'):
+            value = (record.get('cost_info') or {}).get(name, value if value is not None else usage_counts.get(name, 0)) or 0
+        elif name == 'cache_mode':
+            value = (record.get('cost_info') or {}).get(name, value)
         if name in ('timings', 'pricing_snapshot'):
             value = json.dumps(value, ensure_ascii=False)
         elif name == 'caller_id':
@@ -38,5 +50,5 @@ def read_metadata(row):
                 value = json.loads(value) if value else None
             except (TypeError, ValueError):
                 value = None
-        result[name] = value
+        result[name] = (value or 0) if name.startswith('cache_write') else value
     return result

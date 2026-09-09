@@ -12,7 +12,9 @@ def test_standard_cache_writes_and_reasoning_are_not_double_charged():
     values = {'input_tokens': 100000, 'cached_tokens': 60000, 'cache_write_tokens': 20000,
               'output_tokens': 1000, 'reasoning_tokens': 900}
     price = estimate('gpt-6-astra', values)
-    assert price['input_cost'] == pytest.approx(.45)
+    assert price['input_cost'] == pytest.approx(.20)
+    assert price['cache_write_cost'] == pytest.approx(.25)
+    assert price['cache_write_extra_cost'] == pytest.approx(.05)
     assert price['cached_cost'] == pytest.approx(.06)
     assert price['output_cost'] == pytest.approx(.05)
     assert price['total_cost'] == pytest.approx(.56)

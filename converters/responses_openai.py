@@ -363,9 +363,10 @@ def _usage_to_responses(usage: Any) -> Optional[Dict[str, Any]]:
         "total_tokens": total_tokens,
     }
     prompt_details = usage.get("prompt_tokens_details")
-    if isinstance(prompt_details, dict) and prompt_details.get("cached_tokens") is not None:
+    if isinstance(prompt_details, dict):
         result["input_tokens_details"] = {
-            "cached_tokens": int(prompt_details.get("cached_tokens", 0) or 0)
+            key: int(prompt_details[key] or 0) for key in
+            ('cached_tokens', 'cache_write_tokens', 'cache_write_1h_tokens') if key in prompt_details
         }
     completion_details = usage.get("completion_tokens_details")
     if isinstance(completion_details, dict) and completion_details.get("reasoning_tokens") is not None:

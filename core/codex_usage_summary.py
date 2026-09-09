@@ -3,7 +3,7 @@
 from core.codex_pricing import PRICES, canonical_model, estimate, price_metadata
 
 TOKEN_FIELDS = ('input_tokens', 'cached_tokens', 'output_tokens', 'reasoning_tokens', 'total_tokens', 'cache_write_tokens')
-COST_FIELDS = ('input_cost', 'cached_cost', 'output_cost', 'total_cost')
+COST_FIELDS = ('input_cost', 'cached_cost', 'output_cost', 'total_cost', 'cache_write_cost', 'cache_write_extra_cost')
 
 
 def _empty():

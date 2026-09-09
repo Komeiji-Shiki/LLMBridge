@@ -129,6 +129,7 @@ async def _complete_monitoring(
         output_tokens=output_tokens,
         cached_tokens=cached_tokens,
         pricing=pricing_config,
+        upstream_usage=upstream_usage,
     ) if pricing_config else {}
     monitoring_service.request_end(
         request_id=request_id,

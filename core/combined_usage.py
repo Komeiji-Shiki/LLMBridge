@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-COST_FIELDS = ('input_cost', 'cached_cost', 'output_cost', 'total_cost')
+COST_FIELDS = ('input_cost', 'cached_cost', 'output_cost', 'total_cost', 'cache_write_cost', 'cache_write_extra_cost')
 
 
 def combine_usage(bridge, codex, source):
@@ -17,7 +17,7 @@ def combine_usage(bridge, codex, source):
         return result
     if source == 'codex':
         result['model_stats'], result['daily_stats'] = [], []
-        for key in ('total_tokens', 'total_input_tokens', 'total_output_tokens', 'total_cached_tokens',
+        for key in ('total_tokens', 'total_input_tokens', 'total_output_tokens', 'total_cached_tokens', 'total_cache_write_tokens', 'total_cache_write_1h_tokens',
                     *COST_FIELDS):
             result[key] = 0
         for key in ('cost_usd', 'cost_cny'):
@@ -46,7 +46,7 @@ def combine_usage(bridge, codex, source):
     for key in ('input_tokens', 'output_tokens', 'cached_tokens', 'tokens'):
         result['total_' + key] += codex.get('total_tokens' if key == 'tokens' else key, 0)
     result['total_reasoning_tokens'] = codex.get('reasoning_tokens', 0)
-    result['total_cache_write_tokens'] = codex.get('cache_write_tokens', 0)
+    result['total_cache_write_tokens'] = result.get('total_cache_write_tokens', 0) + codex.get('cache_write_tokens', 0)
     for row in codex['model_stats']:
         result['model_stats'].append({**row, 'source': 'codex', 'display_name': row['model'],
                                       'request_count': 0, 'rpm': 0, 'tpm': 0,

@@ -1,0 +1,1020 @@
+{
+  "verified_at": "2026-09-09",
+  "basis": "首次发布的官方API价格，包含发布即生效的优惠",
+  "models": {
+    "claude-opus-4-5": {
+      "pricing": {
+        "input": 5,
+        "output": 25,
+        "cached_input": 0.5,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 6.25,
+        "cache_write_1h": 10
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-opus-4-5"
+      ],
+      "note": "",
+      "aliases": [
+        "claude-4-5-opus"
+      ]
+    },
+    "claude-opus-4-6": {
+      "pricing": {
+        "input": 5,
+        "output": 25,
+        "cached_input": 0.5,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 6.25,
+        "cache_write_1h": 10,
+        "input_tiers": [
+          {
+            "min_input_tokens": 200001,
+            "input": 10,
+            "output": 37.5,
+            "cached_input": 1.0,
+            "cache_write": 12.5,
+            "cache_write_1h": 20
+          }
+        ]
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-opus-4-6",
+        "https://www.anthropic.com/news/claude-opus-4-6",
+        "https://claude.com/blog/1m-context-ga"
+      ],
+      "note": "保留首发长上下文溢价；不采用2026-03-13取消溢价后的价格。",
+      "aliases": [
+        "claude-4-6-opus"
+      ]
+    },
+    "claude-opus-4-7": {
+      "pricing": {
+        "input": 5,
+        "output": 25,
+        "cached_input": 0.5,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 6.25,
+        "cache_write_1h": 10
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-opus-4-7"
+      ],
+      "note": "",
+      "aliases": [
+        "claude-4-7-opus"
+      ]
+    },
+    "claude-opus-4-8": {
+      "pricing": {
+        "input": 5,
+        "output": 25,
+        "cached_input": 0.5,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 6.25,
+        "cache_write_1h": 10
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-opus-4-8"
+      ],
+      "note": "",
+      "aliases": [
+        "claude-4-8-opus"
+      ]
+    },
+    "claude-opus-5": {
+      "pricing": {
+        "input": 5,
+        "output": 25,
+        "cached_input": 0.5,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 6.25,
+        "cache_write_1h": 10
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-opus-5"
+      ],
+      "note": "",
+      "aliases": [
+        "claude-5-opus"
+      ]
+    },
+    "claude-opus-4-1": {
+      "pricing": {
+        "input": 15,
+        "output": 75,
+        "cached_input": 1.5,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 18.75,
+        "cache_write_1h": 30
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-opus-4-1"
+      ],
+      "note": ""
+    },
+    "claude-sonnet-4-5": {
+      "pricing": {
+        "input": 3,
+        "output": 15,
+        "cached_input": 0.3,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 3.75,
+        "cache_write_1h": 6,
+        "input_tiers": [
+          {
+            "min_input_tokens": 200001,
+            "input": 6,
+            "output": 22.5,
+            "cached_input": 0.6,
+            "cache_write": 7.5,
+            "cache_write_1h": 12
+          }
+        ]
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing"
+      ],
+      "note": "",
+      "aliases": [
+        "claude-4-5-s",
+        "claude4.5s"
+      ]
+    },
+    "claude-sonnet-4-6": {
+      "pricing": {
+        "input": 3,
+        "output": 15,
+        "cached_input": 0.3,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 3.75,
+        "cache_write_1h": 6,
+        "input_tiers": [
+          {
+            "min_input_tokens": 200001,
+            "input": 6,
+            "output": 22.5,
+            "cached_input": 0.6,
+            "cache_write": 7.5,
+            "cache_write_1h": 12
+          }
+        ]
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-sonnet-4-6",
+        "https://claude.com/blog/1m-context-ga"
+      ],
+      "note": "保留首发长上下文溢价；不采用2026-03-13取消溢价后的价格。",
+      "aliases": [
+        "claude-4-6-s",
+        "claude4.6s"
+      ]
+    },
+    "claude-fable-5": {
+      "pricing": {
+        "input": 10,
+        "output": 50,
+        "cached_input": 1,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 12.5,
+        "cache_write_1h": 20
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/news/claude-fable-5-mythos-5"
+      ],
+      "note": ""
+    },
+    "claude-fable-5.1": {
+      "pricing": {
+        "input": 10,
+        "output": 50,
+        "cached_input": 0.25,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 12.5,
+        "cache_write_1h": 20
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/about-claude/pricing",
+        "https://www.anthropic.com/claude/fable"
+      ],
+      "note": "5.1 首发缓存价为 0.25，不能沿用 Fable 5 的 1 美元。"
+    },
+    "gpt-5": {
+      "pricing": {
+        "input": 1.25,
+        "output": 10,
+        "cached_input": 0.125,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5"
+      ],
+      "note": ""
+    },
+    "gpt-5.1": {
+      "pricing": {
+        "input": 1.25,
+        "output": 10,
+        "cached_input": 0.125,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.1"
+      ],
+      "note": ""
+    },
+    "gpt-5.1-codex": {
+      "pricing": {
+        "input": 1.25,
+        "output": 10,
+        "cached_input": 0.125,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.1-codex"
+      ],
+      "note": ""
+    },
+    "gpt-5.2": {
+      "pricing": {
+        "input": 1.75,
+        "output": 14,
+        "cached_input": 0.175,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.2"
+      ],
+      "note": ""
+    },
+    "gpt-5.3-codex": {
+      "pricing": {
+        "input": 1.75,
+        "output": 14,
+        "cached_input": 0.175,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.3-codex"
+      ],
+      "note": ""
+    },
+    "gpt-5.4": {
+      "pricing": {
+        "input": 2.5,
+        "output": 15,
+        "cached_input": 0.25,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.4"
+      ],
+      "note": ""
+    },
+    "gpt-5.5": {
+      "pricing": {
+        "input": 5,
+        "output": 30,
+        "cached_input": 0.5,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.5"
+      ],
+      "note": ""
+    },
+    "gpt-5.6-sol": {
+      "pricing": {
+        "input": 4,
+        "output": 20,
+        "cached_input": 0.4,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 5.0,
+        "input_tiers": [
+          {
+            "min_input_tokens": 272001,
+            "input": 8,
+            "output": 30.0,
+            "cached_input": 0.8,
+            "cache_write": 10.0
+          }
+        ]
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+      ],
+      "note": "Sol 使用首发促销价。"
+    },
+    "gpt-5.6-luna": {
+      "pricing": {
+        "input": 0.2,
+        "output": 1.2,
+        "cached_input": 0.02,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 0.25,
+        "input_tiers": [
+          {
+            "min_input_tokens": 272001,
+            "input": 0.4,
+            "output": 1.7999999999999998,
+            "cached_input": 0.04,
+            "cache_write": 0.5
+          }
+        ]
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+      ],
+      "note": ""
+    },
+    "gpt-6-astra": {
+      "pricing": {
+        "input": 10,
+        "output": 50,
+        "cached_input": 1.0,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 12.5,
+        "input_tiers": [
+          {
+            "min_input_tokens": 272001,
+            "input": 20,
+            "output": 75.0,
+            "cached_input": 2.0,
+            "cache_write": 25.0
+          }
+        ]
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-6-astra"
+      ],
+      "note": ""
+    },
+    "gemini-2.5-pro": {
+      "pricing": {
+        "input": 1.25,
+        "output": 10,
+        "cached_input": 0.3125,
+        "unit": 1000000,
+        "currency": "USD",
+        "input_tiers": [
+          {
+            "min_input_tokens": 200001,
+            "input": 2.5,
+            "output": 15,
+            "cached_input": 0.625
+          }
+        ]
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://developers.googleblog.com/en/gemini-2-5-models-now-support-implicit-caching/"
+      ],
+      "note": "采用早期 75% 缓存折扣，不采用后来 90% 折扣。"
+    },
+    "gemini-2.5-flash": {
+      "pricing": {
+        "input": 0.3,
+        "output": 2.5,
+        "cached_input": 0.075,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://developers.googleblog.com/en/gemini-2-5-models-now-support-implicit-caching/",
+        "https://developers.googleblog.com/en/gemini-2-5-thinking-model-updates/"
+      ],
+      "note": "按未带 preview 日期的稳定版首次发布价格；与 04-17 预览版区分。"
+    },
+    "gemini-2.5-flash-preview-09-2025": {
+      "pricing": {
+        "input": 0.3,
+        "output": 2.5,
+        "cached_input": 0.03,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing"
+      ],
+      "note": "09-2025 独立预览快照发布时采用 90% 缓存折扣。"
+    },
+    "gemini-3-pro": {
+      "pricing": {
+        "input": 2,
+        "output": 12,
+        "cached_input": 0.2,
+        "unit": 1000000,
+        "currency": "USD",
+        "input_tiers": [
+          {
+            "min_input_tokens": 200001,
+            "input": 4,
+            "output": 18,
+            "cached_input": 0.4
+          }
+        ]
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing"
+      ],
+      "note": ""
+    },
+    "gemini-3.1-pro": {
+      "pricing": {
+        "input": 2,
+        "output": 12,
+        "cached_input": 0.2,
+        "unit": 1000000,
+        "currency": "USD",
+        "input_tiers": [
+          {
+            "min_input_tokens": 200001,
+            "input": 4,
+            "output": 18,
+            "cached_input": 0.4
+          }
+        ]
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing"
+      ],
+      "note": ""
+    },
+    "gemini-3-flash": {
+      "pricing": {
+        "input": 0.5,
+        "output": 3,
+        "cached_input": 0.05,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing"
+      ],
+      "note": ""
+    },
+    "gemini-3.6-flash": {
+      "pricing": {
+        "input": 1.5,
+        "output": 7.5,
+        "cached_input": 0.15,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-3-7-flash/"
+      ],
+      "note": "保留 3.6 原始价格；3.7 发布后的同价促销不追溯使用。"
+    },
+    "gemini-3.7-flash": {
+      "pricing": {
+        "input": 0.75,
+        "output": 3.75,
+        "cached_input": 0.075,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-3-7-flash/"
+      ],
+      "note": "采用首发优惠，原公告有效期至 2026-12-31；不自动跟随后续调价。"
+    },
+    "gemini-3.8-flash": {
+      "pricing": {
+        "input": 0.75,
+        "output": 3.75,
+        "cached_input": 0.075,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/"
+      ],
+      "note": "采用首发优惠，原公告有效期至 2026-12-31；不自动跟随后续调价。"
+    },
+    "deepseek-v3.2": {
+      "pricing": {
+        "input": 2,
+        "output": 3,
+        "cached_input": 0.2,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://api-docs.deepseek.com/zh-cn/news/news250929/",
+        "https://api-docs.deepseek.com/zh-cn/img/v3_2_price_zh.webp"
+      ],
+      "note": "V3.2 正式版沿用 Exp 首发价。"
+    },
+    "deepseek-v3.2-exp": {
+      "pricing": {
+        "input": 2,
+        "output": 3,
+        "cached_input": 0.2,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://api-docs.deepseek.com/zh-cn/news/news250929/",
+        "https://api-docs.deepseek.com/zh-cn/img/v3_2_price_zh.webp"
+      ],
+      "note": "V3.2 正式版沿用 Exp 首发价。"
+    },
+    "deepseek-v4-pro": {
+      "pricing": {
+        "input": 12,
+        "output": 24,
+        "cached_input": 1,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://api-docs.deepseek.com/zh-cn/news/news260424/",
+        "https://api-docs.deepseek.com/zh-cn/img/v4-price.png"
+      ],
+      "note": "以 V4 首次公开预览发布为起点，保留后续缓存降价前价格。",
+      "aliases": [
+        "ds-v4-pro"
+      ]
+    },
+    "deepseek-v4-flash": {
+      "pricing": {
+        "input": 1,
+        "output": 2,
+        "cached_input": 0.2,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://api-docs.deepseek.com/zh-cn/news/news260424/",
+        "https://api-docs.deepseek.com/zh-cn/img/v4-price.png"
+      ],
+      "note": "以 V4 首次公开预览发布为起点，保留后续缓存降价前价格。"
+    },
+    "deepseek-v4-flash-vision-exp": {
+      "pricing": {
+        "input": 3,
+        "output": 9,
+        "cached_input": 0.1,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://api-docs.deepseek.com/zh-cn/news/news260821/",
+        "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/"
+      ],
+      "note": "视觉实验版在峰谷计费推出后发布；此配置为首发高峰价。闲时输入1.5/输出4.5/命中0.05，未实现按时段切换。"
+    },
+    "minimax-m2": {
+      "pricing": {
+        "input": 0,
+        "output": 0,
+        "cached_input": 0,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 0
+      },
+      "sources": [
+        "https://platform.minimax.io/docs/release-notes/models"
+      ],
+      "note": "发布即免费体验，原公告有效期至 2025-11-07 00:00 UTC。此为首发价，不代表今天免费。"
+    },
+    "minimax-m2.7": {
+      "pricing": {
+        "input": 0.3,
+        "output": 1.2,
+        "cached_input": 0.06,
+        "unit": 1000000,
+        "currency": "USD",
+        "cache_write": 0.375
+      },
+      "sources": [
+        "https://platform.minimax.io/subscribe/token-plan?tab=api-enterprise"
+      ],
+      "note": ""
+    },
+    "minimax-m3": {
+      "pricing": {
+        "input": 2.1,
+        "output": 8.4,
+        "cached_input": 0.42,
+        "unit": 1000000,
+        "currency": "CNY",
+        "input_tiers": [
+          {
+            "min_input_tokens": 512001,
+            "input": 8.4,
+            "output": 33.6,
+            "cached_input": 1.68
+          }
+        ]
+      },
+      "sources": [
+        "https://minimaxi.com/blog/minimax-m3",
+        "https://filecdn.minimax.chat/public/20260601-101351-1780280055505.jpeg"
+      ],
+      "note": "首发7天五折只适用于不超过512K的请求；长上下文保留原价。未公布独立写入费。"
+    },
+    "kimi-k2.5": {
+      "pricing": {
+        "input": 4,
+        "output": 21,
+        "cached_input": 0.7,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://forum.moonshot.ai/t/kimi-k2-5-api-is-now-available/218",
+        "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "https://help.aliyun.com/zh/model-studio/context-cache"
+      ],
+      "note": "保留原有人民币报价；原厂部署缓存命中按输入价17.5%，区别于百炼自行部署的20%。",
+      "aliases": [
+        "kimi-2.5",
+        "k2p5"
+      ]
+    },
+    "kimi-k2.6": {
+      "pricing": {
+        "input": 6.5,
+        "output": 27,
+        "cached_input": 1.1,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://platform.kimi.com/",
+        "https://platform.kimi.ai/docs/pricing/chat-k26"
+      ],
+      "note": "原配置6.5/27对应人民币，不能标成美元。"
+    },
+    "kimi-k2.7-code": {
+      "pricing": {
+        "input": 6.5,
+        "output": 27,
+        "cached_input": 1.3,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://platform.kimi.com/",
+        "https://platform.kimi.ai/docs/pricing/chat-k27-code"
+      ],
+      "note": "原配置6.5/27对应人民币，不能标成美元。"
+    },
+    "kimi-k3": {
+      "pricing": {
+        "input": 20,
+        "output": 100,
+        "cached_input": 2,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://platform.kimi.com/",
+        "https://platform.kimi.ai/docs/pricing/chat-k3"
+      ],
+      "note": ""
+    },
+    "glm-5": {
+      "pricing": {
+        "input": 4,
+        "output": 18,
+        "cached_input": 1,
+        "unit": 1000000,
+        "currency": "CNY",
+        "input_tiers": [
+          {
+            "min_input_tokens": 32000,
+            "input": 6,
+            "output": 22,
+            "cached_input": 1.5
+          }
+        ]
+      },
+      "sources": [
+        "https://bigmodel.cn/pricing"
+      ],
+      "note": ""
+    },
+    "glm-5.1": {
+      "pricing": {
+        "input": 6,
+        "output": 24,
+        "cached_input": 1.3,
+        "unit": 1000000,
+        "currency": "CNY",
+        "input_tiers": [
+          {
+            "min_input_tokens": 32000,
+            "input": 8,
+            "output": 28,
+            "cached_input": 2
+          }
+        ]
+      },
+      "sources": [
+        "https://bigmodel.cn/pricing"
+      ],
+      "note": ""
+    },
+    "glm-5.2": {
+      "pricing": {
+        "input": 8,
+        "output": 28,
+        "cached_input": 2,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://bigmodel.cn/pricing"
+      ],
+      "note": ""
+    },
+    "glm-4.7-flash": {
+      "pricing": {
+        "input": 0,
+        "output": 0,
+        "cached_input": 0,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://bigmodel.cn/pricing",
+        "https://docs.bigmodel.cn/cn/update/new-releases"
+      ],
+      "note": "官方免费模型。"
+    },
+    "qwen3.7-max": {
+      "pricing": {
+        "input": 12,
+        "output": 36,
+        "cached_input": 2.4,
+        "unit": 1000000,
+        "currency": "CNY",
+        "cached_input_explicit": 1.2000000000000002,
+        "cache_write": 15.0
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "https://help.aliyun.com/zh/model-studio/context-cache"
+      ],
+      "note": "中国内地/全球部署基础目录价；隐式命中20%，显式命中10%，显式写入125%。"
+    },
+    "qwen3.7-plus": {
+      "pricing": {
+        "input": 2,
+        "output": 8,
+        "cached_input": 0.4,
+        "unit": 1000000,
+        "currency": "CNY",
+        "cached_input_explicit": 0.2,
+        "cache_write": 2.5,
+        "input_tiers": [
+          {
+            "min_input_tokens": 256001,
+            "input": 6,
+            "output": 24,
+            "cached_input": 1.2,
+            "cached_input_explicit": 0.6,
+            "cache_write": 7.5
+          }
+        ]
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "https://help.aliyun.com/zh/model-studio/context-cache"
+      ],
+      "note": "中国内地/全球部署基础目录价；隐式命中20%，显式命中10%，显式写入125%。"
+    },
+    "qwen3.8-flash": {
+      "pricing": {
+        "input": 0.8,
+        "output": 2.7,
+        "cached_input": 0.1,
+        "unit": 1000000,
+        "currency": "CNY",
+        "cached_input_explicit": 0.1,
+        "cache_write": 1.25
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/qwen3-8-flash"
+      ],
+      "note": "该模型是缓存比例例外：显式/隐式命中均0.1，显式写入1.25元，不能套用20%/125%。"
+    },
+    "qwen3.5-397b-a17b": {
+      "pricing": {
+        "input": 1.2,
+        "output": 7.2,
+        "unit": 1000000,
+        "currency": "CNY",
+        "input_tiers": [
+          {
+            "min_input_tokens": 128001,
+            "input": 3,
+            "output": 18
+          }
+        ]
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/model-pricing"
+      ],
+      "note": "原厂托管目录价。缓存支持列表未列出这些开源模型，不伪造缓存折扣。"
+    },
+    "qwen3.5-122b-a10b": {
+      "pricing": {
+        "input": 0.8,
+        "output": 6.4,
+        "unit": 1000000,
+        "currency": "CNY",
+        "input_tiers": [
+          {
+            "min_input_tokens": 128001,
+            "input": 2,
+            "output": 16
+          }
+        ]
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/model-pricing"
+      ],
+      "note": "原厂托管目录价。缓存支持列表未列出这些开源模型，不伪造缓存折扣。"
+    },
+    "qwen3.5-27b": {
+      "pricing": {
+        "input": 0.6,
+        "output": 4.8,
+        "unit": 1000000,
+        "currency": "CNY",
+        "input_tiers": [
+          {
+            "min_input_tokens": 128001,
+            "input": 1.8,
+            "output": 14.4
+          }
+        ]
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/model-pricing"
+      ],
+      "note": "原厂托管目录价。缓存支持列表未列出这些开源模型，不伪造缓存折扣。"
+    },
+    "qwen3.5-35b-a3b": {
+      "pricing": {
+        "input": 0.4,
+        "output": 3.2,
+        "unit": 1000000,
+        "currency": "CNY",
+        "input_tiers": [
+          {
+            "min_input_tokens": 128001,
+            "input": 1.6,
+            "output": 12.8
+          }
+        ]
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/model-pricing"
+      ],
+      "note": "原厂托管目录价。缓存支持列表未列出这些开源模型，不伪造缓存折扣。"
+    },
+    "step-3.5-flash": {
+      "pricing": {
+        "input": 0.7,
+        "output": 2.1,
+        "cached_input": 0.14,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://platform.stepfun.com/docs/zh/guides/pricing/details"
+      ],
+      "note": ""
+    },
+    "hy4-preview": {
+      "pricing": {
+        "input": 6,
+        "output": 18,
+        "cached_input": 0.3,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://cloud.tencent.com/document/product/1823/130055"
+      ],
+      "note": "按量API价格；不将产品订阅的积分优惠当作API单价。"
+    },
+    "deepseek-v3-0324": {
+      "pricing": {
+        "input": 2,
+        "output": 8,
+        "cached_input": 0.5,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://api-docs.deepseek.com/zh-cn/news/news250325/",
+        "https://api-docs.deepseek.com/zh-cn/news/news1226/"
+      ],
+      "note": "0324 快照发布时，2024年V3的限时优惠已结束，不能套用V3最早的优惠价。"
+    },
+    "kimi-k2-thinking": {
+      "pricing": {
+        "input": 4,
+        "output": 16,
+        "cached_input": 1,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://openrouter.ai/moonshotai/kimi-k2-thinking",
+        "https://openrouter.ai/docs/guides/best-practices/prompt-caching",
+        "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "https://forum.moonshot.ai/t/an-update-on-new-k2-models-and-new-pricing/104"
+      ],
+      "note": "保留原有人民币标准版报价，非Turbo；Moonshot 原缓存命中单价为输入单价25%。"
+    },
+    "mimo-v2-flash": {
+      "pricing": {
+        "input": 0,
+        "output": 0,
+        "cached_input": 0,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://mimo.mi.com/docs/zh-CN/news/previous-news/news20251216",
+        "https://mimo.mi.com/docs/zh-CN/news/previous-news/beta-free"
+      ],
+      "note": "首发限时免费；后续收费价0.1/0.3美元不回填为首发价。"
+    },
+    "qwen3.6-plus-preview:free": {
+      "pricing": {
+        "input": 0,
+        "output": 0,
+        "cached_input": 0,
+        "unit": 1000000,
+        "currency": "USD"
+      },
+      "sources": [
+        "https://openrouter.ai/qwen/qwen3.6-plus-preview%3Afree"
+      ],
+      "note": "仅限明确的免费预览ID，不替换收费稳定版。"
+    },
+    "qwen3-next-80b-a3b-thinking": {
+      "pricing": {
+        "input": 1,
+        "output": 10,
+        "unit": 1000000,
+        "currency": "CNY"
+      },
+      "sources": [
+        "https://help.aliyun.com/zh/model-studio/model-pricing"
+      ],
+      "note": "官方北京/全球托管价；没有已核实的独立缓存折扣。"
+    },
+    "local-no-token-charge": {
+      "pricing": {
+        "input": 0,
+        "output": 0,
+        "cached_input": 0,
+        "unit": 1000000,
+        "currency": "CNY",
+        "cache_write": 0
+      },
+      "sources": [],
+      "note": "用户明确选择本地或社区模型按0元记录；不代表硬件、电费或托管成本为0。"
+    }
+  }
+}

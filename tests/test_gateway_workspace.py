@@ -16,6 +16,8 @@ def test_metadata_sqlite_all_read_paths_and_history(tmp_path):
     logger = SQLiteLogger(tmp_path / 'requests.db')
     record = {'type': 'request_end', 'request_id': 'request', 'timestamp': 1000, 'model': 'demo', 'success': True,
               'input_tokens': 10, 'output_tokens': 20, 'cached_tokens': 2,
+              'cache_write_tokens': 0, 'cache_write_1h_tokens': 0, 'cache_write_cost': 0,
+              'cache_write_extra_cost': 0, 'cache_mode': None,
               'cost_info': {'total_cost': 3.5, 'currency': 'CNY'},
               'caller_id': 'stable-key', 'caller_name': '用户', 'conversation_id': 'conversation',
               'gateway_request_id': 'wire-id', 'timings': {'total_ms': 123}, 'pricing_snapshot': {'input': 7}}

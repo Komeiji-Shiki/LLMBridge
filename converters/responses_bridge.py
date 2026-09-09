@@ -296,9 +296,10 @@ def _usage_to_chat(
         "total_tokens": total_tokens,
     }
     input_details = usage.get("input_tokens_details")
-    if isinstance(input_details, dict) and input_details.get("cached_tokens") is not None:
+    if isinstance(input_details, dict):
         result["prompt_tokens_details"] = {
-            "cached_tokens": int(input_details.get("cached_tokens", 0) or 0)
+            key: int(input_details[key] or 0) for key in
+            ('cached_tokens', 'cache_write_tokens', 'cache_write_1h_tokens') if key in input_details
         }
     output_details = usage.get("output_tokens_details")
     if isinstance(output_details, dict) and output_details.get("reasoning_tokens") is not None:

@@ -2,8 +2,8 @@
 
 import time
 
-TOKENS = ('input_tokens', 'output_tokens', 'total_tokens', 'cached_tokens')
-COSTS = ('input_cost', 'cached_cost', 'output_cost', 'total_cost')
+TOKENS = ('input_tokens', 'output_tokens', 'total_tokens', 'cached_tokens', 'cache_write_tokens', 'cache_write_1h_tokens')
+COSTS = ('input_cost', 'cached_cost', 'output_cost', 'total_cost', 'cache_write_cost', 'cache_write_extra_cost')
 
 
 def query_token_stats(conn, start_ts, end_ts, model_config, rpm_period, usd_to_cny):
@@ -14,7 +14,8 @@ def query_token_stats(conn, start_ts, end_ts, model_config, rpm_period, usd_to_c
             params.append(value)
     clause = ' WHERE ' + ' AND '.join(where) if where else ''
     fields = TOKENS + COSTS
-    sums = ','.join(f'COALESCE(SUM({key}),0)' for key in fields)
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(requests)')}
+    sums = ','.join(f'COALESCE(SUM({key}),0)' if key in columns else '0' for key in fields)
     grouped = conn.execute(f'''
         SELECT model, COALESCE(currency,'USD'), COUNT(*), {sums},
                SUM(CASE WHEN total_cost > 0 THEN 1 ELSE 0 END)
@@ -66,7 +67,7 @@ def query_token_stats(conn, start_ts, end_ts, model_config, rpm_period, usd_to_c
                             for unit, values in currencies.items())
 
     daily = []
-    token_sums = ','.join(f'COALESCE(SUM({key}),0)' for key in TOKENS)
+    token_sums = ','.join(f'COALESCE(SUM({key}),0)' if key in columns else '0' for key in TOKENS)
     for day, *values in conn.execute(f'''
         SELECT date, {token_sums},
             SUM(CASE WHEN currency='CNY' THEN COALESCE(total_cost,0)/? ELSE COALESCE(total_cost,0) END)
@@ -81,6 +82,8 @@ def query_token_stats(conn, start_ts, end_ts, model_config, rpm_period, usd_to_c
     return {'model_stats': sorted(models.values(), key=lambda row: row['total_tokens'], reverse=True),
             'daily_stats': daily, 'total_input_tokens': totals['input_tokens'],
             'total_output_tokens': totals['output_tokens'], 'total_tokens': totals['total_tokens'],
+            'total_cache_write_tokens': totals['cache_write_tokens'],
+            'total_cache_write_1h_tokens': totals['cache_write_1h_tokens'],
             'total_cached_tokens': totals['cached_tokens'], **cost_usd, 'currency': 'USD',
             'cost_usd': {key: round(value, 6) for key, value in cost_usd.items()},
             'cost_cny': {key: round(value * usd_to_cny, 6) for key, value in cost_usd.items()},

@@ -36,12 +36,15 @@ def estimate(model, usage, long_context=False):
     cached = min(usage['cached_tokens'], usage['input_tokens'])
     writes = min(usage.get('cache_write_tokens', 0), usage['input_tokens'] - cached)
     # 没有单独 cache-write 价的模型，写入仍归入普通输入，不能重复计费。
-    input_cost = ((usage['input_tokens'] - cached - writes) * rate['input']
-                  + writes * rate.get('cache_write', rate['input'])) * input_factor / 1_000_000
+    billable_writes = writes if 'cache_write' in rate else 0
+    input_cost = (usage['input_tokens'] - cached - billable_writes) * rate['input'] * input_factor / 1_000_000
+    write_cost = billable_writes * rate.get('cache_write', 0) * input_factor / 1_000_000
+    extra_cost = write_cost - billable_writes * rate['input'] * input_factor / 1_000_000
     cached_cost = cached * rate['cached_input'] * input_factor / 1_000_000
     output_cost = usage['output_tokens'] * rate['output'] * output_factor / 1_000_000
     return {'input_cost': input_cost, 'cached_cost': cached_cost, 'output_cost': output_cost,
-            'total_cost': input_cost + cached_cost + output_cost}
+            'cache_write_cost': write_cost, 'cache_write_extra_cost': extra_cost,
+            'total_cost': input_cost + cached_cost + write_cost + output_cost}
 
 
 def price_metadata():

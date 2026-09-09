@@ -29,6 +29,7 @@ from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
 from utils.task_registry import spawn
 from converters.anthropic_openai import extract_anthropic_usage_tokens
+from utils.api_pricing import chat_cache_details
 from utils.json_unescape import StreamingUnicodeUnescaper
 from ._direct_api_utils import (
     detect_first_chunk_error,
@@ -783,7 +784,7 @@ def convert_anthropic_response_to_openai(
             "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
-            **({"prompt_tokens_details": {"cached_tokens": cached_tokens}} if cached_tokens else {})
+            **chat_cache_details(cached_tokens, response_json.get('usage'))
         }
     }
 
@@ -915,7 +916,7 @@ def build_openai_stream_from_anthropic(
                     "prompt_tokens": input_tokens,
                     "completion_tokens": output_tokens,
                     "total_tokens": total,
-                    **({"prompt_tokens_details": {"cached_tokens": cached_tokens}} if cached_tokens else {})
+                    **chat_cache_details(cached_tokens, upstream_usage)
                 }
             }
             return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
@@ -1187,7 +1188,7 @@ def build_openai_stream_from_anthropic(
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                         cached_tokens=cached_tokens,
-                        pricing=pricing_config
+                        pricing=pricing_config, upstream_usage=upstream_usage
                     )
                 except Exception:
                     pass
@@ -1587,7 +1588,7 @@ async def handle_anthropic_native_from_openai(
                             input_tokens=resp_input_tokens or 0,
                             output_tokens=resp_output_tokens or 0,
                             cached_tokens=resp_cached_tokens or 0,
-                            pricing=pricing_config)
+                            pricing=pricing_config, upstream_usage=resp_upstream_usage)
                     except Exception:
                         pass
                 if isinstance(cost_info, dict) and resp_stop_reason:

@@ -608,7 +608,7 @@ async def _handle_passthrough_non_stream(
 
             cost_info = direct_api_service.calculate_cost(
                 input_tokens=partial_input_tokens, output_tokens=0,
-                pricing=pricing_config) if pricing_config else {}
+                pricing=pricing_config, upstream_usage=response_json.get("usage")) if pricing_config else {}
 
             if cost_info.get("total_cost"):
                 logger.info(f"[DIRECT_API_PASSTHROUGH] 非流式失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
@@ -694,7 +694,7 @@ async def _handle_passthrough_non_stream(
         cost_info = direct_api_service.calculate_cost(
             input_tokens=input_tokens, output_tokens=output_tokens,
             cached_tokens=cached_tokens,
-            pricing=pricing_config) if pricing_config else {}
+            pricing=pricing_config, upstream_usage=upstream_usage) if pricing_config else {}
 
         monitoring_service.request_end(
             request_id=request_id, success=True,

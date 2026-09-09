@@ -12,6 +12,8 @@ def test_migration_preserves_old_amounts_and_covers_every_field():
     assert connection.execute('SELECT total_cost FROM requests').fetchone()[0] == 12.34
     assert connection.execute('SELECT caller_id FROM requests').fetchone()[0] == 'unattributed'
     record = {'caller_id': 'key-id', 'caller_name': '用户', 'conversation_id': 'session',
+              'cache_write_tokens': 12, 'cache_write_1h_tokens': 3,
+              'cache_write_cost': .2, 'cache_write_extra_cost': .05, 'cache_mode': 'explicit',
               'gateway_request_id': 'logical', 'timings': {'total_ms': 123},
               'pricing_snapshot': {'pricing': {'input': 1}, 'exchange_rate': {'USD_TO_CNY': 7.2}}}
     write_metadata(connection, 'old', record)

@@ -11,6 +11,14 @@ function modelPrimaryConfig(config) {
 function mergeModelEditorConfig(config) {
     const original = structuredClone(modelEditor.originalConfig);
     const primary = modelPrimaryConfig(original);
+    // 表单编辑基础单价时保留按请求长度定义的阶梯与未展示的计费字段。
+    if (config.pricing && primary.pricing) {
+        const preservedPricing = { ...primary.pricing };
+        for (const key of ['input', 'output', 'unit', 'currency', 'cached_input', 'cache_write', 'cache_write_1h']) {
+            delete preservedPricing[key];
+        }
+        config.pricing = { ...preservedPricing, ...config.pricing };
+    }
     // Only fields represented by this form can be removed by clearing a control.
     const managedFields = [
         'api_type', 'model_id', 'display_name', 'passthrough', 'sanitize_recursive_schemas',

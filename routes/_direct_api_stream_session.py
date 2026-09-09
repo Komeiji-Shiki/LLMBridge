@@ -692,7 +692,7 @@ class PassthroughStreamSession:
         cost_info = self.direct_api_service.calculate_cost(
             input_tokens=self.input_tokens, output_tokens=self.output_tokens,
             cached_tokens=self.cached_tokens,
-            pricing=self.pricing_config) if self.pricing_config else {}
+            pricing=self.pricing_config, upstream_usage=self.upstream_usage) if self.pricing_config else {}
         filler_chunks = self._flush_tool_args_tails()
         final_tool_calls = finalize_tool_calls(self.tool_call_accumulator)
 

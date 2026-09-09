@@ -54,6 +54,7 @@ function showAddModelModal() {
     document.getElementById('pricing-unit').value = '1000000';
     document.getElementById('pricing-currency').value = 'USD';
     document.getElementById('pricing-cached-input').value = '';
+            loadCacheWritePricing('', {});
     document.getElementById('token-stats-mode').value = 'api';
     document.getElementById('custom-params').value = '';
     document.getElementById('extra-body-params').value = '';
@@ -206,6 +207,7 @@ function fillModelForm(config) {
             document.getElementById('pricing-unit').value = config.pricing.unit || 1000000;
             document.getElementById('pricing-currency').value = config.pricing.currency || 'USD';
             document.getElementById('pricing-cached-input').value = config.pricing.cached_input ?? '';
+            loadCacheWritePricing('', config.pricing);
         } else {
             // 重置计费配置
             document.getElementById('pricing-input').value = '';
@@ -213,6 +215,7 @@ function fillModelForm(config) {
             document.getElementById('pricing-unit').value = '1000000';
             document.getElementById('pricing-currency').value = 'USD';
             document.getElementById('pricing-cached-input').value = '';
+            loadCacheWritePricing('', {});
         }
         
         // 加载最高温度限制
@@ -252,6 +255,7 @@ function fillModelForm(config) {
             document.getElementById('lmarena-pricing-unit').value = config.pricing.unit || 1000000;
             document.getElementById('lmarena-pricing-currency').value = config.pricing.currency || 'USD';
             document.getElementById('lmarena-pricing-cached-input').value = config.pricing.cached_input ?? '';
+            loadCacheWritePricing('lmarena-', config.pricing);
         } else {
             // 重置计费配置
             document.getElementById('lmarena-pricing-input').value = '';
@@ -259,6 +263,7 @@ function fillModelForm(config) {
             document.getElementById('lmarena-pricing-unit').value = '1000000';
             document.getElementById('lmarena-pricing-currency').value = 'USD';
             document.getElementById('lmarena-pricing-cached-input').value = '';
+            loadCacheWritePricing('lmarena-', {});
         }
         
         // 加载最高温度限制
@@ -509,7 +514,8 @@ async function saveModel() {
                 output: parseFloat(pricingOutput) || 0,
                 unit: parseInt(document.getElementById('pricing-unit').value) || 1000000,
                 currency: document.getElementById('pricing-currency').value,
-                ...(cachedInput ? { cached_input: parseFloat(cachedInput) || 0 } : {})
+                ...(cachedInput ? { cached_input: parseFloat(cachedInput) || 0 } : {}),
+                ...readCacheWritePricing('')
             };
         }
         
@@ -589,7 +595,8 @@ async function saveModel() {
                 output: parseFloat(lmarenaPricingOutput) || 0,
                 unit: parseInt(document.getElementById('lmarena-pricing-unit').value) || 1000000,
                 currency: document.getElementById('lmarena-pricing-currency').value,
-                ...(lmarenaCachedInput ? { cached_input: parseFloat(lmarenaCachedInput) || 0 } : {})
+                ...(lmarenaCachedInput ? { cached_input: parseFloat(lmarenaCachedInput) || 0 } : {}),
+                ...readCacheWritePricing('lmarena-')
             };
         }
         
@@ -649,4 +656,19 @@ async function saveModel() {
     } finally {
         setModelSaving(false);
     }
+}
+
+// 写入配置使用完整单价，避免用户把 1.25 倍单价误当成额外加价。
+function loadCacheWritePricing(prefix, pricing) {
+    document.getElementById(`${prefix}pricing-cache-write`).value = pricing.cache_write ?? '';
+    document.getElementById(`${prefix}pricing-cache-write-1h`).value = pricing.cache_write_1h ?? '';
+}
+
+function readCacheWritePricing(prefix) {
+    const prices = {};
+    for (const [field, control] of [['cache_write', 'cache-write'], ['cache_write_1h', 'cache-write-1h']]) {
+        const raw = document.getElementById(`${prefix}pricing-${control}`).value;
+        if (raw !== '') prices[field] = Number(raw);
+    }
+    return prices;
 }

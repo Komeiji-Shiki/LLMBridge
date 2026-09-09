@@ -40,7 +40,7 @@ def usage_csv(data):
     writer = csv.writer(output)
     writer.writerow(['来源', '模型', '请求数', '用量事件数', '会话数', '输入Tokens', '输出Tokens',
                      '缓存命中Tokens', '推理Tokens', '缓存写入Tokens', '总Tokens', '输入成本(原币)',
-                     '缓存成本(原币)', '输出成本(原币)', '总成本(原币)', '货币', '平均Token/请求', '金额口径', '价格核对日期'])
+                     '缓存读取成本(原币)', '输出成本(原币)', '总成本(原币)', '缓存写入成本(原币)', '缓存写入额外成本(原币)', '货币', '平均Token/请求', '金额口径', '价格核对日期'])
     for row in data['model_stats']:
         external = row.get('source') == 'codex'
         priced = not external or row.get('cost_kind') == 'estimated'
@@ -50,7 +50,7 @@ def usage_csv(data):
             row.get('input_tokens', 0), row.get('output_tokens', 0), row.get('cached_tokens', 0),
             row.get('reasoning_tokens', ''), row.get('cache_write_tokens', ''), row.get('total_tokens', 0),
             *('' if not priced else round(row.get(key, 0) or 0, 6)
-              for key in ('input_cost', 'cached_cost', 'output_cost', 'total_cost')),
+              for key in ('input_cost', 'cached_cost', 'output_cost', 'total_cost', 'cache_write_cost', 'cache_write_extra_cost')),
             '' if not priced else csv_safe_text(row.get('currency', 'USD')),
             '' if external else round(row.get('total_tokens', 0) / row['request_count']) if row.get('request_count') else 0,
             '标准API估算' if external and priced else '未定价' if external else '网关历史记录',

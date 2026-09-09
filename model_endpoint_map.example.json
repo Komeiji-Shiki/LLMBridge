@@ -51,6 +51,16 @@
     "model_id": "claude-sonnet-4-5",
     "display_name": "Claude Sonnet (Anthropic原生)",
     "auto_cache": true,
+    "pricing": {
+      "input": 3,
+      "output": 15,
+      "cached_input": 0.3,
+      "cache_write": 3.75,
+      "cache_write_1h": 6,
+      "unit": 1000000,
+      "currency": "USD",
+      "input_tiers": [{"min_input_tokens": 200001, "input": 6, "output": 22.5, "cached_input": 0.6, "cache_write": 7.5, "cache_write_1h": 12}]
+    },
     "// 说明": "用于对接Anthropic原生 /v1/messages 接口。以Anthropic格式原样透传，不走OpenAI转换。建议配合本项目的 /v1/messages 入口使用。auto_cache=true 时自动注入 prompt caching 断点"
   },
 

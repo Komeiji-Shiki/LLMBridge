@@ -690,12 +690,18 @@ def convert_openai_usage_to_anthropic(usage: Optional[Dict[str, Any]]) -> Dict[s
     completion_tokens = total_output_tokens(usage)
     details = usage.get("prompt_tokens_details")
     cached_tokens = int(details.get("cached_tokens", 0) or 0) if isinstance(details, dict) else 0
-    return {
-        "input_tokens": max(0, prompt_tokens - cached_tokens),
-        "cache_creation_input_tokens": 0,
+    from utils.api_pricing import cache_write_usage
+    writes, one_hour = cache_write_usage(usage)
+    result = {
+        "input_tokens": max(0, prompt_tokens - cached_tokens - writes),
+        "cache_creation_input_tokens": writes,
         "cache_read_input_tokens": cached_tokens,
         "output_tokens": completion_tokens,
     }
+    if one_hour:
+        result['cache_creation'] = {'ephemeral_5m_input_tokens': max(0, writes - one_hour),
+                                    'ephemeral_1h_input_tokens': one_hour}
+    return result
 
 
 def sanitize_anthropic_thinking_blocks(messages: Any) -> Any:

@@ -121,7 +121,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         context.outcome.update(status='cancelled' if failure == 'Client disconnected' else 'failed' if failure else 'incomplete' if incomplete else 'success',
                                observed_native_tools=sorted(observed_tools))
         params['timings'] = context.snapshot()
-        cost = service.calculate_cost(input_tokens, output_tokens, config.get('pricing') or {}, cached_tokens=cached_tokens)
+        cost = service.calculate_cost(input_tokens, output_tokens, config.get('pricing') or {}, cached_tokens=cached_tokens, upstream_usage=upstream_usage)
         monitor.request_end(request_id=request_id, success=failure is None, error=failure,
                             input_tokens=input_tokens, output_tokens=output_tokens, cached_tokens=cached_tokens,
                             cost_info=cost, response_content=''.join(text_parts), full_messages=original_messages,

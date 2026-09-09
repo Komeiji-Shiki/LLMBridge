@@ -213,7 +213,7 @@
 <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
 <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">普通输入金额</div>
 <div id="input-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #2aa8ff;">-</div>
-</div><div><div>缓存输入金额</div><div class="cost-value" id="cached-cost-value">-</div></div>
+</div><div><div>缓存输入金额</div><div class="cost-value" id="cached-cost-value">-</div></div><div><div>缓存写入金额</div><div class="cost-value" id="cache-write-cost-value">-</div><small>其中额外费用 <span id="cache-write-extra-cost-value">-</span></small></div>
 <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
 <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">输出成本</div>
 <div id="output-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #10b981;">-</div>
@@ -927,8 +927,8 @@
 </div>
 <div>
 <label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
-<input class="form-input" id="lmarena-pricing-cached-input" placeholder="=输入单价" step="0.0001" type="number">
-</input></div>
+<input class="form-input" min="0" id="lmarena-pricing-cached-input" placeholder="=输入单价" step="0.0001" type="number">
+</input></div><div><label style="font-size: 0.875rem; color: var(--text-dim);">缓存写入完整单价（默认 / 5分钟）</label><input class="form-input" id="lmarena-pricing-cache-write" placeholder="留空按普通输入计费" min="0" step="0.0001" type="number"/></div><div><label style="font-size: 0.875rem; color: var(--text-dim);">1小时缓存写入完整单价</label><input class="form-input" id="lmarena-pricing-cache-write-1h" placeholder="留空使用默认写入单价" min="0" step="0.0001" type="number"/></div>
 <div></div>
 </div>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
@@ -1379,8 +1379,8 @@
 </div>
 <div>
 <label style="font-size: 0.875rem; color: var(--text-dim);">缓存命中单价</label>
-<input class="form-input" id="pricing-cached-input" placeholder="=输入单价" step="0.0001" type="number"/>
-</div>
+<input class="form-input" min="0" id="pricing-cached-input" placeholder="=输入单价" step="0.0001" type="number"/>
+</div><div><label style="font-size: 0.875rem; color: var(--text-dim);">缓存写入完整单价（默认 / 5分钟）</label><input class="form-input" id="pricing-cache-write" placeholder="留空按普通输入计费" min="0" step="0.0001" type="number"/></div><div><label style="font-size: 0.875rem; color: var(--text-dim);">1小时缓存写入完整单价</label><input class="form-input" id="pricing-cache-write-1h" placeholder="留空使用默认写入单价" min="0" step="0.0001" type="number"/></div>
 </div>
 <small style="color: var(--text-dim); display: block; margin-top: 8px;">
                                 例如：OpenAI GPT-4o 输入 2.5/百万token = 输入单价2.5, 单位1000000；缓存命中通常为输入的 1/2~1/10（如 1.25）

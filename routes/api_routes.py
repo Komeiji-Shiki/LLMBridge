@@ -909,7 +909,7 @@ async def _handle_anthropic_passthrough(
                     input_tokens=final_input_tokens,
                     output_tokens=final_output_tokens,
                     cached_tokens=final_cached_tokens,
-                    pricing=pricing_config) if pricing_config else None
+                    pricing=pricing_config, upstream_usage=stream_state.get("upstream_usage")) if pricing_config else None
                 if cost_info and cost_info.get("total_cost"):
                     logger.info(
                         f"[ANTHROPIC_COMPAT] 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
@@ -1030,7 +1030,7 @@ async def _handle_anthropic_passthrough(
             input_tokens=final_input_tokens,
             output_tokens=final_output_tokens,
             cached_tokens=final_cached_tokens,
-            pricing=pricing_config) if pricing_config else None
+            pricing=pricing_config, upstream_usage=resp_upstream_usage) if pricing_config else None
         if cost_info and cost_info.get("total_cost"):
             logger.info(
                 f"[ANTHROPIC_COMPAT] 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
