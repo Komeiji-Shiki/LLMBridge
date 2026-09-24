@@ -638,12 +638,10 @@ class DirectAPIService:
                     text = text.replace(key_param, '***')
             return text
 
-        if base_url:
-            # 使用自定义地址（如本地反代）
-            endpoint = f"{base_url.rstrip('/')}/v1beta/models/{model}:{method}?key={key_param}{sse_param}"
-        else:
-            # 使用Google官方地址
-            endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={key_param}{sse_param}"
+        # 配置允许填写主机根地址或已包含 /v1beta 的地址，避免重复拼接版本路径。
+        configured_base = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
+        versioned_base = configured_base if configured_base.endswith("/v1beta") else f"{configured_base}/v1beta"
+        endpoint = f"{versioned_base}/models/{model}:{method}?key={key_param}{sse_param}"
         
         # 转换OpenAI格式消息为Gemini格式
         gemini_contents = []
@@ -946,7 +944,8 @@ class DirectAPIService:
                 # 检查响应状态
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"[GEMINI_NATIVE] API调用失败: {response.status} - {error_text}")
+                    error_message = error_text.strip() or f"Gemini API 返回 HTTP {response.status}（响应正文为空）"
+                    logger.error(f"[GEMINI_NATIVE] API调用失败: {response.status} - {error_message}")
                     try:
                         error_json = json.loads(error_text)
                         yield _normalize_error_for_passthrough(
@@ -954,7 +953,7 @@ class DirectAPIService:
                     except json.JSONDecodeError:
                         yield {
                             "error": {
-                                "message": error_text,
+                                "message": error_message,
                                 "type": "api_error",
                                 "code": response.status
                             }

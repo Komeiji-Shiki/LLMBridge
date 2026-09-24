@@ -71,7 +71,13 @@ def test_gemini_stream_tool_indices_remain_distinct_across_chunks():
 
 
 @pytest.mark.parametrize('stream', [False, True])
-def test_gemini_request_returns_signature_and_generation_options(stream):
+@pytest.mark.parametrize('base_url, expected_base', [
+    (None, 'https://generativelanguage.googleapis.com/v1beta'),
+    ('http://localhost:8317', 'http://localhost:8317/v1beta'),
+    ('http://localhost:8317/v1beta', 'http://localhost:8317/v1beta'),
+    ('http://localhost:8317/v1beta/', 'http://localhost:8317/v1beta'),
+])
+def test_gemini_request_returns_signature_and_generation_options(stream, base_url, expected_base):
     async def run():
         session = MagicMock()
         response = MagicMock(status=200)
@@ -86,9 +92,13 @@ def test_gemini_request_returns_signature_and_generation_options(stream):
         original = copy.deepcopy(assistant)
         result = [item async for item in service.call_gemini_native_api(
             'test-key', 'demo', [assistant, {'role': 'tool', 'tool_call_id': 'one', 'content': 'ok'}],
-            stream=stream, response_format={'type': 'json_schema', 'json_schema': {'schema': SCHEMA}},
+            stream=stream, base_url=base_url,
+            response_format={'type': 'json_schema', 'json_schema': {'schema': SCHEMA}},
             stop_sequences=['END'])]
         assert not any('error' in item for item in result)
+        method = 'streamGenerateContent' if stream else 'generateContent'
+        suffix = '&alt=sse' if stream else ''
+        assert session.post.call_args.args[0] == f'{expected_base}/models/demo:{method}?key=test-key{suffix}'
         body = json.loads(session.post.call_args.kwargs['data'])
         assert body['contents'][0]['parts'][1]['thoughtSignature'] == 'signed'
         assert body['contents'][1]['parts'][0]['functionResponse']['id'] == 'one'
@@ -97,6 +107,22 @@ def test_gemini_request_returns_signature_and_generation_options(stream):
         assert body['generationConfig']['stopSequences'] == ['END']
         assert assistant == original
     asyncio.run(run())
+
+
+def test_gemini_empty_upstream_error_reports_http_status():
+    async def run():
+        session = MagicMock()
+        response = MagicMock(status=404)
+        response.text = AsyncMock(return_value='')
+        session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+        session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+        service = DirectAPIService(session)
+        return [item async for item in service.call_gemini_native_api(
+            'test-key', 'demo', [{'role': 'user', 'content': 'hello'}], stream=True)]
+
+    result = asyncio.run(run())
+    assert result[0]['error']['code'] == 404
+    assert 'HTTP 404' in result[0]['error']['message']
 
 
 @pytest.mark.parametrize('chunk_size', [1, 2, 13, 1000])
