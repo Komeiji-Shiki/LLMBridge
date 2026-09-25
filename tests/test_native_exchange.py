@@ -2,6 +2,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 import pytest
+from core.conversation_store import ConversationStore
 from core.request_context import RequestContext, current_request
 from services.native_exchange import display_messages_for, forward_native_exchange
 
@@ -140,4 +141,75 @@ def test_forward_records_display_messages_for_gemini():
         assert started['messages_count'] == 4
         assert [message['role'] for message in started['messages']] == ['system', 'user', 'assistant', 'user']
         assert monitor.request_end.call_args.kwargs['full_messages'] == started['messages']
+    asyncio.run(run())
+
+
+def test_display_messages_gemini_thoughts_and_signatures():
+    body = {'contents': [
+        {'role': 'model', 'parts': [{'thought': True, 'text': '想一下'}, {'text': '答案'},
+                                    {'text': '', 'thoughtSignature': 'sig-1'}]},
+        {'role': 'user', 'parts': [{'text': '继续'}]},
+    ]}
+    messages = display_messages_for(body, 'gemini')
+    assert messages[0]['content'] == '答案'
+    assert messages[0]['reasoning_content'] == '想一下'
+    assert messages[0]['reasoning_signature'] == 'sig-1'
+    assert messages[1] == {'role': 'user', 'content': '继续'}
+
+
+@pytest.mark.parametrize('stream', [True, False])
+def test_forward_native_gemini_restores_thought_signature(stream, monkeypatch, tmp_path):
+    async def run():
+        store = ConversationStore(tmp_path / 'conversations.db')
+        monkeypatch.setattr('services.gemini_history.conversation_store', store)
+        service = MagicMock()
+        service.calculate_cost.return_value = {'total_cost': 0, 'currency': 'USD'}
+        monitor = MagicMock()
+        monitor.broadcast_to_monitors = AsyncMock()
+        captured = []
+
+        full_response = {'candidates': [{'content': {'role': 'model',
+                                                     'parts': [{'thought': True, 'text': '想了半天'},
+                                                               {'text': '你好呀'},
+                                                               {'text': '', 'thoughtSignature': 'sig-1'}]},
+                                    'finishReason': 'STOP'}],
+                         'usageMetadata': {'promptTokenCount': 3, 'candidatesTokenCount': 4}}
+        events = [
+            {'candidates': [{'content': {'role': 'model', 'parts': [{'thought': True, 'text': '想了半天'}]}}]},
+            {'candidates': [{'content': {'role': 'model', 'parts': [{'text': '你好呀'}]}}]},
+            {'candidates': [{'content': {'role': 'model', 'parts': [{'text': '', 'thoughtSignature': 'sig-1'}]},
+                             'finishReason': 'STOP'}],
+             'usageMetadata': {'promptTokenCount': 3, 'candidatesTokenCount': 4}},
+        ] if stream else [full_response]
+
+        async def upstream(**kwargs):
+            captured.append(kwargs['request_body'])
+            for event in events:
+                if stream:
+                    yield ('data: ' + json.dumps(event) + '\n\n').encode()
+                else:
+                    yield json.dumps(event).encode()
+        service.call_api_passthrough = upstream
+        config = {'provider': 'gemini', 'api_type': 'gemini_native', 'api_key': 'test',
+                  'api_base_url': 'https://example.test'}
+
+        async def send(contents):
+            token = current_request.set(RequestContext(authenticated=True, owner_id='owner'))
+            try:
+                result = await forward_native_exchange({'contents': contents}, config, 'alias',
+                                                       service, monitor, stream=stream)
+                if stream:
+                    _ = b''.join([chunk async for chunk in result.body_iterator])
+            finally:
+                current_request.reset(token)
+
+        await send([{'role': 'user', 'parts': [{'text': '你好'}]}])
+        await send([{'role': 'user', 'parts': [{'text': '你好'}]},
+                    {'role': 'model', 'parts': [{'thought': True, 'text': '想了半天'}, {'text': '你好呀'}]},
+                    {'role': 'user', 'parts': [{'text': '继续'}]}])
+        restored_parts = captured[-1]['contents'][1]['parts']
+        assert restored_parts[0]['thoughtSignature'] == 'sig-1'
+        assert restored_parts[1] == {'text': '你好呀'}
+        params = monitor.request_start.call_args.kwargs['params']
+        assert params['restored_thought_signatures'] == 1
     asyncio.run(run())

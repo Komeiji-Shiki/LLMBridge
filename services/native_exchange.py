@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+import logging
 import uuid
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -10,6 +11,9 @@ from core.request_context import RequestContext, current_request, credential_ide
 from services.protocol_events import payloads, error_status
 from services.provider_capabilities import protocol_name, apply_native_tool_defaults
 from utils.usage_tokens import resolve_usage_tokens
+
+
+logger = logging.getLogger(__name__)
 
 
 class ContextStreamingResponse(StreamingResponse):
@@ -93,6 +97,8 @@ def _content_from_blocks(blocks):
             continue
         if not isinstance(block, dict):
             continue
+        if block.get('thought'):
+            continue
         if any(key in block for key in ('inlineData', 'inline_data', 'fileData', 'file_data')) or block.get('type') in ('image', 'image_url', 'input_image', 'input_file'):
             media = block.get('inlineData') or block.get('inline_data') or block.get('fileData') or block.get('file_data') or block
             mime = media.get('mimeType') or media.get('mime_type') or block.get('type') or 'media'
@@ -133,10 +139,26 @@ def _messages_from_gemini(body):
         if not isinstance(item, dict):
             continue
         role = item.get('role') or 'user'
-        content = _content_from_blocks(item.get('parts'))
-        if not content:
+        parts = item.get('parts')
+        content = _content_from_blocks(parts)
+        message = {'role': 'assistant' if role == 'model' else role, 'content': content}
+        thought_texts, signatures = [], []
+        if isinstance(parts, list):
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                if part.get('thought') and isinstance(part.get('text'), str) and part.get('text'):
+                    thought_texts.append(part['text'])
+                signature = part.get('thoughtSignature')
+                if isinstance(signature, str) and signature:
+                    signatures.append(signature)
+        if thought_texts:
+            message['reasoning_content'] = ''.join(thought_texts)
+        if signatures:
+            message['reasoning_signature'] = signatures[0] if len(signatures) == 1 else signatures
+        if not content and not thought_texts and not signatures:
             continue
-        messages.append({'role': 'assistant' if role == 'model' else role, 'content': content})
+        messages.append(message)
     return messages
 
 
@@ -239,6 +261,7 @@ def display_messages_for(body, protocol):
 async def forward_native_exchange(body, config, model, service, monitor, *, stream=False, context=None, gemini_response=False):
     from routes._direct_api_utils import get_api_key
     from converters.gemini_interactions import convert_gemini_gc_to_interactions, convert_interactions_to_gemini_gc, InteractionsToGeminiGCConverter
+    from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler
     context = context or current_request.get() or RequestContext()
     context.model, context.endpoint = model, copy.deepcopy(config)
     if not context.request_body:
@@ -255,6 +278,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
     incomplete = False
     observed_tools = set()
     protocol = protocol_name(config)
+    assembler = GeminiTurnAssembler() if protocol == 'gemini' and context.authenticated else None
     params = {'protocol': protocol, 'streaming': stream, 'model_alias': model,
               'caller_id': context.owner_id, 'caller_name': context.owner_name,
               'conversation_id': context.session_id, 'gateway_request_id': context.request_id}
@@ -289,6 +313,8 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         text = text_from_native(value)
         if isinstance(text, str) and text:
             text_parts.append(text)
+        if assembler is not None:
+            assembler.feed(value)
 
     async def finish():
         nonlocal ended
@@ -305,6 +331,12 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                             cost_info=cost, response_content=''.join(text_parts), full_messages=original_messages,
                             upstream_usage=upstream_usage)
         await monitor.broadcast_to_monitors({'type': 'request_end', 'request_id': request_id, 'success': failure is None})
+        if assembler is not None and failure is None and not incomplete and assembler.has_signatures():
+            try:
+                contents = body.get('contents') if isinstance(body, dict) else None
+                await GeminiThoughtHistory(context, config, body).remember(contents, assembler)
+            except Exception:
+                logger.warning('Gemini 思考签名记录失败；不影响本次响应')
 
     try:
         key = await get_api_key(model, config.get('api_keys') or config.get('api_key'), strategy=config.get('api_key_strategy', 'round_robin'),
@@ -329,6 +361,13 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
             endpoint = config.get('endpoint_path') or {'responses': '/responses', 'anthropic': '/messages'}.get(protocol, '/chat/completions')
             headers = None
         upstream = apply_native_tool_defaults(upstream, config)
+        if assembler is not None:
+            try:
+                restored = await GeminiThoughtHistory(context, config, body).restore(upstream)
+                if restored:
+                    params['restored_thought_signatures'] = restored
+            except Exception:
+                logger.warning('Gemini 思考签名恢复失败；按客户端原始内容请求上游')
         monitor.request_start(request_id=request_id, model=config.get('display_name') or model,
                               messages_count=len(original_messages), messages=original_messages, mode='native_' + protocol, params=params)
         started = True
