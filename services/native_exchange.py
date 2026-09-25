@@ -58,6 +58,184 @@ def text_from_native(value):
     return ''
 
 
+def _plain_text(value):
+    """把字符串、内容块或字典压成可读文本，用于 system 一类提示的提取。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return _plain_text(value.get('parts') or value.get('content') or value.get('text'))
+    if isinstance(value, list):
+        chunks = []
+        for block in value:
+            if isinstance(block, str):
+                chunks.append(block)
+            elif isinstance(block, dict):
+                text = block.get('text')
+                if isinstance(text, str):
+                    chunks.append(text)
+        return '\n'.join(chunk for chunk in chunks if chunk)
+    return ''
+
+
+def _content_from_blocks(blocks):
+    """把各原生协议的内容块数组转成展示用 content，纯文本收敛成字符串。"""
+    if isinstance(blocks, str):
+        return blocks
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    if not isinstance(blocks, list):
+        return json.dumps(blocks, ensure_ascii=False) if blocks else ''
+    out = []
+    for block in blocks:
+        if isinstance(block, str):
+            if block:
+                out.append({'type': 'text', 'text': block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        if any(key in block for key in ('inlineData', 'inline_data', 'fileData', 'file_data')) or block.get('type') in ('image', 'image_url', 'input_image', 'input_file'):
+            media = block.get('inlineData') or block.get('inline_data') or block.get('fileData') or block.get('file_data') or block
+            mime = media.get('mimeType') or media.get('mime_type') or block.get('type') or 'media'
+            out.append({'type': 'text', 'text': '[附件: ' + str(mime) + ']'})
+            continue
+        call = block.get('functionCall') or block.get('function_call')
+        if isinstance(call, dict):
+            out.append({'type': 'text', 'text': '[functionCall] ' + json.dumps(call, ensure_ascii=False)})
+            continue
+        response = block.get('functionResponse') or block.get('function_response')
+        if isinstance(response, dict):
+            out.append({'type': 'text', 'text': '[functionResponse] ' + json.dumps(response, ensure_ascii=False)})
+            continue
+        text = block.get('text')
+        if isinstance(text, str):
+            if text:
+                out.append({'type': 'text', 'text': text})
+            continue
+        out.append({'type': 'text', 'text': json.dumps(block, ensure_ascii=False)})
+    if not out:
+        return ''
+    if len(out) == 1:
+        return out[0]['text']
+    return out
+
+
+def _messages_from_gemini(body):
+    messages = []
+    system_text = _plain_text(body.get('systemInstruction'))
+    if system_text:
+        messages.append({'role': 'system', 'content': system_text})
+    contents = body.get('contents')
+    if isinstance(contents, str):
+        contents = [{'role': 'user', 'parts': [{'text': contents}]}]
+    for item in contents or []:
+        if isinstance(item, str):
+            item = {'role': 'user', 'parts': [{'text': item}]}
+        if not isinstance(item, dict):
+            continue
+        role = item.get('role') or 'user'
+        content = _content_from_blocks(item.get('parts'))
+        if not content:
+            continue
+        messages.append({'role': 'assistant' if role == 'model' else role, 'content': content})
+    return messages
+
+
+def _messages_from_interactions(body):
+    messages = []
+    system_text = _plain_text(body.get('system_instruction'))
+    if system_text:
+        messages.append({'role': 'system', 'content': system_text})
+    for step in body.get('input') or []:
+        if not isinstance(step, dict):
+            continue
+        kind = step.get('type') or ''
+        if kind in ('user_input', 'model_output'):
+            content = _content_from_blocks(step.get('content'))
+            if not content:
+                continue
+            messages.append({'role': 'assistant' if kind == 'model_output' else 'user', 'content': content})
+        elif kind == 'thought':
+            text = _plain_text(step.get('summary'))
+            if text:
+                messages.append({'role': 'assistant', 'content': '[thought] ' + text})
+        elif kind == 'function_call':
+            messages.append({'role': 'assistant', 'tool_calls': [{
+                'id': step.get('id') or step.get('call_id') or '',
+                'type': 'function',
+                'function': {'name': step.get('name') or '', 'arguments': json.dumps(step.get('arguments') or {}, ensure_ascii=False)}}]})
+        elif kind == 'function_result':
+            messages.append({'role': 'tool', 'tool_call_id': step.get('call_id') or '',
+                             'content': _content_from_blocks(step.get('result')) or ''})
+    return messages
+
+
+def _messages_from_anthropic(body):
+    messages = []
+    system_text = _plain_text(body.get('system'))
+    if system_text:
+        messages.append({'role': 'system', 'content': system_text})
+    for item in body.get('messages') or []:
+        if isinstance(item, dict):
+            messages.append(item)
+    return messages
+
+
+def _messages_from_responses(body):
+    messages = []
+    instructions = _plain_text(body.get('instructions'))
+    if instructions:
+        messages.append({'role': 'system', 'content': instructions})
+    input_items = body.get('input')
+    if isinstance(input_items, str):
+        input_items = [{'role': 'user', 'content': input_items}]
+    for item in input_items or []:
+        if isinstance(item, str):
+            messages.append({'role': 'user', 'content': item})
+            continue
+        if not isinstance(item, dict):
+            continue
+        kind = item.get('type') or 'message'
+        if kind == 'message':
+            content = _content_from_blocks(item.get('content'))
+            if not content:
+                continue
+            messages.append({'role': item.get('role') or 'user', 'content': content})
+        elif kind == 'function_call':
+            messages.append({'role': 'assistant', 'tool_calls': [{
+                'id': item.get('call_id') or '',
+                'type': 'function',
+                'function': {'name': item.get('name') or '', 'arguments': item.get('arguments') or '{}'}}]})
+        elif kind == 'function_call_output':
+            messages.append({'role': 'tool', 'tool_call_id': item.get('call_id') or '',
+                             'content': _content_from_blocks(item.get('output')) or ''})
+        elif kind == 'reasoning':
+            text = _plain_text(item.get('summary'))
+            if text:
+                messages.append({'role': 'assistant', 'reasoning_content': text})
+        else:
+            messages.append({'role': 'user', 'content': json.dumps(item, ensure_ascii=False)})
+    return messages
+
+
+def display_messages_for(body, protocol):
+    """把原生协议请求体归一化成 [{role, content}] 消息列表，供监控展示和 token 估算。"""
+    messages = None
+    if isinstance(body, dict):
+        if protocol == 'gemini':
+            messages = _messages_from_gemini(body)
+        elif protocol == 'interactions':
+            messages = _messages_from_interactions(body)
+        elif protocol == 'anthropic':
+            messages = _messages_from_anthropic(body)
+        elif protocol == 'responses':
+            messages = _messages_from_responses(body)
+        else:
+            messages = body.get('messages')
+    if isinstance(messages, list) and messages:
+        return messages
+    return [{'role': 'user', 'content': copy.deepcopy(body)}]
+
+
 async def forward_native_exchange(body, config, model, service, monitor, *, stream=False, context=None, gemini_response=False):
     from routes._direct_api_utils import get_api_key
     from converters.gemini_interactions import convert_gemini_gc_to_interactions, convert_interactions_to_gemini_gc, InteractionsToGeminiGCConverter
@@ -80,7 +258,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
     params = {'protocol': protocol, 'streaming': stream, 'model_alias': model,
               'caller_id': context.owner_id, 'caller_name': context.owner_name,
               'conversation_id': context.session_id, 'gateway_request_id': context.request_id}
-    original_messages = body.get('messages') or [{'role': 'user', 'content': copy.deepcopy(body)}]
+    original_messages = display_messages_for(body, protocol)
 
     def observe(value):
         nonlocal input_tokens, output_tokens, cached_tokens, upstream_usage, failure, incomplete
