@@ -111,6 +111,28 @@ def test_display_messages_interactions_body():
     assert messages[4] == {'role': 'tool', 'tool_call_id': 'call_1', 'content': '结果'}
 
 
+def test_display_messages_interactions_string_keeps_system_and_input():
+    assert display_messages_for({'system_instruction': '系统', 'input': '用户问题'}, 'interactions') == [
+        {'role': 'system', 'content': '系统'}, {'role': 'user', 'content': '用户问题'}]
+
+
+def test_display_messages_gemini_preserves_tool_features():
+    from utils.request_features import request_features
+    body = {'contents': [
+        {'role': 'model', 'parts': [
+            {'text': '查询'}, {'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {'q': 1}},
+                             'thoughtSignature': 'sig'}]},
+        {'role': 'user', 'parts': [
+            {'functionResponse': {'id': 'c1', 'name': 'lookup', 'response': {'answer': '结果'}}}]}]}
+    messages = display_messages_for(body, 'gemini')
+    assert messages[0]['content'] == '查询'
+    assert messages[0]['tool_calls'][0]['function'] == {'name': 'lookup', 'arguments': '{"q": 1}'}
+    assert messages[0]['reasoning_signature'] == 'sig'
+    assert messages[1] == {'role': 'tool', 'tool_call_id': 'c1', 'name': 'lookup',
+                           'content': '{"answer": "结果"}'}
+    assert request_features({'request_messages': messages})['has_tool_calls'] is True
+
+
 def test_display_messages_chat_and_fallback():
     assert display_messages_for({'messages': [{'role': 'user', 'content': 'hi'}]}, 'chat') == [
         {'role': 'user', 'content': 'hi'}]
@@ -208,8 +230,7 @@ def test_forward_native_gemini_restores_thought_signature(stream, monkeypatch, t
                     {'role': 'model', 'parts': [{'thought': True, 'text': '想了半天'}, {'text': '你好呀'}]},
                     {'role': 'user', 'parts': [{'text': '继续'}]}])
         restored_parts = captured[-1]['contents'][1]['parts']
-        assert restored_parts[0]['thoughtSignature'] == 'sig-1'
-        assert restored_parts[1] == {'text': '你好呀'}
+        assert restored_parts == full_response['candidates'][0]['content']['parts']
         params = monitor.request_start.call_args.kwargs['params']
         assert params['restored_thought_signatures'] == 1
     asyncio.run(run())

@@ -140,9 +140,12 @@ def _messages_from_gemini(body):
             continue
         role = item.get('role') or 'user'
         parts = item.get('parts')
-        content = _content_from_blocks(parts)
+        # 展示与特征统计共用工具字段，避免工具历史退化成普通 JSON 文本。
+        ordinary = [part for part in parts if not isinstance(part, dict)
+                    or not any(key in part for key in ('functionCall', 'functionResponse'))] if isinstance(parts, list) else parts
+        content = _content_from_blocks(ordinary)
         message = {'role': 'assistant' if role == 'model' else role, 'content': content}
-        thought_texts, signatures = [], []
+        thought_texts, signatures, tool_calls, tool_results = [], [], [], []
         if isinstance(parts, list):
             for part in parts:
                 if not isinstance(part, dict):
@@ -152,13 +155,25 @@ def _messages_from_gemini(body):
                 signature = part.get('thoughtSignature')
                 if isinstance(signature, str) and signature:
                     signatures.append(signature)
+                call = part.get('functionCall')
+                if isinstance(call, dict):
+                    tool_calls.append({'id': call.get('id') or '', 'type': 'function',
+                                       'function': {'name': call.get('name') or '',
+                                                    'arguments': json.dumps(call.get('args', {}), ensure_ascii=False)}})
+                response = part.get('functionResponse')
+                if isinstance(response, dict):
+                    tool_results.append({'role': 'tool', 'tool_call_id': response.get('id') or '',
+                                         'name': response.get('name') or '',
+                                         'content': json.dumps(response.get('response'), ensure_ascii=False)})
         if thought_texts:
             message['reasoning_content'] = ''.join(thought_texts)
         if signatures:
             message['reasoning_signature'] = signatures[0] if len(signatures) == 1 else signatures
-        if not content and not thought_texts and not signatures:
-            continue
-        messages.append(message)
+        if tool_calls:
+            message['tool_calls'] = tool_calls
+        if content or thought_texts or signatures or tool_calls:
+            messages.append(message)
+        messages.extend(tool_results)
     return messages
 
 
@@ -167,7 +182,11 @@ def _messages_from_interactions(body):
     system_text = _plain_text(body.get('system_instruction'))
     if system_text:
         messages.append({'role': 'system', 'content': system_text})
-    for step in body.get('input') or []:
+    input_items = body.get('input')
+    if isinstance(input_items, str):
+        messages.append({'role': 'user', 'content': input_items})
+        return messages
+    for step in input_items or []:
         if not isinstance(step, dict):
             continue
         kind = step.get('type') or ''

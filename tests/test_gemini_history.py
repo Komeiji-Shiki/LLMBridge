@@ -1,5 +1,8 @@
 import asyncio
+import copy
 import json
+
+import pytest
 
 from core.conversation_store import ConversationStore
 from core.request_context import RequestContext
@@ -53,37 +56,138 @@ def bind_store(monkeypatch, tmp_path):
     return store
 
 
+@pytest.mark.parametrize('parts', [
+    [{'text': '回答', 'thoughtSignature': 'text-signature'}],
+    [{'thought': True, 'text': '思考'}, {'text': '回答'},
+     {'text': '', 'thoughtSignature': 'tail-signature'}],
+    [{'thought': True, 'text': '先想', 'thoughtSignature': 'first'},
+     {'thought': True, 'text': '再想', 'thoughtSignature': 'second'}, {'text': '回答'}],
+    [{'functionCall': {'name': 'lookup', 'args': {'q': 1}}, 'thoughtSignature': 'first-call'},
+     {'functionCall': {'name': 'lookup', 'args': {'q': 1}}}],
+    [{'text': '图片'}, {'inlineData': {'mimeType': 'image/png', 'data': 'AAAA'},
+                       'thoughtSignature': 'image-signature'}],
+])
+def test_review_restores_original_signed_parts(parts, tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        body = {'contents': [{'role': 'user', 'parts': [{'text': '问题'}]}]}
+        response = chunk(parts)
+        response['candidates'][0]['finishReason'] = 'STOP'
+        history = GeminiThoughtHistory(context(), {'model_id': 'target'}, body)
+        await history.remember(body['contents'], build_assembler([response]))
+        stripped = [{key: value for key, value in part.items() if key != 'thoughtSignature'}
+                    for part in parts]
+        client = {'contents': body['contents'] + [{'role': 'model', 'parts': stripped}]}
+        count = await history.restore(client)
+        assert count == sum(bool(part.get('thoughtSignature')) for part in parts)
+        assert client['contents'][-1]['parts'] == parts
+    asyncio.run(run())
+
+
+def test_review_changed_image_does_not_restore(tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        body = {'contents': [{'role': 'user', 'parts': [
+            {'text': '描述图片'}, {'inlineData': {'mimeType': 'image/png', 'data': 'AAAA'}}]}]}
+        history = GeminiThoughtHistory(context(), {}, body)
+        await history.remember(body['contents'], build_assembler(signature_only_response()))
+        client = copy.deepcopy(body)
+        client['contents'][0]['parts'][1]['inlineData']['data'] = 'BBBB'
+        client['contents'].append({'role': 'model', 'parts': [{'text': '普通回答'}]})
+        assert await history.restore(client) == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('finish_reason', [None, 'MAX_TOKENS', 'SAFETY'])
+def test_review_unfinished_response_is_not_remembered(finish_reason, tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        body = {'contents': [{'role': 'user', 'parts': [{'text': '问题'}]}]}
+        response = signature_only_response()
+        candidate = response[-1]['candidates'][0]
+        candidate.pop('finishReason')
+        if finish_reason:
+            candidate['finishReason'] = finish_reason
+        history = GeminiThoughtHistory(context(), {}, body)
+        await history.remember(body['contents'], build_assembler(response))
+        client = {'contents': body['contents'] + [{'role': 'model', 'parts': [{'text': '普通回答'}]}]}
+        assert await history.restore(client) == 0
+    asyncio.run(run())
+
+
+def test_review_multiple_candidates_restore_independently(tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        body = {'contents': [{'role': 'user', 'parts': [{'text': '问题'}]}]}
+        response = {'candidates': [
+            {'index': index, 'content': {'parts': [{'text': text}, {'text': '', 'thoughtSignature': text}]},
+             'finishReason': 'STOP'} for index, text in enumerate(['回答甲', '回答乙'])]}
+        history = GeminiThoughtHistory(context(), {}, body)
+        await history.remember(body['contents'], build_assembler([response]))
+        for text in ['回答甲', '回答乙']:
+            client = {'contents': body['contents'] + [{'role': 'model', 'parts': [{'text': text}]}]}
+            assert await history.restore(client) == 1
+            assert client['contents'][-1]['parts'][-1]['thoughtSignature'] == text
+    asyncio.run(run())
+
+
+def test_review_cached_content_binds_scope():
+    first = GeminiThoughtHistory(context(), {}, {'cachedContent': 'cachedContents/first'})
+    second = GeminiThoughtHistory(context(), {}, {'cachedContent': 'cachedContents/second'})
+    assert first.scope() != second.scope()
+
+
+@pytest.mark.parametrize('thoughts', [
+    [{'thought': True, 'text': '改写的思考'}],
+    [{'thought': True, 'text': 'think one'}, {'thought': True, 'text': 'think two'}],
+])
+def test_restore_rejects_edited_thoughts_and_removed_internal_space(thoughts, tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        body = {'contents': [{'role': 'user', 'parts': [{'text': '问题'}]}]}
+        response = chunk([{'thought': True, 'text': 'think one ', 'thoughtSignature': 'first'},
+                          {'thought': True, 'text': 'think two', 'thoughtSignature': 'second'},
+                          {'text': '回答'}])
+        response['candidates'][0]['finishReason'] = 'STOP'
+        history = GeminiThoughtHistory(context(), {}, body)
+        await history.remember(body['contents'], build_assembler([response]))
+        client = {'contents': body['contents'] + [{'role': 'model', 'parts': thoughts + [{'text': '回答'}]}]}
+        original = copy.deepcopy(client)
+        assert await history.restore(client) == 0
+        assert client == original
+    asyncio.run(run())
+
+
 def test_assembler_merges_thought_deltas_and_trailing_signature():
     assembler = build_assembler(streamed_response())
-    record = assembler.record()
-    assert record['thoughts'] == [{'text': '想了半天', 'signature': 'sig-1'}]
-    assert record['calls'] == []
-    assert record['trailing'] == []
-    parts = assembler.assembled_parts()
-    assert parts[0] == {'thought': True, 'text': '想了半天', 'thoughtSignature': 'sig-1'}
-    assert parts[1] == {'text': '你好呀'}
+    assert list(assembler.completed_parts()) == [[
+        {'thought': True, 'text': '想了半天'}, {'text': '你好呀'},
+        {'text': '', 'thoughtSignature': 'sig-1'}]]
 
 
 def test_assembler_signature_without_thought_stays_trailing():
     assembler = build_assembler(signature_only_response())
-    record = assembler.record()
-    assert record['thoughts'] == []
-    assert record['trailing'] == ['sig-x']
     assert assembler.has_signatures() is True
-    assert assembler.assembled_parts() == [{'text': '普通回答'}]
+    assert list(assembler.completed_parts()) == [[
+        {'text': '普通回答'}, {'text': '', 'thoughtSignature': 'sig-x'}]]
 
 
 def test_assembler_call_signature_and_streamed_arguments():
     assembler = build_assembler([
         chunk([{'functionCall': {'id': 'c1', 'name': 'lookup', 'args': '{"q":'}}]),
         chunk([{'functionCall': {'id': 'c1', 'name': 'lookup', 'args': '1}'}, 'thoughtSignature': 'sig-c'}]),
+        {'candidates': [{'finishReason': 'STOP'}]},
     ])
-    record = assembler.record()
-    assert record['calls'] == [{'id': 'c1', 'name': 'lookup', 'args': '{"q":1}', 'signature': 'sig-c'}]
-    assert record['thoughts'] == []
+    assert list(assembler.completed_parts()) == [[{
+        'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {'q': 1}}, 'thoughtSignature': 'sig-c'}]]
 
 
-def test_digest_ignores_thoughts_signatures_and_media_but_not_edits():
+def test_digest_ignores_thoughts_signatures_but_not_media_or_edits():
     base = [
         {'role': 'user', 'parts': [{'text': '你好'}]},
         {'role': 'model', 'parts': [{'thought': True, 'text': '想'}, {'text': '答'},
@@ -92,7 +196,8 @@ def test_digest_ignores_thoughts_signatures_and_media_but_not_edits():
     ]
     without_thought = [
         {'role': 'user', 'parts': [{'text': '你好'}]},
-        {'role': 'model', 'parts': [{'text': '答'}]},
+        {'role': 'model', 'parts': [{'text': '答'},
+                                    {'inlineData': {'mimeType': 'image/png', 'data': 'AAAA'}}]},
     ]
     without_media = [
         {'role': 'user', 'parts': [{'text': '你好'}]},
@@ -105,7 +210,8 @@ def test_digest_ignores_thoughts_signatures_and_media_but_not_edits():
     digests = {name: [digest for _, digest in history_boundaries(value)]
                for name, value in (('base', base), ('without_thought', without_thought),
                                    ('without_media', without_media), ('edited', edited))}
-    assert digests['base'] == digests['without_thought'] == digests['without_media']
+    assert digests['base'] == digests['without_thought']
+    assert digests['base'] != digests['without_media']
     assert digests['edited'] != digests['base']
 
 
@@ -142,14 +248,16 @@ def test_restore_round_trip_and_insert_and_edit_skip(tmp_path, monkeypatch):
                              {'role': 'model', 'parts': [{'thought': True, 'text': '想了半天'}, {'text': '你好呀'}]}]}
         count = await GeminiThoughtHistory(ctx, {'model_id': 'target'}, kept).restore(kept)
         assert count == 1
-        assert kept['contents'][1]['parts'][0]['thoughtSignature'] == 'sig-1'
+        assert kept['contents'][1]['parts'][-1] == {'text': '', 'thoughtSignature': 'sig-1'}
+        assert kept['contents'][1]['parts'][0] == {'thought': True, 'text': '想了半天'}
         assert kept['contents'][1]['parts'][1] == {'text': '你好呀'}
 
         dropped = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]},
                                 {'role': 'model', 'parts': [{'text': '你好呀'}]}]}
         count = await GeminiThoughtHistory(ctx, {'model_id': 'target'}, dropped).restore(dropped)
         assert count == 1
-        assert dropped['contents'][1]['parts'][0] == {'thought': True, 'text': '想了半天', 'thoughtSignature': 'sig-1'}
+        assert dropped['contents'][1]['parts'][0] == {'thought': True, 'text': '想了半天'}
+        assert dropped['contents'][1]['parts'][-1] == {'text': '', 'thoughtSignature': 'sig-1'}
 
         edited = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]},
                                {'role': 'model', 'parts': [{'text': '你好呀!!'}]}]}
@@ -193,6 +301,7 @@ def test_restore_matches_and_signs_function_call(tmp_path, monkeypatch):
             body['contents'], build_assembler([
                 chunk([{'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {'q': 1}}}]),
                 chunk([{'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {}}, 'thoughtSignature': 'sig-c'}]),
+                {'candidates': [{'finishReason': 'STOP'}]},
             ]))
         client = {'contents': [{'role': 'user', 'parts': [{'text': '查一下'}]},
                                {'role': 'model', 'parts': [{'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {'q': 1}}}]},
@@ -263,4 +372,72 @@ def test_scope_binds_system_and_tools(tmp_path, monkeypatch):
         # 系统提示一致时恢复可用
         count = await GeminiThoughtHistory(ctx, {'model_id': 'target'}, body).restore(client)
         assert count == 1
+    asyncio.run(run())
+
+
+def test_restore_accepts_trimmed_thought_text(tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        ctx = context()
+        body = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]}]}
+        assembler = build_assembler([
+            chunk([{'thought': True, 'text': ' 想了'}]),
+            chunk([{'thought': True, 'text': '半天 '}]),
+            chunk([{'text': '你好呀'}]),
+            {'candidates': [{'content': {'role': 'model', 'parts': [{'text': '', 'thoughtSignature': 'sig-1'}]},
+                             'finishReason': 'STOP'}]},
+        ])
+        await GeminiThoughtHistory(ctx, {'model_id': 'target'}, body).remember(body['contents'], assembler)
+        client = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]},
+                               {'role': 'model', 'parts': [{'thought': True, 'text': '想了半天'},
+                                                           {'text': '你好呀'}]}]}
+        count = await GeminiThoughtHistory(ctx, {'model_id': 'target'}, client).restore(client)
+        assert count == 1
+        assert client['contents'][1]['parts'][0] == {'thought': True, 'text': ' 想了半天 '}
+        assert client['contents'][1]['parts'][-1] == {'text': '', 'thoughtSignature': 'sig-1'}
+        assert client['contents'][1]['parts'][1] == {'text': '你好呀'}
+    asyncio.run(run())
+
+
+def test_restore_inserts_when_client_drops_thought_and_trims_text(tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        ctx = context()
+        body = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]}]}
+        assembler = build_assembler([
+            chunk([{'thought': True, 'text': '想了半天'}]),
+            chunk([{'text': ' 你好呀'}]),
+            chunk([{'text': '\n'}]),
+            {'candidates': [{'content': {'role': 'model', 'parts': [{'text': '', 'thoughtSignature': 'sig-1'}]},
+                             'finishReason': 'STOP'}]},
+        ])
+        await GeminiThoughtHistory(ctx, {'model_id': 'target'}, body).remember(body['contents'], assembler)
+        client = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]},
+                               {'role': 'model', 'parts': [{'text': '你好呀'}]}]}
+        count = await GeminiThoughtHistory(ctx, {'model_id': 'target'}, client).restore(client)
+        assert count == 1
+        assert client['contents'][1]['parts'][0] == {'thought': True, 'text': '想了半天'}
+        assert client['contents'][1]['parts'][-1] == {'text': '', 'thoughtSignature': 'sig-1'}
+        assert client['contents'][1]['parts'][1] == {'text': ' 你好呀\n'}
+    asyncio.run(run())
+
+
+def test_restore_replaces_whitespace_only_thought_shell(tmp_path, monkeypatch):
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        ctx = context()
+        body = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]}]}
+        assembler = build_assembler(streamed_response())
+        await GeminiThoughtHistory(ctx, {'model_id': 'target'}, body).remember(body['contents'], assembler)
+        client = {'contents': [{'role': 'user', 'parts': [{'text': '你好'}]},
+                               {'role': 'model', 'parts': [{'thought': True, 'text': ' '},
+                                                           {'text': '你好呀'}]}]}
+        count = await GeminiThoughtHistory(ctx, {'model_id': 'target'}, client).restore(client)
+        assert count == 1
+        assert len(client['contents'][1]['parts']) == 3
+        assert client['contents'][1]['parts'][0] == {'thought': True, 'text': '想了半天'}
+        assert client['contents'][1]['parts'][-1] == {'text': '', 'thoughtSignature': 'sig-1'}
     asyncio.run(run())
