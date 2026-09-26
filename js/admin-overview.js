@@ -647,10 +647,13 @@ function renderCodexPricing(data) {
     container.parentElement.hidden = !pricing?.rates;
     if (!pricing?.rates) return;
     const unknown = pricing.unpriced_models || [];
+    const aliases = Object.entries(pricing.aliases || {}).map(([model, target]) =>
+        `${escapeHtml(model)} 按 ${escapeHtml(target)} 单价估算`).join('；');
     const rows = Object.entries(pricing.rates).map(([model, rate]) => `
-        <tr><td><a href="https://developers.openai.com/api/docs/models/${encodeURIComponent(model)}" target="_blank" rel="noopener noreferrer">${escapeHtml(model)}</a></td>
+        <tr><td><a href="https://developers.openai.com/api/docs/models/${encodeURIComponent(model)}" target="_blank" rel="noopener noreferrer" title="价格核对日期：${escapeHtml(rate.verified_at || pricing.verified_at)}">${escapeHtml(model)}</a></td>
         <td>${rate.input}</td><td>${rate.cached_input}</td><td>${rate.output}</td><td>${rate.long_context ? '>272K' : '—'}</td></tr>`).join('');
-    container.innerHTML = `<p>价格核对日期：${escapeHtml(pricing.verified_at)}，单位 USD / 百万 Token。长上下文按模型规则计价，缓存属于输入、推理属于输出，不重复相加。</p>
-        ${unknown.length ? `<p>未定价：${unknown.map(escapeHtml).join('、')}，共 ${formatNumber(data.unpriced_tokens || 0)} Tokens。</p>` : '<p>当前所选范围的 Codex 模型均有公开价格。</p>'}
+    container.innerHTML = `<p>价格表最近更新：${escapeHtml(pricing.verified_at)}，单位 USD / 百万 Token。长上下文按模型规则计价，缓存属于输入、推理属于输出，不重复相加。</p>
+        ${aliases ? `<p>计价映射：${aliases}。</p>` : ''}
+        ${unknown.length ? `<p>未定价：${unknown.map(escapeHtml).join('、')}，共 ${formatNumber(data.unpriced_tokens || 0)} Tokens。</p>` : '<p>当前所选范围的 Codex 模型均已配置估算价格。</p>'}
         <table class="table"><thead><tr><th>模型 / 官方来源</th><th>普通输入</th><th>缓存输入</th><th>输出</th><th>长上下文</th></tr></thead><tbody>${rows}</tbody></table>`;
 }

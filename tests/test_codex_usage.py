@@ -179,6 +179,24 @@ def test_http_sources_csv_and_gateway_totals(index, tmp_path, monkeypatch):
         assert external['总成本(原币)'] == '0.00132'
         assert external['金额口径'] == '标准API估算'
         assert external['货币'] == 'USD'
+        # 正式模型和指定计价别名都应进入 API 汇总与 CSV，保留原始名称。
+        assert external['价格核对日期'] == '2026-09-09'
+        for model in ('gpt-6-sol', 'codex-auto-review'):
+            write_log(tmp_path / 'home/sessions/a.jsonl', metadata(model) + [event(usage(100), usage(100))])
+            priced = client.get('/api/admin/token_stats?source=all&force=true').json()
+            assert priced['total_cost'] == pytest.approx(1.000264)
+            external_model = next(row for row in priced['model_stats'] if row['source'] == 'codex')
+            assert external_model['model'] == model
+            assert external_model['price_model'] == 'gpt-6-sol'
+            assert priced['pricing']['complete'] is True
+            assert priced['pricing']['aliases']['codex-auto-review'] == 'gpt-6-sol'
+            assert priced['pricing']['rates']['gpt-6-sol']['verified_at'] == '2026-09-27'
+            assert priced['pricing']['rates']['gpt-6-astra']['verified_at'] == '2026-09-09'
+            report = client.get('/api/admin/export_report?source=codex')
+            external = list(csv.DictReader(io.StringIO(report.content.decode('utf-8-sig'))))[0]
+            assert external['价格核对日期'] == '2026-09-27'
+            assert external['模型'] == model
+            assert external['总成本(原币)'] == '0.000264'
     writer.close()
 
 

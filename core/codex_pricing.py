@@ -2,13 +2,15 @@
 
 import re
 
-VERIFIED_AT = '2026-09-09'
-PRICE_VERSION = '2026-09-09-standard-v1'
+VERIFIED_AT = '2026-09-27'
+PRICE_VERSION = '2026-09-27-standard-v2'
 SOURCE_ROOT = 'https://developers.openai.com/api/docs/models/'
 
 # 单位为 USD / 百万 Token；上下文范围遵循对应模型页的 request/session 说明。
 PRICES = {
     'gpt-6-astra': {'input': 10, 'cached_input': 1, 'output': 50, 'cache_write': 12.5, 'long_context': 'request'},
+    'gpt-6-sol': {'input': 2, 'cached_input': .2, 'output': 10, 'cache_write': 2.5,
+                  'long_context': 'request', 'verified_at': '2026-09-27'},
     'gpt-5.6-sol': {'input': 4, 'cached_input': .4, 'output': 20, 'cache_write': 5, 'long_context': 'request'},
     'gpt-5.6-terra': {'input': 2, 'cached_input': .2, 'output': 12, 'cache_write': 2.5, 'long_context': 'request'},
     'gpt-5.6-luna': {'input': .2, 'cached_input': .02, 'output': 1.2, 'cache_write': .25, 'long_context': 'request'},
@@ -19,11 +21,14 @@ PRICES = {
     'gpt-5.2-codex': {'input': 1.75, 'cached_input': .175, 'output': 14},
 }
 
+# auto-review 按用户指定的 Sol 单价估算，保留原始模型名称用于统计。
+MODEL_ALIASES = {'gpt-5.6': 'gpt-5.6-sol', 'codex-auto-review': 'gpt-6-sol'}
+
 
 def canonical_model(model):
-    # 只接受已知模型及其日期快照，不把 auto-review、Spark 或未知别名猜成付费模型。
+    # 仅应用明确的计价映射；Spark 和其他未知模型仍保留未定价状态。
     model = re.sub(r'-\d{4}-\d{2}-\d{2}$', '', model)
-    return 'gpt-5.6-sol' if model == 'gpt-5.6' else model
+    return MODEL_ALIASES.get(model, model)
 
 
 def estimate(model, usage, long_context=False):
@@ -50,5 +55,8 @@ def estimate(model, usage, long_context=False):
 def price_metadata():
     return {'basis': 'standard_api_equivalent', 'verified_at': VERIFIED_AT, 'version': PRICE_VERSION,
             'currency': 'USD', 'unit': 1_000_000,
-            'rates': {model: {**rate, 'source_url': SOURCE_ROOT + model} for model, rate in PRICES.items()},
+            # 其余模型继续沿用原快照，核对日期按模型保留。
+            'rates': {model: {**rate, 'verified_at': rate.get('verified_at', '2026-09-09'),
+                              'source_url': SOURCE_ROOT + model} for model, rate in PRICES.items()},
+            'aliases': dict(MODEL_ALIASES),
             'exclusions': ['subscription_billing', 'fast_mode', 'tools', 'regional_processing']}

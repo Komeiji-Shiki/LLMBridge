@@ -18,19 +18,41 @@ def test_standard_cache_writes_and_reasoning_are_not_double_charged():
     assert price['cached_cost'] == pytest.approx(.06)
     assert price['output_cost'] == pytest.approx(.05)
     assert price['total_cost'] == pytest.approx(.56)
-    assert estimate('codex-auto-review', values) is None
+    assert estimate('unknown-review', values) is None
     assert estimate('gpt-5.3-codex-spark', values) is None
 
 
-def test_request_and_session_context_thresholds(tmp_path):
+@pytest.mark.parametrize('model', ['gpt-6-sol', 'codex-auto-review'])
+@pytest.mark.parametrize('long_context', [False, True])
+def test_sol_and_auto_review_use_same_standard_rates(model, long_context):
+    values = {'input_tokens': 100000, 'cached_tokens': 60000, 'cache_write_tokens': 20000,
+              'output_tokens': 1000, 'reasoning_tokens': 900}
+    price = estimate(model, values, long_context)
+    input_factor = 2 if long_context else 1
+    output_factor = 1.5 if long_context else 1
+    assert price['input_cost'] == pytest.approx(.04 * input_factor)
+    assert price['cached_cost'] == pytest.approx(.012 * input_factor)
+    assert price['cache_write_cost'] == pytest.approx(.05 * input_factor)
+    assert price['cache_write_extra_cost'] == pytest.approx(.01 * input_factor)
+    assert price['output_cost'] == pytest.approx(.01 * output_factor)
+    assert price['total_cost'] == pytest.approx(.219 if long_context else .112)
+
+
+@pytest.mark.parametrize('model,expected_cost', [
+    ('gpt-6-astra', 2.545), ('gpt-6-sol', .509), ('codex-auto-review', .509),
+])
+def test_request_and_session_context_thresholds(tmp_path, model, expected_cost):
     home = tmp_path / 'home'
-    write_log(home / 'sessions/astra.jsonl', metadata('gpt-6-astra') + [
+    write_log(home / 'sessions/request-model.jsonl', metadata(model) + [
         event(last=usage(272000, 1000, 200000)),
         event(last=usage(300000, 1000, 250000), timestamp='2026-09-08T13:00:00Z')])
     index = CodexUsageIndex(tmp_path / 'usage.db', [home])
     data = index.stats()
-    assert data['total_cost'] == pytest.approx(.97 + 1.575)
+    assert data['total_cost'] == pytest.approx(expected_cost)
     assert data['long_context_events'] == 1
+    assert data['model_stats'][0]['model'] == model
+    assert data['model_stats'][0]['price_model'] == ('gpt-6-sol' if model == 'codex-auto-review' else model)
+    assert data['pricing']['complete'] is True
     # 同一会话后续进入长上下文，session 级模型的日期子区间也使用该档位。
     write_log(home / 'sessions/5.5.jsonl', metadata('gpt-5.5') + [
         event(last=usage(100000, 1000, 0), timestamp=datetime(2026, 9, 7, 12).isoformat()),
@@ -67,10 +89,10 @@ def test_background_scan_does_not_block_saved_statistics(tmp_path, monkeypatch):
     monkeypatch.setattr(admin_usage, 'codex_usage_index', index)
     release, started = threading.Event(), threading.Event()
     original = index._scan
-    def slow_scan(conn, force):
+    def slow_scan(conn, force, immediate=False):
         started.set()
         assert release.wait(2)
-        original(conn, force)
+        original(conn, force, immediate)
     monkeypatch.setattr(index, '_scan', slow_scan)
     bridge = {'model_stats': [], 'daily_stats': [], 'total_tokens': 0, 'total_input_tokens': 0,
               'total_output_tokens': 0, 'total_cached_tokens': 0}

@@ -44,6 +44,8 @@ def usage_csv(data):
     for row in data['model_stats']:
         external = row.get('source') == 'codex'
         priced = not external or row.get('cost_kind') == 'estimated'
+        pricing = data.get('pricing', {})
+        rate = pricing.get('rates', {}).get(row.get('price_model', row['model']), {})
         writer.writerow([
             row.get('source', 'bridge'), csv_safe_text(row.get('display_name', row['model'])),
             '' if external else row.get('request_count', 0), row.get('event_count', ''), row.get('session_count', ''),
@@ -54,7 +56,7 @@ def usage_csv(data):
             '' if not priced else csv_safe_text(row.get('currency', 'USD')),
             '' if external else round(row.get('total_tokens', 0) / row['request_count']) if row.get('request_count') else 0,
             '标准API估算' if external and priced else '未定价' if external else '网关历史记录',
-            data.get('pricing', {}).get('verified_at', '') if external and priced else '',
+            rate.get('verified_at', pricing.get('verified_at', '')) if external and priced else '',
         ])
     return Response(content=output.getvalue().encode('utf-8-sig'), media_type='text/csv; charset=utf-8',
                     headers={'Content-Disposition': 'attachment; filename=token_report.csv'})

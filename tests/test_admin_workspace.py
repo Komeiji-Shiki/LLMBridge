@@ -565,7 +565,7 @@ def test_estimated_cost_currency_chart_reuse_and_mobile_layout(ui):
             'total_tokens': 101000, 'total_input_tokens': 100000, 'total_output_tokens': 1000,
             'cost_usd': {'total_cost': 1, 'input_cost': .5, 'cached_cost': .1, 'output_cost': .4},
             'cost_cny': {'total_cost': 7.2, 'input_cost': 3.6, 'cached_cost': .72, 'output_cost': 2.88},
-            'pricing': {**price_metadata(), 'unpriced_models': ['codex-auto-review']}}
+            'pricing': {**price_metadata(), 'unpriced_models': ['unpublished']}}
     page.route('**/api/admin/token_stats?*', lambda route: route.fulfill(json=data))
     page.locator('[data-page="overview"]').click()
     page.evaluate('refreshTokenStats()')
@@ -573,7 +573,9 @@ def test_estimated_cost_currency_chart_reuse_and_mobile_layout(ui):
     assert page.locator('#total-cost-value').inner_text() == '≥ $1.0000'
     assert page.locator('#cached-cost-value').inner_text() == '$0.1000'
     page.locator('.pricing-details summary').click()
-    assert 'codex-auto-review' in page.locator('#codex-pricing-details').inner_text()
+    pricing_text = page.locator('#codex-pricing-details').inner_text()
+    assert '未定价：unpublished' in pricing_text
+    assert 'codex-auto-review 按 gpt-6-sol 单价估算' in pricing_text
     stable = page.evaluate('''async () => {
         const before = tokenInputBarChart;
         await refreshTokenStats();
