@@ -82,6 +82,29 @@ def test_playground_metadata_does_not_block_next_run_or_overwrite_its_result(ui)
     assert page.locator('#gw-log').get_attribute('href') == '/monitor?search=run-2'
 
 
+def test_playground_catalog_loads_while_trust_is_pending(ui):
+    page, _, _, _ = ui
+    page.evaluate('''() => {
+        const original = window.fetch;
+        window.fetch = (url, options) => {
+            if (url === '/api/admin/tokenizer_trust') {
+                return new Promise(resolve => {window.finishCatalogTrust = resolve;});
+            }
+            if (url === '/api/admin/capabilities') return Promise.resolve(new Response(JSON.stringify({
+                models: [{model: 'Independent catalog', endpoint: 0, protocol: 'responses',
+                    provider: 'test', issues: [], native_tools: [], configured_tools: []}]})));
+            return original(url, options);
+        };
+        window.pendingCatalogLoad = gatewayWorkspace.load();
+    }''')
+    page.wait_for_function("document.querySelector('#gw-model option')?.textContent.includes('Independent catalog')", timeout=3000)
+    assert page.locator('#gw-run').is_enabled()
+    page.evaluate('''async () => {
+        finishCatalogTrust(new Response(JSON.stringify({sources: []})));
+        await pendingCatalogLoad;
+    }''')
+
+
 def test_playground_catalog_survives_trust_failure_and_formats_json(ui):
     page, _, writes, _ = ui
     page.route('**/api/admin/tokenizer_trust', lambda route: route.fulfill(status=503, json={'detail': 'trust unavailable'}))

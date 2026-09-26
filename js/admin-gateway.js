@@ -208,20 +208,24 @@
     }
     async function load() {
         const version = ++loadVersion, revision = trustRevision;
-        const [catalog, trust] = await Promise.allSettled([json('/api/admin/capabilities'), json('/api/admin/tokenizer_trust')]);
-        if (version !== loadVersion) return;
-        if (catalog.status === 'fulfilled' && !controller) {
+        // 两个接口各自更新页面，来源列表缓慢时仍可选择模型和编辑草稿。
+        const catalog = json('/api/admin/capabilities').then(data => {
+            if (version !== loadVersion || controller) return;
             const prior = selected(); saveDraft();
-            models = catalog.value.models; el('model').replaceChildren();
+            models = data.models; el('model').replaceChildren();
             models.forEach((item, index) => el('model').add(new Option(`${item.model} · 端点 ${item.endpoint + 1} · ${item.protocol}`, String(index))));
             const same = models.findIndex(item => item.model === prior?.model && item.endpoint === prior.endpoint);
             if (same >= 0) el('model').value = String(same);
             showCapabilities(); restoreDraft();
-        } else if (catalog.status === 'rejected') el('diagnosis').textContent = catalog.reason.message;
-        if (revision === trustRevision && !trustDirty) {
-            if (trust.status === 'fulfilled') el('trust').value = trust.value.sources.join('\n');
-            else el('trust-state').textContent = '读取来源列表失败：' + trust.reason.message;
-        }
+        }).catch(error => {
+            if (version === loadVersion) el('diagnosis').textContent = error.message;
+        });
+        const trust = json('/api/admin/tokenizer_trust').then(data => {
+            if (version === loadVersion && revision === trustRevision && !trustDirty) el('trust').value = data.sources.join('\n');
+        }).catch(error => {
+            if (version === loadVersion && revision === trustRevision && !trustDirty) el('trust-state').textContent = '读取来源列表失败：' + error.message;
+        });
+        await Promise.all([catalog, trust]);
     }
     el('model').addEventListener('change', () => { saveDraft(); showCapabilities(); restoreDraft(); });
     el('refresh').addEventListener('click', load); el('template').addEventListener('click', () => { template(); saveDraft(); });
