@@ -21,9 +21,9 @@ async def selected_usage(bridge, source, start=None, end=None, force=False, back
         try:
             # 经本网关转发的日志只在 Codex 单独视图保留，合计使用网关记录。
             providers = CONFIG.get('codex_usage', {}).get('bridge_providers', ['local-lmarenabridge']) if source == 'all' else []
-            if background and not force:
+            if background:
                 codex = await asyncio.to_thread(codex_usage_index.stats, start, end, False, providers, refresh=False)
-                codex['status']['refreshing'] = codex_usage_index.schedule_refresh()
+                codex['status']['refreshing'] = codex_usage_index.schedule_refresh(immediate=force)
             else:
                 codex = await asyncio.to_thread(codex_usage_index.stats, start, end, force, providers)
         except (ValueError, TypeError) as error:

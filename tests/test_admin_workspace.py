@@ -621,3 +621,78 @@ def test_home_statistics_do_not_wait_for_overview_and_quick_ranges(ui):
     assert cost_chart['y'] > token_chart['y'] + token_chart['height']
     for route in pending:
         route.fulfill(json={'active_requests': [], 'stats': {}, 'mode': {}, 'total_models': 0, 'total_tabs': 0})
+
+
+@pytest.mark.parametrize('slow_path', ['overview', 'token_stats'])
+def test_manual_refresh_updates_both_cards_independently(ui, slow_path):
+    from urllib.parse import parse_qs
+    page, _, _, _ = ui
+    page.locator('[data-page="overview"]').click()
+    page.locator('#usage-source').select_option('bridge')
+    page.evaluate('refreshTokenStats()')
+    page.evaluate('refreshOverview({ includeRates: false })')
+    selected_dates = [page.locator('#token-start-date').input_value(), page.locator('#token-end-date').input_value()]
+    responses = {
+        'overview': {'active_requests': [], 'stats': {'total_requests': 12, 'success_requests': 9},
+                     'mode': {}, 'total_models': 4, 'total_tabs': 0},
+        'token_stats': {'total_tokens': 222, 'total_input_tokens': 200, 'total_output_tokens': 22,
+                        'model_stats': [], 'daily_stats': []},
+    }
+    queries, pending = {}, []
+
+    def refresh(route):
+        path = urlparse(route.request.url).path.rsplit('/', 1)[-1]
+        queries[path] = parse_qs(urlparse(route.request.url).query)
+        if path == slow_path:
+            pending.append(route)
+        else:
+            route.fulfill(json=responses[path])
+
+    page.route('**/api/admin/overview*', refresh)
+    page.route('**/api/admin/token_stats?*', refresh)
+    page.locator('#usage-refresh').click()
+    if slow_path == 'overview':
+        playwright.expect(page.locator('#total-tokens-value')).to_have_text('222')
+        playwright.expect(page.locator('#total-requests-stat .stat-card-value')).to_have_text('0')
+        playwright.expect(page.locator('#usage-refresh')).to_be_enabled()
+    else:
+        playwright.expect(page.locator('#total-requests-stat .stat-card-value')).to_have_text('12')
+        playwright.expect(page.locator('#total-tokens-value')).to_have_text('0')
+
+    assert len(pending) == 1
+    assert queries['overview'] == {'force': ['true']}
+    assert queries['token_stats']['force'] == ['true']
+    assert queries['token_stats']['background'] == ['true']
+    assert queries['token_stats']['source'] == ['bridge']
+    assert queries['token_stats']['start_date'] == [selected_dates[0]]
+    assert queries['token_stats']['end_date'] == [selected_dates[1]]
+    pending[0].fulfill(json=responses[slow_path])
+    playwright.expect(page.locator('#total-requests-stat .stat-card-value')).to_have_text('12')
+    playwright.expect(page.locator('#total-requests-stat .stat-card-detail')).to_have_text('成功率: 75.0%')
+    playwright.expect(page.locator('#total-tokens-value')).to_have_text('222')
+    playwright.expect(page.locator('#usage-refresh')).to_be_enabled()
+
+
+def test_manual_refresh_polls_updated_codex_usage_without_restarting_scan(ui):
+    from urllib.parse import parse_qs
+    page, _, _, _ = ui
+    page.locator('[data-page="overview"]').click()
+    page.evaluate('refreshTokenStats()')
+    queries = []
+
+    def stats(route):
+        params = parse_qs(urlparse(route.request.url).query)
+        queries.append(params)
+        refreshing = 'force' in params
+        route.fulfill(json={'total_tokens': 100 if refreshing else 200, 'model_stats': [], 'daily_stats': [],
+                            'codex_usage': {'status': {'available': True, 'refreshing': refreshing}}})
+
+    page.route('**/api/admin/token_stats?*', stats)
+    page.locator('#usage-refresh').click()
+    playwright.expect(page.locator('#total-tokens-value')).to_have_text('100')
+    playwright.expect(page.locator('#usage-refresh')).to_be_enabled()
+    playwright.expect(page.locator('#codex-usage-status')).to_contain_text('正在后台检查更新')
+    playwright.expect(page.locator('#total-tokens-value')).to_have_text('200')
+    assert len(queries) == 2
+    assert queries[0]['force'] == ['true']
+    assert 'force' not in queries[1]

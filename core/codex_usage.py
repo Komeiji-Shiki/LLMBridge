@@ -136,8 +136,8 @@ class CodexUsageIndex:
         self._schema_ready = True
         return conn
 
-    def _scan(self, conn, force):
-        if not force and time.monotonic() - self._last_scan < 60:
+    def _scan(self, conn, force, immediate=False):
+        if not force and not immediate and time.monotonic() - self._last_scan < 60:
             return
         homes = self.homes if self.homes is not None else discover_homes()
         known = {row['path']: (row['size'], row['mtime']) for row in conn.execute('SELECT * FROM files')}
@@ -189,24 +189,25 @@ class CodexUsageIndex:
             self._status = status
             self._last_scan = time.monotonic()
 
-    def refresh(self, force=False):
+    def refresh(self, force=False, *, immediate=False):
         with self._scan_lock:
             conn = self._connect()
             try:
-                self._scan(conn, force)
+                self._scan(conn, force, immediate)
             finally:
                 conn.close()
 
-    def schedule_refresh(self):
+    def schedule_refresh(self, *, immediate=False):
         """首页先读已保存索引，后台单独扫描；同一时刻最多一个扫描任务。"""
         from utils.task_registry import spawn
         if self._scan_lock.locked() or self._refresh_task and not self._refresh_task.done():
             return True
-        if self._status and time.monotonic() - self._last_scan < 60:
+        if not immediate and self._status and time.monotonic() - self._last_scan < 60:
             return False
         async def run():
             try:
-                await asyncio.to_thread(self.refresh)
+                # 手动刷新跳过扫描间隔，但仍复用未变化文件的索引。
+                await asyncio.to_thread(self.refresh, immediate=immediate)
             except Exception:
                 logging.getLogger(__name__).exception('Codex 后台扫描失败')
                 with self._lock:

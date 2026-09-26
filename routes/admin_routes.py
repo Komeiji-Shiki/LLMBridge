@@ -535,14 +535,15 @@ async def get_overview(
     tab_connection_times: dict,
     tab_request_counts: dict,
     CONFIG: dict,
-    MODEL_ENDPOINT_MAP: dict
+    MODEL_ENDPOINT_MAP: dict,
+    force: bool = False
 ):
     """获取系统概览信息"""
     # 🔧 A1 修复：使用 async 版本，避免 threading.Lock 阻塞事件循环
     summary = await monitoring_service.get_summary_async()
     
     # 请求统计：优先走缓存，避免重启后首屏冷查询
-    stats_from_source = await _get_admin_cached_response("overview", "stats")
+    stats_from_source = None if force else await _get_admin_cached_response("overview", "stats")
     if stats_from_source is None:
         stats_from_source = summary['stats']  # 默认使用内存统计作为后备
         
@@ -978,7 +979,8 @@ async def get_token_stats(
     monitoring_service,
     MODEL_ENDPOINT_MAP: dict,
     estimate_message_tokens_func,
-    estimate_tokens_func
+    estimate_tokens_func,
+    force: bool = False
 ):
     """获取token用量统计，支持日期范围过滤
     
@@ -989,6 +991,9 @@ async def get_token_stats(
     filter_start = start_time or start_date
     filter_end = end_time or end_date
 
+    # 手动刷新使用新一代查询，避免复用缓存或仍在执行的旧查询。
+    if force:
+        _TOKEN_STATS_QUERIES.invalidate()
     cache_key = _build_admin_cache_key(filter_start, filter_end, rpm_period, stats_db.enabled, _TOKEN_STATS_QUERIES.generation)
     cached_response = await _get_admin_cached_response("token_stats", cache_key)
     if cached_response is not None:
@@ -1525,12 +1530,12 @@ async def update_config_endpoint(request: Request):
 
 
 @router.get("/api/admin/overview")
-async def get_overview_endpoint():
+async def get_overview_endpoint(force: bool = False):
     conn = _app_state.connection
     return await get_overview(
         monitoring_service, stats_db, MonitorConfig, conn.browser_ws_ref['ws'],
         conn.browser_connections, conn.browser_connections_lock, conn.tab_connection_times,
-        conn.tab_request_counts, CONFIG, MODEL_ENDPOINT_MAP
+        conn.tab_request_counts, CONFIG, MODEL_ENDPOINT_MAP, force=force
     )
 
 
@@ -1641,7 +1646,7 @@ async def get_token_stats_endpoint(start_date: Optional[str] = None, end_date: O
         raise HTTPException(status_code=422, detail='日期范围无效') from error
     bridge = await get_token_stats(
         start_date, end_date, start_time, end_time, rpm_period, stats_db,
-        monitoring_service, MODEL_ENDPOINT_MAP, estimate_message_tokens, estimate_tokens
+        monitoring_service, MODEL_ENDPOINT_MAP, estimate_message_tokens, estimate_tokens, force=force
     )
     return await selected_usage(bridge, source, filter_start, filter_end, force, background)
 

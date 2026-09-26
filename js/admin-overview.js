@@ -9,6 +9,7 @@ let currentCostCurrency = 'USD';
 // 缓存最新的 token stats 数据（用于货币切换时无需重新请求）
 let latestTokenStatsData = null;
 const tokenStatsRefresh = { serial: 0, controller: null, pollTimer: null };
+const overviewRefresh = { serial: 0 };
 
 // 汇率常量（与后端保持一致）
 const EXCHANGE_RATE = { USD_TO_CNY: 7.2, CNY_TO_USD: 1.0 / 7.2 };
@@ -142,10 +143,12 @@ function updateOverallRatesFromCachedData() {
 }
 
 async function refreshOverview(options = {}) {
-    const { includeRates = true } = options;
-    if (includeRates) refreshTokenStats();
+    const { includeRates = true, force = false } = options;
+    const serial = ++overviewRefresh.serial;
+    // 手动刷新同时更新两组统计，各自完成后立即显示。
+    if (includeRates) refreshTokenStats(force);
     try {
-        const response = await fetch('/api/admin/overview');
+        const response = await fetch('/api/admin/overview' + (force ? '?force=true' : ''));
         
         if (!response.ok) {
             const errorText = await response.text();
@@ -160,6 +163,7 @@ async function refreshOverview(options = {}) {
         }
         
         const data = await response.json();
+        if (serial !== overviewRefresh.serial) return;
         
         document.querySelector('#browser-stat .stat-card-value').textContent =
             data.browser_connected ? '✅ 已连接' : '❌ 未连接';
@@ -218,6 +222,7 @@ async function refreshOverview(options = {}) {
         
         
     } catch (error) {
+        if (serial !== overviewRefresh.serial) return;
         console.error('❌ 刷新概览失败:', error);
         console.error('错误详情:', error.message);
         showMessage('danger', '刷新概览失败: ' + error.message);

@@ -200,3 +200,53 @@ def test_bridge_provider_excluded_only_from_combined_view(index, tmp_path, monke
     assert standalone['total_tokens'] == 110
     assert standalone['codex_usage']['excluded_usage']['event_count'] == 0
     assert index.stats('2026-09-09', '2026-09-09', exclude_providers=['local-lmarenabridge'])['excluded_usage']['event_count'] == 0
+
+
+def test_manual_background_refresh_is_incremental_and_does_not_wait(index, tmp_path, monkeypatch):
+    import asyncio
+    import threading
+    from core import codex_usage
+    from routes import admin_usage
+
+    changed = tmp_path / 'home/sessions/changed.jsonl'
+    unchanged = tmp_path / 'home/sessions/unchanged.jsonl'
+    write_log(changed, metadata() + [event(usage(100))])
+    write_log(unchanged, metadata() + [event(usage(20), timestamp='2026-09-08T13:00:00Z')])
+    assert index.stats()['total_tokens'] == 140
+    write_log(changed, metadata() + [event(usage(200))])
+    started, release = threading.Event(), threading.Event()
+    parsed = []
+
+    def slow_parse(path):
+        parsed.append(path)
+        started.set()
+        assert release.wait(5), '测试必须先收到旧索引统计，再允许扫描完成'
+        yield from parse_session(path)
+
+    monkeypatch.setattr(codex_usage, 'parse_session', slow_parse)
+    bridge = {'model_stats': [], 'daily_stats': [], 'total_tokens': 45,
+              'total_input_tokens': 40, 'total_output_tokens': 5, 'total_cached_tokens': 0}
+
+    async def run():
+        try:
+            cached = await asyncio.wait_for(admin_usage.selected_usage(
+                bridge, 'all', force=True, background=True), timeout=3)
+            assert cached['total_tokens'] == 185
+            assert cached['codex_usage']['status']['refreshing'] is True
+            assert await asyncio.to_thread(started.wait, 3)
+            task = index._refresh_task
+            assert not task.done()
+            assert index.schedule_refresh(immediate=True) is True
+            assert index._refresh_task is task
+        finally:
+            release.set()
+            if index._refresh_task is not None:
+                await index._refresh_task
+
+        fresh = await admin_usage.selected_usage(bridge, 'all', background=True)
+        assert fresh['total_tokens'] == 285
+        assert fresh['codex_usage']['status']['refreshing'] is False
+        assert fresh['codex_usage']['status']['changed_files'] == 1
+        assert parsed == [changed]
+
+    asyncio.run(run())

@@ -72,3 +72,42 @@ def test_concurrent_token_queries_share_database_work(monkeypatch):
             None, None, None, None, 'day', database, None, {}, None, None) for _ in range(20)))
     assert all(item['total_tokens'] == 123 for item in asyncio.run(run()))
     database.get_token_stats_async.assert_awaited_once()
+
+
+def test_manual_refresh_bypasses_cached_gateway_statistics(tmp_path, monkeypatch):
+    from cachetools import TTLCache
+    from core import db_stats
+    from modules.monitoring_sqlite import SQLiteLogger
+    from routes import admin_routes
+    from utils.async_singleflight import AsyncSingleFlight
+
+    path = tmp_path / 'requests.db'
+    writer = SQLiteLogger(path)
+    monkeypatch.setattr(db_stats, 'DB_PATH', path)
+    monkeypatch.setattr(admin_routes, 'stats_db', db_stats.StatsDB())
+    # 保持缓存有效，验证刷新确实重新读取数据库，而非恰好等到缓存过期。
+    monkeypatch.setattr(admin_routes, '_ADMIN_STATS_CACHE', {
+        name: TTLCache(maxsize=256, ttl=600) for name in ('overview', 'token_stats', 'request_stats')})
+    monkeypatch.setattr(admin_routes, '_TOKEN_STATS_QUERIES', AsyncSingleFlight())
+    app = FastAPI()
+    app.include_router(admin_routes.router)
+
+    def record(request_id):
+        writer.write_request({'type': 'request_end', 'request_id': request_id, 'timestamp': time.time(),
+                              'model': 'demo', 'success': True, 'input_tokens': 100, 'output_tokens': 20})
+
+    try:
+        with TestClient(app) as client:
+            record('first')
+            assert client.get('/api/admin/overview').json()['stats']['total_requests'] == 1
+            assert client.get('/api/admin/token_stats?source=bridge').json()['total_tokens'] == 120
+            record('second')
+            assert client.get('/api/admin/overview').json()['stats']['total_requests'] == 1
+            assert client.get('/api/admin/token_stats?source=bridge').json()['total_tokens'] == 120
+
+            assert client.get('/api/admin/overview?force=true').json()['stats']['total_requests'] == 2
+            assert client.get('/api/admin/token_stats?source=bridge&force=true&background=true').json()['total_tokens'] == 240
+            assert client.get('/api/admin/overview').json()['stats']['total_requests'] == 2
+            assert client.get('/api/admin/token_stats?source=bridge').json()['total_tokens'] == 240
+    finally:
+        writer.close()
