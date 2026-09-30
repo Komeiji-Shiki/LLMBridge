@@ -356,7 +356,7 @@ class APIKeyManager:
             ]
 
     def validate_request(
-        self, provided_secret: str, model_name: Optional[str] = None
+        self, provided_secret: str, model_name: Optional[str] = None, *, consume: bool = True
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         验证 API 请求。
@@ -396,6 +396,10 @@ class APIKeyManager:
 
             # 🔧 在锁内读取 rpm_limit，避免与 update_key/delete_key 的锁外读竞态
             rpm_limit = key_data.get("rpm_limit", 0)
+
+        # WebSocket 握手只确认身份；创建响应或追加指令时才消耗一次请求额度。
+        if not consume:
+            return True, key_id, None
 
         # RPM 检查（在锁外进行，因为 rate_limiter 有自己的锁）
         allowed, remaining = self._rate_limiter.check_and_consume(key_id, rpm_limit)

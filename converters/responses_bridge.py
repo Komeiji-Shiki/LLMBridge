@@ -87,8 +87,11 @@ def _chat_tool_to_responses(tool: Any) -> Dict[str, Any]:
         "description": function.get("description", ""),
         "parameters": copy.deepcopy(function.get("parameters", {})),
     }
-    if "strict" in function:
-        result["strict"] = function["strict"]
+    for field in ("strict", "async"):
+        if field in function:
+            result[field] = copy.deepcopy(function[field])
+        elif field in tool:
+            result[field] = copy.deepcopy(tool[field])
     return result
 
 

@@ -166,7 +166,8 @@ def _extract_client_api_key(request: Request, allow_gemini_style: bool = False) 
 
 @observe_authenticated_request
 def _validate_request_api_key(request: Request, model_name: Optional[str],
-                              allow_gemini_style: bool = False) -> None:
+                              allow_gemini_style: bool = False, *,
+                              consume_rate_limit: bool = True) -> None:
     """
     统一 API Key 认证逻辑：
     1) 全局 api_key（管理员 key）始终可用（常数时间比较）
@@ -209,7 +210,10 @@ def _validate_request_api_key(request: Request, model_name: Optional[str],
 
     # 访客 key 校验（模型白名单 + RPM）
     if has_guest_keys:
-        valid, key_id, error_msg = api_key_manager.validate_request(provided_key, model_name)
+        if consume_rate_limit:
+            valid, key_id, error_msg = api_key_manager.validate_request(provided_key, model_name)
+        else:
+            valid, key_id, error_msg = api_key_manager.validate_request(provided_key, model_name, consume=False)
         if not valid:
             if error_msg and "频率超限" in error_msg:
                 raise RateLimitError(error_msg).to_http_exception()
