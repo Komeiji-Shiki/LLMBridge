@@ -240,3 +240,50 @@ def test_compare_layout_and_nonstreaming_speed_note(monitor_ui, width):
     page.locator('#compareModal .close').focus()
     page.keyboard.press('Shift+Tab')
     assert page.locator('#compareModal').evaluate('(el) => el.contains(document.activeElement)')
+
+
+def test_anthropic_content_blocks_render_in_request_details(monitor_ui):
+    page, logs = monitor_ui
+    signature = 'native-signature-' * 700
+    logs[0]['request_messages'] = [
+        {'role': 'user', 'content': [{'type': 'text', 'text': '计算后调用校验工具。'}]},
+        {'role': 'assistant', 'content': [
+            {'type': 'thinking', 'thinking': '先计算候选值。\n再校验余数。', 'signature': signature},
+            {'type': 'tool_use', 'id': 'call_native', 'name': 'check_candidate', 'input': {'value': 423}},
+            {'type': 'redacted_thinking', 'data': 'encrypted-native-thinking'},
+            {'type': 'text', 'text': '<b>等待工具结果</b>'},
+        ]},
+        {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'call_native', 'content': [
+                {'type': 'text', 'text': '校验成功。'},
+                {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'image-data'}},
+            ]},
+        ]},
+    ]
+    page.locator('#request-logs .detail-btn').first.click()
+    boxes = page.locator('#modalBody .message-box')
+    assistant = boxes.nth(1)
+    page.wait_for_selector('#modalBody [data-content-type="thinking"]')
+    assert assistant.locator(':scope > [data-content-type]').evaluate_all('(nodes) => nodes.map(node => node.dataset.contentType)') == [
+        'thinking', 'tool_use', 'redacted_thinking', 'text',
+    ]
+    thinking = assistant.locator('[data-content-type="thinking"]')
+    assert thinking.locator('.message-content').inner_text() == '先计算候选值。\n再校验余数。'
+    assert assistant.get_by_text('含思维链签名', exact=True).count() == 1
+    assert 'check_candidate' in assistant.locator('[data-content-type="tool_use"]').inner_text()
+    assert 'call_native' in boxes.nth(2).inner_text()
+    tool_role = boxes.nth(2).locator('.message-role')
+    assert tool_role.inner_text().startswith('tool')
+    assert tool_role.get_attribute('title') == 'Anthropic 协议角色：user'
+    assert '校验成功。' in boxes.nth(2).inner_text()
+    assert '[图片内容：image/png]' in boxes.nth(2).inner_text()
+    assert assistant.locator('[data-content-type="text"]').inner_text() == '<b>等待工具结果</b>'
+    assert assistant.locator('b').count() == 0
+    signature_box = thinking.locator('details.native-signature')
+    assert not signature_box.evaluate('(node) => node.open')
+    assert f'{len(signature)} 字符' in signature_box.locator('summary').inner_text()
+    signature_box.locator('summary').click()
+    signature_box.get_by_role('button', name='展开', exact=True).click()
+    assert signature_box.locator('pre span').inner_text() == signature
+    # 同一详情里的常规响应仍经原有消息渲染路径展示。
+    assert '这是测试环境中的模拟回答。' in boxes.last.inner_text()

@@ -1011,3 +1011,13 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 #log-load-state.log-load-error { color: #f87171; }
 #log-filters label { display: flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: 12px; }
 #log-refresh-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+
+/* 原生内容块使用已有色板，签名折叠后不占用正文空间。 */
+.native-content-block { margin-top: 12px; }
+.native-content-block:first-child { margin-top: 0; }
+.native-block-title { margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--accent); }
+.native-block-meta { margin-bottom: 6px; font-size: 11px; color: var(--text-dim); overflow-wrap: anywhere; }
+.native-content-block .data-disclosure { margin-top: 8px; }
+.native-tool-input { margin: 0; padding: 10px 12px; background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 Consolas, monospace; }
+.native-message-badge { margin-left: 6px; color: var(--accent); background: var(--surface-3); }
+
