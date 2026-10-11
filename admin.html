@@ -98,7 +98,7 @@
             <!-- 概览页面 -->
             <div id="overview" class="page active">
                 <div class="page-header overview-header">
-                    <div><span class="eyebrow">LLMBRIDGE / ANALYTICS</span><h2>用量概览</h2><p>网关运行状态、模型用量与 Codex 估算金额</p></div>
+                    <div><span class="eyebrow">LLMBRIDGE / ANALYTICS</span><h2>用量概览</h2><p>网关运行状态、模型用量与本地工具估算金额</p></div>
                     <a class="btn" href="/monitor">查看请求监控 ↗</a>
                 </div>
                 <div class="stats-grid overview-summary">
@@ -167,6 +167,7 @@
 <option value="all">全部来源</option>
 <option value="bridge">LLMBridge</option>
 <option value="codex">Codex</option>
+<option value="claude_code">Claude Code</option>
 </select>
 <div class="usage-range" aria-label="用量日期快捷选择">
     <button class="btn btn-sm" data-days="30" aria-pressed="true" onclick="setUsageRange(30)" title="最近 30 个自然日，包含今天">30d</button>

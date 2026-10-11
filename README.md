@@ -499,7 +499,7 @@ MIT License
 Made with Shiki and Gray
 ## Codex 本地用量统计
 
-管理面板的「用量与金额」支持「全部来源 / LLMBridge / Codex」，默认合计 Token，首页默认最近 30 天。30d / 7d / 1d / 所有日期可一键切换，按本机自然日统计，1d 表示今天。日期筛选、模型分布、上下排列的每日趋势和 CSV 导出使用同一个范围。Codex 的缓存输入和推理输出分别属于输入和输出，不额外加入总 Token。
+管理面板的「用量与金额」支持「全部来源 / LLMBridge / Codex / Claude Code」，默认合计 Token，首页默认最近 30 天。30d / 7d / 1d / 所有日期可一键切换，按本机自然日统计，1d 表示今天。日期筛选、模型分布、上下排列的每日趋势和 CSV 导出使用同一个范围。缓存输入和推理输出分别属于输入和输出，不额外加入总 Token。
 
 服务读取其所在机器的 `CODEX_HOME`（未设置时为 `~/.codex`）下的 `sessions/`、`archived_sessions/`，并发现 JetBrains 的 Codex 缓存目录。额外 Codex home 可通过 `CODEX_USAGE_HOMES` 指定，Windows 用分号分隔，Linux/macOS 用冒号分隔。例如 PowerShell 在启动服务前设置：
 
@@ -516,3 +516,17 @@ Codex 金额按当前公开标准 API 单价折算，明确标为估算，不代
 标准价格表在 `core/codex_pricing.py`，当前核对日期为 2026-09-09，覆盖 Astra、Sol、Terra、Luna、GPT-5.5、GPT-5.4、GPT-5.4 mini、GPT-5.3-Codex 和 GPT-5.2-Codex。金额按普通输入、缓存输入和输出拆分，独立缓存写入按有明确报价的模型处理；超过 272K 输入的长上下文按对应模型的单次请求或完整会话规则加价。使用的是标准模式价格快照，不包含快模式、工具及地区附加费；更新价格表后需重启服务。详细依据与优化记录见 [性能与布局优化说明](docs/OPTIMIZATION_2026-09-09.md)。
 
 实现思路参考 [codex-usage](https://github.com/DhWU-coder/codex-usage) 的本地 JSONL 扫描、累计差分和文件指纹缓存，以 Python 接入现有统计系统，无需另外启动该工具。
+
+## Claude Code 本地用量统计
+
+来源选项中的「Claude Code」读取服务所在机器 `~/.claude/projects/` 和 `~/.claude/transcripts/` 下的 JSONL，包括子代理目录。`CLAUDE_CONFIG_DIR` 可以覆盖默认 home；额外 home 使用 `CLAUDE_CODE_USAGE_HOMES`，Windows 用分号分隔，Linux/macOS 用冒号分隔。
+
+统计复用 Codex 的文件变化检查、后台刷新和日期筛选，索引保存到 `logs/claude_code_usage.db`。按 assistant 的消息 ID 和请求 ID 合并同一调用的流式记录及跨文件副本，保留最完整的各项计数；本地合成通知不计入用量。只保存统计元数据和 Token 数，源日志保持只读。
+
+Claude 的总输入为普通输入、缓存读取和缓存写入之和，总 Token 为总输入加输出。推理 Token 已属于输出，不再次相加。主模型的 `usage.iterations` 已包含在顶层用量中，单独报告的 advisor 用量按其模型另计。模型明细、每日趋势和 CSV 均支持 Claude Code，明细展示缓存写入及其中 1 小时写入的 Token，日志行保持只读。
+
+估算采用 [Anthropic 官方标准 API 价格](https://platform.claude.com/docs/en/about-claude/pricing)，价格快照在 `core/claude_code_pricing.py`，核对日期为 2026-10-12。5 分钟缓存写入与 1 小时写入分别计价，未记录 TTL 的写入按标准 5 分钟估算；未知模型保留 Token 并显示未定价。金额不代表订阅实际扣费。
+
+全部来源包含网关、Codex 和 Claude Code。原生 Claude 日志通常没有网关 provider 标识，因此通过本网关转发的 Claude Code 调用可能在合计中重复出现，单独选择来源可以分别查看。若包装器在日志中提供 `providerId` 或 `provider`，可在 `config.jsonc` 的 `claude_code_usage.bridge_providers` 数组列出对应值，合计时排除这些调用，Claude Code 单独视图仍保留完整统计。
+
+实现参考 [token-monitor](https://github.com/Javis603/token-monitor) 的本地日志来源与 [Tokscale 的 Claude 解析器](https://github.com/junhoyeo/tokscale/blob/main/crates/tokscale-core/src/sessions/claudecode.rs) 的流式去重和缓存拆分方式，直接接入现有 Python 服务。

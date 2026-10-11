@@ -289,7 +289,7 @@ async function refreshTokenStats(force = false) {
         params.set('background', 'true');
         if (force) params.set('force', 'true');
         const status = document.getElementById('codex-usage-status');
-        if (status && source !== 'bridge') status.textContent = '正在读取 Codex 用量，首次扫描历史日志可能需要一些时间…';
+        if (status && source !== 'bridge') status.textContent = '正在读取本地工具用量，首次扫描历史日志可能需要一些时间…';
         
         // 日期筛选器用于 Token 统计、成本统计等
         if (currentStartDate) params.append('start_date', currentStartDate);
@@ -317,34 +317,16 @@ async function refreshTokenStats(force = false) {
         const data = await response.json();
         // 来源切换后忽略旧请求，避免较慢的扫描覆盖当前选择。
         if (serial !== tokenStatsRefresh.serial) return;
-        if (status) {
-            const usage = data.codex_usage;
-            if (!usage) status.textContent = '';
-            else if (usage.status?.errors?.length) {
-                status.textContent = 'Codex 部分数据读取失败，当前统计可能不完整。' + usage.status.errors.map(item => item.error).join('；');
-            } else if (usage.status?.refreshing && !usage.status?.available) {
-                status.textContent = 'Codex 正在首次导入，已先显示网关统计；导入完成后自动补齐。';
-            } else if (!usage.status?.available) {
-                status.textContent = '服务所在机器未发现 Codex 会话日志。可通过 CODEX_HOME 或 CODEX_USAGE_HOMES 指定目录。';
-            } else {
-                const updated = usage.status.scanned_at ? new Date(usage.status.scanned_at * 1000).toLocaleString() : '已有本地索引';
-                status.textContent = `Codex · ${usage.session_count || 0} 个会话 · ${usage.event_count || 0} 条用量事件 · ${updated}\n缓存输入 ${formatNumber(usage.cached_tokens || 0)} · 推理输出 ${formatNumber(usage.reasoning_tokens || 0)}`;
-                if (usage.status.refreshing) status.textContent += ' · 正在后台检查更新';
-                status.title = (usage.status.directories || []).join('\n');
-                if (usage.excluded_usage?.event_count) {
-                    status.textContent += `\n合计已排除经 LLMBridge 转发的 ${usage.excluded_usage.event_count} 条事件，共 ${formatNumber(usage.excluded_usage.total_tokens)} Tokens；Codex 单独视图保留完整用量。`;
-                }
-            }
-        }
-        if (data.codex_usage?.status?.refreshing) {
+        renderLocalUsageStatus(data);
+        if (data.codex_usage?.status?.refreshing || data.claude_code_usage?.status?.refreshing) {
             tokenStatsRefresh.pollTimer = setTimeout(() => {
                 if (!document.hidden && document.getElementById('overview').classList.contains('active')) refreshTokenStats();
             }, 1500);
         }
         const costNote = document.getElementById('usage-cost-note');
-        if (costNote) costNote.textContent = source === 'bridge' ? '金额采用网关记录中的历史价格。' : 'Codex 按当前公开标准 API 单价估算，不代表订阅实际扣费；快模式、工具和地区附加费未计入。未定价模型保留 Token，金额合计仅含已知价格部分。';
-        document.getElementById('total-cost-label').textContent = source === 'all' ? '已记录 + Codex 估算' : source === 'codex' ? 'Codex 估算金额' : '网关已记录金额';
-        renderCodexPricing(data);
+        if (costNote) costNote.textContent = source === 'bridge' ? '金额采用网关记录中的历史价格。' : '本地工具按公开标准 API 单价估算，不代表订阅实际扣费。Claude 缓存写入按 5 分钟与 1 小时拆分；未记录 TTL 时按 5 分钟估算。快模式、工具和地区附加费未计入，未定价模型保留 Token。';
+        document.getElementById('total-cost-label').textContent = source === 'all' ? '已记录 + 本地工具估算' : source === 'codex' ? 'Codex 估算金额' : source === 'claude_code' ? 'Claude Code 估算金额' : '网关已记录金额';
+        renderUsagePricing(data);
         
         // 更新总计卡片
         const totalTokens = data.total_tokens || 0;
@@ -641,7 +623,28 @@ async function deleteModelStats(modelName) {
     }
 }
 
-function renderCodexPricing(data) {
+function renderLocalUsageStatus(data) {
+    const container = document.getElementById('codex-usage-status');
+    if (!container) return;
+    const sources = [
+        ['Codex', data.codex_usage, 'CODEX_HOME 或 CODEX_USAGE_HOMES'],
+        ['Claude Code', data.claude_code_usage, 'CLAUDE_CONFIG_DIR 或 CLAUDE_CODE_USAGE_HOMES'],
+    ].filter(([, usage]) => usage);
+    container.title = sources.flatMap(([, usage]) => usage.status?.directories || []).join('\n');
+    container.textContent = sources.map(([label, usage, homes]) => {
+        if (usage.status?.errors?.length) return `${label} 部分数据读取失败，当前统计可能不完整。` + usage.status.errors.map(item => item.error).join('；');
+        if (usage.status?.refreshing && !usage.status?.available) return `${label} 正在首次导入，导入完成后自动补齐。`;
+        if (!usage.status?.available) return `服务所在机器未发现 ${label} 会话日志，可通过 ${homes} 指定目录。`;
+        const updated = usage.status.scanned_at ? new Date(usage.status.scanned_at * 1000).toLocaleString() : '已有本地索引';
+        let text = `${label} · ${usage.session_count || 0} 个会话 · ${usage.event_count || 0} 条用量事件 · ${updated}\n缓存读取 ${formatNumber(usage.cached_tokens || 0)} · 缓存写入 ${formatNumber(usage.cache_write_tokens || 0)} · 推理输出 ${formatNumber(usage.reasoning_tokens || 0)}`;
+        if (label === 'Claude Code') text += ` · 其中 1 小时写入 ${formatNumber(usage.cache_write_1h_tokens || 0)}`;
+        if (usage.status.refreshing) text += ' · 正在后台检查更新';
+        if (usage.excluded_usage?.event_count) text += `\n合计已排除经 LLMBridge 转发的 ${usage.excluded_usage.event_count} 条事件，共 ${formatNumber(usage.excluded_usage.total_tokens)} Tokens；${label} 单独视图保留完整用量。`;
+        return text;
+    }).join('\n\n');
+}
+
+function renderUsagePricing(data) {
     const container = document.getElementById('codex-pricing-details');
     const pricing = data.pricing;
     container.parentElement.hidden = !pricing?.rates;
@@ -650,10 +653,10 @@ function renderCodexPricing(data) {
     const aliases = Object.entries(pricing.aliases || {}).map(([model, target]) =>
         `${escapeHtml(model)} 按 ${escapeHtml(target)} 单价估算`).join('；');
     const rows = Object.entries(pricing.rates).map(([model, rate]) => `
-        <tr><td><a href="https://developers.openai.com/api/docs/models/${encodeURIComponent(model)}" target="_blank" rel="noopener noreferrer" title="价格核对日期：${escapeHtml(rate.verified_at || pricing.verified_at)}">${escapeHtml(model)}</a></td>
-        <td>${rate.input}</td><td>${rate.cached_input}</td><td>${rate.output}</td><td>${rate.long_context ? '>272K' : '—'}</td></tr>`).join('');
-    container.innerHTML = `<p>价格表最近更新：${escapeHtml(pricing.verified_at)}，单位 USD / 百万 Token。长上下文按模型规则计价，缓存属于输入、推理属于输出，不重复相加。</p>
+        <tr><td><a href="${escapeHtml(rate.source_url || 'https://developers.openai.com/api/docs/models/' + encodeURIComponent(model))}" target="_blank" rel="noopener noreferrer" title="价格核对日期：${escapeHtml(rate.verified_at || pricing.verified_at)}">${escapeHtml(model)}</a></td>
+        <td>${rate.input}</td><td>${rate.cached_input}</td><td>${rate.cache_write ?? '—'}</td><td>${rate.cache_write_1h ?? '—'}</td><td>${rate.output}</td><td>${rate.long_context ? '>' + formatNumber(rate.threshold || 272000) : '—'}</td></tr>`).join('');
+    container.innerHTML = `<p>价格表最近更新：${escapeHtml(pricing.verified_at)}，单位 USD / 百万 Token。每个模型链接标明各自核对日期。输入包含普通输入、缓存读取和写入，推理属于输出，不重复相加。</p>
         ${aliases ? `<p>计价映射：${aliases}。</p>` : ''}
-        ${unknown.length ? `<p>未定价：${unknown.map(escapeHtml).join('、')}，共 ${formatNumber(data.unpriced_tokens || 0)} Tokens。</p>` : '<p>当前所选范围的 Codex 模型均已配置估算价格。</p>'}
-        <table class="table"><thead><tr><th>模型 / 官方来源</th><th>普通输入</th><th>缓存输入</th><th>输出</th><th>长上下文</th></tr></thead><tbody>${rows}</tbody></table>`;
+        ${unknown.length ? `<p>未定价：${unknown.map(escapeHtml).join('、')}，共 ${formatNumber(data.unpriced_tokens || 0)} Tokens。</p>` : '<p>当前所选范围的本地工具模型均已配置估算价格。</p>'}
+        <table class="table"><thead><tr><th>模型 / 官方来源</th><th>普通输入</th><th>缓存读取</th><th>缓存写入</th><th>1小时写入</th><th>输出</th><th>长上下文</th></tr></thead><tbody>${rows}</tbody></table>`;
 }

@@ -1633,8 +1633,8 @@ async def get_token_stats_endpoint(start_date: Optional[str] = None, end_date: O
                                    start_time: Optional[str] = None, end_time: Optional[str] = None,
                                    rpm_period: Optional[str] = None, source: str = 'all', force: bool = False,
                                    background: bool = False):
-    if source not in ('all', 'bridge', 'codex'):
-        raise HTTPException(status_code=422, detail='用量来源必须是 all、bridge 或 codex')
+    if source not in ('all', 'bridge', 'codex', 'claude_code'):
+        raise HTTPException(status_code=422, detail='用量来源必须是 all、bridge、codex 或 claude_code')
     filter_start, filter_end = start_time or start_date, end_time or end_date
     from core.db_stats import StatsDB
     try:

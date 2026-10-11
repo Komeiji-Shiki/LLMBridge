@@ -53,7 +53,7 @@ function getTopModelsWithOther(modelStats, tokenField, topN = 10) {
     const otherModels = sortedStats.slice(topN);
 
     const otherValue = otherModels.reduce((sum, item) => sum + (item[tokenField] || 0), 0);
-    const labels = topModels.map(s => s.source === 'codex' ? `${s.model} (Codex)` : s.model);
+    const labels = topModels.map(s => s.source === 'codex' ? `${s.model} (Codex)` : s.source === 'claude_code' ? `${s.model} (Claude Code)` : s.model);
     const dataValues = topModels.map(s => s[tokenField] || 0);
 
     if (otherValue > 0) {
@@ -550,7 +550,9 @@ const TOKEN_STATS_COLUMNS = [
     ['input_tokens', '输入 Tokens'],
     ['output_tokens', '输出 Tokens'],
     ['cached_tokens', '命中缓存'],
-    ['reasoning_tokens', 'Codex 推理'],
+    ['cache_write_tokens', '缓存写入'],
+    ['cache_write_1h_tokens', '其中1小时写入'],
+    ['reasoning_tokens', '推理 Tokens'],
     ['request_count', '请求数'],
     ['avg_tokens', '平均 Token/请求'],
     ['rpm', 'RPM'],
@@ -649,6 +651,8 @@ function renderTokenStatsTable(modelStats) {
             </thead>
             <tbody>
                 ${sortedStats.map(stat => {
+                    const external = stat.source === 'codex' || stat.source === 'claude_code';
+                    const sourceLabel = stat.source === 'claude_code' ? 'Claude Code' : 'Codex';
                     // 格式化RPM和TPM
                     const rpmDisplay = stat.rpm !== undefined && stat.rpm > 0
                         ? `<span style="color: #10b981;">${stat.rpm.toFixed(2)}</span>`
@@ -703,25 +707,27 @@ function renderTokenStatsTable(modelStats) {
                     return `
                         <tr>
                             <td>
-                                ${stat.source === 'codex' ? '' : `<input type="checkbox" class="model-stat-checkbox" data-model="${escapeHtml(stat.model)}" onchange="updateSelectedCount()" style="cursor: pointer;">`}
+                                ${external ? '' : `<input type="checkbox" class="model-stat-checkbox" data-model="${escapeHtml(stat.model)}" onchange="updateSelectedCount()" style="cursor: pointer;">`}
                             </td>
                             <td>
                                 <strong>${escapeHtml(stat.display_name || stat.model)}</strong>
-                                <small class="stat-source">${stat.source === 'codex' ? 'Codex · ' + (stat.cost_kind === 'estimated' ? '估算金额' : '未定价') : 'LLMBridge'}</small>
+                                <small class="stat-source">${external ? sourceLabel + ' · ' + (stat.cost_kind === 'estimated' ? '估算金额' : '未定价') : 'LLMBridge'}</small>
                                 ${stat.display_name && stat.display_name !== stat.model ? `<br><small style="color: var(--text-dim);">(${escapeHtml(stat.model)})</small>` : ''}
                             </td>
                             <td><span style="color: var(--accent);">${formatNumber(stat.total_tokens)}</span></td>
                             <td>${formatNumber(stat.input_tokens)}</td>
                             <td>${formatNumber(stat.output_tokens)}</td>
                             <td>${cachedDisplay}</td>
-                            <td>${stat.source === 'codex' ? formatNumber(stat.reasoning_tokens || 0) : '-'}</td>
-                            <td>${stat.source === 'codex' ? `${stat.event_count} 条用量事件` : stat.request_count}</td>
+                            <td>${formatNumber(stat.cache_write_tokens || 0)}</td>
+                            <td>${formatNumber(stat.cache_write_1h_tokens || 0)}</td>
+                            <td>${external ? formatNumber(stat.reasoning_tokens || 0) : '-'}</td>
+                            <td>${external ? `${stat.event_count} 条用量事件` : stat.request_count}</td>
                             <td>${stat.request_count > 0 ? formatNumber(Math.round(stat.total_tokens / stat.request_count)) : '-'}</td>
                             <td>${rpmDisplay}</td>
                             <td>${tpmDisplay}</td>
-                            <td${costTooltip ? ` title="${costTooltip}"` : ''}>${stat.source === 'codex' && stat.cost_kind !== 'estimated' ? '未定价' : (stat.source === 'codex' ? '≈ ' : '') + costDisplay}</td>
+                            <td${costTooltip ? ` title="${costTooltip}"` : ''}>${external && stat.cost_kind !== 'estimated' ? '未定价' : (external ? '≈ ' : '') + costDisplay}</td>
                             <td>
-                                ${stat.source === 'codex' ? '<small>日志只读</small>' : `<button class="btn btn-danger btn-sm" data-model="${escapeHtml(stat.model)}" onclick="deleteModelStats(this.dataset.model)">删除</button>`}
+                                ${external ? '<small>日志只读</small>' : `<button class="btn btn-danger btn-sm" data-model="${escapeHtml(stat.model)}" onclick="deleteModelStats(this.dataset.model)">删除</button>`}
                             </td>
                         </tr>
                     `;

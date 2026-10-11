@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.codex_usage import CodexUsageIndex, parse_session
+from core.claude_code_usage import ClaudeCodeUsageIndex
 
 
 def usage(input_tokens, output=10, cached=20, reasoning=3):
@@ -39,6 +40,8 @@ def index(tmp_path, monkeypatch):
     from routes import admin_usage
     importer = CodexUsageIndex(tmp_path / 'usage.db', [tmp_path / 'home'])
     monkeypatch.setattr(admin_usage, 'codex_usage_index', importer)
+    monkeypatch.setattr(admin_usage, 'claude_code_usage_index', ClaudeCodeUsageIndex(
+        tmp_path / 'claude.db', [tmp_path / 'claude']))
     return importer
 
 
@@ -268,3 +271,97 @@ def test_manual_background_refresh_is_incremental_and_does_not_wait(index, tmp_p
         assert parsed == [changed]
 
     asyncio.run(run())
+
+
+def claude_event(message_id='message-1', model='claude-opus-5-5', timestamp='2026-09-08T12:00:00Z', **usage):
+    return {'type': 'assistant', 'timestamp': timestamp, 'sessionId': 'claude-session',
+            'requestId': 'request-' + message_id,
+            'message': {'id': message_id, 'model': model, 'usage': usage}}
+
+
+def test_claude_streaming_copies_cache_ttl_and_prompt_snapshot(index, tmp_path):
+    from routes import admin_usage
+    importer = admin_usage.claude_code_usage_index
+    home = tmp_path / 'claude'
+    snapshot = claude_event(input_tokens=150, output_tokens=2)
+    partial = claude_event(input_tokens=10, cache_read_input_tokens=100,
+                          cache_creation_input_tokens=40, output_tokens=2)
+    complete = claude_event(input_tokens=10, cache_read_input_tokens=100,
+                           cache_creation_input_tokens=40, output_tokens=20,
+                           cache_creation={'ephemeral_5m_input_tokens': 10, 'ephemeral_1h_input_tokens': 30},
+                           output_tokens_details={'thinking_tokens': 5})
+    write_log(home / 'projects/a.jsonl', [snapshot, partial, complete, complete,
+              claude_event('synthetic', '<synthetic>', input_tokens=1000)])
+    write_log(home / 'transcripts/copy.jsonl', [partial])
+    write_log(home / 'projects/session/subagents/agent.jsonl', [
+        claude_event('subagent', input_tokens=5, output_tokens=1)])
+    data = importer.stats()
+    assert data['event_count'] == 2
+    assert data['input_tokens'] == 155
+    assert data['output_tokens'] == 21
+    assert data['total_tokens'] == 176
+    assert data['cached_tokens'] == 100
+    assert data['cache_write_tokens'] == 40
+    assert data['cache_write_1h_tokens'] == 30
+    assert data['reasoning_tokens'] == 5
+    assert data['total_cost'] == pytest.approx(.00079)
+    assert data['cache_write_cost'] == pytest.approx(.00029)
+    assert data['daily_stats'][0]['cache_write_1h_tokens'] == 30
+
+
+def test_claude_http_source_dates_combined_costs_and_csv(index, tmp_path, monkeypatch):
+    from routes import admin_routes, admin_usage
+    write_log(tmp_path / 'home/sessions/a.jsonl', metadata('gpt-6-sol') + [event(usage(100))])
+    write_log(tmp_path / 'claude/projects/a.jsonl', [
+        claude_event(input_tokens=10, cache_read_input_tokens=100, cache_creation_input_tokens=40,
+                     cache_creation={'ephemeral_1h_input_tokens': 30, 'ephemeral_5m_input_tokens': 10},
+                     output_tokens=20),
+        claude_event('next-day', timestamp='2026-09-09T12:00:00Z', input_tokens=5, output_tokens=1),
+    ])
+    bridge = {'model_stats': [], 'daily_stats': [], 'total_tokens': 45,
+              'total_input_tokens': 40, 'total_output_tokens': 5, 'total_cached_tokens': 0,
+              'total_cost': 1, 'cost_usd': {'total_cost': 1}}
+    monkeypatch.setattr(admin_routes, 'get_token_stats', AsyncMock(return_value=bridge))
+    app = FastAPI()
+    app.include_router(admin_routes.router)
+    with TestClient(app) as client:
+        query = 'start_date=2026-09-08&end_date=2026-09-08'
+        standalone = client.get('/api/admin/token_stats?source=claude_code&' + query).json()
+        assert standalone['total_tokens'] == 170
+        assert standalone['total_cost'] == pytest.approx(.00075)
+        assert standalone['total_cache_write_1h_tokens'] == 30
+        assert {row['source'] for row in standalone['model_stats']} == {'claude_code'}
+        assert 'codex_usage' not in standalone
+        combined = client.get('/api/admin/token_stats?source=all&' + query).json()
+        assert combined['total_tokens'] == 325
+        assert combined['total_cost'] == pytest.approx(1.001014)
+        assert combined['daily_stats'][0]['estimated_cost_usd'] == pytest.approx(.001014)
+        assert combined['cost_breakdown']['claude_code_estimated_usd']['total_cost'] == pytest.approx(.00075)
+        report = client.get('/api/admin/export_report?source=claude_code&' + query)
+        rows = list(csv.DictReader(io.StringIO(report.content.decode('utf-8-sig'))))
+        assert len(rows) == 1
+        assert rows[0]['来源'] == 'claude_code'
+        assert rows[0]['总Tokens'] == '170'
+        assert rows[0]['1小时缓存写入Tokens'] == '30'
+        assert rows[0]['总成本(原币)'] == '0.00075'
+        assert rows[0]['请求数'] == ''
+        assert rows[0]['价格核对日期'] == '2026-10-12'
+
+
+def test_claude_advisor_unknown_model_and_request_context_tier(index, tmp_path):
+    from routes import admin_usage
+    write_log(tmp_path / 'claude/projects/a.jsonl', [
+        claude_event(model='custom-model', input_tokens=10, output_tokens=2,
+                     iterations=[{'type': 'message', 'input_tokens': 10, 'output_tokens': 2},
+                                 {'type': 'advisor_message', 'model': 'claude-sonnet-5-5',
+                                  'input_tokens': 20, 'output_tokens': 3}]),
+        claude_event('haiku', model='claude-haiku-5-5', input_tokens=1,
+                     cache_read_input_tokens=100000, output_tokens=10),
+    ])
+    data = admin_usage.claude_code_usage_index.stats()
+    assert data['event_count'] == 3
+    assert data['unpriced_tokens'] == 12
+    models = {row['model']: row for row in data['model_stats']}
+    assert models['custom-model']['total_cost'] is None
+    assert models['claude-sonnet-5-5']['total_tokens'] == 23
+    assert models['claude-haiku-5-5']['total_cost'] == pytest.approx(.0050255)
