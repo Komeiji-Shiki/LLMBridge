@@ -169,13 +169,13 @@
     "type": "模型类型：text或image",
     
     "api_type": "API类型：direct_api（OpenAI Chat兼容）/ responses_native（OpenAI Responses原生上游）/ gemini_native / anthropic_native",
-    "api_base_url": "第三方API的基础URL",
+    "api_base_url": "第三方API的基础URL。Gemini 的版本路径由用户填写（如 https://opencode.ai/inference/go/v1 或 https://generativelanguage.googleapis.com/v1beta），程序不会自动补版本；留空使用 https://generativelanguage.googleapis.com/v1beta",
     "api_key": "第三方API的密钥",
     "api_keys": "第三方API的密钥数组（支持多key轮询）。可配合 api_key_strategy 选择轮询策略",
     "api_key_strategy": "可选，API Key 轮询策略：round_robin（默认，逐key轮询）或 sticky（粘性轮询：先用第一个key，额度不足时切换并冷却48小时）",
     "api_key_cooldown_seconds": "可选，sticky 策略的冷却时长（秒），默认 172800（48小时）",
     "endpoint_path": "可选，上游模型端点路径。默认 /chat/completions，responses_native 默认 /responses，anthropic_native 默认 /messages",
-    "upstream_protocol": "可选，仅 gemini_native 生效：generate_content（默认，旧版 generateContent 协议）或 interactions（谷歌新 Interactions API，上游端点 /v1beta/interactions；认证使用 x-goog-api-key 请求头）。api_base_url 可填写主机根或已带 /v1beta 的地址，gemini-3 系列建议 interactions",
+    "upstream_protocol": "可选，仅 gemini_native 生效：generate_content（默认，在 api_base_url 后追加 /models/模型ID:generateContent，流式使用 :streamGenerateContent）或 interactions（追加 /interactions；认证使用 x-goog-api-key 请求头）。版本路径由 api_base_url 决定，请按上游支持情况选择协议",
     "model_id": "发送给第三方API的实际模型ID",
     "display_name": "在统计中显示的模型名称",
     

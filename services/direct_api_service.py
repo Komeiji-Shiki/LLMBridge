@@ -611,7 +611,7 @@ class DirectAPIService:
             temperature: 温度参数
             top_p: top_p参数
             max_tokens: 最大token数
-            base_url: 自定义API地址（可选，默认使用Google官方地址）
+            base_url: 自定义API基础地址（版本路径由用户填写，留空使用Google官方 /v1beta 地址）
             thinking_config: 思维链配置（可选）
             tools: OpenAI 格式的 tools 列表（将转换为 Gemini functionDeclarations）
             tool_choice: OAI tool_choice（将转换为 Gemini toolConfig）
@@ -638,10 +638,9 @@ class DirectAPIService:
                     text = text.replace(key_param, '***')
             return text
 
-        # 配置允许填写主机根地址或已包含 /v1beta 的地址，避免重复拼接版本路径。
-        configured_base = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
-        versioned_base = configured_base if configured_base.endswith("/v1beta") else f"{configured_base}/v1beta"
-        endpoint = f"{versioned_base}/models/{model}:{method}?key={key_param}{sse_param}"
+        # 自定义地址的版本路径由用户决定，仅在未配置地址时使用官方默认值。
+        configured_base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        endpoint = f"{configured_base}/models/{model}:{method}?key={key_param}{sse_param}"
         
         # 转换OpenAI格式消息为Gemini格式
         gemini_contents = []
@@ -1017,7 +1016,7 @@ class DirectAPIService:
         stop_sequences: Optional[List[str]] = None,
         extra_body: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """调用 Gemini Interactions API（新协议 /v1beta/interactions）。
+        """调用 Gemini Interactions API（基础地址后追加 /interactions）。
 
         与 call_gemini_native_api 平行：OpenAI 消息在内部转换为 interactions
         无状态步骤数组（store=false，签名前缀匹配注入由转换器完成），
@@ -1031,8 +1030,8 @@ class DirectAPIService:
             temperature: 温度参数
             top_p: top_p参数（interactions 未确认支持，转换器忽略）
             max_tokens: 最大token数
-            base_url: 自定义API地址（主机根，如 https://generativelanguage.googleapis.com
-                或 http://127.0.0.1:7861；缺省使用Google官方地址）
+            base_url: 自定义API基础地址（如 https://generativelanguage.googleapis.com/v1beta
+                或 http://127.0.0.1:7861/v1；版本路径由用户填写，留空使用Google官方 /v1beta 地址）
             thinking_config: 思维链配置（thinkingLevel 映射为 thinking_level）
             tools: OpenAI 格式的 tools 列表（转换为 Interactions 扁平工具定义）
             tool_choice: OAI tool_choice（仅 "none" 受支持，不传 tools）
@@ -1044,19 +1043,15 @@ class DirectAPIService:
             流式：interactions SSE 事件 dict；非流式：interaction 对象 dict；
             出错时：_normalize_error_for_passthrough 格式的错误 dict
         """
-        # Interactions 官方使用 x-goog-api-key 请求头。配置可以填写主机根地址，
-        # 也可以填写已经带 /v1beta 的地址，统一避免重复版本路径。
+        # Interactions 使用 x-goog-api-key 请求头，版本路径沿用用户填写的基础地址。
         sse_param = "?alt=sse" if stream else ""
 
         def _redact(text: str) -> str:
             """脱敏异常消息中的 API key。"""
             return text.replace(api_key, "***") if api_key else text
 
-        configured_base = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
-        if configured_base.endswith("/v1beta"):
-            endpoint = f"{configured_base}/interactions{sse_param}"
-        else:
-            endpoint = f"{configured_base}/v1beta/interactions{sse_param}"
+        configured_base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        endpoint = f"{configured_base}/interactions{sse_param}"
 
         request_body = build_interactions_request_body(
             model=model,

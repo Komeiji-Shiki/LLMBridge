@@ -363,10 +363,9 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         context.credential_fingerprint = credential_identity(key)
         upstream = copy.deepcopy(body)
         target = config.get('model_id') or model
-        base = (config.get('api_base_url') or 'https://generativelanguage.googleapis.com').rstrip('/')
+        base = (config.get('api_base_url') or 'https://generativelanguage.googleapis.com/v1beta').rstrip('/')
         if protocol in ('gemini', 'interactions'):
-            if not base.endswith('/v1beta'):
-                base += '/v1beta'
+            # 与转换调用一致，直接使用配置中的版本路径。
             if protocol == 'interactions':
                 if gemini_response:
                     upstream = convert_gemini_gc_to_interactions(upstream, target)

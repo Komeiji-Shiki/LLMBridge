@@ -73,7 +73,7 @@ def test_gemini_stream_tool_indices_remain_distinct_across_chunks():
 @pytest.mark.parametrize('stream', [False, True])
 @pytest.mark.parametrize('base_url, expected_base', [
     (None, 'https://generativelanguage.googleapis.com/v1beta'),
-    ('http://localhost:8317', 'http://localhost:8317/v1beta'),
+    ('http://localhost:8317', 'http://localhost:8317'),
     ('http://localhost:8317/v1beta', 'http://localhost:8317/v1beta'),
     ('http://localhost:8317/v1beta/', 'http://localhost:8317/v1beta'),
 ])

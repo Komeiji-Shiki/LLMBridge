@@ -777,7 +777,7 @@
 <label class="form-label" for="api-base-url">API Base URL</label>
 <input class="form-input" id="api-base-url" placeholder="http://127.0.0.1:7861 或 https://api.openai.com/v1" type="text"/>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            API服务器地址。OpenAI兼容格式必填；Gemini原生格式可选（留空使用Google官方地址，填写可用于本地反代）
+                            API服务器基础地址。Gemini 的版本路径由用户填写，例如 <code>https://opencode.ai/inference/go/v1</code> 或 <code>https://generativelanguage.googleapis.com/v1beta</code>，程序不会自动补版本。Gemini 留空时使用 Google 官方 <code>/v1beta</code> 地址；其他格式必填。
                         </small>
 </div><div class="form-group" data-direct-setting="">
 <label class="form-label" for="model-id">目标模型ID</label>
@@ -806,7 +806,7 @@
 <option value="interactions">Interactions API（新版，gemini-3 系列推荐）</option>
 </select>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            Gemini 上游协议。旧版 <code>generateContent</code> 仍受支持；谷歌新 Interactions API（<code>/v1beta/interactions</code>）支持思考级别、思考签名回传等新特性，gemini-3 系列建议使用。仅 <code>gemini_native</code> 生效。
+                            Gemini 上游协议。<code>generateContent</code> 在基础地址后追加 <code>/models/模型ID:generateContent</code>（流式使用 <code>:streamGenerateContent</code>）；Interactions API 追加 <code>/interactions</code>。版本路径均以 API Base URL 为准，请按上游支持情况选择协议。仅 <code>gemini_native</code> 生效。
                         </small>
 </div><div class="form-group" data-direct-setting="">
 <label class="form-label" for="endpoint-path">模型端点（可选）</label>

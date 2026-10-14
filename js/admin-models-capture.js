@@ -207,8 +207,9 @@ async function fetchModelsFromAPI(event) {
         // 移除末尾的斜杠
         let baseUrl = apiBaseUrl.replace(/\/+$/, '');
         
-        // 🔧 检测是否是Google Gemini API
-        const isGeminiAPI = baseUrl.includes('generativelanguage.googleapis.com');
+        // 按所选协议识别 Gemini 代理，模型列表也沿用用户填写的版本路径。
+        const isGeminiAPI = document.getElementById('api-type').value === 'gemini_native'
+            || baseUrl.includes('generativelanguage.googleapis.com');
         
         // 尝试多种可能的URL模式
         const urlsToTry = [];
@@ -217,9 +218,6 @@ async function fetchModelsFromAPI(event) {
             // Google Gemini API特殊处理
             // 使用查询参数传递API Key
             urlsToTry.push(`${baseUrl}/models?key=${encodeURIComponent(apiKey)}`);
-            if (!baseUrl.includes('/v1')) {
-                urlsToTry.push(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`);
-            }
         } else {
             // 标准OpenAI格式
             urlsToTry.push(`${baseUrl}/models`);
