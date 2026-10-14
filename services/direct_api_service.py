@@ -21,7 +21,6 @@ import copy
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
-from urllib.parse import quote
 
 from core.config_loader import CONFIG
 from converters.gemini_interactions import build_interactions_request_body
@@ -625,22 +624,15 @@ class DirectAPIService:
         method = "streamGenerateContent" if stream else "generateContent"
         
         # 修复：流式请求必须添加 alt=sse 参数，让 Gemini 返回标准 SSE 格式
-        sse_param = "&alt=sse" if stream else ""
-
-        # 🔧 key 拼接进查询串前做 URL 编码，防特殊字符破坏 URL
-        key_param = quote(api_key or "", safe="")
+        sse_param = "?alt=sse" if stream else ""
 
         def _redact(text: str) -> str:
-            """脱敏：key 以明文与 URL 编码两种形态出现在 URL/异常消息中"""
-            if api_key:
-                text = text.replace(api_key, '***')
-                if key_param != api_key:
-                    text = text.replace(key_param, '***')
-            return text
+            """脱敏异常消息中的 API key。"""
+            return text.replace(api_key, '***') if api_key else text
 
         # 自定义地址的版本路径由用户决定，仅在未配置地址时使用官方默认值。
         configured_base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-        endpoint = f"{configured_base}/models/{model}:{method}?key={key_param}{sse_param}"
+        endpoint = f"{configured_base}/models/{model}:{method}{sse_param}"
         
         # 转换OpenAI格式消息为Gemini格式
         gemini_contents = []
@@ -929,6 +921,9 @@ class DirectAPIService:
                 separators=(',', ':')
             )
             headers = {"Content-Type": "application/json"}
+            # 与 Google SDK 和原生透传一致，使用请求头传递上游密钥。
+            if api_key:
+                headers["x-goog-api-key"] = api_key
             # 转换协议后仍保留客户端的会话标识和其他端到端请求头。
             self._apply_context_upstream_headers(headers)
             async with self.session.post(
@@ -978,9 +973,7 @@ class DirectAPIService:
                 }
             }
         except aiohttp.ClientError as e:
-            # 🔧 脱敏：Gemini 的 key 拼在 URL 查询串里，部分 aiohttp 异常
-            # （InvalidURL 等）的 str() 会携带完整 URL，不脱敏就直接把 key
-            # 泄漏进日志和客户端错误响应
+            # 网络异常可能包含请求信息，统一清除密钥后再返回。
             safe_err = _redact(str(e))
             logger.error(f"[GEMINI_NATIVE] 网络请求失败: {safe_err}")
             yield {

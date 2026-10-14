@@ -215,9 +215,8 @@ async function fetchModelsFromAPI(event) {
         const urlsToTry = [];
         
         if (isGeminiAPI) {
-            // Google Gemini API特殊处理
-            // 使用查询参数传递API Key
-            urlsToTry.push(`${baseUrl}/models?key=${encodeURIComponent(apiKey)}`);
+            // Gemini 只使用配置的基础地址，密钥在请求头中发送。
+            urlsToTry.push(`${baseUrl}/models`);
         } else {
             // 标准OpenAI格式
             urlsToTry.push(`${baseUrl}/models`);
@@ -241,9 +240,13 @@ async function fetchModelsFromAPI(event) {
                     'Content-Type': 'application/json'
                 };
                 
-                // 🔧 Gemini使用query参数，其他API使用Bearer Token
-                if (!isGeminiAPI) {
-                    headers['Authorization'] = `Bearer ${apiKey}`;
+                // 与推理请求保持一致，Gemini 使用 x-goog-api-key 鉴权。
+                if (hasApiKey) {
+                    if (isGeminiAPI) {
+                        headers['x-goog-api-key'] = apiKey;
+                    } else {
+                        headers['Authorization'] = `Bearer ${apiKey}`;
+                    }
                 }
                 
                 const response = await fetch(modelsUrl, {

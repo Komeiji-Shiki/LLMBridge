@@ -119,7 +119,7 @@ def test_gateway_context_excludes_proxy_and_local_auth_headers(upstream_method):
     assert 'accept-encoding' in captured
     for name in ('authorization', 'cookie', 'x-bridge-session-id'):
         assert name not in captured
-    if upstream_method == 'call_gemini_interactions_api':
+    if upstream_method:
         assert captured['x-goog-api-key'] == 'upstream-key'
     else:
         assert 'x-goog-api-key' not in captured

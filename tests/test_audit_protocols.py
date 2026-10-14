@@ -97,8 +97,9 @@ def test_gemini_request_returns_signature_and_generation_options(stream, base_ur
             stop_sequences=['END'])]
         assert not any('error' in item for item in result)
         method = 'streamGenerateContent' if stream else 'generateContent'
-        suffix = '&alt=sse' if stream else ''
-        assert session.post.call_args.args[0] == f'{expected_base}/models/demo:{method}?key=test-key{suffix}'
+        suffix = '?alt=sse' if stream else ''
+        assert session.post.call_args.args[0] == f'{expected_base}/models/demo:{method}{suffix}'
+        assert session.post.call_args.kwargs['headers']['x-goog-api-key'] == 'test-key'
         body = json.loads(session.post.call_args.kwargs['data'])
         assert body['contents'][0]['parts'][1]['thoughtSignature'] == 'signed'
         assert body['contents'][1]['parts'][0]['functionResponse']['id'] == 'one'
