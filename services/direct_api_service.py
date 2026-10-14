@@ -928,12 +928,13 @@ class DirectAPIService:
                 ensure_ascii=False,
                 separators=(',', ':')
             )
+            headers = {"Content-Type": "application/json"}
+            # 转换协议后仍保留客户端的会话标识和其他端到端请求头。
+            self._apply_context_upstream_headers(headers)
             async with self.session.post(
                 endpoint,
                 data=request_body_json.encode('utf-8'),
-                headers={
-                    "Content-Type": "application/json"
-                },
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(
                     total=CONFIG.get("api_call_timeout_seconds", 3000),
                     sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
@@ -1090,6 +1091,7 @@ class DirectAPIService:
             }
             if api_key:
                 headers["x-goog-api-key"] = api_key
+            self._apply_context_upstream_headers(headers)
             async with self.session.post(
                 endpoint,
                 data=request_body_json.encode('utf-8'),

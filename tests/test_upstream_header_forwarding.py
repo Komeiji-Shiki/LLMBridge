@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,9 @@ class _FakeResponse:
 
     async def __aexit__(self, exc_type, exc, traceback):
         return False
+
+    async def json(self):
+        return {"ok": True}
 
 
 class _FakeSession:
@@ -76,12 +80,24 @@ def test_passthrough_does_not_invent_missing_opencode_session():
     assert 'x-opencode-session' not in headers
 
 
-def test_gateway_context_excludes_proxy_and_local_auth_headers():
+@pytest.mark.parametrize('upstream_method', [None, 'call_gemini_native_api', 'call_gemini_interactions_api'])
+def test_gateway_context_excludes_proxy_and_local_auth_headers(upstream_method):
     app = FastAPI()
     app.add_middleware(GatewayRequestMiddleware)
 
     @app.post('/v1/responses')
     async def route(request: Request):
+        if upstream_method:
+            # 直接捕获转换调用最终交给 HTTP 客户端的请求头，覆盖异步上下文传递。
+            session = _FakeSession()
+            service = DirectAPIService(session)
+            result = [item async for item in getattr(service, upstream_method)(
+                api_key='upstream-key', model='demo',
+                messages=[{'role': 'user', 'content': 'hello'}],
+                base_url='https://upstream.example/v1',
+            )]
+            assert result == [{'ok': True}]
+            return session.kwargs['headers']
         return current_request.get().upstream_headers
 
     response = TestClient(app).post('/v1/responses', headers={
@@ -89,6 +105,7 @@ def test_gateway_context_excludes_proxy_and_local_auth_headers():
         'X-Provider-Trace': 'trace-from-client',
         'User-Agent': 'client-agent/1.0',
         'Authorization': 'Bearer local-key',
+        'X-Goog-Api-Key': 'local-google-key',
         'Cookie': 'secret=do-not-forward',
         'X-Bridge-Session-ID': 'local-session',
     })
@@ -102,3 +119,7 @@ def test_gateway_context_excludes_proxy_and_local_auth_headers():
     assert 'accept-encoding' in captured
     for name in ('authorization', 'cookie', 'x-bridge-session-id'):
         assert name not in captured
+    if upstream_method == 'call_gemini_interactions_api':
+        assert captured['x-goog-api-key'] == 'upstream-key'
+    else:
+        assert 'x-goog-api-key' not in captured
