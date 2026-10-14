@@ -24,6 +24,24 @@ def payloads(chunk):
     return values
 
 
+def gemini_termination(value):
+    """提取 Gemini 原始停止原因，将异常终止转换成可读错误。"""
+    if not isinstance(value, dict):
+        return None, None
+    candidate = (value.get('candidates') or [{}])[0]
+    feedback = value.get('promptFeedback') or {}
+    reason = candidate.get('finishReason') or feedback.get('blockReason')
+    if not reason or reason in ('STOP', 'MAX_TOKENS', 'CONTINUATION', 'TOOL_USE',
+                                'FINISH_REASON_UNSPECIFIED', 'BLOCK_REASON_UNSPECIFIED'):
+        return reason, None
+    detail = candidate.get('finishMessage') or feedback.get('blockReasonMessage')
+    message = f'Gemini 上游终止生成：{reason}'
+    if detail:
+        message += f'。上游说明：{detail}'
+    return reason, {'code': 422, 'type': 'upstream_generation_error',
+                    'reason': reason, 'message': message}
+
+
 def error_status(value):
     if not isinstance(value, dict):
         return None

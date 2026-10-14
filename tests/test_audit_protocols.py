@@ -110,6 +110,36 @@ def test_gemini_request_returns_signature_and_generation_options(stream, base_ur
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('stream', [False, True])
+def test_gemini_generation_reports_original_block_reason(stream):
+    from core.request_context import RequestContext, current_request
+
+    async def run():
+        context = RequestContext()
+        token = current_request.set(context)
+        session = MagicMock()
+        response = MagicMock(status=200)
+        blocked = {'candidates': [{'finishReason': 'PROHIBITED_CONTENT', 'finishMessage': 'provider explanation'}]}
+        response.json = AsyncMock(return_value=blocked)
+
+        async def chunks():
+            yield ('data: ' + json.dumps(blocked) + '\n\n').encode()
+
+        response.content.iter_any = chunks
+        session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+        session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+        try:
+            result = [item async for item in DirectAPIService(session).call_gemini_native_api(
+                'test-key', 'demo', [{'role': 'user', 'content': 'hello'}], stream=stream)]
+            assert result[0]['error']['reason'] == 'PROHIBITED_CONTENT'
+            assert 'provider explanation' in result[0]['error']['message']
+            assert context.outcome['stop_reason'] == 'PROHIBITED_CONTENT'
+        finally:
+            current_request.reset(token)
+
+    asyncio.run(run())
+
+
 def test_gemini_empty_upstream_error_reports_http_status():
     async def run():
         session = MagicMock()

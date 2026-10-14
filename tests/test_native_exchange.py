@@ -49,6 +49,83 @@ def test_native_tool_forwarding_and_usage(provider, protocol, tool, stream):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('stream', [True, False])
+@pytest.mark.parametrize('reason', ['STOP', 'MAX_TOKENS', 'PROHIBITED_CONTENT'])
+def test_gemini_stop_reason_reaches_monitor_and_storage(tmp_path, monkeypatch, stream, reason):
+    from modules import monitoring
+    from modules.monitoring_sqlite import SQLiteLogger
+
+    store = SQLiteLogger(tmp_path / 'requests.db')
+    log_manager = MagicMock()
+    log_manager.write_request_log.side_effect = store.write_request
+    monkeypatch.setattr(monitoring, 'LogManager', lambda: log_manager)
+    monkeypatch.setattr(monitoring.MonitoringService, '_load_persisted_stats', lambda self: None)
+    monitor = monitoring.MonitoringService()
+    monitor.broadcast_to_monitors = AsyncMock()
+    blocked = reason == 'PROHIBITED_CONTENT'
+
+    async def run():
+        context = RequestContext()
+        token = current_request.set(context)
+        service = MagicMock()
+        service.calculate_cost.return_value = {'total_cost': 0, 'currency': 'USD'}
+        response = {'candidates': [{'finishReason': reason, 'finishMessage': 'provider explanation'}],
+                    'usageMetadata': {'promptTokenCount': 3, 'thoughtsTokenCount': 4}}
+
+        async def upstream(**kwargs):
+            if stream:
+                thought = {'candidates': [{'content': {'parts': [{'text': 'thinking', 'thought': True}]}}]}
+                yield ('data: ' + json.dumps(thought) + '\n\n').encode()
+                yield ('data: ' + json.dumps(response) + '\n\n').encode()
+            else:
+                yield json.dumps(response).encode()
+
+        service.call_api_passthrough = upstream
+        config = {'api_type': 'gemini_native', 'api_key': 'test', 'api_base_url': 'https://example.test/v1'}
+        try:
+            result = await forward_native_exchange({'contents': []}, config, 'gemini', service, monitor,
+                                                   stream=stream, context=context)
+            if stream and blocked:
+                chunks = []
+                async for chunk in result.body_iterator:
+                    chunks.append(chunk)
+                    if b'upstream_generation_error' in chunk:
+                        # 客户端读到错误后立即关闭，也不能覆盖真实拦截原因。
+                        await result.body_iterator.aclose()
+                        break
+                raw = b''.join(chunks)
+            else:
+                raw = b''.join([chunk async for chunk in result.body_iterator]) if stream else result.body
+            # 等待现有串行监控队列完成，检查实际缓存和数据库查询结果。
+            monitor._event_pool.submit(lambda: None).result(timeout=5)
+            record = log_manager.write_request_log.call_args.args[0]
+            request_id = record['request_id']
+            for saved in (record, monitor.request_details_cache[request_id],
+                          monitor.recent_requests[-1], store.get_request_details(request_id),
+                          store.query_requests()['items'][0]):
+                assert saved['stop_reason'] == reason
+                assert saved['status'] == ('failed' if blocked else 'success')
+            assert record['success'] is not blocked
+            assert record['output_tokens'] == 4
+            if blocked:
+                assert b'upstream_generation_error' in raw
+                assert 'PROHIBITED_CONTENT' in record['error']
+                assert 'provider explanation' in record['error']
+                if not stream:
+                    assert result.status_code == 422
+            else:
+                assert b'upstream_generation_error' not in raw
+        finally:
+            current_request.reset(token)
+
+    try:
+        asyncio.run(run())
+    finally:
+        monitor._event_pool.shutdown(wait=True)
+        monitor._monitor_pool.shutdown(wait=True)
+        store.close()
+
+
 def test_display_messages_gemini_body():
     body = {
         'systemInstruction': {'parts': [{'text': '你是助手'}]},

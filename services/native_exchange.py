@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from core.config_loader import CONFIG
 from core.request_context import RequestContext, current_request, credential_identity
-from services.protocol_events import payloads, error_status
+from services.protocol_events import payloads, error_status, gemini_termination
 from services.provider_capabilities import protocol_name, apply_native_tool_defaults
 from utils.usage_tokens import resolve_usage_tokens
 
@@ -294,6 +294,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
     upstream_usage = None
     text_parts = []
     failure = None
+    generation_error = None
     incomplete = False
     observed_tools = set()
     protocol = protocol_name(config)
@@ -304,7 +305,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
     original_messages = display_messages_for(body, protocol)
 
     def observe(value):
-        nonlocal input_tokens, output_tokens, cached_tokens, upstream_usage, failure, incomplete
+        nonlocal input_tokens, output_tokens, cached_tokens, upstream_usage, failure, incomplete, generation_error
         if not isinstance(value, dict):
             return
         if error_status(value):
@@ -312,6 +313,13 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         if value.get('type') == 'response.incomplete' or value.get('status') == 'incomplete':
             incomplete = True
         native = value.get('response') or value.get('interaction') or value
+        if protocol == 'gemini':
+            reason, terminal_error = gemini_termination(native)
+            if reason:
+                context.outcome['stop_reason'] = reason
+            if terminal_error:
+                generation_error = terminal_error
+                failure = terminal_error['message']
         for item in native.get('output', []) or native.get('steps', []):
             kind = item.get('type', '') if isinstance(item, dict) else ''
             if kind.endswith('_call') and kind != 'function_call':
@@ -400,6 +408,9 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
             status = error_status(value) or 200
             if protocol == 'interactions' and gemini_response and status == 200:
                 value = convert_interactions_to_gemini_gc(value)
+            if generation_error:
+                value = {**value, 'error': generation_error}
+                status = generation_error['code']
             return JSONResponse(value, status, headers={'X-Bridge-Session-ID': context.session_id, 'X-Bridge-Request-ID': context.request_id})
         try:
             first = await asyncio.wait_for(anext(iterator), timeout=float(CONFIG.get('first_chunk_timeout_seconds') or 180))
@@ -429,8 +440,13 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                                 yield ('data: ' + json.dumps(converted, ensure_ascii=False) + '\n\n').encode()
                     else:
                         yield chunk
+                    if generation_error:
+                        # 保留原始结束事件，并明确告知客户端实际失败原因。
+                        yield ('data: ' + json.dumps({'error': generation_error}, ensure_ascii=False) + '\n\n').encode()
+                        return
             except (asyncio.CancelledError, GeneratorExit):
-                failure = 'Client disconnected'
+                # 客户端收到错误后关闭流时，保留已经确认的上游失败原因。
+                failure = failure or 'Client disconnected'
                 raise
             except Exception as error:
                 failure = str(error)

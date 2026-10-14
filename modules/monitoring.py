@@ -80,6 +80,7 @@ class RequestInfo:
     status: str  # 'active', 'success', 'failed'
     duration: Optional[float] = None
     error: Optional[str] = None
+    stop_reason: Optional[str] = None
     messages_count: int = 0
     session_id: Optional[str] = None
     mode: Optional[str] = None
@@ -660,6 +661,11 @@ class MonitoringService:
         """记录请求结束（实际执行，在线程池中运行）"""
         # 🔧 缩锁优化：锁内只做数据更新，asdict/日志构建移到锁外
         current_time = time.time()
+        # 原始停止原因同时进入实时缓存和持久化日志，避免界面显示为空。
+        context = current_request.get()
+        stop_reason = (context.outcome.get('stop_reason') if context else None) or (cost_info or {}).get('stop_reason')
+        if not stop_reason and isinstance(response_message, dict):
+            stop_reason = response_message.get('finish_reason') or response_message.get('stop_reason')
         
         with self._lock:
             if request_id not in self.active_requests:
@@ -670,13 +676,13 @@ class MonitoringService:
             request_info.status = 'success' if success else 'failed'
             request_info.duration = current_time - request_info.timestamp
             request_info.error = error
+            request_info.stop_reason = stop_reason
             
             request_info.response_preview = (response_content[:500] + "...") if response_content and len(response_content) > 500 else response_content
             request_info.reasoning_preview = (reasoning_content[:500] + "...") if reasoning_content and len(reasoning_content) > 500 else reasoning_content
             request_info.input_tokens = input_tokens
             request_info.output_tokens = output_tokens
             request_info.cached_tokens = cached_tokens
-            context = current_request.get()
             if context:
                 request_info.timings = context.snapshot()
 
@@ -726,12 +732,6 @@ class MonitoringService:
         
         # （_store_request_details 已移回锁内，因为需要修改共享的 request_details_cache）
 
-        # 停止原因：cost_info.stop_reason 优先（Anthropic 链路写入），
-        # 兜底从 response_message.finish_reason 提取（OpenAI 兼容链路）
-        stop_reason = (cost_info or {}).get('stop_reason')
-        if not stop_reason and isinstance(response_message, dict):
-            stop_reason = response_message.get('finish_reason') or response_message.get('stop_reason')
-
         log_entry = {
             'type': 'request_end',
             **{name: request_dict_for_recent[name] for name in ('caller_id', 'caller_name', 'conversation_id', 'gateway_request_id', 'timings', 'pricing_snapshot')},
@@ -756,7 +756,7 @@ class MonitoringService:
             'cost_info': cost_info,
             'upstream_usage': upstream_usage,
             'system_fingerprint': system_fingerprint,
-            'stop_reason': (cost_info or {}).get('stop_reason')
+            'stop_reason': stop_reason
         }
         if isinstance(_request_params, dict):
             for param_key, param_value in _request_params.items():

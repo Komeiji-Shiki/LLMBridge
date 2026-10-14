@@ -20,6 +20,7 @@ import base64
 import copy
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
+from services.protocol_events import gemini_termination
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
@@ -630,6 +631,13 @@ class DirectAPIService:
             """脱敏异常消息中的 API key。"""
             return text.replace(api_key, '***') if api_key else text
 
+        def _prepare_response(value):
+            reason, error = gemini_termination(value)
+            context = current_request.get()
+            if reason and context:
+                context.outcome['stop_reason'] = reason
+            return {**value, 'error': error} if error else value
+
         # 自定义地址的版本路径由用户决定，仅在未配置地址时使用官方默认值。
         configured_base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
         endpoint = f"{configured_base}/models/{model}:{method}{sse_param}"
@@ -958,11 +966,11 @@ class DirectAPIService:
                 if stream:
                     # 流式响应（公共 SSE 解析器；Gemini 兼容无前缀的裸 JSON 行）
                     async for chunk in _iter_sse_json_events(response, "GEMINI_NATIVE", parse_bare_json=True):
-                        yield chunk
+                        yield _prepare_response(chunk)
                 else:
                     # 非流式响应
                     response_data = await response.json()
-                    yield response_data
+                    yield _prepare_response(response_data)
         
         except asyncio.TimeoutError:
             logger.error(f"[GEMINI_NATIVE] 请求超时 (模型: {model})")
