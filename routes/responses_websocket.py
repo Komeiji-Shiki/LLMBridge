@@ -102,6 +102,34 @@ def rewrite_model(raw: str | bytes, alias: str, target: str) -> str | bytes:
     return encoded.encode("utf-8") if isinstance(raw, bytes) else encoded
 
 
+async def stop_tasks(tasks: list) -> None:
+    """取消并等待转发任务。
+
+    不用 asyncio.gather：本任务在等待期间被取消时，gather 会改抛子任务自己的
+    CancelledError（不带取消方的信息），anyio 等取消方认不出这是自己发起的
+    取消，会把它当作异常继续上抛。asyncio.wait 只传播本任务自身的取消。
+    """
+    for task in tasks:
+        task.cancel()
+    if not tasks:
+        return
+    await asyncio.wait(tasks)
+    for task in tasks:
+        if not task.cancelled():
+            task.exception()  # 结果已在主流程处理，这里只标记为已读取
+
+
+async def release(upstream, monitor) -> None:
+    """关闭上游连接并结束统计记录；调用方用 shield 保护，外层取消时照常完成。"""
+    if upstream is not None:
+        await upstream.close()
+    if monitor is not None:
+        try:
+            await monitor.close()
+        except Exception:
+            logger.warning("Responses WebSocket 统计记录未能完成。")
+
+
 @router.websocket("/v1/responses")
 async def responses_websocket(websocket: WebSocket):
     context = RequestContext()
@@ -203,19 +231,15 @@ async def responses_websocket(websocket: WebSocket):
         if accepted:
             await send_error(websocket, 502, "上游 WebSocket 连接中断或超时。")
     finally:
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        if upstream is not None:
-            await upstream.close()
-        if monitor is not None:
-            try:
-                await monitor.close()
-            except Exception:
-                logger.warning("Responses WebSocket 统计记录未能完成。")
         try:
-            await websocket.close(code=close_code)
-        except (RuntimeError, WebSocketDisconnect):
-            pass
-        current_request.reset(token)
+            try:
+                await stop_tasks(tasks)
+            finally:
+                # 被取消时也要关闭上游连接、结束统计记录，否则会遗留连接和活跃请求
+                await asyncio.shield(release(upstream, monitor))
+            try:
+                await websocket.close(code=close_code)
+            except (RuntimeError, WebSocketDisconnect):
+                pass
+        finally:
+            current_request.reset(token)

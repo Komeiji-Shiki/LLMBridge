@@ -181,3 +181,61 @@ class ResponsesWebSocketMonitoringTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CleanupCancellationTests(unittest.TestCase):
+    """连接收尾期间 handler 被取消（TestClient / 服务关闭的 cancel scope）时的行为。"""
+
+    def test_stop_tasks_keeps_callers_cancellation(self):
+        # 自己取消子任务的同一轮里调用方也被取消：gather 会改抛子任务那份不带
+        # 信息的 CancelledError，anyio 认不出是自己发起的取消而继续上抛
+        async def run():
+            loop = asyncio.get_running_loop()
+            waiter = loop.create_future()
+
+            async def forward():
+                await waiter
+
+            child = asyncio.create_task(forward())
+            await asyncio.sleep(0)
+
+            async def owner():
+                loop.call_soon(asyncio.current_task().cancel, "cancel-scope")
+                try:
+                    await ws_route.stop_tasks([child])
+                except asyncio.CancelledError as exc:
+                    return exc.args
+                return None
+
+            self.assertEqual(await asyncio.create_task(owner()), ("cancel-scope",))
+            self.assertTrue(child.cancelled())
+
+        asyncio.run(run())
+
+    def test_release_finishes_when_handler_is_cancelled(self):
+        async def run():
+            upstream = FakeUpstream()
+            closing = asyncio.Event()
+            finished = asyncio.Event()
+
+            async def close_monitor():
+                await closing.wait()
+                finished.set()
+
+            monitor = SimpleNamespace(close=AsyncMock(side_effect=close_monitor))
+
+            async def handler():
+                await asyncio.shield(ws_route.release(upstream, monitor))
+
+            task = asyncio.create_task(handler())
+            await asyncio.sleep(0)
+            task.cancel("cancel-scope")
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            # handler 已经因取消退出，统计收尾仍在独立任务里等待并最终完成
+            self.assertTrue(upstream.closed)
+            self.assertFalse(finished.is_set())
+            closing.set()
+            await asyncio.wait_for(finished.wait(), timeout=1)
+
+        asyncio.run(run())
