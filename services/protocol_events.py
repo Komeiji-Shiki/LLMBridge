@@ -28,8 +28,11 @@ def gemini_termination(value):
     """提取 Gemini 原始停止原因，将异常终止转换成可读错误。"""
     if not isinstance(value, dict):
         return None, None
-    candidate = (value.get('candidates') or [{}])[0]
-    feedback = value.get('promptFeedback') or {}
+    candidates = value.get('candidates')
+    candidate = candidates[0] if isinstance(candidates, list) and candidates else {}
+    candidate = candidate if isinstance(candidate, dict) else {}
+    feedback = value.get('promptFeedback')
+    feedback = feedback if isinstance(feedback, dict) else {}
     reason = candidate.get('finishReason') or feedback.get('blockReason')
     if not reason or reason in ('STOP', 'MAX_TOKENS', 'CONTINUATION', 'TOOL_USE',
                                 'FINISH_REASON_UNSPECIFIED', 'BLOCK_REASON_UNSPECIFIED'):

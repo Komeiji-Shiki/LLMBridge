@@ -131,13 +131,51 @@ def test_gemini_generation_reports_original_block_reason(stream):
         try:
             result = [item async for item in DirectAPIService(session).call_gemini_native_api(
                 'test-key', 'demo', [{'role': 'user', 'content': 'hello'}], stream=stream)]
-            assert result[0]['error']['reason'] == 'PROHIBITED_CONTENT'
-            assert 'provider explanation' in result[0]['error']['message']
+            assert result[-1]['error']['reason'] == 'PROHIBITED_CONTENT'
+            assert 'provider explanation' in result[-1]['error']['message']
             assert context.outcome['stop_reason'] == 'PROHIBITED_CONTENT'
         finally:
             current_request.reset(token)
 
     asyncio.run(run())
+
+
+def test_gemini_stream_termination_keeps_final_chunk_content_and_usage():
+    """终止块里的最后一段文本和用量要先交给调用方，错误作为独立事件随后发出。"""
+    from core.request_context import RequestContext, current_request
+
+    async def run():
+        context = RequestContext()
+        token = current_request.set(context)
+        session = MagicMock()
+        response = MagicMock(status=200)
+        final = {'candidates': [{'content': {'parts': [{'text': 'tail'}]}, 'finishReason': 'RECITATION'}],
+                 'usageMetadata': {'promptTokenCount': 7, 'candidatesTokenCount': 3}}
+
+        async def chunks():
+            yield ('data: ' + json.dumps(final) + '\n\n').encode()
+
+        response.content.iter_any = chunks
+        session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+        session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+        try:
+            result = [item async for item in DirectAPIService(session).call_gemini_native_api(
+                'test-key', 'demo', [{'role': 'user', 'content': 'hello'}], stream=True)]
+            assert result[0] == final
+            assert result[1] == {'error': result[1]['error']}
+            assert result[1]['error']['reason'] == 'RECITATION'
+        finally:
+            current_request.reset(token)
+
+    asyncio.run(run())
+
+
+def test_gemini_termination_ignores_malformed_candidates():
+    from services.protocol_events import gemini_termination
+    assert gemini_termination({'candidates': ['oops']}) == (None, None)
+    assert gemini_termination({'candidates': [], 'promptFeedback': 'bad'}) == (None, None)
+    reason, error = gemini_termination({'promptFeedback': {'blockReason': 'SAFETY'}})
+    assert reason == 'SAFETY' and error['code'] == 422
 
 
 def test_gemini_empty_upstream_error_reports_http_status():

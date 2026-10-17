@@ -796,15 +796,21 @@ async def handle_gemini_native_direct(
             if "error" in gemini_response:
                 error_msg = str(gemini_response.get("error"))
 
-                partial_input_tokens = 0
-                try:
-                    partial_input_tokens = estimate_message_tokens_func(
-                        openai_req.get('messages', []), model=display_name)
-                except Exception as token_err:
-                    logger.warning(f"[GEMINI_NATIVE] 错误时输入token计算失败: {token_err}")
+                # 生成被上游终止（安全拦截等）时响应里仍有已计费的 usageMetadata
+                usage_meta = gemini_response.get("usageMetadata")
+                usage_meta = usage_meta if isinstance(usage_meta, dict) else {}
+                partial_input_tokens = int(usage_meta.get("promptTokenCount") or 0)
+                partial_output_tokens = (int(usage_meta.get("candidatesTokenCount") or 0)
+                                         + int(usage_meta.get("thoughtsTokenCount") or 0))
+                if not partial_input_tokens:
+                    try:
+                        partial_input_tokens = estimate_message_tokens_func(
+                            openai_req.get('messages', []), model=display_name)
+                    except Exception as token_err:
+                        logger.warning(f"[GEMINI_NATIVE] 错误时输入token计算失败: {token_err}")
 
                 cost_info = direct_api_service.calculate_cost(
-                    input_tokens=partial_input_tokens, output_tokens=0,
+                    input_tokens=partial_input_tokens, output_tokens=partial_output_tokens,
                     pricing=pricing_config) if pricing_config else {}
 
                 if cost_info.get("total_cost"):
@@ -812,8 +818,9 @@ async def handle_gemini_native_direct(
 
                 monitoring_service.request_end(
                     request_id=request_id, success=False, error=error_msg,
-                    input_tokens=partial_input_tokens, output_tokens=0,
-                    cost_info=cost_info, full_messages=full_messages)
+                    input_tokens=partial_input_tokens, output_tokens=partial_output_tokens,
+                    cost_info=cost_info, full_messages=full_messages,
+                    upstream_usage=usage_meta or None)
                 await monitoring_service.broadcast_to_monitors({
                     "type": "request_end", "request_id": request_id, "success": False})
 
