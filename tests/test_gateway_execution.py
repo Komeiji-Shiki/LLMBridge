@@ -94,9 +94,19 @@ def test_request_cache_requires_auth_and_excludes_auth_headers(tmp_path, monkeyp
         'Authorization': 'Bearer do-not-store-this-secret', 'X-Bridge-Session-ID': 'conversation'})
     assert response.status_code == 200
     assert response.headers['x-bridge-session-id'] == 'conversation'
-    saved = store.find_response('admin', 'reply')
-    assert saved is not None
-    assert 'do-not-store-this-secret' not in json.dumps(saved['payload'])
-    assert json.loads(gzip.decompress(base64.b64decode(saved['payload']['wire_gzip_base64'])))['id'] == 'reply'
-    assert store.find_response('guest', 'reply') is None
+    from pathlib import Path
+    import sqlite3
+    from core.exchange_archive import load_exchange
+    request_id = response.headers['x-bridge-request-id']
+    archive = next(Path('logs/exchanges').glob('*/*/' + request_id + '.json.gz'))
+    saved = load_exchange(archive)
+    assert 'do-not-store-this-secret' not in json.dumps(saved)
+    assert json.loads(gzip.decompress(base64.b64decode(saved['wire_gzip_base64'])))['id'] == 'reply'
+    # 会话库只记录会话绑定，不再保存完整交换副本
+    connection = sqlite3.connect(store.path)
+    try:
+        assert [row[0] for row in connection.execute('SELECT owner FROM conversations')] == ['admin']
+        assert connection.execute('SELECT COUNT(*) FROM artifacts').fetchone()[0] == 0
+    finally:
+        connection.close()
     assert current_request.get() is None

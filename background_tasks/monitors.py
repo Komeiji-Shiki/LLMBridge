@@ -44,8 +44,16 @@ def _purge_expired_logs(monitoring_service) -> None:
     """同步清理逻辑（在线程池中执行，不阻塞事件循环）：
     - 删除 logs/ 下超过 MAX_LOG_DAYS 的日期目录（YYYYMMDD 命名，分层 JSON 日志）
     - 删除 SQLite 中超过 MAX_DB_DAYS 的请求记录（保留期更长，避免长期费用统计缩水）
+    - 删除 logs/exchanges 中超过 exchange_archive.retention_days 的完整交换归档
     """
+    from core.config_loader import CONFIG
+    from core.exchange_archive import purge_expired_exchanges
     from modules.monitoring import MonitorConfig
+
+    archive_days = (CONFIG.get('exchange_archive') or {}).get('retention_days', 0)
+    removed_archives = purge_expired_exchanges(archive_days)
+    if removed_archives:
+        logger.info(f"[LOG_CLEANER] 🧹 删除 {removed_archives} 个超过 {archive_days} 天的完整交换归档日期目录")
 
     if MonitorConfig.MAX_LOG_DAYS <= 0 and MonitorConfig.MAX_DB_DAYS <= 0:
         return  # 用户批准永久保留业务日志，不能按日期自动删除。

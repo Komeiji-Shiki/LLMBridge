@@ -68,6 +68,11 @@
     "days": 30,
     "run_on_startup": false
   },
+  // 完整交换归档（logs/exchanges/YYYYMMDD）：retention_days 为 0 时永久保留；
+  // 大于 0 时每日删除早于该天数的日期目录。重度使用每天可达数百 MB
+  "exchange_archive": {
+    "retention_days": 0
+  },
   // DeepSeek 官方 logprobs 蒸馏采集：命中 api_base_hosts 且模型名匹配时，
   // 自动给上游 /chat/completions 注入 logprobs=true、top_logprobs=20，并把
   // reasoning/content 两路 token 分布落成 raw + normalized JSONL。

@@ -118,14 +118,12 @@ class GatewayRequestMiddleware:
                                   'wire_gzip_base64': base64.b64encode(wire_archive).decode(),
                                   'timings': context.snapshot()}
                         from core.exchange_archive import save_exchange
+                        # 完整交换只写入归档；会话库仅保存后续请求会读取的状态
                         save_exchange(context, record)
                         conversation_store.touch(context.owner_id, session_key, context.model,
                                                  endpoint_identity(context.endpoint), context.credential_fingerprint)
-                        conversation_store.put(context.owner_id, session_key, 'last_exchange', record)
                         if context.artifacts:
                             conversation_store.put(context.owner_id, session_key, 'signatures', context.artifacts)
-                        if isinstance(response_object, dict) and response_object.get('id'):
-                            conversation_store.put(context.owner_id, session_key, 'response:' + response_object['id'], record)
                     await asyncio.shield(asyncio.to_thread(persist))
             except Exception:
                 logger.exception('会话缓存保存失败；完整请求日志仍由独立记录器保存')

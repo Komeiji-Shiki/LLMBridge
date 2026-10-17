@@ -113,16 +113,24 @@ async def tokenizer_trust():
 
 @router.get('/exchanges/{request_id}')
 async def download_exchange(request_id: str):
+    import gzip
     from pathlib import Path
-    from fastapi.responses import FileResponse
+    from fastapi.responses import Response
+    from core.exchange_archive import load_exchange
     if not re.fullmatch(r'[a-f0-9]{32}', request_id):
         raise HTTPException(400, '请求 ID 格式无效')
-    def find():
-        return next(Path('logs/exchanges').glob('*/*/' + request_id + '.json.gz'), None)
-    path = await asyncio.to_thread(find)
-    if path is None:
+    def build():
+        path = next(Path('logs/exchanges').glob('*/*/' + request_id + '.json.gz'), None)
+        if path is None:
+            return None
+        # 归档内 upstream_request 的共享字段是占位，下载时还原为完整记录
+        record = load_exchange(path)
+        return gzip.compress(json.dumps(record, ensure_ascii=False, separators=(',', ':')).encode(), compresslevel=6)
+    content = await asyncio.to_thread(build)
+    if content is None:
         raise HTTPException(404, '完整归档尚未生成或已被手动清理')
-    return FileResponse(path, filename=request_id + '.json.gz', media_type='application/gzip')
+    return Response(content, media_type='application/gzip',
+                    headers={'Content-Disposition': f'attachment; filename="{request_id}.json.gz"'})
 
 
 @router.post('/tokenizer_trust')

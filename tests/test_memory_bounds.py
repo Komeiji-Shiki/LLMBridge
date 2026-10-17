@@ -155,59 +155,127 @@ def test_tokenizer_cache_is_lru_bounded(monkeypatch):
     assert set(cache) == {'b', 'c'}
 
 
-def test_conversation_store_dedupes_identical_messages(tmp_path):
-    store = ConversationStore(tmp_path / 'conversations.db')
-    messages = [{'role': 'user', 'content': 'hello'}]
-    record = {
-        'request': {'model': 'm', 'messages': messages},
-        'upstream_request': {'model': 'm2', 'messages': messages},
-        'response': {'id': 'r1'},
-    }
-    store.touch('owner', 'session', 'm', 'endpoint')
-    store.put('owner', 'session', 'last_exchange', record)
+def _fill_store(store, sessions=40, size=20000):
+    import os
+    for index in range(sessions):
+        store.touch('owner', f's{index}', 'm', 'endpoint')
+        store.put('owner', f's{index}', 'signatures', {'blob': os.urandom(size).hex()})
 
-    restored = store.get('owner', 'session', 'last_exchange')
-    assert restored['upstream_request']['messages'] == messages
-    assert restored['upstream_request']['model'] == 'm2'
-    assert '_messages_in_request' not in restored['upstream_request']
 
+def _freelist(path):
+    import sqlite3
+    connection = sqlite3.connect(path)
+    try:
+        return connection.execute('PRAGMA freelist_count').fetchone()[0]
+    finally:
+        connection.close()
+
+
+def test_conversation_store_purges_legacy_exchange_snapshots(tmp_path):
     import gzip
     import sqlite3
 
-    connection = sqlite3.connect(store.path)
+    path = tmp_path / 'conversations.db'
+    legacy = sqlite3.connect(path)
+    legacy.executescript('''
+        CREATE TABLE conversations (
+            owner TEXT NOT NULL, session TEXT NOT NULL, model TEXT NOT NULL,
+            endpoint TEXT NOT NULL, credential TEXT NOT NULL DEFAULT '',
+            touched REAL NOT NULL, PRIMARY KEY(owner, session));
+        CREATE TABLE artifacts (
+            owner TEXT NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL,
+            PRIMARY KEY(owner, session, key));
+    ''')
+    payload = gzip.compress(json.dumps({'kept': True}).encode())
+    legacy.execute("INSERT INTO conversations VALUES('owner','session','m','endpoint','',9e18)")
+    legacy.executemany('INSERT INTO artifacts VALUES(?,?,?,?)', [
+        ('owner', 'session', key, payload)
+        for key in ('last_exchange', 'response:abc', 'signatures', 'reasoning:x')
+    ])
+    legacy.commit()
+    legacy.close()
+
+    store = ConversationStore(path)
+    assert store.get('owner', 'session', 'signatures') == {'kept': True}
+    connection = sqlite3.connect(path)
     try:
-        payload = connection.execute(
-            "SELECT payload FROM artifacts WHERE key='last_exchange'"
-        ).fetchone()[0]
+        keys = {row[0] for row in connection.execute('SELECT key FROM artifacts')}
+        version = connection.execute('PRAGMA user_version').fetchone()[0]
     finally:
         connection.close()
-    stored = json.loads(gzip.decompress(payload))
-    assert 'messages' not in stored['upstream_request']
-    assert stored['upstream_request']['_messages_in_request'] is True
+    assert keys == {'signatures', 'reasoning:x'}
+    assert version >= 1
+
+
+def test_reclaim_returns_free_pages_to_filesystem(tmp_path):
+    store = ConversationStore(tmp_path / 'conversations.db')
+    _fill_store(store)
+    with store.connection() as connection:
+        connection.execute('DELETE FROM conversations')
+    before = _freelist(store.path)
+    assert before > 100
+
+    # 小批次也要回收全部空闲页（execute() 单步执行时每批只回收 1 页）
+    assert store.reclaim(pages=64) == before
+    assert _freelist(store.path) == 0
+    assert store.storage_stats()['free_bytes'] == 0
+
+
+def test_reclaim_respects_batch_budget(tmp_path):
+    store = ConversationStore(tmp_path / 'conversations.db')
+    _fill_store(store)
+    with store.connection() as connection:
+        connection.execute('DELETE FROM conversations')
+    before = _freelist(store.path)
+    assert store.reclaim(pages=10, max_batches=2) == 20
+    assert _freelist(store.path) == before - 20
 
 
 def test_compact_copy_is_valid_and_enables_incremental_vacuum(tmp_path):
     store = ConversationStore(tmp_path / 'conversations.db')
     store.touch('owner', 'session', 'm', 'endpoint')
-    store.put('owner', 'session', 'last_exchange', {
-        'request': {'messages': [{'role': 'user', 'content': 'x' * 5000}]},
-        'upstream_request': {'messages': [{'role': 'user', 'content': 'x' * 5000}]},
-        'response': None,
-    })
+    store.put('owner', 'session', 'signatures', {'data': 'x' * 5000})
 
     target = store.compact_copy(tmp_path / 'compacted.db')
     copied = ConversationStore(target)
     stats = copied.storage_stats()
     assert stats['auto_vacuum'] == 2
     assert stats['free_bytes'] == 0
-    assert copied.get('owner', 'session', 'last_exchange') is not None
+    assert copied.get('owner', 'session', 'signatures') == {'data': 'x' * 5000}
 
 
-def test_reclaim_is_safe_on_non_autovacuum_database(tmp_path):
-    store = ConversationStore(tmp_path / 'conversations.db')
-    store.touch('owner', 'session', 'm', 'endpoint')
-    # 新库已启用 auto_vacuum；此处只验证 reclaim 能正常执行并返回设置
-    assert store.reclaim(pages=8) in (0, 1, 2)
+def test_exchange_archive_stores_shared_request_fields_once(tmp_path):
+    import gzip
+    from types import SimpleNamespace
+    from core.exchange_archive import SAME_AS_REQUEST, load_exchange, save_exchange
+
+    messages = [{'role': 'user', 'content': 'hello ' * 200}]
+    tools = [{'name': 'Bash', 'description': 'run'}]
+    record = {
+        'request': {'model': 'alias', 'messages': messages, 'tools': tools},
+        'upstream_request': {'model': 'upstream', 'tools': tools, 'messages': messages, 'stream': True},
+        'response': {'id': 'r1'},
+    }
+    context = SimpleNamespace(request_id='a' * 32, owner_id='owner', model='alias', session_id='s')
+    path = save_exchange(context, record, root=tmp_path)
+
+    stored = json.loads(gzip.decompress(path.read_bytes()))
+    assert stored['upstream_request'] == {
+        'model': 'upstream', 'tools': SAME_AS_REQUEST, 'messages': SAME_AS_REQUEST, 'stream': True}
+    restored = load_exchange(path)
+    assert restored['upstream_request'] == record['upstream_request']
+    assert list(restored['upstream_request']) == ['model', 'tools', 'messages', 'stream']
+
+
+def test_exchange_archive_retention_only_removes_old_date_directories(tmp_path):
+    from datetime import date
+    from core.exchange_archive import purge_expired_exchanges
+
+    for name in ('20261001', '20261010', '20261012', '20261018', 'notes'):
+        (tmp_path / name).mkdir()
+    assert purge_expired_exchanges(0, root=tmp_path, today=date(2026, 10, 18)) == 0
+    assert purge_expired_exchanges(7, root=tmp_path, today=date(2026, 10, 18)) == 2
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ['20261012', '20261018', 'notes']
 
 
 def test_local_tokenizer_does_not_import_transformers_or_torch():

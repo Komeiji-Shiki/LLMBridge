@@ -4,7 +4,7 @@ Only cache records expire. Historical request logs are not deleted here.
 
 磁盘空洞治理：
 - 新库创建时启用 incremental auto-vacuum；
-- 每小时清理后按页预算执行 incremental_vacuum 并截断 WAL；
+- 每小时清理后分批执行 incremental_vacuum，再截断 WAL；
 - 旧库（auto_vacuum=NONE）需要一次完整 VACUUM，见 compact()。
 """
 from contextlib import contextmanager
@@ -13,58 +13,64 @@ import json
 import logging
 from pathlib import Path
 import sqlite3
+import threading
 import time
 
 logger = logging.getLogger(__name__)
 
-# last_exchange / response:<id> 里的 upstream_request 通常与 request 共用同一份
-# messages。存储时只保留一份，读取时再还原，避免每条记录把完整历史存两遍。
-_MESSAGES_IN_REQUEST = '_messages_in_request'
-# 每小时最多回收的页数（每页 4KB，4096 页约 16MB），避免长时间持锁。
-_RECLAIM_PAGES_PER_RUN = 4096
-
-
-def _dedupe_record(record):
-    """上游请求与原始请求的 messages 完全相同时，存储侧去掉重复副本。"""
-    if not isinstance(record, dict):
-        return record
-    request = record.get('request')
-    upstream = record.get('upstream_request')
-    if not isinstance(request, dict) or not isinstance(upstream, dict):
-        return record
-    messages = request.get('messages')
-    if messages is None or upstream.get('messages') != messages:
-        return record
-    stored_upstream = dict(upstream)
-    stored_upstream.pop('messages', None)
-    stored_upstream[_MESSAGES_IN_REQUEST] = True
-    stored = dict(record)
-    stored['upstream_request'] = stored_upstream
-    return stored
-
-
-def _restore_record(record):
-    """还原 _dedupe_record 去掉的 messages，读取方看到的结构保持不变。"""
-    if not isinstance(record, dict):
-        return record
-    upstream = record.get('upstream_request')
-    if not isinstance(upstream, dict) or not upstream.get(_MESSAGES_IN_REQUEST):
-        return record
-    request = record.get('request')
-    if not isinstance(request, dict) or 'messages' not in request:
-        return record
-    restored_upstream = dict(upstream)
-    restored_upstream.pop(_MESSAGES_IN_REQUEST, None)
-    restored_upstream['messages'] = request.get('messages')
-    restored = dict(record)
-    restored['upstream_request'] = restored_upstream
-    return restored
+# PRAGMA user_version 记录的库结构版本。
+# 1：清除旧版写入的 last_exchange / response:<id>。它们从未被读取，
+#    同样的完整交换永久保存在 logs/exchanges。
+_SCHEMA_VERSION = 1
+# 每批回收的页数（每页 4KB，4096 页约 16MB）。批次之间释放写锁，
+# 其他写入可以穿插执行；单次清理最多回收 _RECLAIM_MAX_BATCHES 批。
+_RECLAIM_PAGES_PER_BATCH = 4096
+_RECLAIM_MAX_BATCHES = 256
+# TRUNCATE checkpoint 等待读者期间会挡住新写入，只给很短的等待时间。
+_CHECKPOINT_BUSY_TIMEOUT_MS = 2000
 
 
 class ConversationStore:
     def __init__(self, path='data/conversations.db', idle_seconds=3 * 86400):
         self.path = Path(path)
         self.idle_seconds = idle_seconds
+        self._initialize_lock = threading.Lock()
+
+    def _initialize(self, connection):
+        """建表与结构迁移；user_version 达到当前版本后不再执行。
+
+        库文件被删除后 user_version 回到 0，下一次连接会自动重建。
+        """
+        # 新库必须在建表前设置 auto_vacuum；旧库需要一次 VACUUM 才会生效。
+        if connection.execute('PRAGMA page_count').fetchone()[0] == 0:
+            connection.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        connection.execute('PRAGMA journal_mode=WAL')
+        connection.executescript('''
+            CREATE TABLE IF NOT EXISTS conversations (
+                owner TEXT NOT NULL, session TEXT NOT NULL, model TEXT NOT NULL,
+                endpoint TEXT NOT NULL, credential TEXT NOT NULL DEFAULT '',
+                touched REAL NOT NULL, PRIMARY KEY(owner, session));
+            CREATE TABLE IF NOT EXISTS artifacts (
+                owner TEXT NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL,
+                PRIMARY KEY(owner, session, key),
+                FOREIGN KEY(owner, session) REFERENCES conversations(owner, session) ON DELETE CASCADE);
+            CREATE INDEX IF NOT EXISTS idx_conversations_idle ON conversations(touched);
+            CREATE TABLE IF NOT EXISTS response_prefixes (
+                owner TEXT NOT NULL, scope TEXT NOT NULL, prefix TEXT NOT NULL,
+                payload BLOB, digest TEXT NOT NULL, touched REAL NOT NULL,
+                PRIMARY KEY(owner, scope, prefix));
+            CREATE INDEX IF NOT EXISTS idx_response_prefixes_idle ON response_prefixes(touched);
+        ''')
+        version = connection.execute('PRAGMA user_version').fetchone()[0]
+        if version < 1:
+            deleted = connection.execute(
+                "DELETE FROM artifacts WHERE key='last_exchange' OR key LIKE 'response:%'"
+            ).rowcount
+            if deleted:
+                logger.info('[CONV_CACHE] 已清除 %s 条无人读取的旧版交换快照', deleted)
+        if version < _SCHEMA_VERSION:
+            connection.execute(f'PRAGMA user_version={_SCHEMA_VERSION}')
+        connection.commit()
 
     @contextmanager
     def connection(self):
@@ -72,30 +78,11 @@ class ConversationStore:
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         try:
-            # 新库必须在建表前设置 auto_vacuum；旧库需要一次 VACUUM 才会生效。
-            is_new_database = connection.execute(
-                'PRAGMA page_count'
-            ).fetchone()[0] == 0
-            if is_new_database:
-                connection.execute('PRAGMA auto_vacuum=INCREMENTAL')
-            connection.execute('PRAGMA journal_mode=WAL')
+            # 只读一次库头；建表脚本不再随每次读写重复执行
+            if connection.execute('PRAGMA user_version').fetchone()[0] < _SCHEMA_VERSION:
+                with self._initialize_lock:
+                    self._initialize(connection)
             connection.execute('PRAGMA foreign_keys=ON')
-            connection.executescript('''
-                CREATE TABLE IF NOT EXISTS conversations (
-                    owner TEXT NOT NULL, session TEXT NOT NULL, model TEXT NOT NULL,
-                    endpoint TEXT NOT NULL, credential TEXT NOT NULL DEFAULT '',
-                    touched REAL NOT NULL, PRIMARY KEY(owner, session));
-                CREATE TABLE IF NOT EXISTS artifacts (
-                    owner TEXT NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL,
-                    PRIMARY KEY(owner, session, key),
-                    FOREIGN KEY(owner, session) REFERENCES conversations(owner, session) ON DELETE CASCADE);
-                CREATE INDEX IF NOT EXISTS idx_conversations_idle ON conversations(touched);
-                CREATE TABLE IF NOT EXISTS response_prefixes (
-                    owner TEXT NOT NULL, scope TEXT NOT NULL, prefix TEXT NOT NULL,
-                    payload BLOB, digest TEXT NOT NULL, touched REAL NOT NULL,
-                    PRIMARY KEY(owner, scope, prefix));
-                CREATE INDEX IF NOT EXISTS idx_response_prefixes_idle ON response_prefixes(touched);
-            ''')
             yield connection
             connection.commit()
         finally:
@@ -116,14 +103,7 @@ class ConversationStore:
             else:
                 connection.execute('INSERT INTO conversations VALUES(?,?,?,?,?,?)', (owner, session, model, endpoint, credential, now))
 
-    def binding(self, owner, session):
-        with self.connection() as connection:
-            row = connection.execute('SELECT * FROM conversations WHERE owner=? AND session=? AND touched>?',
-                                     (owner, session, time.time() - self.idle_seconds)).fetchone()
-            return dict(row) if row else None
-
     def put(self, owner, session, key, payload):
-        payload = _dedupe_record(payload)
         compressed = gzip.compress(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode(), compresslevel=6)
         with self.connection() as connection:
             connection.execute('INSERT INTO artifacts VALUES(?,?,?,?) ON CONFLICT(owner,session,key) DO UPDATE SET payload=excluded.payload',
@@ -134,47 +114,43 @@ class ConversationStore:
             row = connection.execute('''SELECT a.payload FROM artifacts a JOIN conversations c USING(owner,session)
                 WHERE a.owner=? AND a.session=? AND a.key=? AND c.touched>?''',
                 (owner, session, key, time.time() - self.idle_seconds)).fetchone()
-            return _restore_record(json.loads(gzip.decompress(row['payload']))) if row else None
-
-    def find_response(self, owner, response_id):
-        with self.connection() as connection:
-            row = connection.execute('''SELECT c.*, a.payload FROM artifacts a JOIN conversations c USING(owner,session)
-                WHERE a.owner=? AND a.key=? AND c.touched>? ORDER BY c.touched DESC LIMIT 1''',
-                (owner, 'response:' + response_id, time.time() - self.idle_seconds)).fetchone()
-            if row:
-                result = dict(row)
-                result['payload'] = _restore_record(
-                    json.loads(gzip.decompress(result['payload']))
-                )
-                return result
+            return json.loads(gzip.decompress(row['payload'])) if row else None
 
     def cleanup(self):
+        cutoff = time.time() - self.idle_seconds
         with self.connection() as connection:
-            connection.execute('DELETE FROM response_prefixes WHERE touched<=?', (time.time() - self.idle_seconds,))
-            deleted = connection.execute('DELETE FROM conversations WHERE touched<=?', (time.time() - self.idle_seconds,)).rowcount
+            connection.execute('DELETE FROM response_prefixes WHERE touched<=?', (cutoff,))
+            deleted = connection.execute('DELETE FROM conversations WHERE touched<=?', (cutoff,)).rowcount
         self.reclaim()
         return deleted
 
-    def reclaim(self, pages=_RECLAIM_PAGES_PER_RUN):
-        """回收空洞并截断 WAL。
+    def reclaim(self, pages=_RECLAIM_PAGES_PER_BATCH, max_batches=_RECLAIM_MAX_BATCHES):
+        """分批回收空闲页并截断 WAL，返回本次回收的页数。
 
-        只有启用了 auto_vacuum 的库才能真正把尾页还给文件系统；旧库返回
-        auto_vacuum=0，需要先执行一次 compact()。
+        只有启用了 auto_vacuum 的库才能把空闲页还给文件系统；旧库需要
+        先执行一次 compact()，这里只做 WAL 截断。
         """
         connection = sqlite3.connect(self.path, timeout=30)
         try:
-            connection.execute('PRAGMA busy_timeout=30000')
-            auto_vacuum = connection.execute('PRAGMA auto_vacuum').fetchone()[0]
-            if auto_vacuum:
-                # 不能放在事务里执行
-                connection.commit()
-                connection.execute(f'PRAGMA incremental_vacuum({int(pages)})')
+            freed = 0
+            if connection.execute('PRAGMA auto_vacuum').fetchone()[0]:
+                for _ in range(max_batches):
+                    before = connection.execute('PRAGMA freelist_count').fetchone()[0]
+                    if not before:
+                        break
+                    # execute() 只单步执行这条 PRAGMA，每次只回收 1 页；
+                    # executescript 会把语句执行到底，并在批次结束时提交。
+                    connection.executescript(f'PRAGMA incremental_vacuum({int(pages)});')
+                    after = connection.execute('PRAGMA freelist_count').fetchone()[0]
+                    freed += before - after
+                    if after >= before:
+                        break
+            connection.execute(f'PRAGMA busy_timeout={_CHECKPOINT_BUSY_TIMEOUT_MS}')
             try:
-                connection.commit()
                 connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
             except sqlite3.Error as exc:
                 logger.debug('WAL checkpoint 跳过: %s', exc)
-            return auto_vacuum
+            return freed
         finally:
             connection.close()
 
@@ -214,7 +190,8 @@ class ConversationStore:
     def compact_copy(self, target):
         """在线生成压缩副本（VACUUM INTO），不阻塞现有写入。
 
-        副本是复制开始时的快照；替换正式库需要先停掉服务。
+        副本是复制开始时的快照。替换正式库需要先停掉服务，并同时删除
+        旧库的 -wal / -shm 文件，否则残留 WAL 可能被回放到新文件上。
         """
         target = Path(target)
         if target.exists():
