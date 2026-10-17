@@ -1145,6 +1145,16 @@
                             多轮对话可命中上游缓存大幅降低成本（缓存读取约为原价 10%，写入约 1.25 倍）。
                             客户端已自带 cache_control 时不重复注入。仅 Anthropic 原生格式生效
                         </small>
+</div><div class="form-group" data-direct-setting="" id="anthropic-tool-name-rewrite-config" style="display: none;">
+<label class="form-label">
+<input id="anthropic-tool-name-rewrite" style="margin-right: 8px;" type="checkbox">
+                            工具名改写（绕过中转站工具拦截）
+                        </input></label>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            部分中转站会按名称拦截 <code>read_file</code> 等工具，把客户端参数换成自己的格式（如只剩 <code>file_path</code>）。
+                            开启后发往上游时把 <code>read_file</code> 改名为 <code>read_workspace_file</code>，响应中的工具调用再改回原名，客户端无感知。
+                            可在模型 JSON 中用 <code>tool_name_rewrite_map</code> 自定义映射。仅 Anthropic 原生格式生效
+                        </small>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 15px;">
 <div class="settings-block-title">
 <h4>🔄 消息转换</h4>

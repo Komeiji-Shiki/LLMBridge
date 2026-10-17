@@ -421,6 +421,9 @@ function toggleThinkingOptions() {
     // 自动提示词缓存仅对 Anthropic 原生上游显示
     const autoCacheDiv = document.getElementById('anthropic-auto-cache-config');
     if (autoCacheDiv) autoCacheDiv.style.display = (apiType === 'anthropic_native') ? 'block' : 'none';
+    // 工具名改写同样只对 Anthropic 原生上游显示
+    const toolNameRewriteDiv = document.getElementById('anthropic-tool-name-rewrite-config');
+    if (toolNameRewriteDiv) toolNameRewriteDiv.style.display = (apiType === 'anthropic_native') ? 'block' : 'none';
     if (val === 'true') {
         // 启用思考：显示控制方式选择器，按控制方式切换 budget / effort
         const controlMode = document.getElementById('thinking-control')?.value || 'budget';

@@ -51,6 +51,11 @@ from converters.anthropic_openai import (
     sanitize_anthropic_thinking_blocks,
 )
 from utils.json_unescape import AnthropicSSEToolArgsRewriter
+from utils.tool_name_rewrite import (
+    apply_tool_name_rewrite,
+    describe_restore_map,
+    restore_tool_names_in_response,
+)
 
 # 全局配置与状态
 from core.config_loader import (
@@ -791,6 +796,11 @@ async def _handle_anthropic_passthrough(
         passthrough_body.update(copy.deepcopy(extra_body_params))
         logger.info(f"[ANTHROPIC_COMPAT] 已合并附加主体参数: {list(extra_body_params.keys())}")
 
+    # 工具名改写：在合并参数之后执行（覆盖 extra_body 注入的工具），
+    # 在自动缓存之前执行（断点打在最终发送的对象上）
+    tool_name_restore = apply_tool_name_rewrite(
+        passthrough_body, endpoint_config, log_tag="ANTHROPIC_COMPAT")
+
     # 自动提示词缓存：在 custom_params 之后注入，避免断点被顶层字段覆盖丢失
     apply_auto_cache_control(passthrough_body, endpoint_config, log_tag="ANTHROPIC_COMPAT")
 
@@ -804,6 +814,8 @@ async def _handle_anthropic_passthrough(
         monitor_extra["custom_params"] = custom_params
     if isinstance(extra_body_params, dict) and extra_body_params:
         monitor_extra["extra_body_params"] = extra_body_params
+    if tool_name_restore:
+        monitor_extra["tool_name_rewrite"] = describe_restore_map(tool_name_restore)
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -830,8 +842,9 @@ async def _handle_anthropic_passthrough(
             success = True
             error_msg = None
             first_chunk = True
-            # 把 input_json_delta 中的 \uXXXX 转义提前解码为明文再透传下游
-            sse_rewriter = AnthropicSSEToolArgsRewriter()
+            # 把 input_json_delta 中的 \uXXXX 转义提前解码为明文再透传下游；
+            # 启用工具名改写时同时把 tool_use 别名恢复为客户端原名
+            sse_rewriter = AnthropicSSEToolArgsRewriter(tool_name_restore=tool_name_restore)
             # 旁路解析状态：累积响应内容用于监控记录
             stream_state = {
                 "content_parts": [],
@@ -1002,6 +1015,9 @@ async def _handle_anthropic_passthrough(
                 error_response_payload = build_anthropic_error_payload(
                     err_obj if isinstance(err_obj, dict) else response_json)
             elif isinstance(response_json, dict):
+                # 工具名改写：别名恢复为原名后重新序列化，监控与客户端看到同一份数据
+                if restore_tool_names_in_response(response_json, tool_name_restore):
+                    response_buf = bytearray(json.dumps(response_json, ensure_ascii=False).encode("utf-8"))
                 # 成功响应：提取内容用于监控记录
                 resp_content, resp_reasoning, resp_tool_calls, resp_input_tokens, resp_output_tokens, resp_cached_tokens = \
                     extract_anthropic_response_content(response_json)

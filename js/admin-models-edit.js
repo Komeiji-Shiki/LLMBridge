@@ -48,6 +48,7 @@ function showAddModelModal() {
     document.getElementById('oai-thinking-effort').value = '';
     document.getElementById('thinking-separator').value = '';
     document.getElementById('anthropic-auto-cache').checked = false;
+    document.getElementById('anthropic-tool-name-rewrite').checked = false;
     toggleThinkingOptions();
     document.getElementById('pricing-input').value = '';
     document.getElementById('pricing-output').value = '';
@@ -184,6 +185,8 @@ function fillModelForm(config) {
         document.getElementById('oai-thinking-effort').value = config.oai_thinking_effort || '';
         // 自动提示词缓存（仅 Anthropic 原生格式消费）
         document.getElementById('anthropic-auto-cache').checked = config.auto_cache === true;
+        // 工具名改写（仅 Anthropic 原生格式消费）
+        document.getElementById('anthropic-tool-name-rewrite').checked = config.tool_name_rewrite === true;
         toggleThinkingOptions();
         document.getElementById('thinking-separator').value = config.thinking_separator || '';
         
@@ -404,6 +407,11 @@ async function saveModel() {
         // 自动提示词缓存：仅 Anthropic 原生格式生效
         if (apiType === 'anthropic_native' && document.getElementById('anthropic-auto-cache').checked) {
             config.auto_cache = true;
+        }
+
+        // 工具名改写：仅 Anthropic 原生格式生效；自定义映射 tool_name_rewrite_map 不在表单管理范围内，保存时保留
+        if (apiType === 'anthropic_native' && document.getElementById('anthropic-tool-name-rewrite').checked) {
+            config.tool_name_rewrite = true;
         }
 
         // verbosity 对 OpenAI Chat 和 Responses 原生上游均可转换

@@ -31,6 +31,12 @@ from utils.task_registry import spawn
 from converters.anthropic_openai import extract_anthropic_usage_tokens
 from utils.api_pricing import chat_cache_details
 from utils.json_unescape import StreamingUnicodeUnescaper
+from utils.tool_name_rewrite import (
+    apply_tool_name_rewrite,
+    describe_restore_map,
+    restore_tool_name,
+    restore_tool_names_in_response,
+)
 from ._direct_api_utils import (
     detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
@@ -847,9 +853,12 @@ def build_openai_stream_from_anthropic(
     openai_req: dict,
     full_messages: list,
     estimate_tokens_func=None,
-    thinking_separator: Optional[str] = None
+    thinking_separator: Optional[str] = None,
+    tool_name_restore: Optional[Dict[str, str]] = None
 ):
     """将 Anthropic SSE 流转换为 OpenAI SSE 流。
+
+    tool_name_restore：工具名改写的 别名 → 原名 映射，tool_use 名称按此恢复。
 
     Anthropic 事件序列：
       message_start → content_block_start → content_block_delta(可多次)
@@ -953,7 +962,7 @@ def build_openai_stream_from_anthropic(
                             oai_idx = next_oai_idx
                             next_oai_idx += 1
                             tool_id = cb.get("id", f"call_{uuid.uuid4().hex[:24]}")
-                            tool_name = cb.get("name", "")
+                            tool_name = restore_tool_name(cb.get("name", ""), tool_name_restore)
                             active_tool = {
                                 "anthropic_idx": idx,
                                 "oai_idx": oai_idx,
@@ -1321,6 +1330,10 @@ async def handle_anthropic_native_from_openai(
         anthropic_body.update(copy.deepcopy(extra_body_params))
         logger.info(f"[OAI_TO_ANTHROPIC] 已合并附加主体参数: {list(extra_body_params.keys())}")
 
+    # ── 工具名改写（合并参数之后、自动缓存之前）──
+    tool_name_restore = apply_tool_name_rewrite(
+        anthropic_body, endpoint_config, log_tag="OAI_TO_ANTHROPIC")
+
     # ── 自动提示词缓存（在 custom_params 之后注入，避免断点被顶层字段覆盖丢失）──
     anthropic_body = apply_auto_cache_control(anthropic_body, endpoint_config)
 
@@ -1360,6 +1373,8 @@ async def handle_anthropic_native_from_openai(
         val = endpoint_config.get(key)
         if val is not None and val != "":
             monitor_extra[key] = val
+    if tool_name_restore:
+        monitor_extra["tool_name_rewrite"] = describe_restore_map(tool_name_restore)
 
     monitoring_service.request_start(
         request_id=request_id,
@@ -1486,7 +1501,8 @@ async def handle_anthropic_native_from_openai(
             estimate_tokens_func=estimate_tokens_func,
             openai_req=openai_req,
             full_messages=full_messages,
-            thinking_separator=thinking_separator
+            thinking_separator=thinking_separator,
+            tool_name_restore=tool_name_restore
         )
 
     else:
@@ -1528,6 +1544,9 @@ async def handle_anthropic_native_from_openai(
                 await monitoring_service.broadcast_to_monitors({
                     "type": "request_end", "request_id": request_id, "success": False})
                 return JSONResponse(status_code=status_code, content=normalized)
+
+            # 工具名改写：先把别名恢复为原名，再提取监控内容和转换格式
+            restore_tool_names_in_response(response_json, tool_name_restore)
 
             # 提取内容用于监控
             resp_content, resp_reasoning, resp_tool_calls, resp_input_tokens, resp_output_tokens, resp_cached_tokens = \

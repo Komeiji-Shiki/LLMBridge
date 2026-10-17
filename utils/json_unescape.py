@@ -220,15 +220,17 @@ class AnthropicSSEToolArgsRewriter:
     - 只重写 input_json_delta 事件的 partial_json，其余字节原样转发
     - 每个 content block index 维护独立的解码器状态
     - content_block_stop 时冲刷残留：不完整转义原样补发为一个附加 delta
+    - tool_name_restore（别名 → 原名）非空时，content_block_start 中的 tool_use 名称恢复为原名
     """
 
-    __slots__ = ("_buf", "_unescapers")
+    __slots__ = ("_buf", "_unescapers", "_tool_name_restore")
 
-    def __init__(self):
+    def __init__(self, tool_name_restore=None):
         # 🔧 性能：bytearray 缓冲。bytes 的 += 每次全量复制（CPython 仅对 str
         # 有原地优化），长流式响应下逐 chunk 退化为 O(n²)
         self._buf = bytearray()
         self._unescapers = {}
+        self._tool_name_restore = tool_name_restore or {}
 
     def feed(self, chunk: bytes) -> bytes:
         """处理一段字节，返回可转发的完整事件块（可能为空，等待更多字节）。"""
@@ -294,6 +296,13 @@ class AnthropicSSEToolArgsRewriter:
             cb = event.get("content_block")
             if isinstance(cb, dict) and cb.get("type") == "tool_use":
                 self._unescapers[event.get("index", 0)] = StreamingUnicodeUnescaper()
+                original = self._tool_name_restore.get(cb.get("name"))
+                if original:
+                    cb["name"] = original
+                    line_end = b"\r" if lines[data_idx].endswith(b"\r") else b""
+                    lines[data_idx] = b"data: " + json.dumps(
+                        event, ensure_ascii=False).encode("utf-8") + line_end
+                    return b"\n".join(lines)
             return block
 
         if etype == "content_block_delta":
