@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import codecs
 import copy
-import hashlib
 import json
 import logging
 from core.endpoint_observer import observe_endpoint
@@ -30,7 +29,7 @@ from core.constants import TimeoutDefaults
 from core.errors import BadRequestError
 from core.model_archive import is_model_archived
 from modules.monitoring import monitoring_service
-from utils.monitor_params import build_monitor_request_params
+from utils.monitor_params import build_monitor_request_params, summarize_tools
 
 from . import api_routes as _chat_api
 from ._direct_api_utils import (
@@ -145,25 +144,8 @@ def _summarize_tools_for_monitor(tools: Any) -> Dict[str, Any]:
 
     上游隐式 prompt cache 把 tools 计入缓存前缀，顺序或定义差一个字节
     就会整体 miss；日志只记 tools_count 会留下排查盲区，记 sha256 + names 补上。
-    顺序参与哈希（不排序），因为工具顺序变化同样破坏缓存前缀。
     """
-    if not isinstance(tools, list):
-        return {}
-    try:
-        canonical = json.dumps(tools, ensure_ascii=False, separators=(",", ":"), sort_keys=False, default=str)
-    except (TypeError, ValueError):
-        return {"tools_count": len(tools)}
-    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    names: List[str] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        name = tool.get("name")
-        if not name and isinstance(tool.get("function"), dict):
-            name = tool["function"].get("name")
-        if isinstance(name, str) and name:
-            names.append(name)
-    return {"tools_count": len(tools), "tools_sha256": digest, "tools_names": names}
+    return summarize_tools(tools) if isinstance(tools, list) else {}
 
 
 def _extract_reasoning_summary_text(summary: Any) -> str:

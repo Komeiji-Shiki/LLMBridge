@@ -15,6 +15,7 @@ tools 定义（Claude Code 单条请求的 system + tools 可达数百 KB）。�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Iterable
 
@@ -45,6 +46,8 @@ _MAX_DICT_ITEMS = 100
 _MAX_DEPTH = 6
 _MAX_PARAM_BYTES = 24 * 1024
 _MAX_TOOLS_BYTES = 12 * 1024
+# Gemini 把函数声明放在 functionDeclarations（REST 驼峰）/ function_declarations 列表里
+_TOOL_DECLARATION_KEYS = ("functionDeclarations", "function_declarations")
 
 
 def _is_sensitive_key(key: Any) -> bool:
@@ -173,6 +176,28 @@ def _compact_schema(schema: dict) -> dict:
     return result
 
 
+def _compact_wrapped_tools(tool: dict, compact_one) -> dict:
+    """OpenAI Chat 把定义包在 function 里，Gemini 用 functionDeclarations 列表。"""
+    wrapped = {}
+    if isinstance(tool.get("function"), dict):
+        wrapped["function"] = compact_one(tool["function"])
+    for list_key in _TOOL_DECLARATION_KEYS:
+        declarations = tool.get(list_key)
+        if isinstance(declarations, list):
+            wrapped[list_key] = [compact_one(item) for item in declarations[:_MAX_LIST_ITEMS]]
+            if len(declarations) > _MAX_LIST_ITEMS:
+                wrapped[list_key].append(f"…[+{len(declarations) - _MAX_LIST_ITEMS} items]")
+    return wrapped
+
+
+def _compact_builtin_tool(tool: dict) -> dict:
+    """googleSearch / codeExecution 这类内置工具只有配置键，没有名称和参数。"""
+    return {
+        str(key): _compact_value(value, depth=3, key=key)
+        for key, value in list(tool.items())[:_MAX_DICT_ITEMS]
+    }
+
+
 def _compact_tool(tool: Any) -> Any:
     if not isinstance(tool, dict):
         return _compact_value(tool, depth=2)
@@ -182,6 +207,7 @@ def _compact_tool(tool: Any) -> Any:
             compact_tool[tool_key] = _compact_value(
                 tool[tool_key], depth=2, key=tool_key
             )
+    compact_tool.update(_compact_wrapped_tools(tool, _compact_tool))
     description = tool.get("description")
     if isinstance(description, str) and description:
         compact_tool["description"] = _truncate_text(
@@ -193,7 +219,7 @@ def _compact_tool(tool: Any) -> Any:
         if isinstance(schema, dict):
             compact_tool[schema_key] = _compact_schema(schema)
             break
-    return compact_tool
+    return compact_tool or _compact_builtin_tool(tool)
 
 
 def _compact_tool_summary(tool: Any) -> Any:
@@ -204,6 +230,7 @@ def _compact_tool_summary(tool: Any) -> Any:
     for tool_key in ("type", "name"):
         if tool_key in tool:
             result[tool_key] = _compact_value(tool[tool_key], depth=2, key=tool_key)
+    result.update(_compact_wrapped_tools(tool, _compact_tool_summary))
     description = tool.get("description")
     if isinstance(description, str) and description:
         result["description"] = _truncate_text(
@@ -218,7 +245,79 @@ def _compact_tool_summary(tool: Any) -> Any:
                 "property_count": len(properties) if isinstance(properties, dict) else 0,
             }
             break
-    return result
+    return result or {str(key): "…" for key in list(tool)[:_MAX_DICT_ITEMS]}
+
+
+def summarize_tools(tools: list) -> dict:
+    """完整 tools 定义的摘要：数量、规范哈希与名称序列。
+
+    顺序参与哈希（不排序）：工具顺序变化同样会破坏上游缓存前缀。
+    """
+    raw = json.dumps(tools, ensure_ascii=False, separators=(",", ":"), default=str)
+    return {
+        "tools_count": len(tools),
+        "tools_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "tools_names": _tool_names(tools),
+    }
+
+
+def _tool_names(tools: list) -> list:
+    names = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        name = function.get("name") if isinstance(function, dict) else tool.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+            continue
+        declarations = next((tool[key] for key in _TOOL_DECLARATION_KEYS
+                             if isinstance(tool.get(key), list)), None)
+        if declarations is not None:
+            names.extend(item["name"] for item in declarations
+                         if isinstance(item, dict) and isinstance(item.get("name"), str))
+        elif isinstance(tool.get("type"), str):
+            names.append(tool["type"])
+        elif tool:
+            names.append(str(next(iter(tool))))
+    return names
+
+
+def _fingerprint(value: Any) -> str:
+    """完整值的 sha256（敏感键先脱敏，避免哈希可被用来校验猜测的密钥）。"""
+    raw = json.dumps(_redact_sensitive(value), ensure_ascii=False, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _redact_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: "[REDACTED]" if _is_sensitive_key(key) else _redact_sensitive(item)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value
+
+
+def _add_compacted(params: dict, key: Any, value: Any) -> None:
+    """写入压缩后的字段；压缩有损时附带完整内容的指纹。
+
+    提示词缓存对比依赖这些指纹：tools 描述或 system 在预览截断之后的
+    改动，压缩快照看不出来，只能靠完整内容的哈希发现。已经携带指纹的
+    快照（monitoring 对 build 结果的二次压缩）保留原指纹。
+    """
+    if key == "system":
+        compact = _compact_system(value)
+    elif key == "tools":
+        compact = _compact_tools(value)
+    else:
+        compact = _compact_value(value, depth=1, key=key)
+    params[key] = compact
+    if key == "tools" and isinstance(value, list) and compact != value:
+        for summary_key, summary_value in summarize_tools(value).items():
+            params.setdefault(summary_key, summary_value)
+    elif (isinstance(value, (str, list, dict)) and not _is_sensitive_key(key)
+          and compact != value):
+        params.setdefault(f"{key}_sha256", _fingerprint(value))
 
 
 def _compact_tools(value: Any) -> Any:
@@ -282,12 +381,7 @@ def compact_monitor_params(params: Any, *, max_bytes: int = _MAX_PARAM_BYTES) ->
     for key, value in params.items():
         if key in MONITOR_PARAM_EXCLUDED_KEYS:
             continue
-        if key == "system":
-            compacted[key] = _compact_system(value)
-        elif key == "tools":
-            compacted[key] = _compact_tools(value)
-        else:
-            compacted[key] = _compact_value(value, depth=1, key=key)
+        _add_compacted(compacted, key, value)
     return _shrink_to_budget(compacted, max_bytes=max_bytes)
 
 
@@ -313,12 +407,7 @@ def build_monitor_request_params(
         for key, value in request_body.items():
             if key in excluded:
                 continue
-            if key == "system":
-                params[key] = _compact_system(value)
-            elif key == "tools":
-                params[key] = _compact_tools(value)
-            else:
-                params[key] = _compact_value(value, depth=1, key=key)
+            _add_compacted(params, key, value)
 
     if "stream" in params and "streaming" not in params:
         params["streaming"] = bool(params.get("stream"))

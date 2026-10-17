@@ -25,6 +25,8 @@ import json
 import math
 from typing import Any, Iterable, Optional
 
+from utils.monitor_params import summarize_tools
+
 # Fields that always differ between two runs and say nothing about whether
 # the shared prompt prefix survived. Everything else at the top level of a
 # request log is considered cache-relevant (model, system_fingerprint,
@@ -219,60 +221,67 @@ def compare_tools(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
     """Compare tool definitions.
 
     ``status`` is ``identical`` / ``different`` / ``unknown``. ``unknown``
-    means neither log records tool definitions (responses-native passthrough
-    logs only keep counts/hashes, older logs keep nothing), so a tool change
-    cannot be ruled out as the cache-break cause.
+    means neither log records tool definitions (older logs keep nothing),
+    so a tool change cannot be ruled out as the cache-break cause.
+
+    ``tools_sha256`` hashes the full definitions, while logged ``tools`` may be
+    a size-bounded preview; the hash wins whenever both logs carry one.
     """
     old, new = (_parameter_view(log) for log in (old, new))
-    old_tools = old.get("tools")
-    new_tools = new.get("tools")
-    if old_tools is not None and new_tools is not None:
-        old_list = old_tools or []
-        new_list = new_tools or []
-        same = canonical(old_list) == canonical(new_list)
-        result: dict[str, Any] = {
-            "status": "identical" if same else "different",
-            "source": "tools",
-            "old_count": len(old_list),
-            "new_count": len(new_list),
-            "old_sha256": short_hash(old_list),
-            "new_sha256": short_hash(new_list),
-        }
-        if not same:
-            for index, (left, right) in enumerate(zip(old_list, new_list)):
-                if canonical(left) != canonical(right):
-                    left_fn = left.get("function", left) if isinstance(left, dict) else {}
-                    right_fn = right.get("function", right) if isinstance(right, dict) else {}
-                    result["first_difference"] = {
-                        "index": index,
-                        "old_name": left_fn.get("name") if isinstance(left_fn, dict) else None,
-                        "new_name": right_fn.get("name") if isinstance(right_fn, dict) else None,
-                    }
-                    break
-        return result
-
+    # 没有指纹的一侧记录的是完整 tools，按同一口径补算后再比较
+    for view, other in ((old, new), (new, old)):
+        if (view.get("tools_sha256") is None and other.get("tools_sha256") is not None
+                and isinstance(view.get("tools"), list)):
+            view.update(summarize_tools(view["tools"]))
     old_sha = old.get("tools_sha256")
     new_sha = new.get("tools_sha256")
-    if old_sha is None or new_sha is None:
+    if old_sha is not None and new_sha is not None:
+        old_names = old.get("tools_names") or []
+        new_names = new.get("tools_names") or []
+        return {
+            "status": "identical" if old_sha == new_sha else "different",
+            "source": "tools_sha256",
+            "old_count": old.get("tools_count"),
+            "new_count": new.get("tools_count"),
+            "old_sha256": old_sha,
+            "new_sha256": new_sha,
+            "removed": sorted(set(old_names) - set(new_names))[:20],
+            "added": sorted(set(new_names) - set(old_names))[:20],
+            "same_name_set": set(old_names) == set(new_names),
+        }
+
+    old_tools = old.get("tools")
+    new_tools = new.get("tools")
+    if old_tools is None or new_tools is None:
         return {
             "status": "unknown",
             "source": "none",
             "old_count": old.get("tools_count"),
             "new_count": new.get("tools_count"),
         }
-    old_names = old.get("tools_names") or []
-    new_names = new.get("tools_names") or []
-    return {
-        "status": "identical" if old_sha == new_sha else "different",
-        "source": "tools_sha256",
-        "old_count": old.get("tools_count"),
-        "new_count": new.get("tools_count"),
-        "old_sha256": old_sha,
-        "new_sha256": new_sha,
-        "removed": sorted(set(old_names) - set(new_names))[:20],
-        "added": sorted(set(new_names) - set(old_names))[:20],
-        "same_name_set": set(old_names) == set(new_names),
+    old_list = old_tools or []
+    new_list = new_tools or []
+    same = canonical(old_list) == canonical(new_list)
+    result: dict[str, Any] = {
+        "status": "identical" if same else "different",
+        "source": "tools",
+        "old_count": len(old_list),
+        "new_count": len(new_list),
+        "old_sha256": short_hash(old_list),
+        "new_sha256": short_hash(new_list),
     }
+    if not same:
+        for index, (left, right) in enumerate(zip(old_list, new_list)):
+            if canonical(left) != canonical(right):
+                left_fn = left.get("function", left) if isinstance(left, dict) else {}
+                right_fn = right.get("function", right) if isinstance(right, dict) else {}
+                result["first_difference"] = {
+                    "index": index,
+                    "old_name": left_fn.get("name") if isinstance(left_fn, dict) else None,
+                    "new_name": right_fn.get("name") if isinstance(right_fn, dict) else None,
+                }
+                break
+    return result
 
 
 def compare_params(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:

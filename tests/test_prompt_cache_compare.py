@@ -257,3 +257,65 @@ def test_compare_cpu_work_runs_outside_event_loop(monkeypatch):
     monkeypatch.setattr(prompt_cache_compare, 'compare', worker_compare)
     result = asyncio.run(monitor_routes.compare_request_logs(FakeMonitoring(), 'a', 'b'))
     assert result['requested'] == {'a': 'a', 'b': 'b'}
+
+
+def _logged_params(request_body):
+    """模拟监控链路：路由构建快照，monitoring.request_start 再压缩一次。"""
+    from utils.monitor_params import build_monitor_request_params, compact_monitor_params
+    return compact_monitor_params(build_monitor_request_params(request_body))
+
+
+def test_truncated_tool_description_change_is_detected_by_full_hash():
+    def tools(tail):
+        return [{"name": "Bash", "description": "x" * 400 + tail,
+                 "input_schema": {"type": "object", "properties": {}}}]
+    old = _log("a", [], **_logged_params({"tools": tools("OLD")}))
+    same = _log("b", [], **_logged_params({"tools": tools("OLD")}))
+    new = _log("c", [], **_logged_params({"tools": tools("NEW")}))
+    assert old["tools"] == new["tools"]  # 预览完全相同
+    assert compare_tools(old, same)["status"] == "identical"
+    result = compare_tools(old, new)
+    assert result["status"] == "different"
+    assert result["source"] == "tools_sha256"
+    assert result["same_name_set"] is True
+
+
+def test_full_tools_log_is_hashed_against_compacted_log():
+    small = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
+    full = _log("a", [], **_logged_params({"tools": small}))
+    assert "tools_sha256" not in full  # 未截断时日志保留完整定义
+    from utils.monitor_params import summarize_tools
+    hashed = _log("b", [], tools=[{"type": "function"}], **summarize_tools(small))
+    assert compare_tools(full, hashed)["status"] == "identical"
+
+
+def test_system_change_after_preview_is_reported_by_fingerprint():
+    old = _log("a", [], **_logged_params({"system": "s" * 1500 + "A"}))
+    new = _log("b", [], **_logged_params({"system": "s" * 1500 + "B"}))
+    assert old["system"] == new["system"]
+    keys = {item["key"] for item in compare_params(old, new)["differences"]}
+    assert keys == {"system_sha256"}
+
+
+def test_openai_and_gemini_tool_names_survive_compaction():
+    big = "d" * 400
+    openai_tools = [{"type": "function", "function": {"name": name, "description": big,
+                                                      "parameters": {"type": "object"}}}
+                    for name in ("read_file", "write_file")]
+    params = _logged_params({"tools": openai_tools})
+    assert [tool["function"]["name"] for tool in params["tools"]] == ["read_file", "write_file"]
+    assert params["tools_names"] == ["read_file", "write_file"]
+
+    gemini_tools = [{"functionDeclarations": [{"name": "lookup", "description": big}]},
+                    {"googleSearch": {}}]
+    params = _logged_params({"tools": gemini_tools})
+    assert params["tools"][0]["functionDeclarations"][0]["name"] == "lookup"
+    assert params["tools_names"] == ["lookup", "googleSearch"]
+
+
+def test_sensitive_fields_are_never_fingerprinted():
+    params = _logged_params({"api_key": "k" * 5000, "extra": {"api_key": "secret", "note": "n" * 5000}})
+    assert params["api_key"] == "[REDACTED]"
+    assert "api_key_sha256" not in params
+    from utils.monitor_params import _fingerprint
+    assert params["extra_sha256"] == _fingerprint({"api_key": "other", "note": "n" * 5000})
