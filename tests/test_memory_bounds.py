@@ -91,6 +91,16 @@ def test_oversized_stats_file_skips_recent_requests(tmp_path):
     assert 'recent_requests' not in loaded
 
 
+def test_unreadable_oversized_stats_json_is_preserved(tmp_path):
+    stats_path = tmp_path / 'stats.json'
+    # 统计头部本身超过读取窗口，无法定位 recent_requests
+    stats_path.write_text(json.dumps({'model_stats': {'m': 'x' * (9 * 1024 * 1024)}}), encoding='utf-8')
+    assert _load_stats_json(stats_path) == {}
+    assert not stats_path.exists()
+    backups = list(tmp_path.glob('stats.*.bak'))
+    assert len(backups) == 1 and backups[0].stat().st_size > 9 * 1024 * 1024
+
+
 def test_byte_limited_cache_evicts_and_skips_oversized_values():
     cache = ByteLimitedTTLCache(maxsize=10, ttl=60, max_bytes=1000)
     cache['a'] = 'x' * 400

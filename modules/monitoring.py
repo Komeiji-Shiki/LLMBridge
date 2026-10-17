@@ -145,6 +145,16 @@ def _compact_recent_record(record: dict) -> dict:
     return compacted
 
 
+def _preserve_unreadable_stats(stats_path: Path) -> None:
+    """恢复失败的超大 stats.json 改名保留，避免下次持久化用空统计覆盖历史。"""
+    backup = stats_path.with_name(f"{stats_path.stem}.{time.strftime('%Y%m%d-%H%M%S')}.bak")
+    try:
+        os.replace(stats_path, backup)
+        logger.warning("原 stats.json 已另存为 %s，可手动恢复历史统计", backup.name)
+    except OSError as exc:
+        logger.warning("stats.json 另存失败，下次持久化将覆盖原文件: %s", exc)
+
+
 def _load_stats_json(stats_path: Path) -> dict:
     """读取 stats.json；超大文件只恢复统计头部，跳过 recent_requests。"""
     try:
@@ -166,12 +176,14 @@ def _load_stats_json(stats_path: Path) -> dict:
         logger.warning(
             "stats.json 过大且无法定位 recent_requests，本次跳过历史统计恢复"
         )
+        _preserve_unreadable_stats(stats_path)
         return {}
     partial = head[:cut].rstrip().rstrip(',') + '}'
     try:
         data = json.loads(partial)
     except json.JSONDecodeError:
         logger.warning("stats.json 过大且头部截断后无法解析，本次跳过历史统计恢复")
+        _preserve_unreadable_stats(stats_path)
         return {}
     logger.info(
         "stats.json 超过 %.1fMB，已跳过 recent_requests 恢复（下次持久化将压缩写入）",
