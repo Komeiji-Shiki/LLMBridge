@@ -206,14 +206,18 @@ class ConversationStore:
             connection.close()
         return target
 
-    def remember_response_prefix(self, owner, scope, prefix, output):
-        """A conflicting output makes the prefix ambiguous until it expires."""
+    def remember_response_prefixes(self, owner, scope, prefixes, output):
+        """Store one output under several keys in one transaction.
+
+        A conflicting output makes that key ambiguous until it expires.
+        """
         import hashlib
         raw = json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
         digest = hashlib.sha256(raw).hexdigest()
+        payload = gzip.compress(raw, compresslevel=6)
         now = time.time()
         with self.connection() as connection:
-            connection.execute('''INSERT INTO response_prefixes VALUES(?,?,?,?,?,?)
+            connection.executemany('''INSERT INTO response_prefixes VALUES(?,?,?,?,?,?)
                 ON CONFLICT(owner,scope,prefix) DO UPDATE SET
                     payload=CASE WHEN response_prefixes.touched<=? THEN excluded.payload
                                  WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.payload
@@ -222,8 +226,8 @@ class ConversationStore:
                                 WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.digest
                                 ELSE '' END,
                     touched=excluded.touched''',
-                (owner, scope, prefix, gzip.compress(raw, compresslevel=6), digest, now,
-                 now - self.idle_seconds, now - self.idle_seconds))
+                [(owner, scope, prefix, payload, digest, now, now - self.idle_seconds, now - self.idle_seconds)
+                 for prefix in dict.fromkeys(prefixes)])
 
     def response_prefixes(self, owner, scope, prefixes):
         """Fetch exact assistant boundaries in one transaction, without scanning logs."""

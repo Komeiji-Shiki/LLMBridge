@@ -207,7 +207,7 @@ def test_digest_ignores_thoughts_signatures_but_not_media_or_edits():
         {'role': 'user', 'parts': [{'text': '你好'}]},
         {'role': 'model', 'parts': [{'text': '答!'}]},
     ]
-    digests = {name: [digest for _, digest in history_boundaries(value)]
+    digests = {name: [digest for _, digest, _ in history_boundaries(value)]
                for name, value in (('base', base), ('without_thought', without_thought),
                                    ('without_media', without_media), ('edited', edited))}
     assert digests['base'] == digests['without_thought']
@@ -228,9 +228,9 @@ def test_digest_normalizes_model_text_edges_only():
         {'role': 'user', 'parts': [{'text': '保持原样'}]},
         {'role': 'model', 'parts': [{'text': 'answer\nline'}]},
     ]
-    first_digest = [digest for _, digest in history_boundaries(first)]
-    second_digest = [digest for _, digest in history_boundaries(second)]
-    edited_digest = [digest for _, digest in history_boundaries(edited_user)]
+    first_digest = [digest for _, digest, _ in history_boundaries(first)]
+    second_digest = [digest for _, digest, _ in history_boundaries(second)]
+    edited_digest = [digest for _, digest, _ in history_boundaries(edited_user)]
     assert first_digest == second_digest
     assert edited_digest != first_digest
 
@@ -440,4 +440,34 @@ def test_restore_replaces_whitespace_only_thought_shell(tmp_path, monkeypatch):
         assert len(client['contents'][1]['parts']) == 3
         assert client['contents'][1]['parts'][0] == {'thought': True, 'text': '想了半天'}
         assert client['contents'][1]['parts'][-1] == {'text': '', 'thoughtSignature': 'sig-1'}
+    asyncio.run(run())
+
+
+def test_tool_loop_signature_survives_missing_earlier_history(tmp_path, monkeypatch):
+    """更早的轮次被客户端删掉或改写后，当前工具循环的函数调用签名仍要恢复。"""
+    bind_store(monkeypatch, tmp_path)
+
+    async def run():
+        ctx = context()
+        first = [{'role': 'user', 'parts': [{'text': '你好'}]}]
+        await GeminiThoughtHistory(ctx, {'model_id': 'target'}, {'contents': first}).remember(
+            first, build_assembler(streamed_response()))
+        loop = [*first, {'role': 'model', 'parts': [{'text': '你好呀'}]},
+                {'role': 'user', 'parts': [{'text': '查一下'}]}]
+        await GeminiThoughtHistory(ctx, {'model_id': 'target'}, {'contents': loop}).remember(
+            loop, build_assembler([
+                chunk([{'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {'q': 1}}, 'thoughtSignature': 'sig-c'}]),
+                {'candidates': [{'finishReason': 'STOP'}]},
+            ]))
+        call = {'role': 'model', 'parts': [{'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {'q': 1}}}]}
+        result = {'role': 'user', 'parts': [{'functionResponse': {'name': 'lookup', 'id': 'c1', 'response': {'r': 1}}}]}
+
+        for earlier in ([],  # 最早一轮被丢掉
+                        [first[0], {'role': 'model', 'parts': [{'text': '你好呀，被客户端改过'}]}]):
+            contents = copy.deepcopy([*earlier, loop[-1], call, result])
+            body = {'contents': contents}
+            count = await GeminiThoughtHistory(ctx, {'model_id': 'target'}, body).restore(body)
+            assert count == 1
+            assert contents[-2]['parts'][0]['thoughtSignature'] == 'sig-c'
+            assert all('thoughtSignature' not in part for item in contents[:-2] for part in item['parts'])
     asyncio.run(run())

@@ -38,13 +38,27 @@ def visible_message(message):
 
 
 def history_boundaries(messages):
+    """每条助手消息处的 (index, 整段前缀指纹, 本轮局部指纹)。
+
+    整段前缀覆盖从开头到本轮的全部可见历史，上下文完全一致时精确命中。
+    局部指纹只覆盖上一条助手消息之后的消息与本轮助手消息：客户端删掉或
+    改写了别处的历史（中间缺一段、按条数上限丢掉最早的轮次）时，本轮
+    只要自身及其提问未变，仍能恢复。system/developer 已计入作用域，不参与
+    局部指纹。
+    """
     digest = hashlib.sha256(b'responses-history-v1')
+    window = []
     for index, message in enumerate(messages):
         encoded = json.dumps(visible_message(message), sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()
-        digest.update(len(encoded).to_bytes(8, 'big'))
-        digest.update(encoded)
-        if isinstance(message, dict) and message.get('role') == 'assistant':
-            yield index, digest.hexdigest()
+        framed = len(encoded).to_bytes(8, 'big') + encoded
+        digest.update(framed)
+        role = message.get('role') if isinstance(message, dict) else None
+        if role in ('system', 'developer'):
+            continue
+        window.append(framed)
+        if role == 'assistant':
+            yield index, digest.hexdigest(), hashlib.sha256(b'responses-turn-v1' + b''.join(window)).hexdigest()
+            window = []
 
 
 class ResponsesHistory:
@@ -70,21 +84,24 @@ class ResponsesHistory:
         # carry an automatically restored item from the previous attempt.
         request = copy.deepcopy(self.chat_request)
         messages = request.get('messages', [])
-        boundaries = dict(history_boundaries(messages))
+        boundaries = list(history_boundaries(messages))
+        keys = [key for _, prefix, turn in boundaries for key in (prefix, turn)]
         try:
             records = await asyncio.to_thread(conversation_store.response_prefixes,
-                self.context.owner_id, self.scope(), list(boundaries.values())) if boundaries else {}
+                self.context.owner_id, self.scope(), keys) if keys else {}
         except Exception:
             logger.warning('Responses history lookup failed; using client history without automatic restoration')
             records = {}
-        for index, prefix in boundaries.items():
+        for index, prefix, turn in boundaries:
             message = messages[index]
             metadata = message.get('provider_metadata')
             if isinstance(metadata, dict) and isinstance(metadata.get('responses_output'), list):
                 continue
-            if prefix in records:
+            # 上下文完整时用整段前缀；别处历史缺失或改动时退回本轮局部匹配
+            output = records.get(prefix) if prefix in records else records.get(turn)
+            if output is not None:
                 message['provider_metadata'] = {**(metadata if isinstance(metadata, dict) else {}),
-                                                'responses_output': records[prefix]}
+                                                'responses_output': output}
         return convert_chat_request_to_responses(request, self.model, self.endpoint_config)['input']
 
     async def remember(self, response):
@@ -94,10 +111,10 @@ class ResponsesHistory:
         chat = convert_responses_response_to_chat(response, self.model)
         message = chat['choices'][0]['message']
         history = [*self.chat_request.get('messages', []), message]
-        _, prefix = list(history_boundaries(history))[-1]
+        _, prefix, turn = list(history_boundaries(history))[-1]
         try:
-            await asyncio.to_thread(conversation_store.remember_response_prefix,
-                self.context.owner_id, self.scope(), prefix, response['output'])
+            await asyncio.to_thread(conversation_store.remember_response_prefixes,
+                self.context.owner_id, self.scope(), [prefix, turn], response['output'])
         except Exception:
             # Never include ciphertext, message content or database payloads in logs.
             logger.warning('Responses history save failed; automatic restoration unavailable for this turn')

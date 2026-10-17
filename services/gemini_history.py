@@ -1,7 +1,12 @@
-"""按历史前缀恢复 Gemini 签名，保留上游内容块及其顺序。
+"""按历史恢复 Gemini 签名，保留上游内容块及其顺序。
 
 客户端可以省略思考和签名，或裁剪文本首尾空白；匹配后恢复原始模型轮次，
 确保签名仍在签发它的内容块上。媒体、工具调用和工具结果参与历史匹配。
+
+每个模型轮次存两个键：整段历史前缀（上下文完全一致时精确命中），以及
+上一个模型轮次之后的内容加本轮的局部指纹。客户端删掉或改写了别处的历史
+时，自身未变的轮次仍按局部指纹恢复，Gemini 3 当前轮的函数调用签名也不会
+因为更早的缺口而全部丢失。
 """
 import asyncio
 import copy
@@ -87,19 +92,30 @@ def normalize_turn(item):
     return {'role': role, 'parts': visible}
 
 
-def _advance(digest, item):
+def _framed(item):
     encoded = _canonical(normalize_turn(item)).encode()
-    digest.update(len(encoded).to_bytes(8, 'big'))
-    digest.update(encoded)
+    return len(encoded).to_bytes(8, 'big') + encoded
+
+
+def _is_model(item):
+    return isinstance(item, dict) and item.get('role') in ('model', 'assistant')
+
+
+def _turn_digest(window):
+    return hashlib.sha256((VERSION + ':turn').encode() + b''.join(window)).hexdigest()
 
 
 def history_boundaries(contents):
-    """生成每个模型轮次结束时的 (index, digest)。"""
+    """生成每个模型轮次处的 (index, 整段前缀指纹, 本轮局部指纹)。"""
     digest = hashlib.sha256(VERSION.encode())
+    window = []
     for index, item in enumerate(contents):
-        _advance(digest, item)
-        if isinstance(item, dict) and item.get('role') in ('model', 'assistant'):
-            yield index, digest.hexdigest()
+        framed = _framed(item)
+        digest.update(framed)
+        window.append(framed)
+        if _is_model(item):
+            yield index, digest.hexdigest(), _turn_digest(window)
+            window = []
 
 
 def _args_complete(args):
@@ -256,13 +272,14 @@ class GeminiThoughtHistory:
         try:
             records = await asyncio.to_thread(conversation_store.response_prefixes,
                                               self.context.owner_id, self.scope(),
-                                              [digest for _, digest in boundaries])
+                                              [key for _, prefix, turn in boundaries for key in (prefix, turn)])
         except Exception:
             logger.warning('Gemini 思考签名查询失败；按客户端原始内容请求上游')
             return 0
         restored = 0
-        for index, digest in boundaries:
-            record = records.get(digest)
+        for index, prefix, turn in boundaries:
+            # 上下文完整时用整段前缀；别处历史缺失或改动时退回本轮局部匹配
+            record = records.get(prefix) if prefix in records else records.get(turn)
             if isinstance(record, dict):
                 restored += _patch_turn(contents[index], record)
         return restored
@@ -273,15 +290,20 @@ class GeminiThoughtHistory:
         if not isinstance(assembler, GeminiTurnAssembler) or not assembler.has_signatures():
             return
         digest = hashlib.sha256(VERSION.encode())
+        window = []
         for item in contents:
-            _advance(digest, item)
+            framed = _framed(item)
+            digest.update(framed)
+            window = [] if _is_model(item) else [*window, framed]
         scope = self.scope()
         try:
             for parts in assembler.completed_parts():
+                framed = _framed({'role': 'model', 'parts': parts})
                 prefix = digest.copy()
-                _advance(prefix, {'role': 'model', 'parts': parts})
-                await asyncio.to_thread(conversation_store.remember_response_prefix,
-                                        self.context.owner_id, scope, prefix.hexdigest(),
+                prefix.update(framed)
+                await asyncio.to_thread(conversation_store.remember_response_prefixes,
+                                        self.context.owner_id, scope,
+                                        [prefix.hexdigest(), _turn_digest([*window, framed])],
                                         {'v': 2, 'parts': parts})
         except Exception:
             logger.warning('Gemini 思考签名保存失败；下一轮将按客户端原始内容请求上游')

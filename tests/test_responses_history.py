@@ -158,7 +158,7 @@ def test_actual_handler_and_retry_boundary_restore_phone_history(store, streamin
                         if b'[DONE]' in chunk:
                             # Saved before handing the terminal marker to the phone.
                             assert list(store.response_prefixes(ctx.owner_id, ctx.responses_history.scope(),
-                                [p for _, p in history_boundaries(messages + [{'role': 'assistant', 'content': 'answer'}])]).values())
+                                [p for _, p, _ in history_boundaries(messages + [{'role': 'assistant', 'content': 'answer'}])]).values())
                 messages += [{'role': 'assistant', 'content': 'answer'}, {'role': 'user', 'content': 'next'}]
             finally: current_request.reset(token)
         assert not any(i.get('type') == 'reasoning' for i in service.requests[0]['input'])
@@ -207,11 +207,11 @@ def test_stream_caches_done_items_only_after_complete_terminal(store, terminal):
 
 def test_persistence_and_concurrent_ambiguity(store):
     from concurrent.futures import ThreadPoolExecutor
-    store.remember_response_prefix('owner', 'scope', 'prefix', response()['output'])
+    store.remember_response_prefixes('owner', 'scope', ['prefix'], response()['output'])
     reopened = ConversationStore(store.path)
     assert reopened.response_prefixes('owner', 'scope', ['prefix'])['prefix'] == response()['output']
     with ThreadPoolExecutor(max_workers=2) as executor:
-        tasks = [executor.submit(reopened.remember_response_prefix, 'owner', 'scope', 'conflict', response(cipher=cipher)['output'])
+        tasks = [executor.submit(reopened.remember_response_prefixes, 'owner', 'scope', ['conflict'], response(cipher=cipher)['output'])
                  for cipher in ('branch-a', 'branch-b')]
         for task in tasks: task.result()
     assert reopened.response_prefixes('owner', 'scope', ['conflict']) == {}
@@ -223,7 +223,7 @@ def test_database_failure_does_not_leak_state_or_break_chat(store, caplog):
         replay = history(context(), messages)
         with patch.object(store, 'response_prefixes', side_effect=RuntimeError('private-ciphertext')):
             assert not any(i.get('type') == 'reasoning' for i in await replay.restore_input())
-        with patch.object(store, 'remember_response_prefix', side_effect=RuntimeError('private-ciphertext')):
+        with patch.object(store, 'remember_response_prefixes', side_effect=RuntimeError('private-ciphertext')):
             await replay.remember(response(cipher='private-ciphertext'))
         assert 'private-' not in caplog.text
     asyncio.run(run())
@@ -273,4 +273,54 @@ def test_client_line_endings_and_text_blocks_are_equivalent(store):
         assert restored[1:3] == native['output']
         phone[1]['content'][0]['text'] = 'answer\r\n```python\r\nindented()\r\n```'
         assert not any(i.get('type') == 'reasoning' for i in await history(context(), phone).restore_input())
+    asyncio.run(run())
+
+
+async def _build_conversation(turns, ctx_factory=context):
+    """逐轮经由 remember 保存，返回完整可见历史。"""
+    messages = []
+    for index in range(1, turns + 1):
+        messages.append({'role': 'user', 'content': f'question {index}'})
+        await history(ctx_factory(), messages).remember(response(f'answer {index}', f'cipher-{index}'))
+        messages.append({'role': 'assistant', 'content': f'answer {index}'})
+    return messages
+
+
+def _ciphers(items):
+    return [item['encrypted_content'] for item in items if item.get('type') == 'reasoning']
+
+
+@pytest.mark.parametrize('variant, expected', [
+    # 中间缺一整轮：之后未变的轮次仍按本轮局部指纹恢复
+    (lambda m: m[:2] + m[4:], ['cipher-1', 'cipher-3', 'cipher-4']),
+    # 某轮正文被客户端截短：只有该轮无法恢复
+    (lambda m: m[:3] + [{'role': 'assistant', 'content': 'answer'}] + m[4:], ['cipher-1', 'cipher-3', 'cipher-4']),
+    # 客户端按条数上限丢掉最早的轮次
+    (lambda m: m[4:], ['cipher-3', 'cipher-4']),
+    # 回退到更早的轮次重新提问
+    (lambda m: m[:4], ['cipher-1', 'cipher-2']),
+])
+def test_unchanged_turns_restore_despite_missing_history(store, variant, expected):
+    async def run():
+        messages = await _build_conversation(4)
+        sent = variant(messages) + [{'role': 'user', 'content': 'next'}]
+        assert _ciphers(await history(context(), sent).restore_input()) == expected
+    asyncio.run(run())
+
+
+def test_identical_turns_in_other_conversations_never_cross_restore(store):
+    async def run():
+        greeting = [{'role': 'user', 'content': 'hi'}]
+        await history(context(), greeting).remember(response('hello', 'cipher-a'))
+        other = [{'role': 'user', 'content': 'earlier topic'}, {'role': 'assistant', 'content': 'noted'}, *greeting]
+        await history(context(), other).remember(response('hello', 'cipher-b'))
+
+        # 两段对话各自的完整前缀照常命中
+        first = greeting + [{'role': 'assistant', 'content': 'hello'}, {'role': 'user', 'content': 'next'}]
+        assert _ciphers(await history(context(), first).restore_input()) == ['cipher-a']
+        second = other + [{'role': 'assistant', 'content': 'hello'}, {'role': 'user', 'content': 'next'}]
+        assert _ciphers(await history(context(), second).restore_input()) == ['cipher-b']
+        # 第三段上下文不同：同一局部指纹出现过两种输出，按歧义处理而不是随便挑一个
+        third = [{'role': 'user', 'content': 'unrelated'}, {'role': 'assistant', 'content': 'sure'}, *first]
+        assert _ciphers(await history(context(), third).restore_input()) == []
     asyncio.run(run())
