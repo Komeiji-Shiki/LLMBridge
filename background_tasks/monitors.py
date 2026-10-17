@@ -114,7 +114,15 @@ async def conversation_cache_cleaner():
     from core.conversation_store import conversation_store
     while True:
         try:
-            await asyncio.to_thread(conversation_store.cleanup)
+            deleted = await asyncio.to_thread(conversation_store.cleanup)
+            stats = await asyncio.to_thread(conversation_store.storage_stats)
+            if stats['free_bytes'] > 256 * 1024 * 1024:
+                logger.warning(
+                    "[CONV_CACHE] 会话库有 %.0fMB 空闲页未回收（auto_vacuum=%s）",
+                    stats['free_bytes'] / (1024 * 1024), stats['auto_vacuum'],
+                )
+            elif deleted:
+                logger.info("[CONV_CACHE] 已清理 %s 个过期会话", deleted)
         except Exception:
             logger.exception('会话缓存清理失败')
         await asyncio.sleep(3600)

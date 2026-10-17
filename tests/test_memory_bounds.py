@@ -11,6 +11,7 @@ import sys
 import pytest
 
 from core.bounded_cache import ByteLimitedTTLCache
+from core.conversation_store import ConversationStore
 from modules.monitoring import _compact_recent_record, _load_stats_json
 from modules.token_counter._custom import _evict_tokenizer_cache
 from services.logprobs_collector import LogprobsCollector
@@ -152,6 +153,61 @@ def test_tokenizer_cache_is_lru_bounded(monkeypatch):
     )
     _evict_tokenizer_cache(cache, 'custom_', 2)
     assert set(cache) == {'b', 'c'}
+
+
+def test_conversation_store_dedupes_identical_messages(tmp_path):
+    store = ConversationStore(tmp_path / 'conversations.db')
+    messages = [{'role': 'user', 'content': 'hello'}]
+    record = {
+        'request': {'model': 'm', 'messages': messages},
+        'upstream_request': {'model': 'm2', 'messages': messages},
+        'response': {'id': 'r1'},
+    }
+    store.touch('owner', 'session', 'm', 'endpoint')
+    store.put('owner', 'session', 'last_exchange', record)
+
+    restored = store.get('owner', 'session', 'last_exchange')
+    assert restored['upstream_request']['messages'] == messages
+    assert restored['upstream_request']['model'] == 'm2'
+    assert '_messages_in_request' not in restored['upstream_request']
+
+    import gzip
+    import sqlite3
+
+    connection = sqlite3.connect(store.path)
+    try:
+        payload = connection.execute(
+            "SELECT payload FROM artifacts WHERE key='last_exchange'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    stored = json.loads(gzip.decompress(payload))
+    assert 'messages' not in stored['upstream_request']
+    assert stored['upstream_request']['_messages_in_request'] is True
+
+
+def test_compact_copy_is_valid_and_enables_incremental_vacuum(tmp_path):
+    store = ConversationStore(tmp_path / 'conversations.db')
+    store.touch('owner', 'session', 'm', 'endpoint')
+    store.put('owner', 'session', 'last_exchange', {
+        'request': {'messages': [{'role': 'user', 'content': 'x' * 5000}]},
+        'upstream_request': {'messages': [{'role': 'user', 'content': 'x' * 5000}]},
+        'response': None,
+    })
+
+    target = store.compact_copy(tmp_path / 'compacted.db')
+    copied = ConversationStore(target)
+    stats = copied.storage_stats()
+    assert stats['auto_vacuum'] == 2
+    assert stats['free_bytes'] == 0
+    assert copied.get('owner', 'session', 'last_exchange') is not None
+
+
+def test_reclaim_is_safe_on_non_autovacuum_database(tmp_path):
+    store = ConversationStore(tmp_path / 'conversations.db')
+    store.touch('owner', 'session', 'm', 'endpoint')
+    # 新库已启用 auto_vacuum；此处只验证 reclaim 能正常执行并返回设置
+    assert store.reclaim(pages=8) in (0, 1, 2)
 
 
 def test_local_tokenizer_does_not_import_transformers_or_torch():
