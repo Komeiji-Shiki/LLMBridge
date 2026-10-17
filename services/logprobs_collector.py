@@ -43,6 +43,12 @@ DEFAULT_COLLECTION_CONFIG = {
     "redact_image_data": True,
     "require_logprobs_to_write": True,
     "compress": True,
+    # 采集缓冲上限：长回复 + top_logprobs=20 时，逐 token 分布很容易
+    # 单请求就达到几十 MB。超过上限后停止追加并标记 truncated，
+    # 已采集部分仍会正常落盘。
+    "max_raw_events": 4000,
+    "max_raw_bytes": 8 * 1024 * 1024,
+    "max_logprob_tokens": 20000,
     "candidate_finish_reasons": ["stop"],
     "tool_call_finish_reasons": ["tool_calls"],
 }
@@ -50,6 +56,23 @@ DEFAULT_COLLECTION_CONFIG = {
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _approx_logprobs_bytes(logprobs: Any) -> int:
+    """粗略估算一条事件里 logprobs 的序列化大小（避免为此再跑一次 json.dumps）。"""
+    if not isinstance(logprobs, dict):
+        return 0
+    total = 0
+    for key in ("content", "reasoning_content"):
+        items = logprobs.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            total += 120
+            top = item.get("top_logprobs") if isinstance(item, dict) else None
+            if isinstance(top, list):
+                total += 80 * len(top)
+    return total
 
 
 def _utc_date() -> str:
@@ -116,6 +139,9 @@ def get_collection_config() -> dict:
         "redact_image_data": _as_bool(cfg.get("redact_image_data"), True),
         "require_logprobs_to_write": _as_bool(cfg.get("require_logprobs_to_write"), True),
         "compress": _as_bool(cfg.get("compress"), True),
+        "max_raw_events": _as_int(cfg.get("max_raw_events"), 4000, 1, 1_000_000),
+        "max_raw_bytes": _as_int(cfg.get("max_raw_bytes"), 8 * 1024 * 1024, 64 * 1024, 1024 * 1024 * 1024),
+        "max_logprob_tokens": _as_int(cfg.get("max_logprob_tokens"), 20000, 1, 10_000_000),
         "candidate_finish_reasons": [reason.lower() for reason in candidate_reasons],
         "tool_call_finish_reasons": [reason.lower() for reason in tool_reasons],
     }
@@ -261,6 +287,16 @@ class LogprobsCollector:
         self.raw_event_count = 0
         self.logprob_event_count = 0
 
+        # 内存上限（见 DEFAULT_COLLECTION_CONFIG）：达到上限后停止追加，
+        # 只保留已采集部分并在记录里标记 truncated。
+        self.max_raw_events = int(cfg.get("max_raw_events") or 4000)
+        self.max_raw_bytes = int(cfg.get("max_raw_bytes") or 8 * 1024 * 1024)
+        self.max_logprob_tokens = int(cfg.get("max_logprob_tokens") or 20000)
+        self._raw_bytes = 0
+        self._raw_truncated = False
+        self._logprob_tokens = 0
+        self._logprobs_truncated = False
+
         self._finish_lock: Optional[asyncio.Lock] = None
         self._finished = False
         self._finishing = False
@@ -372,7 +408,10 @@ class LogprobsCollector:
         if not isinstance(event_json, dict):
             return False
 
-        raw_enabled = bool(self.cfg.get("record_raw_stream", True))
+        raw_enabled = (
+            bool(self.cfg.get("record_raw_stream", True))
+            and not self._raw_truncated
+        )
         raw_event = {"seq": self.raw_event_count} if raw_enabled else None
         raw_has_content = False
 
@@ -435,8 +474,16 @@ class LogprobsCollector:
                     raw_has_content = True
 
         if raw_enabled and raw_event is not None and raw_has_content:
-            self.raw_stream_events.append(raw_event)
-            self.raw_event_count += 1
+            event_bytes = 200 + _approx_logprobs_bytes(raw_event.get("logprobs"))
+            if (
+                len(self.raw_stream_events) >= self.max_raw_events
+                or self._raw_bytes + event_bytes > self.max_raw_bytes
+            ):
+                self._raw_truncated = True
+            else:
+                self.raw_stream_events.append(raw_event)
+                self._raw_bytes += event_bytes
+                self.raw_event_count += 1
 
         if strip:
             return self._strip_choice_logprobs(event_json)
@@ -489,8 +536,17 @@ class LogprobsCollector:
 
     def _extend_logprobs(self, logprobs: dict, key: str, bucket: list) -> None:
         items = logprobs.get(key)
-        if isinstance(items, list) and items:
-            bucket.extend(items)
+        if not isinstance(items, list) or not items:
+            return
+        remaining = self.max_logprob_tokens - self._logprob_tokens
+        if remaining <= 0:
+            self._logprobs_truncated = True
+            return
+        if len(items) > remaining:
+            items = items[:remaining]
+            self._logprobs_truncated = True
+        bucket.extend(items)
+        self._logprob_tokens += len(items)
 
     def _update_usage(self, usage: dict) -> None:
         if self.usage is None:
@@ -574,6 +630,8 @@ class LogprobsCollector:
             "client_requested_top_logprobs": self.client_requested_top_logprobs,
             "request": self.request_snapshot,
             "stream_events": self.raw_stream_events,
+            "raw_event_count": self.raw_event_count,
+            "truncated": self._raw_truncated,
             "error": self.finish_error,
         }
 
@@ -593,6 +651,7 @@ class LogprobsCollector:
             "logprobs": {
                 "reasoning_content": self.reasoning_logprobs,
                 "content": self.content_logprobs,
+                "truncated": self._logprobs_truncated,
             },
             "training": self._training_dict(),
             "collection": {
@@ -600,6 +659,8 @@ class LogprobsCollector:
                 "strip_logprobs_from_client": self.strip_from_client,
                 "logprob_events": self.logprob_event_count,
                 "raw_events": self.raw_event_count,
+                "raw_truncated": self._raw_truncated,
+                "logprobs_truncated": self._logprobs_truncated,
             },
             "completed": self.completed,
             "error": self.finish_error,

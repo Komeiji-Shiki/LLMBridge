@@ -24,7 +24,7 @@ from typing import Dict, Optional, List
 import logging
 from pathlib import Path
 
-from utils.monitor_params import MONITOR_PARAM_EXCLUDED_KEYS
+from utils.monitor_params import MONITOR_PARAM_EXCLUDED_KEYS, compact_monitor_params
 
 logger = logging.getLogger(__name__)
 # 导入SQLite扩展
@@ -60,9 +60,13 @@ class MonitorConfig:
     # 其他配置
     MAX_LOG_SIZE = 400 * 1024 * 1024  # 单文件最大大小（仅用于旧JSONL）
     MAX_LOG_FILES = 10  # 旧JSONL文件的轮转数量
-    MAX_RECENT_REQUESTS = 2000   # 降低以减少内存占用（每秒1个请求也够存半小时）
+    # 🔧 内存约束：每条记录的 request_params 已在写入前压缩到 24KB 以内，
+    # 500 条足够监控面板展示最近请求，再大只是把同样的数据留在内存里。
+    MAX_RECENT_REQUESTS = 500
+    # 持久化到 stats.json 的条数；重启后监控面板靠它恢复最近记录。
+    MAX_PERSISTED_REQUESTS = 200
     MAX_RECENT_ERRORS = 50
-    STATS_UPDATE_INTERVAL = 5  # 秒
+    STATS_UPDATE_INTERVAL = 15  # 秒；每次持久化都会重写整个 stats.json
     MONITOR_SEND_TIMEOUT_SECONDS = 2.0  # 监控WS发送超时（秒），过短会在网络抖动时误剔除客户端
 
 # 确保日志目录存在
@@ -110,6 +114,71 @@ class Stats:
     total_messages: int = 0
     uptime: float = 0.0
 
+
+# stats.json 正常只在 1~2MB 量级；历史版本可能因为存了完整 system/tools
+# 膨胀到上百 MB。超过阈值时只读取 recent_requests 之前的统计部分，避免
+# 启动阶段把整份大文件解析进内存（读完后下一次持久化会写成压缩版）。
+_STATS_JSON_FULL_LOAD_MAX_BYTES = 8 * 1024 * 1024
+_STATS_JSON_PREFIX_BYTES = 4 * 1024 * 1024
+_RECENT_RECORD_TEXT_FIELDS = (
+    'request_messages_preview', 'response_preview',
+    'reasoning_preview', 'error',
+)
+_MAX_RECENT_TEXT_CHARS = 1000
+
+
+def _compact_recent_record(record: dict) -> dict:
+    """压缩从旧 stats.json 恢复的记录，兼容历史大字段。"""
+    if not isinstance(record, dict):
+        return record
+    compacted = dict(record)
+    params = compacted.get('request_params')
+    if isinstance(params, dict):
+        compacted['request_params'] = compact_monitor_params(params)
+    for field in _RECENT_RECORD_TEXT_FIELDS:
+        value = compacted.get(field)
+        if isinstance(value, str) and len(value) > _MAX_RECENT_TEXT_CHARS:
+            compacted[field] = (
+                value[:_MAX_RECENT_TEXT_CHARS]
+                + f"…[truncated {len(value) - _MAX_RECENT_TEXT_CHARS} chars]"
+            )
+    return compacted
+
+
+def _load_stats_json(stats_path: Path) -> dict:
+    """读取 stats.json；超大文件只恢复统计头部，跳过 recent_requests。"""
+    try:
+        if stats_path.stat().st_size <= _STATS_JSON_FULL_LOAD_MAX_BYTES:
+            with open(stats_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except OSError:
+        return {}
+
+    with open(stats_path, 'r', encoding='utf-8') as f:
+        head = f.read(_STATS_JSON_PREFIX_BYTES)
+
+    cut = len(head)
+    for marker in ('"recent_requests"', '"recent_errors"'):
+        index = head.find(marker)
+        if index != -1:
+            cut = min(cut, index)
+    if cut == len(head):
+        logger.warning(
+            "stats.json 过大且无法定位 recent_requests，本次跳过历史统计恢复"
+        )
+        return {}
+    partial = head[:cut].rstrip().rstrip(',') + '}'
+    try:
+        data = json.loads(partial)
+    except json.JSONDecodeError:
+        logger.warning("stats.json 过大且头部截断后无法解析，本次跳过历史统计恢复")
+        return {}
+    logger.info(
+        "stats.json 超过 %.1fMB，已跳过 recent_requests 恢复（下次持久化将压缩写入）",
+        stats_path.stat().st_size / (1024 * 1024),
+    )
+    return data
+
 class LogManager:
     """日志管理器 - 支持新旧两种日志格式"""
     
@@ -120,8 +189,10 @@ class LogManager:
         self._counter_lock = threading.Lock()
         self._hourly_counters = {}  # {(date, hour): counter} 用于生成序号
         
-        # 异步落盘队列（请求线程只入队，后台线程负责实际写盘）
-        self._write_queue = queue.Queue(maxsize=2000)  # 减少内存排队
+        # 异步落盘队列（请求线程只入队，后台线程负责实际写盘）。
+        # 每条 request_end 日志含完整 messages/response，队列过深会把
+        # 大量请求体滞留在内存里；200 条足够吸收磁盘写入抖动。
+        self._write_queue = queue.Queue(maxsize=200)
         self._writer_running = True
         
         # 初始化SQLite日志器
@@ -599,6 +670,9 @@ class MonitoringService:
                 msg_preview = "[Messages List]"
         
         context = current_request.get()
+        # 🔧 内存约束：system 提示词和 tools 定义可能数百 KB，监控只需要预览。
+        # 在这里统一压缩，保证内存与日志里的 request_params 都是有界的。
+        params = compact_monitor_params(params)
         request_info = RequestInfo(
             request_id=request_id,
             timestamp=time.time(),
@@ -1251,8 +1325,9 @@ class MonitoringService:
                 # 🔧 新增：保存每日统计
                 'daily_stats': daily_stats,
                 # 🔧 持久化最近请求/错误列表（_load_persisted_stats 会恢复，
-                # 重启后监控面板仍能看到最近请求）；只存最近 500 条控制文件体积
-                'recent_requests': recent_snapshot[-500:],
+                # 重启后监控面板仍能看到最近请求）；只存最近 MAX_PERSISTED_REQUESTS 条，
+                # 且每条 request_params 已在写入前压缩，文件体积可控。
+                'recent_requests': recent_snapshot[-MonitorConfig.MAX_PERSISTED_REQUESTS:],
                 'recent_errors': recent_errors_snapshot
             }
             
@@ -1301,9 +1376,8 @@ class MonitoringService:
                 logger.info("未找到持久化统计数据，将从零开始")
                 return
             
-            with open(stats_path, 'r', encoding='utf-8') as f:
-                stats_data = json.load(f)
-            
+            stats_data = _load_stats_json(stats_path)
+
             # 恢复模型统计
             if 'model_stats' in stats_data:
                 # 🔧 关键修复：确保所有模型统计包含必需字段
@@ -1323,14 +1397,14 @@ class MonitoringService:
                     loaded_stats
                 )
             
-            # 恢复最近的请求和错误
+            # 恢复最近的请求和错误（历史记录可能含未压缩的大字段）
             if 'recent_requests' in stats_data:
                 for req in stats_data['recent_requests']:
-                    self.recent_requests.append(req)
-            
+                    self.recent_requests.append(_compact_recent_record(req))
+
             if 'recent_errors' in stats_data:
                 for err in stats_data['recent_errors']:
-                    self.recent_errors.append(err)
+                    self.recent_errors.append(_compact_recent_record(err))
             
             # 如果是同一次运行会话，保持原有的启动时间
             # 否则重置启动时间

@@ -5,6 +5,8 @@ Token计数模块 - 用量追踪、状态显示与异步封装
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import importlib.util
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,6 +37,20 @@ from ._custom import (
 logger = logging.getLogger(__name__)
 
 
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _package_version(distribution: str) -> Optional[str]:
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def get_all_tokenizers_status() -> Dict[str, Any]:
     """获取所有分词器的详细状态信息"""
     status = {
@@ -45,33 +61,25 @@ def get_all_tokenizers_status() -> Dict[str, Any]:
         'gemma_local': {'name':'Gemma Tokenizer (本地)','available':False,'path':None,'loaded':_gemma_tokenizer is not None,'description':'本地Gemma分词器文件','supported_models':['gemini系列']},
         'deepseek_local': {'name':'DeepSeek Tokenizer (本地)','available':False,'path':None,'loaded':_deepseek_tokenizer is not None,'description':'本地DeepSeek分词器文件','supported_models':['deepseek-chat','deepseek-coder','deepseek-v3']}
     }
-    try:
-        import tiktoken
-        status['tiktoken']['available'] = True
-        status['tiktoken']['version'] = getattr(tiktoken,'__version__','unknown')
+    # 🔧 这里只探测是否安装、读取版本号，不再真正 import：
+    # import transformers 会连带加载 torch/scipy，打开一次状态页就常驻
+    # 数百 MB；google-generativeai 同理。
+    status['tiktoken']['available'] = _module_available('tiktoken')
+    if status['tiktoken']['available']:
+        status['tiktoken']['version'] = _package_version('tiktoken') or 'unknown'
         status['tiktoken']['loaded'] = len(_tiktoken_cache) > 0
-    except ImportError:
-        pass
-    try:
-        import anthropic
-        status['anthropic']['available'] = True
-        status['anthropic']['version'] = getattr(anthropic,'__version__','unknown')
+    status['anthropic']['available'] = _module_available('anthropic')
+    if status['anthropic']['available']:
+        status['anthropic']['version'] = _package_version('anthropic') or 'unknown'
         status['anthropic']['loaded'] = _anthropic_client is not None
-    except ImportError:
-        pass
-    try:
-        import transformers
-        status['transformers']['available'] = True
-        status['transformers']['version'] = getattr(transformers,'__version__','unknown')
-    except ImportError:
-        pass
-    try:
-        import google.generativeai as genai
-        status['google_generativeai']['available'] = True
-        status['google_generativeai']['version'] = getattr(genai,'__version__','unknown')
+    status['transformers']['available'] = _module_available('transformers')
+    if status['transformers']['available']:
+        status['transformers']['version'] = _package_version('transformers') or 'unknown'
+    google_available = _module_available('google.generativeai')
+    status['google_generativeai']['available'] = google_available
+    if google_available:
+        status['google_generativeai']['version'] = _package_version('google-generativeai') or 'unknown'
         status['google_generativeai']['loaded'] = _gemini_model is not None
-    except ImportError:
-        pass
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     gemma_paths = [os.path.join(project_root,"tokenizers","gemma3-27b-it"),os.path.join(project_root,"tokenizers","gemma-2b-it"),os.path.join(project_root,"tokenizers","gemma")]
     for path in gemma_paths:
@@ -79,14 +87,19 @@ def get_all_tokenizers_status() -> Dict[str, Any]:
             status['gemma_local']['available'] = True
             status['gemma_local']['path'] = path
             break
-    status['gemma_local']['loaded'] = _gemma_tokenizer is not None
+    # _usage 在导入时按值拿到的 _gemma_tokenizer/_deepseek_tokenizer 只是
+    # 导入瞬间的快照；实际加载状态以 _tokenizers 维护的全局为准。
+    loaded_keys = {
+        item['key'] for item in get_tokenizer_memory_info()['loaded_tokenizers']
+    }
+    status['gemma_local']['loaded'] = 'gemma' in loaded_keys
     deepseek_paths = [os.path.join(project_root,"deepseek_v3_tokenizer"),os.path.join(project_root,"tokenizers","dsv3.2")]
     for deepseek_path in deepseek_paths:
         if os.path.exists(deepseek_path) and (os.path.exists(os.path.join(deepseek_path,"tokenizer.json")) or os.path.exists(os.path.join(deepseek_path,"tokenizer_config.json"))):
             status['deepseek_local']['available'] = True
             status['deepseek_local']['path'] = deepseek_path
             break
-    status['deepseek_local']['loaded'] = _deepseek_tokenizer is not None
+    status['deepseek_local']['loaded'] = 'deepseek' in loaded_keys
     status['_memory_info'] = get_tokenizer_memory_info()
     return status
 

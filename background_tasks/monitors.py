@@ -240,6 +240,7 @@ async def memory_monitor(
     """
     process = psutil.Process(os.getpid())
     last_gc_time = time.time()
+    last_trim_time = 0.0
     
     while True:
         try:
@@ -334,8 +335,28 @@ async def memory_monitor(
                     await asyncio.to_thread(gc.collect)
                     last_gc_time = current_time
 
-                    new_info = await asyncio.to_thread(psutil.Process(os.getpid()).memory_info)
+                    new_info = await asyncio.to_thread(process.memory_info)
                     new_memory_mb = new_info.rss / (1024 * 1024)
+
+                    # GC 之后 Python 可能仍把空闲页留在工作集里。超过阈值时
+                    # 把工作集压回系统，避免任务管理器长期显示高占用。
+                    trim_threshold = mem_config.get(
+                        "working_set_trim_threshold_mb",
+                        MemoryDefaults.WORKING_SET_TRIM_THRESHOLD_MB,
+                    )
+                    if new_memory_mb > trim_threshold and current_time - last_trim_time > 600:
+                        from utils.process_memory import trim_working_set
+                        trimmed = await asyncio.to_thread(trim_working_set)
+                        if trimmed:
+                            last_trim_time = current_time
+                            trimmed_info = await asyncio.to_thread(process.memory_info)
+                            trimmed_mb = trimmed_info.rss / (1024 * 1024)
+                            logger.info(
+                                f"[MEM_MONITOR] 🧹 工作集回收: "
+                                f"{new_memory_mb:.2f}MB -> {trimmed_mb:.2f}MB"
+                            )
+                            new_memory_mb = trimmed_mb
+
                     freed_mb = memory_mb - new_memory_mb
                     
                     logger.info(f"[MEM_MONITOR] GC后内存: {memory_mb:.2f}MB -> {new_memory_mb:.2f}MB "

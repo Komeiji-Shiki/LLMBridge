@@ -13,12 +13,27 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from ._types import (
+    _CUSTOM_TOKENIZERS_MAX_SIZE,
+    _TIKTOKEN_MODEL_CACHE_MAX_SIZE,
     _custom_tokenizers,
     _custom_tokenizers_config,
     _tiktoken_model_cache,
+    _tokenizer_last_used,
+    _update_tokenizer_last_used,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _evict_tokenizer_cache(cache: Dict[str, Any], prefix: str, max_size: int) -> None:
+    """按最近使用时间淘汰缓存，保证本地分词器不会全部常驻内存。"""
+    while len(cache) > max_size:
+        oldest = min(
+            cache,
+            key=lambda key: _tokenizer_last_used.get(f'{prefix}{key}', 0),
+        )
+        cache.pop(oldest, None)
+        logger.info(f"[TOKEN_COUNTER] 🧹 LRU清理分词器缓存: {prefix}{oldest}")
 
 
 def install_tokenizer_package(package_name: str) -> Dict[str, Any]:
@@ -76,6 +91,7 @@ def load_tiktoken_model_tokenizer(model_path: str, tokenizer_name: str = None):
     global _tiktoken_model_cache
     cache_key = tokenizer_name or model_path
     if cache_key in _tiktoken_model_cache:
+        _update_tokenizer_last_used(f'tiktoken_model_{cache_key}')
         return _tiktoken_model_cache[cache_key]
     try:
         import tiktoken
@@ -111,6 +127,10 @@ def load_tiktoken_model_tokenizer(model_path: str, tokenizer_name: str = None):
         encoding = tiktoken.Encoding(name=os.path.basename(vocab_file),pat_str=pat_str,mergeable_ranks=mergeable_ranks,special_tokens=special_tokens)
         logger.info(f"[TOKEN_COUNTER] ✅ 已加载tiktoken.model分词器: {vocab_file} (词表大小: {num_base_tokens})")
         _tiktoken_model_cache[cache_key] = encoding
+        _update_tokenizer_last_used(f'tiktoken_model_{cache_key}')
+        _evict_tokenizer_cache(
+            _tiktoken_model_cache, 'tiktoken_model_', _TIKTOKEN_MODEL_CACHE_MAX_SIZE
+        )
         return encoding
     except ImportError as e:
         logger.warning(f"[TOKEN_COUNTER] tiktoken未安装: {e}")
@@ -141,19 +161,27 @@ def add_custom_tokenizer(name:str,source_type:str,source:str,display_name:str=No
                 return {'success':False,'error':'加载tiktoken.model分词器失败'}
             logger.info(f"[TOKEN_COUNTER] ✅ 成功加载tiktoken.model分词器: {source}")
         else:
-            from transformers import AutoTokenizer
-            import warnings
-            warnings.filterwarnings('ignore')
-            if source_type=='huggingface':
-                logger.info(f"[TOKEN_COUNTER] 正在从HuggingFace下载分词器: {source}")
-                tokenizer = AutoTokenizer.from_pretrained(source,trust_remote_code=remote_code_allowed(source))
-                logger.info(f"[TOKEN_COUNTER] ✅ 成功下载分词器: {source}")
-            elif source_type=='local':
+            if source_type=='local':
                 if not os.path.exists(source):
                     return {'success':False,'error':f'本地路径不存在: {source}'}
-                tokenizer = AutoTokenizer.from_pretrained(source,local_files_only=True,trust_remote_code=remote_code_allowed(source))
-            else:
-                return {'success':False,'error':f'不支持的来源类型: {source_type}。支持: huggingface, local, tiktoken_model'}
+                # 优先 tokenizers 直接读取 tokenizer.json，避免 transformers
+                # 顺带导入 torch/scipy（常驻数百 MB）。
+                from ._tokenizers import _load_local_fast_tokenizer
+                tokenizer = _load_local_fast_tokenizer(source)
+                if tokenizer is not None:
+                    logger.info(f"[TOKEN_COUNTER] ✅ 已用 tokenizers 轻量路径加载本地分词器: {source}")
+            if tokenizer is None:
+                from transformers import AutoTokenizer
+                import warnings
+                warnings.filterwarnings('ignore')
+                if source_type=='huggingface':
+                    logger.info(f"[TOKEN_COUNTER] 正在从HuggingFace下载分词器: {source}")
+                    tokenizer = AutoTokenizer.from_pretrained(source,trust_remote_code=remote_code_allowed(source))
+                    logger.info(f"[TOKEN_COUNTER] ✅ 成功下载分词器: {source}")
+                elif source_type=='local':
+                    tokenizer = AutoTokenizer.from_pretrained(source,local_files_only=True,trust_remote_code=remote_code_allowed(source))
+                else:
+                    return {'success':False,'error':f'不支持的来源类型: {source_type}。支持: huggingface, local, tiktoken_model'}
     except ImportError:
         if source_type=='tiktoken_model':
             return {'success':False,'error':'tiktoken库未安装，请先安装: pip install tiktoken'}
@@ -199,8 +227,10 @@ def delete_custom_tokenizer(name:str)->Dict[str,Any]:
 def get_custom_tokenizer(name:str):
     global _custom_tokenizers,_tiktoken_model_cache
     if name in _custom_tokenizers:
+        _update_tokenizer_last_used(f'custom_{name}')
         return _custom_tokenizers[name],False
     if name in _tiktoken_model_cache:
+        _update_tokenizer_last_used(f'tiktoken_model_{name}')
         return _tiktoken_model_cache[name],True
     config = load_custom_tokenizers_config()
     if name not in config:
@@ -213,27 +243,54 @@ def get_custom_tokenizer(name:str):
             if tokenizer:
                 return tokenizer,True
             return None,True
-        from transformers import AutoTokenizer
-        import warnings
-        warnings.filterwarnings('ignore')
-        if source_type=='huggingface':
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],trust_remote_code=remote_code_allowed(tokenizer_config['source']))
-        elif source_type=='local':
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],local_files_only=True,trust_remote_code=remote_code_allowed(tokenizer_config['source']))
-        else:
-            return None,False
+        tokenizer = None
+        if source_type=='local':
+            from ._tokenizers import _load_local_fast_tokenizer
+            tokenizer = _load_local_fast_tokenizer(tokenizer_config['source'])
+        if tokenizer is None:
+            from transformers import AutoTokenizer
+            import warnings
+            warnings.filterwarnings('ignore')
+            if source_type=='huggingface':
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],trust_remote_code=remote_code_allowed(tokenizer_config['source']))
+            elif source_type=='local':
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_config['source'],local_files_only=True,trust_remote_code=remote_code_allowed(tokenizer_config['source']))
+            else:
+                return None,False
         _custom_tokenizers[name] = tokenizer
+        _update_tokenizer_last_used(f'custom_{name}')
+        _evict_tokenizer_cache(
+            _custom_tokenizers, 'custom_', _CUSTOM_TOKENIZERS_MAX_SIZE
+        )
         return tokenizer,False
     except Exception as e:
         logger.warning(f"[TOKEN_COUNTER] 加载自定义分词器 {name} 失败: {e}")
         return None,False
 
 
+def _custom_tokenizer_available(cfg: Dict[str,Any]) -> bool:
+    """只检查配置指向的本地文件是否存在，不实际加载分词器。
+
+    旧版 list_custom_tokenizers 会通过 get_custom_tokenizer 逐个加载所有
+    本地分词器（每个几十 MB），仅打开管理面板就白白吃内存。
+    """
+    source_type = cfg.get('source_type')
+    source = cfg.get('source') or ''
+    if source_type == 'local':
+        return os.path.exists(source)
+    if source_type == 'tiktoken_model':
+        return os.path.exists(os.path.join(source, 'tiktoken.model')) or os.path.exists(source)
+    # huggingface 需要联网才能确认，保持乐观显示
+    return True
+
+
 def list_custom_tokenizers()->Dict[str,Any]:
     config = load_custom_tokenizers_config()
     result = []
     for name,cfg in config.items():
-        tokenizer,is_tiktoken = get_custom_tokenizer(name)
-        available = tokenizer is not None
+        is_tiktoken = name in _tiktoken_model_cache or cfg.get('source_type') == 'tiktoken_model'
+        available = name in _custom_tokenizers or name in _tiktoken_model_cache
+        if not available:
+            available = _custom_tokenizer_available(cfg)
         result.append({'name':cfg.get('name',name),'display_name':cfg.get('display_name',name),'source_type':cfg.get('source_type'),'source':cfg.get('source'),'description':cfg.get('description'),'supported_models':cfg.get('supported_models',[]),'available':available,'is_tiktoken_model':is_tiktoken,'created_at':cfg.get('created_at')})
     return {'count':len(result),'tokenizers':result}

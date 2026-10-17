@@ -15,6 +15,9 @@ from typing import Optional, Dict, Any
 from cachetools import TTLCache
 from fastapi import WebSocket
 
+from core.bounded_cache import ByteLimitedTTLCache
+from core.constants import CacheDefaults
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,11 +50,19 @@ class ImageState:
     downloaded_image_urls: deque = field(default_factory=lambda: deque(maxlen=5000))
     downloaded_urls_set: set = field(default_factory=set)
     
-    # 缓存 - 使用 TTLCache 自动管理过期和大小限制
-    IMAGE_BASE64_CACHE: Any = field(default_factory=lambda: TTLCache(maxsize=50, ttl=600))
-    IMAGE_CACHE_MAX_SIZE: int = 50
-    IMAGE_CACHE_TTL: int = 600
-    PROCESSED_IMAGE_CACHE: Any = field(default_factory=lambda: TTLCache(maxsize=30, ttl=600))
+    # 缓存 - TTL + 条数 + 总字节数三重限制（base64 图片单条可能几 MB）
+    IMAGE_BASE64_CACHE: Any = field(default_factory=lambda: ByteLimitedTTLCache(
+        maxsize=CacheDefaults.IMAGE_CACHE_MAX_SIZE,
+        ttl=CacheDefaults.IMAGE_CACHE_TTL,
+        max_bytes=CacheDefaults.IMAGE_CACHE_MAX_BYTES,
+    ))
+    IMAGE_CACHE_MAX_SIZE: int = CacheDefaults.IMAGE_CACHE_MAX_SIZE
+    IMAGE_CACHE_TTL: int = CacheDefaults.IMAGE_CACHE_TTL
+    PROCESSED_IMAGE_CACHE: Any = field(default_factory=lambda: ByteLimitedTTLCache(
+        maxsize=CacheDefaults.PROCESSED_IMAGE_CACHE_MAX_SIZE,
+        ttl=CacheDefaults.PROCESSED_IMAGE_CACHE_TTL,
+        max_bytes=CacheDefaults.PROCESSED_IMAGE_CACHE_MAX_BYTES,
+    ))
     
     # 文件床
     # 🔧 与 core.constants.CacheDefaults 对齐：旧版此处声明 MAX_SIZE=500，

@@ -31,43 +31,103 @@ logger = logging.getLogger(__name__)
 _anthropic_count_tokens_func = None
 
 
-def get_deepseek_tokenizer():
-    """获取DeepSeek tokenizer实例"""
-    global _deepseek_tokenizer
-    if _deepseek_tokenizer is not None:
-        _update_tokenizer_last_used('deepseek')
-        return _deepseek_tokenizer
+class LocalFastTokenizer:
+    """本地 tokenizer.json 的轻量包装。
+
+    transformers 的 AutoTokenizer 会顺带导入 torch / scipy（实测仅加载一个
+    本地分词器就让进程常驻 400MB+），而本地目录里的 tokenizer.json 用
+    tokenizers 库即可直接加载，token 数与 HF fast tokenizer 完全一致。
+    """
+
+    __slots__ = ("name_or_path", "_tokenizer")
+
+    def __init__(self, name_or_path: str, tokenizer: Any):
+        self.name_or_path = name_or_path
+        self._tokenizer = tokenizer
+
+    def encode(self, text: str, *, add_special_tokens: bool = True, **_: Any):
+        return self._tokenizer.encode(
+            text, add_special_tokens=add_special_tokens
+        ).ids
+
+    def __call__(self, text: str, **kwargs: Any):
+        return self.encode(text, **kwargs)
+
+    def get_vocab_size(self) -> int:
+        return self._tokenizer.get_vocab_size()
+
+    def __len__(self) -> int:
+        return self._tokenizer.get_vocab_size()
+
+
+def _load_local_fast_tokenizer(local_path: str) -> Optional[LocalFastTokenizer]:
+    """优先用 tokenizers 直接加载本地 tokenizer.json，失败时返回 None。"""
+    tokenizer_file = os.path.join(local_path, "tokenizer.json")
+    if not os.path.exists(tokenizer_file):
+        return None
+    try:
+        from tokenizers import Tokenizer
+        return LocalFastTokenizer(local_path, Tokenizer.from_file(tokenizer_file))
+    except Exception as e:
+        logger.debug(f"[TOKEN_COUNTER] tokenizers 直接加载失败 {tokenizer_file}: {e}")
+        return None
+
+
+def _load_deepseek_with_transformers(local_tokenizer_path: str):
+    """兼容没有 tokenizer.json 的旧分词器目录。"""
     try:
         from transformers import AutoTokenizer
         import warnings
         warnings.filterwarnings('ignore', message='.*PyTorch.*')
         warnings.filterwarnings('ignore', message='.*TensorFlow.*')
         warnings.filterwarnings('ignore', message='.*Flax.*')
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        local_tokenizer_paths = [
-            os.path.join(project_root, "deepseek_v3_tokenizer"),
-            os.path.join(project_root, "tokenizers", "dsv3.2"),
-        ]
-        for local_tokenizer_path in local_tokenizer_paths:
-            if os.path.exists(local_tokenizer_path):
-                try:
-                    logger.info(f"[TOKEN_COUNTER] 正在加载DeepSeek tokenizer: {local_tokenizer_path} (约100MB内存)")
-                    _deepseek_tokenizer = AutoTokenizer.from_pretrained(
-                        local_tokenizer_path, local_files_only=True, trust_remote_code=True
-                    )
-                    logger.info(f"[TOKEN_COUNTER] ✅ 已从本地加载DeepSeek tokenizer")
-                    _update_tokenizer_last_used('deepseek')
-                    return _deepseek_tokenizer
-                except Exception as e:
-                    logger.warning(f"[TOKEN_COUNTER] 本地加载DeepSeek tokenizer失败: {e}")
-        logger.info("[TOKEN_COUNTER] DeepSeek tokenizer目录不存在，将使用tiktoken估算")
-        return None
+        return AutoTokenizer.from_pretrained(
+            local_tokenizer_path, local_files_only=True, trust_remote_code=True
+        )
     except ImportError:
         logger.debug("[TOKEN_COUNTER] transformers未安装，使用tiktoken作为替代")
         return None
     except Exception as e:
-        logger.debug(f"[TOKEN_COUNTER] DeepSeek tokenizer初始化失败: {e}")
+        logger.warning(f"[TOKEN_COUNTER] 本地加载DeepSeek tokenizer失败: {e}")
         return None
+
+
+def get_deepseek_tokenizer():
+    """获取DeepSeek tokenizer实例"""
+    global _deepseek_tokenizer
+    if _deepseek_tokenizer is not None:
+        _update_tokenizer_last_used('deepseek')
+        return _deepseek_tokenizer
+
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    local_tokenizer_paths = [
+        os.path.join(project_root, "deepseek_v3_tokenizer"),
+        os.path.join(project_root, "tokenizers", "dsv3.2"),
+    ]
+    for local_tokenizer_path in local_tokenizer_paths:
+        if not os.path.exists(local_tokenizer_path):
+            continue
+        tokenizer = _load_local_fast_tokenizer(local_tokenizer_path)
+        if tokenizer is not None:
+            logger.info(
+                f"[TOKEN_COUNTER] ✅ 已从本地加载DeepSeek tokenizer"
+                f"（tokenizers 轻量路径，约30MB）: {local_tokenizer_path}"
+            )
+            _deepseek_tokenizer = tokenizer
+            _update_tokenizer_last_used('deepseek')
+            return _deepseek_tokenizer
+        logger.info(
+            f"[TOKEN_COUNTER] 正在加载DeepSeek tokenizer: {local_tokenizer_path} (transformers 回退路径)"
+        )
+        tokenizer = _load_deepseek_with_transformers(local_tokenizer_path)
+        if tokenizer is not None:
+            logger.info("[TOKEN_COUNTER] ✅ 已从本地加载DeepSeek tokenizer")
+            _deepseek_tokenizer = tokenizer
+            _update_tokenizer_last_used('deepseek')
+            return _deepseek_tokenizer
+
+    logger.info("[TOKEN_COUNTER] DeepSeek tokenizer目录不存在，将使用tiktoken估算")
+    return None
 
 
 def get_tokenizer_for_model(model_name: str) -> str:
@@ -186,41 +246,49 @@ def get_gemma_tokenizer():
     if _gemma_tokenizer is not None:
         _update_tokenizer_last_used('gemma')
         return _gemma_tokenizer
-    try:
-        from transformers import AutoTokenizer
-        import warnings
-        warnings.filterwarnings('ignore', message='.*PyTorch.*')
-        warnings.filterwarnings('ignore', message='.*TensorFlow.*')
-        warnings.filterwarnings('ignore', message='.*Flax.*')
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        local_tokenizer_paths = [
-            os.path.join(project_root, "tokenizers", "gemma3-27b-it"),
-            os.path.join(project_root, "tokenizers", "gemma-2b-it"),
-            os.path.join(project_root, "tokenizers", "gemma-7b-it"),
-            os.path.join(project_root, "tokenizers", "gemma-2b"),
-            os.path.join(project_root, "tokenizers", "gemma"),
-        ]
-        for local_path in local_tokenizer_paths:
-            if os.path.exists(local_path):
-                try:
-                    logger.info(f"[TOKEN_COUNTER] 正在加载Gemma tokenizer: {local_path} (约80MB内存)")
-                    _gemma_tokenizer = AutoTokenizer.from_pretrained(
-                        local_path, local_files_only=True, trust_remote_code=True
-                    )
-                    logger.info(f"[TOKEN_COUNTER] ✅ 已从本地加载Gemma tokenizer: {os.path.basename(local_path)}")
-                    _update_tokenizer_last_used('gemma')
-                    return _gemma_tokenizer
-                except Exception as e:
-                    logger.debug(f"[TOKEN_COUNTER] 本地加载失败 {local_path}: {e}")
-                    continue
-        logger.debug("[TOKEN_COUNTER] Gemma tokenizer不可用，将使用tiktoken估算（这是正常的，不影响使用）")
-        return None
-    except ImportError:
-        logger.debug("[TOKEN_COUNTER] transformers未安装，使用tiktoken作为替代")
-        return None
-    except Exception as e:
-        logger.debug(f"[TOKEN_COUNTER] Gemma tokenizer初始化失败: {e}")
-        return None
+
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    local_tokenizer_paths = [
+        os.path.join(project_root, "tokenizers", "gemma3-27b-it"),
+        os.path.join(project_root, "tokenizers", "gemma-2b-it"),
+        os.path.join(project_root, "tokenizers", "gemma-7b-it"),
+        os.path.join(project_root, "tokenizers", "gemma-2b"),
+        os.path.join(project_root, "tokenizers", "gemma"),
+    ]
+    for local_path in local_tokenizer_paths:
+        if not os.path.exists(local_path):
+            continue
+        tokenizer = _load_local_fast_tokenizer(local_path)
+        if tokenizer is not None:
+            logger.info(
+                f"[TOKEN_COUNTER] ✅ 已从本地加载Gemma tokenizer"
+                f"（tokenizers 轻量路径，约65MB）: {os.path.basename(local_path)}"
+            )
+            _gemma_tokenizer = tokenizer
+            _update_tokenizer_last_used('gemma')
+            return _gemma_tokenizer
+        try:
+            from transformers import AutoTokenizer
+            import warnings
+            warnings.filterwarnings('ignore', message='.*PyTorch.*')
+            warnings.filterwarnings('ignore', message='.*TensorFlow.*')
+            warnings.filterwarnings('ignore', message='.*Flax.*')
+            logger.info(f"[TOKEN_COUNTER] 正在加载Gemma tokenizer: {local_path} (transformers 回退路径)")
+            _gemma_tokenizer = AutoTokenizer.from_pretrained(
+                local_path, local_files_only=True, trust_remote_code=True
+            )
+            logger.info(f"[TOKEN_COUNTER] ✅ 已从本地加载Gemma tokenizer: {os.path.basename(local_path)}")
+            _update_tokenizer_last_used('gemma')
+            return _gemma_tokenizer
+        except ImportError:
+            logger.debug("[TOKEN_COUNTER] transformers未安装，使用tiktoken作为替代")
+            return None
+        except Exception as e:
+            logger.debug(f"[TOKEN_COUNTER] 本地加载失败 {local_path}: {e}")
+            continue
+
+    logger.debug("[TOKEN_COUNTER] Gemma tokenizer不可用，将使用tiktoken估算（这是正常的，不影响使用）")
+    return None
 
 
 def get_gemini_model():
@@ -389,7 +457,7 @@ def get_tokenizer_memory_info() -> Dict[str, Any]:
     estimated_memory_mb = 0
     details = {}
     if _gemma_tokenizer is not None:
-        estimated_mb = 80
+        estimated_mb = 65
         last_used = _tokenizer_last_used.get('gemma', current_time)
         idle_minutes = (current_time - last_used) / 60
         loaded_tokenizers.append({
@@ -399,7 +467,7 @@ def get_tokenizer_memory_info() -> Dict[str, Any]:
         details['gemma'] = {'estimated_mb': estimated_mb, 'last_used': last_used}
         estimated_memory_mb += estimated_mb
     if _deepseek_tokenizer is not None:
-        estimated_mb = 100
+        estimated_mb = 30
         last_used = _tokenizer_last_used.get('deepseek', current_time)
         idle_minutes = (current_time - last_used) / 60
         loaded_tokenizers.append({

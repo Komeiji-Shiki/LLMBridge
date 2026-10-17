@@ -82,17 +82,34 @@ async def lifespan(app: FastAPI):
     server_state.main_event_loop = asyncio.get_running_loop()
     load_config()
 
-    # 🔧 用 CONFIG 中的值重建 IMAGE_BASE64_CACHE（app_state 中是硬编码默认值）
-    from cachetools import TTLCache
+    # 🔧 用 CONFIG 中的值重建图片缓存（app_state 中是硬编码默认值）。
+    # 条数上限之外再加总字节上限：base64 图片单条可能几 MB，只限条数
+    # 依然会让缓存膨胀到数百 MB。
+    from core.bounded_cache import ByteLimitedTTLCache
     mem_config = CONFIG.get("memory_management", {})
     image_state.IMAGE_CACHE_MAX_SIZE = mem_config.get("image_cache_max_size", CacheDefaults.IMAGE_CACHE_MAX_SIZE)
     image_state.IMAGE_CACHE_TTL = mem_config.get("image_cache_ttl_seconds", CacheDefaults.IMAGE_CACHE_TTL)
-    image_state.IMAGE_BASE64_CACHE = TTLCache(
-        maxsize=image_state.IMAGE_CACHE_MAX_SIZE, ttl=image_state.IMAGE_CACHE_TTL
+    image_state.IMAGE_BASE64_CACHE = ByteLimitedTTLCache(
+        maxsize=image_state.IMAGE_CACHE_MAX_SIZE,
+        ttl=image_state.IMAGE_CACHE_TTL,
+        max_bytes=mem_config.get("image_cache_max_bytes", CacheDefaults.IMAGE_CACHE_MAX_BYTES),
+    )
+
+    processed_config = CONFIG.get("processed_image_cache", {})
+    image_state.PROCESSED_IMAGE_CACHE = ByteLimitedTTLCache(
+        maxsize=processed_config.get("max_size", CacheDefaults.PROCESSED_IMAGE_CACHE_MAX_SIZE),
+        ttl=processed_config.get("ttl_seconds", CacheDefaults.PROCESSED_IMAGE_CACHE_TTL),
+        max_bytes=mem_config.get(
+            "processed_image_cache_max_bytes",
+            CacheDefaults.PROCESSED_IMAGE_CACHE_MAX_BYTES,
+        ),
     )
     logger.info(
-        f"🔧 IMAGE_BASE64_CACHE 已按配置重建: "
-        f"maxsize={image_state.IMAGE_CACHE_MAX_SIZE}, ttl={image_state.IMAGE_CACHE_TTL}s"
+        f"🔧 图片缓存已按配置重建: "
+        f"image(maxsize={image_state.IMAGE_CACHE_MAX_SIZE}, "
+        f"max_bytes={mem_config.get('image_cache_max_bytes', CacheDefaults.IMAGE_CACHE_MAX_BYTES)}), "
+        f"processed(maxsize={processed_config.get('max_size', CacheDefaults.PROCESSED_IMAGE_CACHE_MAX_SIZE)}, "
+        f"max_bytes={mem_config.get('processed_image_cache_max_bytes', CacheDefaults.PROCESSED_IMAGE_CACHE_MAX_BYTES)})"
     )
 
     pool_config = CONFIG.get("connection_pool", {})

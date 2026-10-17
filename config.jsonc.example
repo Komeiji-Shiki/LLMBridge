@@ -46,7 +46,12 @@
   "memory_management": {
     "gc_threshold_mb": 80,
     "image_cache_max_size": 100,
-    "image_cache_ttl_seconds": 600
+    "image_cache_ttl_seconds": 600,
+    // 图片缓存总字节上限（64MB），防止 base64 图片只按条数累积
+    "image_cache_max_bytes": 67108864,
+    "processed_image_cache_max_bytes": 67108864,
+    // GC 后工作集仍高于该值时，把空闲页换出（Windows）
+    "working_set_trim_threshold_mb": 500
   },
   "enable_lmarena_reasoning": true,
   "reasoning_output_mode": "openai",
@@ -78,7 +83,11 @@
     "write_normalized": true,
     "redact_image_data": true,
     "require_logprobs_to_write": true,
-    "compress": true
+    "compress": true,
+    // 单请求采集缓冲上限；达到后停止追加并标记 truncated
+    "max_raw_events": 4000,
+    "max_raw_bytes": 8388608,
+    "max_logprob_tokens": 20000
   },
   // 请求体上限（MiB），支持大对话和图片；独立图床用 FILE_BED_MAX_UPLOAD_MB，默认 32。
   "request_limits": {"max_body_mb": 256},

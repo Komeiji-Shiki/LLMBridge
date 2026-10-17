@@ -47,19 +47,23 @@ class CacheDefaults:
     # 图片缓存
     IMAGE_CACHE_MAX_SIZE = 50   # base64图片很占内存，大幅降低
     IMAGE_CACHE_TTL = 600       # 10分钟
-    
+    # 仅限制条数不够：单条 base64 可能几 MB，必须同时限制总字节数
+    IMAGE_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
     # 文件床URL缓存
     FILEBED_URL_CACHE_TTL = 300  # 5分钟
     FILEBED_URL_CACHE_MAX_SIZE = 50
-    
+
     # 已处理图片缓存
     PROCESSED_IMAGE_CACHE_MAX_SIZE = 30
     PROCESSED_IMAGE_CACHE_TTL = 600
+    PROCESSED_IMAGE_CACHE_MAX_BYTES = 64 * 1024 * 1024
     
     # Tiktoken缓存
     TIKTOKEN_CACHE_MAX_SIZE = 5
-    CUSTOM_TOKENIZERS_MAX_SIZE = 5
-    TIKTOKEN_MODEL_CACHE_MAX_SIZE = 5
+    # 每个自定义分词器/本地 tiktoken 词表常驻数十 MB，只保留最近使用的两个
+    CUSTOM_TOKENIZERS_MAX_SIZE = 2
+    TIKTOKEN_MODEL_CACHE_MAX_SIZE = 2
     
     # 下载历史记录
     DOWNLOADED_URLS_MAX_SIZE = 1000
@@ -103,6 +107,9 @@ class MemoryDefaults:
     
     # 缓存清理保留数量
     IMAGE_CACHE_KEEP_SIZE = 50
+
+    # Windows 工作集回收阈值（MB）：GC 后仍高于该值时把工作集压回磁盘
+    WORKING_SET_TRIM_THRESHOLD_MB = 500
 
 
 class ServerDefaults:
