@@ -84,6 +84,149 @@ def test_gemini_stream_tool_indices_remain_distinct_across_chunks():
     assert end['choices'][0]['finish_reason'] == 'tool_calls'
 
 
+def gemini_chunk(parts, finish=None):
+    candidate = {'content': {'role': 'model', 'parts': parts}}
+    if finish:
+        candidate['finishReason'] = finish
+    return {'candidates': [candidate]}
+
+
+# 真实形态：思考增量 → 并行调用（只有第一个 functionCall 带签名）
+GEMINI_TOOL_TURN = [
+    gemini_chunk([{'thought': True, 'text': '先查'}]),
+    gemini_chunk([{'thought': True, 'text': '两个城市'}]),
+    gemini_chunk([{'functionCall': {'id': 'call_1', 'name': 'get_weather', 'args': {'city': '北京'}},
+                   'thoughtSignature': 'sig-call'},
+                  {'functionCall': {'id': 'call_2', 'name': 'get_weather', 'args': {'city': '上海'}}}], 'STOP'),
+]
+# 正文结尾的纯签名分片
+GEMINI_TEXT_TURN = [
+    gemini_chunk([{'text': '北京晴，'}]),
+    gemini_chunk([{'text': '上海雨。'}]),
+    gemini_chunk([{'text': '', 'thoughtSignature': 'sig-text'}], 'STOP'),
+]
+
+
+def openai_stream_chunks(gemini_chunks):
+    service, indices = DirectAPIService(MagicMock()), {}
+    return [service.convert_gemini_response_to_openai(chunk, 'demo', 'r', is_stream_chunk=True,
+                                                      tool_call_indices=indices) for chunk in gemini_chunks]
+
+
+def anthropic_stream_blocks(openai_chunks):
+    """经 Anthropic SSE 转换后，按客户端 SDK 的方式累积出 content blocks。"""
+    from fastapi.responses import StreamingResponse
+    from converters.anthropic_openai import build_anthropic_streaming_response
+
+    async def body():
+        for chunk in openai_chunks:
+            yield f'data: {json.dumps(chunk, ensure_ascii=False)}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def run():
+        response = build_anthropic_streaming_response(StreamingResponse(body()), 'demo')
+        return ''.join([part async for part in response.body_iterator])
+
+    blocks, keys = {}, {'thinking_delta': 'thinking', 'signature_delta': 'signature',
+                        'text_delta': 'text', 'input_json_delta': 'partial_json'}
+    for line in asyncio.run(run()).splitlines():
+        event = json.loads(line[5:]) if line.startswith('data:') else {}
+        if event.get('type') == 'content_block_start':
+            blocks[event['index']] = dict(event['content_block'])
+        elif event.get('type') == 'content_block_delta':
+            key = keys[event['delta']['type']]
+            block = blocks[event['index']]
+            block[key] = block.get(key, '') + event['delta'][key]
+    result = [blocks[index] for index in sorted(blocks)]
+    for block in result:
+        if block['type'] == 'tool_use':
+            block['input'] = json.loads(block.pop('partial_json', '') or '{}')
+    return result
+
+
+TOOL_TURN_BLOCKS = [
+    {'type': 'thinking', 'thinking': '先查两个城市', 'signature': 'gemini.v1.call.sig-call'},
+    {'type': 'tool_use', 'id': 'call_1', 'name': 'get_weather', 'input': {'city': '北京'}},
+    {'type': 'tool_use', 'id': 'call_2', 'name': 'get_weather', 'input': {'city': '上海'}},
+]
+TEXT_TURN_BLOCKS = [
+    {'type': 'text', 'text': '北京晴，上海雨。'},
+    {'type': 'thinking', 'thinking': '', 'signature': 'gemini.v1.text.sig-text'},
+]
+
+
+@pytest.mark.parametrize('gemini_chunks, expected', [
+    (GEMINI_TOOL_TURN, TOOL_TURN_BLOCKS), (GEMINI_TEXT_TURN, TEXT_TURN_BLOCKS)])
+def test_gemini_signatures_stream_to_anthropic_thinking_blocks(gemini_chunks, expected):
+    assert anthropic_stream_blocks(openai_stream_chunks(gemini_chunks)) == expected
+
+
+@pytest.mark.parametrize('gemini_chunks, expected', [
+    (GEMINI_TOOL_TURN, TOOL_TURN_BLOCKS), (GEMINI_TEXT_TURN, TEXT_TURN_BLOCKS)])
+def test_gemini_signatures_non_stream_match_stream_blocks(gemini_chunks, expected):
+    from fastapi.responses import JSONResponse
+    from converters.anthropic_openai import convert_openai_non_stream_response_to_anthropic
+    parts = [part for chunk in gemini_chunks for part in chunk['candidates'][0]['content']['parts']]
+    openai = DirectAPIService(MagicMock()).convert_gemini_response_to_openai(
+        gemini_chunk(parts, 'STOP'), 'demo', 'r')
+    response = asyncio.run(convert_openai_non_stream_response_to_anthropic(JSONResponse(openai), 'demo'))
+    assert json.loads(response.body)['content'] == expected
+
+
+def gemini_request_body(messages):
+    async def run():
+        session = MagicMock()
+        response = MagicMock(status=200)
+        response.json = AsyncMock(return_value={'candidates': []})
+        session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+        session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+        [item async for item in DirectAPIService(session).call_gemini_native_api('key', 'demo', messages)]
+        return json.loads(session.post.call_args.kwargs['data'])
+    return asyncio.run(run())
+
+
+def test_anthropic_thinking_signatures_restore_gemini_parts_in_place():
+    anthropic = {'model': 'demo', 'messages': [
+        {'role': 'user', 'content': '北京和上海天气？'},
+        {'role': 'assistant', 'content': TOOL_TURN_BLOCKS},
+        {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'call_1', 'content': '晴'},
+            {'type': 'tool_result', 'tool_use_id': 'call_2', 'content': '雨'}]},
+        {'role': 'assistant', 'content': TEXT_TURN_BLOCKS},
+        {'role': 'user', 'content': '谢谢'}]}
+    contents = gemini_request_body(convert_anthropic_to_openai_request(anthropic)['messages'])['contents']
+    assert contents[1] == {'role': 'model', 'parts': [
+        {'text': '先查两个城市', 'thought': True},
+        {'functionCall': {'name': 'get_weather', 'args': {'city': '北京'}, 'id': 'call_1'},
+         'thoughtSignature': 'sig-call'},
+        {'functionCall': {'name': 'get_weather', 'args': {'city': '上海'}, 'id': 'call_2'}}]}
+    # 并行调用的结果同在一轮
+    assert [part['functionResponse']['id'] for part in contents[2]['parts']] == ['call_1', 'call_2']
+    assert contents[3] == {'role': 'model', 'parts': [{'text': '北京晴，上海雨。', 'thoughtSignature': 'sig-text'}]}
+
+
+def test_foreign_thinking_signatures_never_reach_gemini():
+    from converters.anthropic_openai import sanitize_anthropic_thinking_blocks
+    claude_turn = [{'type': 'thinking', 'thinking': 'Claude 的思考', 'signature': 'EqQBCkYIBRgCKkCx'},
+                   {'type': 'text', 'text': '好'}]
+    openai = convert_anthropic_to_openai_request({'model': 'demo', 'messages': [
+        {'role': 'user', 'content': 'hi'}, {'role': 'assistant', 'content': claude_turn}]})
+    assert 'provider_metadata' not in openai['messages'][1]
+    # 反过来切回 Claude 时，Gemini 签名也不能交给 Anthropic 校验
+    cleaned = sanitize_anthropic_thinking_blocks([{'role': 'assistant', 'content': TOOL_TURN_BLOCKS}])
+    assert cleaned[0]['content'] == TOOL_TURN_BLOCKS[1:]
+
+
+def test_flat_stream_chunk_with_text_and_tool_call_keeps_both():
+    chunk = {'choices': [{'index': 0, 'delta': {
+        'reasoning_content': '想想', 'content': '我来查',
+        'tool_calls': [{'index': 0, 'id': 'c1', 'type': 'function',
+                        'function': {'name': 'lookup', 'arguments': '{"q": 1}'}}]}}]}
+    assert anthropic_stream_blocks([chunk]) == [
+        {'type': 'thinking', 'thinking': '想想'}, {'type': 'text', 'text': '我来查'},
+        {'type': 'tool_use', 'id': 'c1', 'name': 'lookup', 'input': {'q': 1}}]
+
+
 @pytest.mark.parametrize('stream', [False, True])
 @pytest.mark.parametrize('base_url, expected_base', [
     (None, 'https://generativelanguage.googleapis.com/v1beta'),

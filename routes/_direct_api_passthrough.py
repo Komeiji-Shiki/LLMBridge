@@ -171,9 +171,11 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
     # prefix/partial/reasoning 占位）。openai_req.copy() 是浅拷贝，
     # 消息 dict 与监控记录的 full_messages 共享引用，不复制会污染
     # 监控日志中的原始请求消息。逐条 dict() 浅复制字段引用，开销极小。
+    # provider_metadata 是网关内部的原生回放载荷（如 Gemini parts），
+    # 客户端中途切到 OpenAI 兼容模型时不能带给上游。
     if isinstance(passthrough_request.get("messages"), list):
         passthrough_request["messages"] = [
-            dict(m) if isinstance(m, dict) else m
+            {k: v for k, v in m.items() if k != "provider_metadata"} if isinstance(m, dict) else m
             for m in passthrough_request["messages"]
         ]
 

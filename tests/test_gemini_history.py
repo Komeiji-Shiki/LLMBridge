@@ -471,3 +471,54 @@ def test_tool_loop_signature_survives_missing_earlier_history(tmp_path, monkeypa
             assert contents[-2]['parts'][0]['thoughtSignature'] == 'sig-c'
             assert all('thoughtSignature' not in part for item in contents[:-2] for part in item['parts'])
     asyncio.run(run())
+
+
+def test_converted_gemini_requests_fall_back_to_server_history(tmp_path, monkeypatch):
+    """OpenAI/Anthropic 转换链路：客户端丢了签名时，下一轮按服务端历史补回。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from core.request_context import current_request
+    from services.direct_api_service import DirectAPIService
+    bind_store(monkeypatch, tmp_path)
+    # 上游没给 functionCall 编号：网关补的编号要同时进入下游与服务端历史
+    upstream = [chunk([{'thought': True, 'text': '查'}]),
+                {'candidates': [{'content': {'role': 'model', 'parts': [
+                    {'functionCall': {'name': 'lookup', 'args': {'q': 1}}, 'thoughtSignature': 'sig-c'}]},
+                    'finishReason': 'STOP'}]}]
+
+    async def call(service, messages):
+        return [item async for item in service.call_gemini_native_api('key', 'target', messages, stream=True)]
+
+    async def run():
+        ctx = context()
+        ctx.transport_depth = 1
+        token = current_request.set(ctx)
+        session = MagicMock()
+        response = MagicMock(status=200)
+
+        async def chunks():
+            for value in upstream:
+                yield ('data: ' + json.dumps(value, ensure_ascii=False) + '\n\n').encode()
+
+        response.content.iter_any = chunks
+        session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+        session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+        service = DirectAPIService(session)
+        try:
+            question = [{'role': 'user', 'content': '查一下'}]
+            first = await call(service, question)
+            call_id = first[-1]['candidates'][0]['content']['parts'][0]['functionCall']['id']
+            tool_call = service.convert_gemini_response_to_openai(first[-1], 'alias', 'r')['choices'][0]['message']['tool_calls'][0]
+            assert tool_call['id'] == call_id
+            # 客户端只回传编号与参数，签名和思考都丢了
+            await call(service, [*question,
+                                 {'role': 'assistant', 'content': None, 'tool_calls': [
+                                     {'id': call_id, 'type': 'function',
+                                      'function': {'name': 'lookup', 'arguments': '{"q": 1}'}}]},
+                                 {'role': 'tool', 'tool_call_id': call_id, 'content': 'ok'}])
+            body = json.loads(session.post.call_args.kwargs['data'])
+            assert body['contents'][1]['parts'] == [
+                {'thought': True, 'text': '查'},
+                {'functionCall': {'name': 'lookup', 'args': {'q': 1}, 'id': call_id}, 'thoughtSignature': 'sig-c'}]
+        finally:
+            current_request.reset(token)
+    asyncio.run(run())

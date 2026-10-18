@@ -21,6 +21,7 @@ import copy
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
 from services.protocol_events import gemini_termination
+from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
@@ -115,6 +116,15 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
 
 from services.sse import iter_sse_json_events as _iter_sse_json_events
 from services.request_execution import retry_before_output
+
+
+def _assign_function_call_ids(value: Any) -> None:
+    """上游没给 functionCall 编号时就地补上，下游回传的调用才能与服务端历史对上。"""
+    for candidate in (value.get("candidates") or []) if isinstance(value, dict) else []:
+        for part in (candidate.get("content") or {}).get("parts") or []:
+            call = part.get("functionCall")
+            if isinstance(call, dict) and not call.get("id"):
+                call["id"] = f"call_{uuid.uuid4().hex[:8]}"
 
 
 
@@ -926,8 +936,15 @@ class DirectAPIService:
         
         try:
             context = current_request.get()
+            history = assembler = None
             if context:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'gemini')
+                # 客户端回传的签名优先（已带签名的轮次不会被覆盖），缺失时按服务端历史补回
+                history = GeminiThoughtHistory(context, context.endpoint, request_body)
+                assembler = GeminiTurnAssembler()
+                restored = await history.restore(request_body)
+                if restored:
+                    logger.info(f"[GEMINI_NATIVE] 已按服务端历史补回 {restored} 个思考签名")
             request_body_json = await asyncio.to_thread(
                 json.dumps,
                 request_body,
@@ -975,14 +992,23 @@ class DirectAPIService:
                         # 终止块本身可能带有最后一段内容和 usageMetadata：先原样交给
                         # 调用方转换计费，再单独发出错误事件
                         error = _termination_error(chunk)
+                        _assign_function_call_ids(chunk)
+                        if assembler is not None:
+                            assembler.feed(chunk)
                         yield chunk
                         if error:
                             yield {'error': error}
                             return
+                    if history is not None:
+                        await history.remember(request_body.get("contents"), assembler)
                 else:
                     # 非流式响应：错误与原始响应合并，调用方仍可读取 usageMetadata
                     response_data = await response.json()
                     error = _termination_error(response_data)
+                    _assign_function_call_ids(response_data)
+                    if history is not None and not error:
+                        assembler.feed(response_data)
+                        await history.remember(request_body.get("contents"), assembler)
                     yield {**response_data, 'error': error} if error else response_data
         
         except asyncio.TimeoutError:

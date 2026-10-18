@@ -15,6 +15,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
+from converters.gemini_anthropic_signatures import (
+    decode_signature,
+    gemini_parts_from_anthropic,
+    gemini_segments,
+)
 from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
 from utils.usage_tokens import total_output_tokens
 
@@ -280,15 +285,14 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
                     "content": content if text_blocks else None,
                     "tool_calls": tool_calls
                 }
-                if thinking_texts:
-                    msg["reasoning_content"] = "\n".join(thinking_texts)
-                openai_messages.append(msg)
-                continue
-
-            # 无 tool_calls 的 assistant 消息：正常构建，附加 reasoning_content
-            msg = {"role": "assistant", "content": content}
+            else:
+                msg = {"role": "assistant", "content": content}
             if thinking_texts:
                 msg["reasoning_content"] = "\n".join(thinking_texts)
+            # 本网关下发的 Gemini 签名随 thinking 块回传：按块顺序还原原生 parts
+            gemini_parts = gemini_parts_from_anthropic(raw_content)
+            if gemini_parts:
+                msg["provider_metadata"] = {"gemini_parts": gemini_parts}
             openai_messages.append(msg)
             continue
 
@@ -707,6 +711,9 @@ def convert_openai_usage_to_anthropic(usage: Optional[Dict[str, Any]]) -> Dict[s
 def sanitize_anthropic_thinking_blocks(messages: Any) -> Any:
     """剔除历史消息中缺失签名的 thinking / redacted_thinking block（透传前清洗）。
 
+    本网关为 Gemini 签发的 thinking 签名（gemini.v1. 前缀）对 Anthropic 无效，
+    客户端中途切回 Claude 模型时一并剔除。
+
     OpenRouter 等上游对 /messages 请求体做严格 schema 校验：thinking block
     必须携带字符串 signature、redacted_thinking 必须携带 data，否则整个
     content 的 union 校验直接 400（"signature": expected string, received
@@ -735,7 +742,8 @@ def sanitize_anthropic_thinking_blocks(messages: Any) -> Any:
         for block in content:
             if isinstance(block, dict):
                 btype = block.get("type")
-                if btype == "thinking" and not block.get("signature"):
+                if btype == "thinking" and (not block.get("signature")
+                                            or decode_signature(block.get("signature"))[0]):
                     removed_blocks += 1
                     continue
                 if btype == "redacted_thinking" and not block.get("data"):
@@ -757,6 +765,22 @@ def sanitize_anthropic_thinking_blocks(messages: Any) -> Any:
             f"thinking/redacted_thinking block（上游严格校验兼容）"
         )
     return sanitized
+
+
+def _flat_segments(reasoning: Any, text: Any, tool_calls: Any) -> List[tuple]:
+    """非 Gemini 来源没有原生顺序：按 思考 → 正文 → 调用 的自然顺序展开。
+
+    签名片段的规则（流式/非流式一致）：签名收束当前思考块；没有打开的思考块
+    时单独成一个空思考块（与 Claude display=omitted 的形态一致）。
+    """
+    segments: List[tuple] = []
+    if isinstance(reasoning, str) and reasoning:
+        segments.append(("thinking", reasoning))
+    if isinstance(text, str) and text:
+        segments.append(("text", text))
+    if isinstance(tool_calls, list) and tool_calls:
+        segments.append(("tool_calls", tool_calls))
+    return segments
 
 
 async def convert_openai_non_stream_response_to_anthropic(
@@ -791,23 +815,36 @@ async def convert_openai_non_stream_response_to_anthropic(
 
     anthropic_usage = convert_openai_usage_to_anthropic(data.get("usage"))
 
-    # ── 构建 Anthropic content blocks（多 block 支持）──
+    # ── 构建 Anthropic content blocks（多 block 支持，规则与流式一致）──
+    segments = gemini_segments(message)
+    if segments is None:
+        segments = _flat_segments(extract_openai_message_reasoning(first_choice),
+                                  extract_openai_message_text(first_choice),
+                                  message.get("tool_calls"))
     content_blocks: List[Dict[str, Any]] = []
-    reasoning_content = extract_openai_message_reasoning(first_choice)
-    text_content = extract_openai_message_text(first_choice)
-    tool_calls = message.get("tool_calls")
-
-    # thinking block
-    if reasoning_content:
-        content_blocks.append({"type": "thinking", "thinking": reasoning_content})
-
-    # text block
-    if text_content:
-        content_blocks.append({"type": "text", "text": text_content})
-
-    # tool_use blocks
-    if isinstance(tool_calls, list) and tool_calls:
-        for tc in tool_calls:
+    open_thinking: Optional[Dict[str, Any]] = None
+    for kind, value in segments:
+        if kind == "thinking":
+            if open_thinking is None:
+                open_thinking = {"type": "thinking", "thinking": ""}
+                content_blocks.append(open_thinking)
+            open_thinking["thinking"] += value
+            continue
+        if kind == "signature":
+            if open_thinking is None:
+                content_blocks.append({"type": "thinking", "thinking": "", "signature": value})
+            else:
+                open_thinking["signature"] = value
+            open_thinking = None
+            continue
+        open_thinking = None
+        if kind == "text":
+            if content_blocks and content_blocks[-1]["type"] == "text":
+                content_blocks[-1]["text"] += value
+            else:
+                content_blocks.append({"type": "text", "text": value})
+            continue
+        for tc in value:
             if not isinstance(tc, dict):
                 continue
             tc_func = tc.get("function", {})
@@ -1022,87 +1059,94 @@ def build_anthropic_streaming_response(
             choice = choices[0]
             delta = choice.get("delta", {}) if isinstance(choice.get("delta"), dict) else {}
 
-            delta_reasoning = delta.get("reasoning_content", "")
-            delta_content = delta.get("content", "")
-            delta_tool_calls = delta.get("tool_calls")
+            # Gemini 链路按原生 parts 顺序展开（签名随 thinking 块下发），其余来源按
+            # 思考 → 正文 → 调用展开；同一 chunk 混有多种内容时逐段发送，不再只取一种
+            segments = gemini_segments(delta)
+            if segments is None:
+                segments = _flat_segments(delta.get("reasoning_content"), delta.get("content"),
+                                          delta.get("tool_calls"))
 
-            # 判断当前 delta 类型
-            if isinstance(delta_tool_calls, list) and delta_tool_calls:
-                current_type = "tool_calls"
-            elif isinstance(delta_reasoning, str) and delta_reasoning:
-                current_type = "thinking"
-            elif isinstance(delta_content, str) and delta_content:
-                current_type = "text"
-            else:
-                current_type = prev_delta_type
-
-            # ── 类型切换 → 关闭旧 block ──
-            if current_type != prev_delta_type and prev_delta_type is not None:
-                for ev in _close_current_blocks():
-                    yield ev
-
-            # ── 发送当前 delta ──
-            if current_type == "thinking" and isinstance(delta_reasoning, str) and delta_reasoning:
-                if active_thinking_idx is None:
-                    active_thinking_idx = next_block_idx
-                    next_block_idx += 1
-                    yield _emit_block_start(active_thinking_idx, "thinking")
-                yield _emit_block_delta(active_thinking_idx, "thinking_delta", delta_reasoning)
-
-            elif current_type == "text" and isinstance(delta_content, str) and delta_content:
-                if active_text_idx is None:
-                    active_text_idx = next_block_idx
-                    next_block_idx += 1
-                    yield _emit_block_start(active_text_idx, "text")
-                yield _emit_block_delta(active_text_idx, "text_delta", delta_content)
-
-            elif current_type == "tool_calls" and isinstance(delta_tool_calls, list):
-                for tc in delta_tool_calls:
-                    if not isinstance(tc, dict):
-                        continue
-                    oai_idx = tc.get("index", 0)
-                    tc_id = tc.get("id")
-                    tc_func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
-                    tc_name = tc_func.get("name", "")
-                    tc_args = tc_func.get("arguments", "")
-
-                    if oai_idx not in active_tool_use:
-                        real_idx = next_block_idx
+            for current_type, value in segments:
+                if current_type == "signature":
+                    if active_thinking_idx is None:
+                        for ev in _close_current_blocks():
+                            yield ev
+                        active_thinking_idx = next_block_idx
                         next_block_idx += 1
-                        active_tool_use[oai_idx] = {
-                            "real_idx": real_idx,
-                            "id": tc_id or "",
-                            "name": tc_name or "",
-                            # 把 arguments 增量中的 \uXXXX 转义提前解码为明文
-                            "args_unescaper": StreamingUnicodeUnescaper()
-                        }
-                        # 发送 content_block_start（等到有 id/name 或第一个 delta 时）
-                        if tc_id or tc_name:
-                            yield _emit_block_start(real_idx, "tool_use", {"id": tc_id or "", "name": tc_name or ""})
-                            active_tool_use[oai_idx]["started"] = True
-                    else:
-                        info = active_tool_use[oai_idx]
-                        # 如果之前没有 id/name，现在补充
-                        if not info.get("started") and (tc_id or tc_name):
-                            info["id"] = tc_id or info["id"]
-                            info["name"] = tc_name or info["name"]
-                            yield _emit_block_start(info["real_idx"], "tool_use", {"id": info["id"], "name": info["name"]})
-                            info["started"] = True
+                        yield _emit_block_start(active_thinking_idx, "thinking")
+                    yield _emit_block_delta(active_thinking_idx, "signature_delta", value)
+                    yield _emit_block_stop(active_thinking_idx)
+                    active_thinking_idx = None
+                    prev_delta_type = None
+                    continue
 
-                    info = active_tool_use.get(oai_idx)
-                    if info and tc_args:
-                        if not info.get("started"):
-                            # 上游首个 delta 只有 arguments 没有 id/name：
-                            # 先补发 content_block_start 保证协议顺序，再发 input_json_delta
-                            yield _emit_block_start(info["real_idx"], "tool_use",
-                                                    {"id": info["id"], "name": info["name"]})
-                            info["started"] = True
-                        # 提前把 \uXXXX 转义解码为明文再发给下游（跨 chunk 安全）
-                        decoded = info["args_unescaper"].feed(tc_args)
-                        if decoded:
-                            yield _emit_block_delta(info["real_idx"], "input_json_delta", decoded)
+                # ── 类型切换 → 关闭旧 block ──
+                if current_type != prev_delta_type and prev_delta_type is not None:
+                    for ev in _close_current_blocks():
+                        yield ev
 
-            prev_delta_type = current_type
+                # ── 发送当前片段 ──
+                if current_type == "thinking":
+                    if active_thinking_idx is None:
+                        active_thinking_idx = next_block_idx
+                        next_block_idx += 1
+                        yield _emit_block_start(active_thinking_idx, "thinking")
+                    yield _emit_block_delta(active_thinking_idx, "thinking_delta", value)
+
+                elif current_type == "text":
+                    if active_text_idx is None:
+                        active_text_idx = next_block_idx
+                        next_block_idx += 1
+                        yield _emit_block_start(active_text_idx, "text")
+                    yield _emit_block_delta(active_text_idx, "text_delta", value)
+
+                else:
+                    for tc in value:
+                        if not isinstance(tc, dict):
+                            continue
+                        oai_idx = tc.get("index", 0)
+                        tc_id = tc.get("id")
+                        tc_func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                        tc_name = tc_func.get("name", "")
+                        tc_args = tc_func.get("arguments", "")
+
+                        if oai_idx not in active_tool_use:
+                            real_idx = next_block_idx
+                            next_block_idx += 1
+                            active_tool_use[oai_idx] = {
+                                "real_idx": real_idx,
+                                "id": tc_id or "",
+                                "name": tc_name or "",
+                                # 把 arguments 增量中的 \uXXXX 转义提前解码为明文
+                                "args_unescaper": StreamingUnicodeUnescaper()
+                            }
+                            # 发送 content_block_start（等到有 id/name 或第一个 delta 时）
+                            if tc_id or tc_name:
+                                yield _emit_block_start(real_idx, "tool_use", {"id": tc_id or "", "name": tc_name or ""})
+                                active_tool_use[oai_idx]["started"] = True
+                        else:
+                            info = active_tool_use[oai_idx]
+                            # 如果之前没有 id/name，现在补充
+                            if not info.get("started") and (tc_id or tc_name):
+                                info["id"] = tc_id or info["id"]
+                                info["name"] = tc_name or info["name"]
+                                yield _emit_block_start(info["real_idx"], "tool_use", {"id": info["id"], "name": info["name"]})
+                                info["started"] = True
+
+                        info = active_tool_use.get(oai_idx)
+                        if info and tc_args:
+                            if not info.get("started"):
+                                # 上游首个 delta 只有 arguments 没有 id/name：
+                                # 先补发 content_block_start 保证协议顺序，再发 input_json_delta
+                                yield _emit_block_start(info["real_idx"], "tool_use",
+                                                        {"id": info["id"], "name": info["name"]})
+                                info["started"] = True
+                            # 提前把 \uXXXX 转义解码为明文再发给下游（跨 chunk 安全）
+                            decoded = info["args_unescaper"].feed(tc_args)
+                            if decoded:
+                                yield _emit_block_delta(info["real_idx"], "input_json_delta", decoded)
+
+                prev_delta_type = current_type
 
             finish_reason = choice.get("finish_reason")
             if finish_reason:
