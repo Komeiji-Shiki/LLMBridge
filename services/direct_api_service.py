@@ -687,11 +687,17 @@ class DirectAPIService:
                 # Gemini 3 系列要求携带 id 关联调用；为空时不携带，兼容旧版 API
                 if tool_call_id:
                     function_response_part["functionResponse"]["id"] = tool_call_id
-                
-                gemini_contents.append({
-                    "role": "user",  # Gemini 的工具结果使用 user 角色
-                    "parts": [function_response_part]
-                })
+
+                # 并行调用的结果必须同在一轮（数量与上一轮 functionCall 一致）
+                previous = gemini_contents[-1] if gemini_contents else None
+                if (previous and previous["role"] == "user"
+                        and all("functionResponse" in part for part in previous["parts"])):
+                    previous["parts"].append(function_response_part)
+                else:
+                    gemini_contents.append({
+                        "role": "user",  # Gemini 的工具结果使用 user 角色
+                        "parts": [function_response_part]
+                    })
                 continue
             
             if role == "system":
