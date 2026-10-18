@@ -1257,6 +1257,7 @@ class DirectAPIService:
                     prompt_tokens=prompt_tokens,
                     output_tokens=candidates_tokens + thoughts_tokens,
                     reasoning_tokens=thoughts_tokens,
+                    cached_tokens=metadata.get("cachedContentTokenCount", 0),
                     completion_mode=completion_tokens_mode,
                     total_tokens=metadata.get("totalTokenCount", 0),
                 )

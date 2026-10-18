@@ -58,6 +58,20 @@ def test_gemini_call_signature_text_and_finish_reason():
     assert choice['message']['tool_calls'][0]['_thought_signature'] == 'signed'
 
 
+@pytest.mark.parametrize('stream', [False, True])
+def test_gemini_cache_hits_reach_anthropic_usage(stream):
+    from converters.anthropic_openai import convert_openai_usage_to_anthropic
+    native = {**native_response(), 'usageMetadata': {
+        'promptTokenCount': 1000, 'cachedContentTokenCount': 800,
+        'candidatesTokenCount': 20, 'thoughtsTokenCount': 30, 'totalTokenCount': 1050}}
+    usage = DirectAPIService(MagicMock()).convert_gemini_response_to_openai(
+        native, 'demo', 'r', is_stream_chunk=stream)['usage']
+    assert usage['prompt_tokens_details'] == {'cached_tokens': 800}
+    assert convert_openai_usage_to_anthropic(usage) == {
+        'input_tokens': 200, 'cache_creation_input_tokens': 0,
+        'cache_read_input_tokens': 800, 'output_tokens': 50}
+
+
 def test_gemini_stream_tool_indices_remain_distinct_across_chunks():
     service = DirectAPIService(MagicMock())
     indices = {}

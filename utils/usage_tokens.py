@@ -94,6 +94,12 @@ def extract_prompt_tokens(usage: Any) -> int:
     return as_int(usage.get("prompt_tokens")) or as_int(usage.get("input_tokens"))
 
 
+def extract_cached_tokens(usage: Any) -> int:
+    """读取 OpenAI 风格 usage 中的缓存命中量（含在 prompt_tokens 内）。"""
+    details = usage.get("prompt_tokens_details") if isinstance(usage, dict) else None
+    return as_int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+
+
 def completion_excludes_reasoning(
     prompt_tokens: int,
     completion_tokens: int,

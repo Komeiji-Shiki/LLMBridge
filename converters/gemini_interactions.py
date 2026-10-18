@@ -574,6 +574,7 @@ def convert_interactions_to_openai_response(
         prompt_tokens=prompt_tokens,
         output_tokens=output_tokens + thought_tokens,
         reasoning_tokens=thought_tokens,
+        cached_tokens=_usage_int(usage, "total_cached_tokens", "cached_tokens"),
         completion_mode=completion_tokens_mode,
         total_tokens=total_tokens,
     )
@@ -790,6 +791,7 @@ class InteractionsStreamConverter:
                     prompt_tokens=prompt_tokens,
                     output_tokens=output_tokens + thought_tokens,
                     reasoning_tokens=thought_tokens,
+                    cached_tokens=_usage_int(usage, "total_cached_tokens", "cached_tokens"),
                     completion_mode=self.completion_tokens_mode,
                     total_tokens=_usage_int(usage, "total_tokens"),
                 ),

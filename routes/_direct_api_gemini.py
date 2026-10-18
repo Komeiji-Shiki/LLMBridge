@@ -15,6 +15,7 @@ from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
 from utils.usage_tokens import (
     compose_chat_usage,
+    extract_cached_tokens,
     extract_prompt_tokens,
     extract_reasoning_tokens,
     get_completion_tokens_mode,
@@ -239,6 +240,7 @@ async def handle_gemini_native_direct(
                 output_tokens = 0
                 total_tokens = 0
                 reasoning_tokens = 0  # 思考 token（含在 output_tokens 里）
+                cached_tokens = 0  # 缓存命中（含在 input_tokens 里）
                 upstream_usage = None  # Gemini 原生 usageMetadata（原样保留，供日志记录）
                 request_success = False
                 stream_completed = False
@@ -369,6 +371,7 @@ async def handle_gemini_native_direct(
                             # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
                             output_tokens = total_output_tokens(usage)
                             reasoning_tokens = extract_reasoning_tokens(usage)
+                            cached_tokens = extract_cached_tokens(usage)
                             total_tokens = resolve_usage_tokens(usage).total_tokens
 
                         yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
@@ -407,6 +410,7 @@ async def handle_gemini_native_direct(
                             # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
                             output_tokens = total_output_tokens(usage)
                             reasoning_tokens = extract_reasoning_tokens(usage)
+                            cached_tokens = extract_cached_tokens(usage)
                             total_tokens = resolve_usage_tokens(usage).total_tokens
 
                         yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
@@ -462,7 +466,7 @@ async def handle_gemini_native_direct(
 
                     cost_info = direct_api_service.calculate_cost(
                         input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=0,
+                        cached_tokens=cached_tokens,
                         pricing=pricing_config) if pricing_config else {}
                     final_content = ''.join(content_parts)
                     final_reasoning = ''.join(reasoning_parts)
@@ -471,7 +475,7 @@ async def handle_gemini_native_direct(
                     monitoring_service.request_end(
                         request_id=request_id, success=request_success,
                         input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=0, error=error_msg,
+                        cached_tokens=cached_tokens, error=error_msg,
                         response_content=final_content,
                         reasoning_content=final_reasoning,
                         cost_info=cost_info, full_messages=full_messages,
@@ -501,6 +505,7 @@ async def handle_gemini_native_direct(
                                     prompt_tokens=input_tokens,
                                     output_tokens=output_tokens,
                                     reasoning_tokens=reasoning_tokens,
+                                    cached_tokens=cached_tokens,
                                     completion_mode=completion_tokens_mode,
                                     total_tokens=final_total_tokens,
                                 )
@@ -524,6 +529,7 @@ async def handle_gemini_native_direct(
                 output_tokens = 0
                 total_tokens = 0
                 reasoning_tokens = 0  # 思考 token（含在 output_tokens 里）
+                cached_tokens = 0  # 缓存命中（含在 input_tokens 里）
                 upstream_usage = None  # interactions usage（interaction.completed 事件携带）
                 request_success = False
                 stream_completed = False
@@ -650,6 +656,7 @@ async def handle_gemini_native_direct(
                             # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
                             output_tokens = total_output_tokens(usage)
                             reasoning_tokens = extract_reasoning_tokens(usage)
+                            cached_tokens = extract_cached_tokens(usage)
                             total_tokens = resolve_usage_tokens(usage).total_tokens
                             upstream_usage = converter.usage
 
@@ -683,6 +690,7 @@ async def handle_gemini_native_direct(
                                 # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
                                 output_tokens = total_output_tokens(usage)
                                 reasoning_tokens = extract_reasoning_tokens(usage)
+                                cached_tokens = extract_cached_tokens(usage)
                                 total_tokens = resolve_usage_tokens(usage).total_tokens
                                 upstream_usage = converter.usage
 
@@ -731,7 +739,7 @@ async def handle_gemini_native_direct(
 
                     cost_info = direct_api_service.calculate_cost(
                         input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=0,
+                        cached_tokens=cached_tokens,
                         pricing=pricing_config) if pricing_config else {}
                     final_content = ''.join(content_parts)
                     final_reasoning = ''.join(reasoning_parts)
@@ -740,7 +748,7 @@ async def handle_gemini_native_direct(
                     monitoring_service.request_end(
                         request_id=request_id, success=request_success,
                         input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=0, error=error_msg,
+                        cached_tokens=cached_tokens, error=error_msg,
                         response_content=final_content,
                         reasoning_content=final_reasoning,
                         cost_info=cost_info, full_messages=full_messages,
@@ -770,6 +778,7 @@ async def handle_gemini_native_direct(
                                     prompt_tokens=input_tokens,
                                     output_tokens=output_tokens,
                                     reasoning_tokens=reasoning_tokens,
+                                    cached_tokens=cached_tokens,
                                     completion_mode=completion_tokens_mode,
                                     total_tokens=final_total_tokens,
                                 )
@@ -855,6 +864,7 @@ async def handle_gemini_native_direct(
             input_tokens = extract_prompt_tokens(usage)
             # 计费按真实总输出（正文+思考），与下游看到的 completion_tokens 口径无关
             output_tokens = total_output_tokens(usage)
+            cached_tokens = extract_cached_tokens(usage)
 
             if input_tokens == 0 or output_tokens == 0:
                 try:
@@ -870,12 +880,13 @@ async def handle_gemini_native_direct(
 
             cost_info = direct_api_service.calculate_cost(
                 input_tokens=input_tokens, output_tokens=output_tokens,
-                cached_tokens=0,
+                cached_tokens=cached_tokens,
                 pricing=pricing_config) if pricing_config else {}
 
             monitoring_service.request_end(
                 request_id=request_id, success=True,
                 input_tokens=input_tokens, output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
                 response_content=response_content,
                 reasoning_content=reasoning_content,
                 cost_info=cost_info, full_messages=full_messages,
