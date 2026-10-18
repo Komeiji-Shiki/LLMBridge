@@ -12,6 +12,9 @@ UPSTREAM_HEADER_EXCLUSIONS = frozenset({
     'connection', 'content-encoding', 'content-length', 'content-md5',
     'digest', 'expect', 'host', 'keep-alive', 'proxy-authenticate',
     'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade',
+    # 上游响应由网关自己的 HTTP 客户端解压，压缩方式只能由它协商：转发
+    # 浏览器的 zstd 等声明会让上游返回网关解不开的编码
+    'accept-encoding',
     # 桥接层本地凭据和控制信息
     'authorization', 'cookie', 'x-api-key', 'x-goog-api-key',
     'x-web-access-key', 'x-bridge-request-id', 'x-bridge-session-id',

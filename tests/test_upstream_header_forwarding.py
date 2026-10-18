@@ -108,6 +108,7 @@ def test_gateway_context_excludes_proxy_and_local_auth_headers(upstream_method):
         'X-Goog-Api-Key': 'local-google-key',
         'Cookie': 'secret=do-not-forward',
         'X-Bridge-Session-ID': 'local-session',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
     })
 
     assert response.status_code == 200
@@ -116,8 +117,8 @@ def test_gateway_context_excludes_proxy_and_local_auth_headers(upstream_method):
     assert captured['x-provider-trace'] == 'trace-from-client'
     assert captured['user-agent'] == 'client-agent/1.0'
     assert 'accept' in captured
-    assert 'accept-encoding' in captured
-    for name in ('authorization', 'cookie', 'x-bridge-session-id'):
+    # 压缩方式由网关的 HTTP 客户端按自己能解的编码协商
+    for name in ('authorization', 'cookie', 'x-bridge-session-id', 'accept-encoding'):
         assert name not in captured
     if upstream_method:
         assert captured['x-goog-api-key'] == 'upstream-key'
