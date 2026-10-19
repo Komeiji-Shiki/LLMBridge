@@ -21,7 +21,7 @@ import copy
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
 from services.protocol_events import gemini_termination
-from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler
+from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler, compact_empty_text_parts
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
@@ -945,6 +945,7 @@ class DirectAPIService:
                 restored = await history.restore(request_body)
                 if restored:
                     logger.info(f"[GEMINI_NATIVE] 已按服务端历史补回 {restored} 个思考签名")
+            compact_empty_text_parts(request_body.get("contents"))
             request_body_json = await asyncio.to_thread(
                 json.dumps,
                 request_body,

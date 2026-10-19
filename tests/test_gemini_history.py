@@ -9,6 +9,7 @@ from core.request_context import RequestContext
 from services.gemini_history import (
     GeminiThoughtHistory,
     GeminiTurnAssembler,
+    compact_empty_text_parts,
     history_boundaries,
 )
 
@@ -480,7 +481,8 @@ def test_converted_gemini_requests_fall_back_to_server_history(tmp_path, monkeyp
     from services.direct_api_service import DirectAPIService
     bind_store(monkeypatch, tmp_path)
     # 上游没给 functionCall 编号：网关补的编号要同时进入下游与服务端历史
-    upstream = [chunk([{'thought': True, 'text': '查'}]),
+    # 真实流式首块是空文本；补回后不能原样发出（new-api 会删掉空 text 导致 400）
+    upstream = [chunk([{'text': ''}]), chunk([{'thought': True, 'text': '查'}]),
                 {'candidates': [{'content': {'role': 'model', 'parts': [
                     {'functionCall': {'name': 'lookup', 'args': {'q': 1}}, 'thoughtSignature': 'sig-c'}]},
                     'finishReason': 'STOP'}]}]
@@ -522,3 +524,24 @@ def test_converted_gemini_requests_fall_back_to_server_history(tmp_path, monkeyp
         finally:
             current_request.reset(token)
     asyncio.run(run())
+
+
+def test_empty_text_parts_are_compacted_before_sending():
+    """存储保持上游原样；发送前去掉空文本块，正文签名并入前一个同类文本块，函数调用不动。"""
+    call = {'functionCall': {'id': 'c1', 'name': 'lookup', 'args': {}}}
+    contents = [
+        {'role': 'model', 'parts': [{'text': ''}, {'thought': True, 'text': '想'}, {'text': ''},
+                                    {'thought': True, 'text': '再想'}, {'text': '回答'},
+                                    {'text': '', 'thoughtSignature': 'sig-text'}]},
+        {'role': 'model', 'parts': [{'text': ''}, {**call, 'thoughtSignature': 'sig-call'}, call]},
+        {'role': 'model', 'parts': [{'text': '', 'thoughtSignature': 'orphan'}, call]},
+        {'role': 'model', 'parts': [{'thought': True, 'thoughtSignature': 'no-text'}, {'text': ''}]},
+        {'role': 'user', 'parts': [{'text': '你好'}]},
+    ]
+    compact_empty_text_parts(contents)
+    assert contents[0]['parts'] == [{'thought': True, 'text': '想'}, {'thought': True, 'text': '再想'},
+                                    {'text': '回答', 'thoughtSignature': 'sig-text'}]
+    assert contents[1]['parts'] == [{**call, 'thoughtSignature': 'sig-call'}, call]
+    assert contents[2]['parts'] == [call]
+    assert contents[3]['parts'] == [{'text': ' '}]
+    assert contents[4]['parts'] == [{'text': '你好'}]

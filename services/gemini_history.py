@@ -51,6 +51,32 @@ def _text_part(part):
             and not (part.keys() - {'text', 'thought', 'thoughtSignature'}))
 
 
+def compact_empty_text_parts(contents):
+    """发送前去掉空文本块，空块上的签名并入前一个同类文本块。
+
+    流式输出以 {"text": ""} 开头，正文签名也常落在末尾的空文本块上。官方接口接受
+    空字符串，但 new-api 等中转按 omitempty 重新序列化会删掉空 text，只剩签名的块
+    被判为缺少数据字段（400）。正文签名不参与校验，没有可并入的文本块时一并丢弃；
+    函数调用块不受影响。
+    """
+    for item in contents if isinstance(contents, list) else []:
+        parts = item.get('parts') if isinstance(item, dict) else None
+        if not isinstance(parts, list):
+            continue
+        kept = []
+        for part in parts:
+            if not isinstance(part, dict) or part.get('text') or part.keys() - {'text', 'thought', 'thoughtSignature'}:
+                kept.append(part)
+                continue
+            previous = kept[-1] if kept else None
+            if (part.get('thoughtSignature') and isinstance(previous, dict) and _text_part(previous)
+                    and previous['text'] and not previous.get('thoughtSignature')
+                    and bool(previous.get('thought')) == bool(part.get('thought'))):
+                previous['thoughtSignature'] = part['thoughtSignature']
+        item['parts'] = kept or [{'text': ' '}]
+    return contents
+
+
 def normalize_turn(item):
     """只忽略思考与签名，保留媒体、工具 ID 和不同类型内容块的顺序。"""
     if isinstance(item, str):
