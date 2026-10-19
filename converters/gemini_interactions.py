@@ -622,6 +622,8 @@ class InteractionsStreamConverter:
         self.current_func: Optional[dict] = None
         self.current_thought_text = ""
         self.current_thought_signature: Optional[str] = None
+        # 本次响应签发的全部思考签名，按 step 顺序供监控展示
+        self.signatures: List[str] = []
         self.usage: Optional[dict] = None
         self.completed: bool = False
         self.status: Optional[str] = None
@@ -652,6 +654,8 @@ class InteractionsStreamConverter:
         self.current_func["arguments"] += str(piece)
 
     def _cache_current_thought(self) -> None:
+        if self.current_thought_signature:
+            self.signatures.append(self.current_thought_signature)
         if self.current_thought_text and self.current_thought_signature:
             cache_thought_signatures([(
                 self.current_thought_text,

@@ -287,3 +287,26 @@ def test_anthropic_content_blocks_render_in_request_details(monitor_ui):
     assert signature_box.locator('pre span').inner_text() == signature
     # 同一详情里的常规响应仍经原有消息渲染路径展示。
     assert '这是测试环境中的模拟回答。' in boxes.last.inner_text()
+
+
+def test_gemini_signatures_render_from_provider_metadata(monitor_ui):
+    page, logs = monitor_ui
+    logs[0]['request_messages'] = [
+        {'role': 'user', 'content': '只在思考里记住一个数字。'},
+        {'role': 'assistant', 'content': '想好了。', 'reasoning_content': '选定一个数字。',
+         'provider_metadata': {'gemini_parts': [
+             {'text': '选定一个数字。', 'thought': True},
+             {'text': '想好了。', 'thoughtSignature': 'gemini-text-signature'},
+         ]}},
+        {'role': 'user', 'content': '是多少？'},
+    ]
+    logs[0]['response_message'] = {'role': 'assistant', 'content': '42',
+                                   'reasoning_signature': ['first-signature', 'second-signature']}
+    page.locator('#request-logs .detail-btn').first.click()
+    page.wait_for_selector('#modalBody .message-box')
+    boxes = page.locator('#modalBody .message-box')
+    history = boxes.nth(1)
+    assert history.get_by_text('含思维链签名', exact=True).count() == 1
+    assert 'gemini-text-signature' in history.inner_text()
+    assert boxes.nth(2).get_by_text('含思维链签名', exact=True).count() == 0
+    assert 'second-signature' in boxes.last.inner_text()

@@ -26,6 +26,7 @@ from converters.gemini_interactions import (
     match_and_inject_thought_signatures,
 )
 from services.direct_api_service import DirectAPIService
+from routes._direct_api_gemini import upstream_signatures
 
 
 def setUpModule():
@@ -362,6 +363,19 @@ class InteractionsStreamConverterTests(unittest.TestCase):
         self.assertEqual(finish[0]["choices"][0]["finish_reason"], "tool_calls")
         # 流式路径也应捕获思考签名
         self.assertTrue(any("Reasoning..." in key for key in signature_cache()))
+        self.assertEqual(conv.signatures, ["sig_1"])
+
+    def test_upstream_signatures_follow_block_order(self):
+        generate = {"candidates": [{"content": {"parts": [
+            {"text": "想", "thought": True},
+            {"functionCall": {"name": "f", "args": {}}, "thoughtSignature": "call_sig"},
+            {"text": "答", "thoughtSignature": "text_sig"},
+        ]}}]}
+        self.assertEqual(upstream_signatures(generate), ["call_sig", "text_sig"])
+        interaction = {"steps": [{"type": "thought", "signature": "thought_sig"},
+                                 {"type": "model_output", "content": []}]}
+        self.assertEqual(upstream_signatures(interaction), ["thought_sig"])
+        self.assertEqual(upstream_signatures({"candidates": [{"content": {"parts": [{"text": "无签名"}]}}]}), [])
 
     def test_error_event(self):
         conv = InteractionsStreamConverter("m", "req")

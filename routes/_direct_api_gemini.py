@@ -42,6 +42,19 @@ from ._direct_api_utils import (
 logger = logging.getLogger(__name__)
 
 
+def upstream_signatures(response: dict) -> list:
+    """按顺序取出上游响应里的思考签名，供监控展示。
+
+    generateContent 的签名挂在首个候选的内容块上，Interactions 的挂在 steps 上。
+    """
+    candidates = response.get("candidates") or [{}]
+    content = candidates[0].get("content") if isinstance(candidates[0], dict) else None
+    parts = content.get("parts") if isinstance(content, dict) else None
+    items = (parts if isinstance(parts, list) else []) + (response.get("steps") or [])
+    return [item.get("thoughtSignature") or item.get("signature") for item in items
+            if isinstance(item, dict) and (item.get("thoughtSignature") or item.get("signature"))]
+
+
 class ThinkingSeparatorStreamSplitter:
     """把正文里夹带的思考内容按 thinking_separator 改写成 reasoning_content。
 
@@ -347,6 +360,7 @@ async def handle_gemini_native_direct(
                 reasoning_tokens = 0  # 思考 token（含在 output_tokens 里）
                 cached_tokens = 0  # 缓存命中（含在 input_tokens 里）
                 upstream_usage = None  # Gemini 原生 usageMetadata（原样保留，供日志记录）
+                signatures = []
                 request_success = False
                 stream_completed = False
                 error_msg = None
@@ -455,6 +469,7 @@ async def handle_gemini_native_direct(
                         _meta = gemini_chunk.get("usageMetadata")
                         if isinstance(_meta, dict) and _meta:
                             upstream_usage = _meta
+                        signatures.extend(upstream_signatures(gemini_chunk))
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
                             gemini_chunk, display_name, request_id, is_stream_chunk=True,
                             completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
@@ -495,6 +510,7 @@ async def handle_gemini_native_direct(
                         _meta = gemini_chunk.get("usageMetadata")
                         if isinstance(_meta, dict) and _meta:
                             upstream_usage = _meta
+                        signatures.extend(upstream_signatures(gemini_chunk))
 
                         openai_chunk = direct_api_service.convert_gemini_response_to_openai(
                             gemini_chunk, display_name, request_id, is_stream_chunk=True,
@@ -612,7 +628,7 @@ async def handle_gemini_native_direct(
                         response_content=final_content,
                         reasoning_content=final_reasoning,
                         cost_info=cost_info, full_messages=full_messages,
-                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
+                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls, signatures),
                         response_tool_calls=final_tool_calls,
                         upstream_usage=upstream_usage)
 
@@ -913,7 +929,7 @@ async def handle_gemini_native_direct(
                         response_content=final_content,
                         reasoning_content=final_reasoning,
                         cost_info=cost_info, full_messages=full_messages,
-                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
+                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls, converter.signatures),
                         response_tool_calls=final_tool_calls,
                         upstream_usage=upstream_usage)
 
@@ -1072,7 +1088,8 @@ async def handle_gemini_native_direct(
                 response_content=response_content,
                 reasoning_content=reasoning_content,
                 cost_info=cost_info, full_messages=full_messages,
-                response_message=build_response_message(response_content, reasoning_content, response_tool_calls),
+                response_message=build_response_message(response_content, reasoning_content, response_tool_calls,
+                                                        upstream_signatures(gemini_response)),
                 response_tool_calls=response_tool_calls,
                 upstream_usage=upstream_usage)
 

@@ -167,13 +167,27 @@ function coalesceResponsesRequestMessages(messages) {
 }
 
 
+// 转换链路把上游原生内容存在 provider_metadata，签名挂在 Gemini parts / Interactions steps 上。
+function providerSignatures(metadata) {
+    if (!metadata || typeof metadata !== 'object') return null;
+    const parts = Array.isArray(metadata.gemini_parts) ? metadata.gemini_parts : [];
+    const steps = Array.isArray(metadata.interactions_steps) ? metadata.interactions_steps : [];
+    const signatures = [
+        ...parts.map(part => part && part.thoughtSignature),
+        ...steps.map(step => step && step.signature),
+    ].filter(signature => typeof signature === 'string' && signature);
+    if (!signatures.length) return null;
+    return signatures.length === 1 ? signatures[0] : signatures;
+}
+
+
 function renderMessageBox(msg) {
     const nativeTypes = ['thinking', 'redacted_thinking', 'tool_use', 'server_tool_use', 'tool_result', 'image', 'document'];
     const nativeContent = msg && Array.isArray(msg.content) && msg.content.some(block => block && nativeTypes.includes(block.type));
     const content = nativeContent ? '' : messageContentToText(msg);
     const toolCalls = msg && msg.tool_calls;
     const reasoning = msg && msg.reasoning_content;
-    const reasoningSignature = msg && msg.reasoning_signature;
+    const reasoningSignature = msg && (msg.reasoning_signature || providerSignatures(msg.provider_metadata));
     let extraBadges = '';
     if (nativeContent) {
         const blocks = msg.content;

@@ -112,12 +112,14 @@ def extract_tool_calls_from_message(message: dict):
     return None
 
 
-def build_response_message(content, reasoning_content=None, tool_calls=None):
+def build_response_message(content, reasoning_content=None, tool_calls=None, signatures=None):
     """构建用于监控面板展示的 assistant 响应消息。"""
     message: Dict[str, Any] = {"role": "assistant"}
 
     if reasoning_content:
         message["reasoning_content"] = reasoning_content
+    if signatures:
+        message["reasoning_signature"] = signatures[0] if len(signatures) == 1 else list(signatures)
 
     if tool_calls:
         message["content"] = content if content else None
