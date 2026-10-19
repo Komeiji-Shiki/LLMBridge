@@ -868,7 +868,7 @@ async def convert_openai_non_stream_response_to_anthropic(
         "id": data.get("id") or f"msg_{uuid.uuid4().hex}",
         "type": "message",
         "role": "assistant",
-        "model": data.get("model") or request_model,
+        "model": request_model,
         "content": content_blocks,
         "stop_reason": map_openai_finish_reason_to_anthropic(finish_reason),
         "stop_sequence": None,
@@ -933,6 +933,8 @@ def build_anthropic_streaming_response(
 
     async def anthropic_stream_generator():
         message_id = f"msg_{uuid.uuid4().hex}"
+        # 与官方一致回报客户端请求的模型：Claude Code 按 message.model 判断思考签名是否由
+        # 当前模型签发，回报上游或显示名时，CLI 重启（回退、恢复）后会剥掉全部签名思考块
         model_name = request_model
 
         # ── 消息级状态 ──
@@ -1033,8 +1035,6 @@ def build_anthropic_streaming_response(
 
             if not isinstance(chunk, dict):
                 continue
-
-            model_name = chunk.get("model") or model_name
 
             usage = chunk.get("usage")
             if isinstance(usage, dict) and usage:

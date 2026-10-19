@@ -527,13 +527,13 @@ async def anthropic_messages(request: Request):
     if original_stream and isinstance(openai_response, StreamingResponse):
         return build_anthropic_streaming_response(
             openai_streaming_response=openai_response,
-            request_model=openai_req.get("model", anthropic_req.get("model", "unknown")),
+            request_model=model_name,
         )
 
     # 非流式：OpenAI JSON -> Anthropic JSON
     return await convert_openai_non_stream_response_to_anthropic(
         openai_response=openai_response,
-        request_model=openai_req.get("model", anthropic_req.get("model", "unknown")),
+        request_model=model_name,
     )
 
 

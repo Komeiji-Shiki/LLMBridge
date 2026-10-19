@@ -217,6 +217,29 @@ def test_foreign_thinking_signatures_never_reach_gemini():
     assert cleaned[0]['content'] == TOOL_TURN_BLOCKS[1:]
 
 
+def test_anthropic_responses_report_requested_model():
+    """Claude Code 按 message.model 判断签名归属，回报显示名会让重启后的 CLI 剥掉签名思考块。"""
+    from fastapi.responses import JSONResponse, StreamingResponse
+    from converters.anthropic_openai import (build_anthropic_streaming_response,
+                                              convert_openai_non_stream_response_to_anthropic)
+    chunk = {'model': 'display-name', 'choices': [{'index': 0, 'delta': {'content': '好'}}]}
+
+    async def body():
+        yield f'data: {json.dumps(chunk)}\n\n'
+        yield 'data: [DONE]\n\n'
+
+    async def run():
+        response = build_anthropic_streaming_response(StreamingResponse(body()), 'gemini-4-argon-sjj')
+        return ''.join([part async for part in response.body_iterator])
+
+    starts = [json.loads(line[5:]) for line in asyncio.run(run()).splitlines()
+              if line.startswith('data:') and '"message_start"' in line]
+    assert starts[0]['message']['model'] == 'gemini-4-argon-sjj'
+    openai = {'model': 'display-name', 'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': '好'}}]}
+    response = asyncio.run(convert_openai_non_stream_response_to_anthropic(JSONResponse(openai), 'gemini-4-argon-sjj'))
+    assert json.loads(response.body)['model'] == 'gemini-4-argon-sjj'
+
+
 def test_flat_stream_chunk_with_text_and_tool_call_keeps_both():
     chunk = {'choices': [{'index': 0, 'delta': {
         'reasoning_content': '想想', 'content': '我来查',
