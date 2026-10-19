@@ -26,6 +26,10 @@ from converters.gemini_interactions import (
     InteractionsStreamConverter,
     convert_interactions_to_openai_response,
 )
+from services.thinking_split_cache import (
+    remember_split_original,
+    restore_history_messages,
+)
 from ._direct_api_utils import (
     append_tool_call_delta,
     build_response_message,
@@ -53,9 +57,27 @@ class ThinkingSeparatorStreamSplitter:
         self.done = False
         self._accumulated = ""
         self._output_position = 0
+        # 切分前的完整正文，用于历史回传时还原上游原文
+        self.original_content = ""
+
+    @staticmethod
+    def _drop_gemini_parts(delta: dict) -> None:
+        """改写 content 后作废原始 parts。
+
+        下游 Anthropic 转换器优先按 provider_metadata.gemini_parts 展开，
+        保留它会让改写后的 reasoning_content/content 被忽略，全文仍按正文下发。
+        """
+        metadata = delta.get("provider_metadata")
+        if isinstance(metadata, dict):
+            metadata.pop("gemini_parts", None)
 
     def process(self, delta: dict) -> bool:
         """原地改写 delta，返回 True 表示该 chunk 应整体跳过。"""
+        raw_content = delta.get("content")
+        # 分隔符出现后仍继续累积，保存上游完整原文（含分隔符本身）
+        if self.separator and isinstance(raw_content, str) and raw_content:
+            self.original_content += raw_content
+
         if not self.enabled or self.done:
             return False
         if delta.get("reasoning_content"):
@@ -63,7 +85,6 @@ class ThinkingSeparatorStreamSplitter:
             self.enabled = False
             return False
 
-        raw_content = delta.get("content")
         if not isinstance(raw_content, str) or not raw_content:
             return False
 
@@ -75,6 +96,7 @@ class ThinkingSeparatorStreamSplitter:
             remaining_reasoning = reasoning_part[self._output_position:]
 
             delta.pop("content", None)
+            self._drop_gemini_parts(delta)
             if remaining_reasoning:
                 delta["reasoning_content"] = remaining_reasoning
             if content_part:
@@ -92,11 +114,13 @@ class ThinkingSeparatorStreamSplitter:
         if safe_position <= self._output_position:
             # 整个增量都可能属于分隔符前缀，先扣住不发
             delta.pop("content", None)
+            self._drop_gemini_parts(delta)
             return not delta
 
         safe_content = self._accumulated[self._output_position:safe_position]
         self._output_position = safe_position
         delta.pop("content", None)
+        self._drop_gemini_parts(delta)
         delta["reasoning_content"] = safe_content
         return False
 
@@ -254,6 +278,11 @@ async def handle_gemini_native_direct(
         is_stream = openai_req.get("stream", False)
         logger.info(f"[GEMINI_NATIVE] 模型映射: '{model_name}' -> '{target_model_id}'")
 
+        # 客户端剥离思考后回传时，按正文还原上游原本生成的完整内容
+        messages_for_upstream = openai_req.get("messages", [])
+        if thinking_separator and isinstance(messages_for_upstream, list):
+            messages_for_upstream = restore_history_messages(messages_for_upstream)
+
         # 🔧 上游协议选择：generate_content（默认，旧行为）或 interactions（新 API）
         upstream_protocol = endpoint_config.get("upstream_protocol", "generate_content")
         if upstream_protocol == "interactions":
@@ -261,7 +290,7 @@ async def handle_gemini_native_direct(
             gemini_generator = direct_api_service.call_gemini_interactions_api(
                 api_key=api_key,
                 model=target_model_id,
-                messages=openai_req.get("messages", []),
+                messages=messages_for_upstream,
                 stream=is_stream,
                 temperature=openai_req.get("temperature"),
                 top_p=openai_req.get("top_p"),
@@ -285,7 +314,7 @@ async def handle_gemini_native_direct(
             gemini_generator = direct_api_service.call_gemini_native_api(
                 api_key=api_key,
                 model=target_model_id,
-                messages=openai_req.get("messages", []),
+                messages=messages_for_upstream,
                 stream=is_stream,
                 temperature=openai_req.get("temperature"),
                 top_p=openai_req.get("top_p"),
@@ -571,6 +600,10 @@ async def handle_gemini_native_direct(
                     final_content = ''.join(content_parts)
                     final_reasoning = ''.join(reasoning_parts)
                     final_tool_calls = finalize_tool_calls(tool_call_accumulator)
+
+                    if (request_success and splitter.done
+                            and splitter.original_content and final_content):
+                        remember_split_original(final_content, splitter.original_content)
 
                     monitoring_service.request_end(
                         request_id=request_id, success=request_success,
@@ -869,6 +902,10 @@ async def handle_gemini_native_direct(
                     final_reasoning = ''.join(reasoning_parts)
                     final_tool_calls = finalize_tool_calls(tool_call_accumulator)
 
+                    if (request_success and splitter.done
+                            and splitter.original_content and final_content):
+                        remember_split_original(final_content, splitter.original_content)
+
                     monitoring_service.request_end(
                         request_id=request_id, success=request_success,
                         input_tokens=input_tokens, output_tokens=output_tokens,
@@ -980,11 +1017,19 @@ async def handle_gemini_native_direct(
                 # 应用思考内容分隔符（仅在无原生 reasoning 且用户配置了分隔符时生效）
                 if (thinking_separator and isinstance(response_content, str)
                         and response_content and not reasoning_content):
+                    original_content = response_content
                     reasoning_content, response_content = direct_api_service.split_thinking_content(
                         response_content, thinking_separator)
                     if reasoning_content:
                         message["content"] = response_content
                         message["reasoning_content"] = reasoning_content
+                        # 原始 parts 仍是未切分的整段文本，保留会让下游
+                        # Anthropic 转换忽略上面的思考/正文划分
+                        metadata = message.get("provider_metadata")
+                        if isinstance(metadata, dict):
+                            metadata.pop("gemini_parts", None)
+                        if response_content:
+                            remember_split_original(response_content, original_content)
                         logger.info(
                             f"[THINKING_SPLIT] 非流式响应已应用思考分隔，"
                             f"reasoning={len(reasoning_content)}字符, "

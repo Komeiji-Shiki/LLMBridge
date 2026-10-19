@@ -91,6 +91,26 @@ class ThinkingSeparatorStreamSplitterTests(unittest.TestCase):
         feed(splitter, ["思考</analysis_channel>正文"])
         self.assertEqual(splitter.flush(), "")
 
+    def test_original_content_keeps_separator_and_later_chunks(self):
+        splitter = ThinkingSeparatorStreamSplitter("</analysis_channel>")
+        delta = {"content": "思考</analysis_channel>正文",
+                 "provider_metadata": {"gemini_parts": [{"text": "思考</analysis_channel>正文"}]}}
+        self.assertFalse(splitter.process(delta))
+        # 原始 parts 已作废，下游按改写后的 reasoning/content 展开
+        self.assertNotIn("gemini_parts", delta["provider_metadata"])
+
+        delta = {"content": "继续"}
+        self.assertFalse(splitter.process(delta))
+
+        self.assertEqual(splitter.original_content,
+                         "思考</analysis_channel>正文继续")
+
+    def test_original_content_includes_chunks_before_separator(self):
+        splitter = ThinkingSeparatorStreamSplitter("</analysis_channel>")
+        feed(splitter, ["思考", "内容</analysis_channel>正文"])
+        self.assertEqual(splitter.original_content,
+                         "思考内容</analysis_channel>正文")
+
 
 if __name__ == "__main__":
     unittest.main()
