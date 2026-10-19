@@ -214,7 +214,8 @@ async def handle_direct_api_request(
                 direct_api_service=direct_api_service,
                 estimate_message_tokens_func=estimate_message_tokens_func,
                 estimate_tokens_func=estimate_tokens_func,
-                full_messages=full_messages, CONFIG=CONFIG)
+                full_messages=full_messages, CONFIG=CONFIG,
+                thinking_separator=thinking_separator)
 
         if api_type == "responses_native":
             return await handle_responses_native_direct(

@@ -38,6 +38,81 @@ from ._direct_api_utils import (
 logger = logging.getLogger(__name__)
 
 
+class ThinkingSeparatorStreamSplitter:
+    """把正文里夹带的思考内容按 thinking_separator 改写成 reasoning_content。
+
+    与透传链路的 PassthroughStreamSession 同语义：分隔符出现前，把已确认
+    不可能是分隔符前缀的内容先下发为 reasoning_content，尾部 sep_len 个字符
+    留在缓冲里，避免分隔符被拆到两个 chunk 时误判。上游已返回原生
+    reasoning_content 时直接停用，避免把正常正文误判成思考。
+    """
+
+    def __init__(self, separator: Optional[str]):
+        self.separator = separator or ""
+        self.enabled = bool(self.separator)
+        self.done = False
+        self._accumulated = ""
+        self._output_position = 0
+
+    def process(self, delta: dict) -> bool:
+        """原地改写 delta，返回 True 表示该 chunk 应整体跳过。"""
+        if not self.enabled or self.done:
+            return False
+        if delta.get("reasoning_content"):
+            # 上游自带原生思考，分隔符不再参与切分
+            self.enabled = False
+            return False
+
+        raw_content = delta.get("content")
+        if not isinstance(raw_content, str) or not raw_content:
+            return False
+
+        self._accumulated += raw_content
+
+        if self.separator in self._accumulated:
+            self.done = True
+            reasoning_part, _, content_part = self._accumulated.partition(self.separator)
+            remaining_reasoning = reasoning_part[self._output_position:]
+
+            delta.pop("content", None)
+            if remaining_reasoning:
+                delta["reasoning_content"] = remaining_reasoning
+            if content_part:
+                delta["content"] = content_part
+
+            logger.info(f"[THINKING_SPLIT_STREAM] 检测到分隔符'{self.separator}'")
+            logger.info(f"  - 思考总长: {len(reasoning_part)} 字符")
+            logger.info(f"  - 本次输出reasoning: {len(remaining_reasoning)} 字符")
+            logger.info(f"  - 正文部分: {len(content_part)} 字符")
+            return not delta
+
+        safe_position = max(
+            self._output_position,
+            len(self._accumulated) - len(self.separator))
+        if safe_position <= self._output_position:
+            # 整个增量都可能属于分隔符前缀，先扣住不发
+            delta.pop("content", None)
+            return not delta
+
+        safe_content = self._accumulated[self._output_position:safe_position]
+        self._output_position = safe_position
+        delta.pop("content", None)
+        delta["reasoning_content"] = safe_content
+        return False
+
+    def flush(self) -> str:
+        """流结束时仍未出现分隔符：交还扣住的尾部，避免末尾字符丢失。"""
+        if not self.enabled or self.done:
+            return ""
+        remaining = self._accumulated[self._output_position:]
+        self._output_position = len(self._accumulated)
+        if remaining:
+            logger.warning(
+                f"[THINKING_SPLIT_STREAM] 流结束仍未检测到分隔符"
+                f"'{self.separator}'，剩余 {len(remaining)} 字符按思考内容下发")
+        return remaining
+
+
 async def handle_gemini_native_direct(
     openai_req: dict,
     model_name: str,
@@ -52,7 +127,8 @@ async def handle_gemini_native_direct(
     estimate_message_tokens_func,
     estimate_tokens_func,
     full_messages: Optional[list] = None,
-    CONFIG: Optional[dict] = None
+    CONFIG: Optional[dict] = None,
+    thinking_separator: Optional[str] = None,
 ):
     """处理Gemini原生API的Direct请求"""
     logger.info(f"[GEMINI_NATIVE] 使用Gemini原生API格式")
@@ -250,6 +326,7 @@ async def handle_gemini_native_direct(
                 # 首块超时/空响应/预读错误时，已在分支中 yield 了 error 事件；
                 # 设此标志阻止 finally 再补发空的 usage/[DONE] 尾部块
                 tail_suppressed = False
+                splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
 
                 try:
                     api_task = asyncio.create_task(anext(gemini_generator))
@@ -354,6 +431,7 @@ async def handle_gemini_native_direct(
                             completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
 
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
+                        suppress_chunk = splitter.process(delta)
                         delta_content = delta.get("content", "")
                         delta_reasoning = delta.get("reasoning_content", "")
                         delta_tool_calls = delta.get("tool_calls")
@@ -374,7 +452,8 @@ async def handle_gemini_native_direct(
                             cached_tokens = extract_cached_tokens(usage)
                             total_tokens = resolve_usage_tokens(usage).total_tokens
 
-                        yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                        if not suppress_chunk:
+                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
                     # 继续处理剩余流
                     async for gemini_chunk in gemini_generator:
@@ -393,6 +472,7 @@ async def handle_gemini_native_direct(
                             completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
 
                         delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
+                        suppress_chunk = splitter.process(delta)
                         delta_content = delta.get("content", "")
                         delta_reasoning = delta.get("reasoning_content", "")
                         delta_tool_calls = delta.get("tool_calls")
@@ -413,7 +493,27 @@ async def handle_gemini_native_direct(
                             cached_tokens = extract_cached_tokens(usage)
                             total_tokens = resolve_usage_tokens(usage).total_tokens
 
-                        yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                        if not suppress_chunk:
+                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+
+                    if error_msg is None:
+                        tail_text = splitter.flush()
+                        if tail_text:
+                            reasoning_parts.append(tail_text)
+                            tail_chunk = {
+                                "id": request_id,
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": display_name,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"reasoning_content": tail_text},
+                                    "finish_reason": None
+                                }],
+                                "usage": None
+                            }
+                            if not client_gone:
+                                yield f"data: {json.dumps(tail_chunk, ensure_ascii=False)}\n\n"
 
                     stream_completed = (error_msg is None)
                     request_success = (error_msg is None)
@@ -537,6 +637,7 @@ async def handle_gemini_native_direct(
                 client_gone = False
                 tail_suppressed = False
                 converter = InteractionsStreamConverter(display_name, request_id, completion_tokens_mode)
+                splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
 
                 try:
                     api_task = asyncio.create_task(anext(gemini_generator))
@@ -639,6 +740,7 @@ async def handle_gemini_native_direct(
 
                         choices = openai_chunk.get("choices") or []
                         delta = choices[0].get("delta", {}) if choices else {}
+                        suppress_chunk = splitter.process(delta)
                         delta_content = delta.get("content", "")
                         delta_reasoning = delta.get("reasoning_content", "")
                         delta_tool_calls = delta.get("tool_calls")
@@ -660,7 +762,8 @@ async def handle_gemini_native_direct(
                             total_tokens = resolve_usage_tokens(usage).total_tokens
                             upstream_usage = converter.usage
 
-                        yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                        if not suppress_chunk:
+                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
                     # 继续处理剩余事件流
                     async for event in gemini_generator:
@@ -673,6 +776,7 @@ async def handle_gemini_native_direct(
                         for openai_chunk in openai_chunks:
                             choices = openai_chunk.get("choices") or []
                             delta = choices[0].get("delta", {}) if choices else {}
+                            suppress_chunk = splitter.process(delta)
                             delta_content = delta.get("content", "")
                             delta_reasoning = delta.get("reasoning_content", "")
                             delta_tool_calls = delta.get("tool_calls")
@@ -694,7 +798,27 @@ async def handle_gemini_native_direct(
                                 total_tokens = resolve_usage_tokens(usage).total_tokens
                                 upstream_usage = converter.usage
 
-                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                            if not suppress_chunk:
+                                yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+
+                    if error_msg is None:
+                        tail_text = splitter.flush()
+                        if tail_text:
+                            reasoning_parts.append(tail_text)
+                            tail_chunk = {
+                                "id": f"chatcmpl-{request_id}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": display_name,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"reasoning_content": tail_text},
+                                    "finish_reason": None
+                                }],
+                                "usage": None
+                            }
+                            if not client_gone:
+                                yield f"data: {json.dumps(tail_chunk, ensure_ascii=False)}\n\n"
 
                     stream_completed = (error_msg is None)
                     request_success = (error_msg is None)
@@ -852,6 +976,19 @@ async def handle_gemini_native_direct(
                 response_content = message.get("content", "")
                 reasoning_content = message.get("reasoning_content", "")
                 response_tool_calls = message.get("tool_calls")
+
+                # 应用思考内容分隔符（仅在无原生 reasoning 且用户配置了分隔符时生效）
+                if (thinking_separator and isinstance(response_content, str)
+                        and response_content and not reasoning_content):
+                    reasoning_content, response_content = direct_api_service.split_thinking_content(
+                        response_content, thinking_separator)
+                    if reasoning_content:
+                        message["content"] = response_content
+                        message["reasoning_content"] = reasoning_content
+                        logger.info(
+                            f"[THINKING_SPLIT] 非流式响应已应用思考分隔，"
+                            f"reasoning={len(reasoning_content)}字符, "
+                            f"content={len(response_content)}字符")
 
             if upstream_protocol == "interactions":
                 # interactions 的 usage 在 Interaction 顶层（total_input_tokens 等）
