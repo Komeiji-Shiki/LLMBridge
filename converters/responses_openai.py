@@ -20,6 +20,7 @@ import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from utils.usage_tokens import total_output_tokens
+from converters import is_content_parts
 
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
@@ -138,10 +139,11 @@ def _convert_function_call_output_item(item: Dict[str, Any]) -> Dict[str, Any]:
     call_id = item.get("call_id")
     if not call_id:
         raise ResponsesRequestError("function_call_output 必须包含 call_id。")
+    output = item.get("output", "")
     return {
         "role": "tool",
         "tool_call_id": call_id,
-        "content": _stringify_output(item.get("output", "")),
+        "content": _convert_message_content(output) if is_content_parts(output) else _stringify_output(output),
     }
 
 

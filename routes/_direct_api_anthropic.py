@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 from core.constants import TimeoutDefaults
 from utils.monitor_params import build_monitor_request_params
 from utils.task_registry import spawn
+from converters import is_content_parts
 from converters.anthropic_openai import extract_anthropic_usage_tokens
 from utils.api_pricing import chat_cache_details
 from utils.json_unescape import StreamingUnicodeUnescaper
@@ -168,56 +169,32 @@ def _convert_openai_content_to_anthropic_blocks(content: Any, role: str) -> List
         return blocks
 
     for part in content:
+        if isinstance(part, str):
+            blocks.append({"type": "text", "text": part})
+            continue
         if not isinstance(part, dict):
             continue
         ptype = part.get("type", "text")
 
-        if ptype in ("text", "input_text"):
+        if ptype in ("text", "input_text", "output_text"):
             text = part.get("text", "")
             if text:
                 blocks.append({"type": "text", "text": text})
 
-        elif ptype == "image_url":
-            url_content = part.get("image_url", {})
-            if isinstance(url_content, dict):
-                url = url_content.get("url", "")
-                parsed = _parse_data_url(url)
-                if parsed:
-                    media_type, data = parsed
-                    # 安全兜底：杜绝 image/png;base64 这样的非法 media_type
-                    # （正常路径 _parse_data_url 已保证正确，此处对异常做最终清洁）
-                    clean_media_type = media_type.split(";")[0].strip()
-                    if clean_media_type != media_type:
-                        logger.warning(
-                            f"[OAI_TO_ANTHROPIC] 修正异常的 media_type: "
-                            f"{media_type!r} → {clean_media_type!r}")
-                        media_type = clean_media_type
-                    blocks.append({
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": media_type, "data": data}
-                    })
-                elif url:
-                    blocks.append({
-                        "type": "image",
-                        "source": {"type": "url", "url": url}
-                    })
-
-        elif ptype == "input_image":
-            # 部分客户端使用 input_image 类型
-            url = part.get("image_url", "") or part.get("url", "")
+        elif ptype in ("image_url", "input_image"):
+            image = part.get("image_url") or part.get("url") or ""
+            url = image.get("url", "") if isinstance(image, dict) else image
             parsed = _parse_data_url(url)
             if parsed:
                 media_type, data = parsed
-                # 安全兜底：同上
-                clean_media_type = media_type.split(";")[0].strip()
-                if clean_media_type != media_type:
-                    logger.warning(
-                        f"[OAI_TO_ANTHROPIC] 修正异常的 media_type (input_image): "
-                        f"{media_type!r} → {clean_media_type!r}")
-                    media_type = clean_media_type
                 blocks.append({
                     "type": "image",
                     "source": {"type": "base64", "media_type": media_type, "data": data}
+                })
+            elif url:
+                blocks.append({
+                    "type": "image",
+                    "source": {"type": "url", "url": url}
                 })
 
     return blocks
@@ -313,7 +290,11 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
         # ── tool 结果消息（OpenAI role=tool）→ Anthropic user 消息中的 tool_result 块 ──
         if role == "tool":
             tool_use_id = msg.get("tool_call_id", "")
-            tool_content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            # 工具结果沿用内容块转换，图片仍嵌套在对应调用的 tool_result 中。
+            if is_content_parts(content):
+                tool_content = _convert_openai_content_to_anthropic_blocks(content, role)
+            else:
+                tool_content = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
             conversation_messages.append({
                 "role": "user",
                 "content": [{

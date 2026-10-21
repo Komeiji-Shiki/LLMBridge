@@ -91,13 +91,13 @@ def _oai_part_to_interactions_block(item: Any) -> Optional[dict]:
         return None
     item_type = item.get("type")
 
-    if item_type in ("text", "input_text"):
+    if item_type in ("text", "input_text", "output_text"):
         text = item.get("text", "")
         return {"type": "text", "text": text} if text else None
 
-    if item_type == "image_url":
-        image_url_data = item.get("image_url") or {}
-        url = image_url_data.get("url", "")
+    if item_type in ("image_url", "input_image"):
+        image = item.get("image_url") or item.get("url") or ""
+        url = image.get("url", "") if isinstance(image, dict) else image
         if url.startswith("data:"):
             try:
                 header, base64_data = url.split(",", 1)
@@ -1032,6 +1032,10 @@ def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
                 if not isinstance(fr, dict):
                     continue
                 result_blocks = _function_response_to_interactions_blocks(fr.get("response"))
+                for media_part in fr.get("parts") or []:
+                    converted = _gemini_part_to_interactions_block(media_part)
+                    if converted:
+                        result_blocks.append(converted)
                 steps.append({
                     "type": "function_result",
                     "name": fr.get("name", "_unknown"),

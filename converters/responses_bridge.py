@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from fastapi.responses import StreamingResponse
 
 from utils.usage_tokens import MODE_MERGE, apply_usage_tokens
+from converters import is_content_parts
 
 
 _SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
@@ -183,7 +184,9 @@ def convert_chat_request_to_responses(
             input_items.append({
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": _stringify(content),
+                # 多模态工具结果必须保留内容块，JSON 字符串无法作为图片输入。
+                "output": (_chat_content_to_responses(content, "tool")
+                           if is_content_parts(content) else _stringify(content)),
             })
             continue
 

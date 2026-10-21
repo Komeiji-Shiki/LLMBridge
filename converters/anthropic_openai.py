@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
+from converters import is_content_parts
 from converters.gemini_anthropic_signatures import (
     decode_signature,
     gemini_parts_from_anthropic,
@@ -191,10 +192,12 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
                 prefix = "[tool_result_error] " if is_error else ""
                 converted_parts.append({"type": "text", "text": prefix + tool_content})
             elif isinstance(tool_content, list):
-                # tool_result content 也可能是 content blocks 数组
-                for tc in tool_content:
-                    if isinstance(tc, dict) and tc.get("type") in ("text", "input_text"):
-                        converted_parts.append({"type": "text", "text": str(tc.get("text", ""))})
+                # 工具结果复用普通内容块转换，保留其中的图片及原有顺序。
+                converted = convert_anthropic_content_to_openai(tool_content)
+                if isinstance(converted, list):
+                    converted_parts.extend(converted)
+                else:
+                    converted_parts.append({"type": "text", "text": converted})
             else:
                 converted_parts.append({"type": "text", "text": json.dumps(tool_content, ensure_ascii=False)})
 
@@ -310,12 +313,11 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
                     if block.get("type") == "tool_result":
                         tool_use_id = block.get("tool_use_id", "")
                         tool_content = block.get("content", "")
-                        # 提取文本
-                        if isinstance(tool_content, list):
-                            text_parts = []
-                            for tc in tool_content:
-                                if isinstance(tc, dict) and tc.get("type") in ("text", "input_text"):
-                                    text_parts.append(str(tc.get("text", "")))
+                        if is_content_parts(tool_content):
+                            tool_content = convert_anthropic_content_to_openai(tool_content)
+                        elif isinstance(tool_content, list):
+                            text_parts = [str(part.get("text", "")) for part in tool_content
+                                          if isinstance(part, dict) and part.get("type") in ("text", "input_text")]
                             tool_content = "\n".join(text_parts) if text_parts else json.dumps(tool_content, ensure_ascii=False)
                         elif not isinstance(tool_content, str):
                             tool_content = json.dumps(tool_content, ensure_ascii=False)
@@ -323,7 +325,7 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
                         openai_messages.append({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
-                            "content": tool_content if isinstance(tool_content, str) else str(tool_content)
+                            "content": tool_content
                         })
                     else:
                         non_tool_blocks.append(block)

@@ -666,6 +666,7 @@ class DirectAPIService:
             # 处理 tool 角色消息（工具调用结果）
             if role == "tool":
                 tool_call_id = msg.get("tool_call_id", "")
+                image_parts = []
                 
                 # 优先用 assistant tool_calls 建立的映射；未命中时回退到旧版推断
                 func_name = tool_id_to_name.get(tool_call_id) or (
@@ -675,13 +676,27 @@ class DirectAPIService:
                 if isinstance(content, dict):
                     response_payload = content
                 elif isinstance(content, list):
-                    # 旧版直接 str(content) 会产生 Python repr 污染工具结果，
-                    # 改为拼接全部文本块
+                    # 文本写入 response，图片按 Gemini 协议嵌套在同一次调用的 parts 中。
                     text_parts = []
                     for item in content:
                         if isinstance(item, dict):
-                            if item.get("type") == "text" and item.get("text"):
+                            if item.get("type") in ("text", "input_text", "output_text") and item.get("text"):
                                 text_parts.append(item["text"])
+                            elif item.get("type") in ("image_url", "input_image"):
+                                image = item.get("image_url") or item.get("url") or ""
+                                url = image.get("url", "") if isinstance(image, dict) else image
+                                if url.startswith("data:"):
+                                    header, image_data = url.split(",", 1)
+                                    mime_type = header[5:].split(";", 1)[0]
+                                else:
+                                    # FunctionResponsePart 仅接受 inlineData，远程图片需先下载。
+                                    async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as image_response:
+                                        image_response.raise_for_status()
+                                        image_data = base64.b64encode(await image_response.read()).decode("ascii")
+                                        mime_type = image_response.headers.get("Content-Type", "").split(";", 1)[0]
+                                    if not mime_type.startswith("image/"):
+                                        mime_type = mimetypes.guess_type(url.split("?", 1)[0])[0] or "image/jpeg"
+                                image_parts.append({"inlineData": {"mimeType": mime_type, "data": image_data}})
                         elif isinstance(item, str):
                             text_parts.append(item)
                     response_payload = {"content": "".join(text_parts)}
@@ -697,6 +712,8 @@ class DirectAPIService:
                 # Gemini 3 系列要求携带 id 关联调用；为空时不携带，兼容旧版 API
                 if tool_call_id:
                     function_response_part["functionResponse"]["id"] = tool_call_id
+                if image_parts:
+                    function_response_part["functionResponse"]["parts"] = image_parts
 
                 # 并行调用的结果必须同在一轮（数量与上一轮 functionCall 一致）
                 previous = gemini_contents[-1] if gemini_contents else None
