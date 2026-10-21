@@ -1,10 +1,14 @@
 """只读扫描 Codex 会话日志，持久化可重建的用量索引。"""
 
 import hashlib
+import io
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+
+import zstandard
 
 from core.local_usage_index import LocalUsageIndex
 
@@ -24,12 +28,28 @@ def _usage(raw):
     return values
 
 
+@contextmanager
+def _session_stream(path):
+    """流式读取压缩历史日志，避免大型会话解压后占满内存。"""
+    try:
+        with path.open('rb') as stream:
+            if path.name.endswith('.jsonl.zst'):
+                with zstandard.ZstdDecompressor().stream_reader(stream, read_across_frames=True) as reader:
+                    with io.BufferedReader(reader) as buffered:
+                        yield buffered
+            else:
+                yield stream
+    except zstandard.ZstdError as error:
+        # 复用索引的文件读取失败事务，保留上次成功的记录并显示扫描错误。
+        raise OSError(f'Codex 压缩日志读取失败：{error}') from error
+
+
 def parse_session(path):
     """逐行处理累计差值；返回的字段不包含提示词、回答或凭据。"""
-    model, session, provider = 'unknown', path.stem, ''
+    model, session, provider = 'unknown', path.name.removesuffix('.zst').removesuffix('.jsonl'), ''
     previous = [0] * len(TOKEN_FIELDS)
     seen = set()
-    with path.open('rb') as stream:
+    with _session_stream(path) as stream:
         for line in stream:
             # 活跃日志尾部可能尚未写完，下次文件变化后重新读取。
             if not line.endswith(b'\n'):
@@ -99,6 +119,7 @@ class CodexUsageIndex(LocalUsageIndex):
     label = 'Codex'
     source = 'codex'
     folders = ('sessions', 'archived_sessions')
+    file_suffixes = ('.jsonl', '.jsonl.zst')
 
     def __init__(self, db_path=Path('logs/codex_usage.db'), homes=None):
         super().__init__(db_path, homes)

@@ -18,6 +18,7 @@ class LocalUsageIndex:
     label = '本地工具'
     source = 'local'
     folders = ()
+    file_suffixes = ('.jsonl',)
     token_fields = ('input_tokens', 'cached_tokens', 'output_tokens',
                     'reasoning_tokens', 'total_tokens', 'cache_write_tokens')
 
@@ -69,7 +70,7 @@ class LocalUsageIndex:
                     errors.append({'path': str(error.filename), 'error': str(error)})
                 for directory, _, names in os.walk(root, onerror=scan_error):
                     for name in names:
-                        if not name.endswith('.jsonl'):
+                        if not name.endswith(self.file_suffixes):
                             continue
                         path = Path(directory) / name
                         key = str(path.resolve())

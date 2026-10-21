@@ -8,6 +8,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock
 
 import pytest
+import zstandard
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -86,6 +87,24 @@ def test_archive_copy_fork_and_file_rewrite(index, tmp_path):
     restarted = CodexUsageIndex(index.db_path, [home])
     assert restarted.stats()['total_tokens'] == 110
     assert restarted.stats()['status']['changed_files'] == 0
+
+    # 日志压缩或同时保留两种格式时，用量与事件标识必须保持一致。
+    compressed = archive.with_suffix('.jsonl.zst')
+    content = archive.read_bytes()
+    compressor = zstandard.ZstdCompressor()
+    boundary = content.index(b'\n') + 1
+    compressed.write_bytes(compressor.compress(content[:boundary]) + compressor.compress(content[boundary:]))
+    assert restarted.stats(force=True)['total_tokens'] == 110
+    archive.unlink()
+    (home / 'sessions/fork.jsonl').unlink()
+    data = restarted.stats(force=True)
+    assert data['total_tokens'] == 110
+    assert data['status']['files'] == 1
+    # 压缩文件损坏时，沿用之前的有效索引并报告读取错误。
+    compressed.write_bytes(b'invalid-zstd')
+    data = restarted.stats(force=True)
+    assert data['total_tokens'] == 110
+    assert data['status']['errors']
 
 
 def test_partial_malformed_and_last_only(index, tmp_path):
