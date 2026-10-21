@@ -133,7 +133,7 @@ function renderTokenInputPieChart(modelStats) {
                     callbacks: {
                         label: function(context) {
                             const label = context.label || '';
-                            const value = formatNumber(context.parsed);
+                            const value = formatTokenNumber(context.parsed);
                             const total = context.dataset.data.reduce((a, b) => a + b, 0);
                             const percentage = ((context.parsed / total) * 100).toFixed(1);
                             return `${label}: ${value} 输入tokens (${percentage}%)`;
@@ -184,7 +184,7 @@ function renderTokenOutputPieChart(modelStats) {
                     callbacks: {
                         label: function(context) {
                             const label = context.label || '';
-                            const value = formatNumber(context.parsed);
+                            const value = formatTokenNumber(context.parsed);
                             const total = context.dataset.data.reduce((a, b) => a + b, 0);
                             const percentage = ((context.parsed / total) * 100).toFixed(1);
                             return `${label}: ${value} 输出tokens (${percentage}%)`;
@@ -258,7 +258,7 @@ function getBarChartOptions() {
                 beginAtZero: true,
                 ticks: {
                     color: '#8fa0bf',
-                    callback: function(value) { return formatNumber(value); }
+                    callback: function(value) { return formatTokenNumber(value); }
                 },
                 grid: { color: 'rgba(34, 54, 80, 0.3)' }
             }
@@ -271,7 +271,10 @@ function getBarChartOptions() {
                 bodyColor: '#d9e5ff',
                 borderColor: '#223650',
                 borderWidth: 1,
-                padding: 12
+                padding: 12,
+                callbacks: {
+                    label: context => context.dataset.label + ': ' + formatTokenNumber(context.parsed.y)
+                }
             }
         }
     };
@@ -380,7 +383,7 @@ function renderTokenTrendChart(dailyStats) {
                     beginAtZero: true,
                     ticks: {
                         color: 'rgba(42, 168, 255, 0.85)',
-                        callback: function(value) { return formatNumber(value); }
+                        callback: function(value) { return formatTokenNumber(value); }
                     },
                     grid: { color: 'rgba(34, 54, 80, 0.15)' },
                     title: { display: true, text: outputAxisSeparate ? '输入 Tokens' : 'Tokens', color: 'rgba(42, 168, 255, 0.85)' }
@@ -392,7 +395,7 @@ function renderTokenTrendChart(dailyStats) {
                     display: outputAxisSeparate,
                     ticks: {
                         color: 'rgba(16, 185, 129, 0.85)',
-                        callback: function(value) { return formatNumber(value); }
+                        callback: function(value) { return formatTokenNumber(value); }
                     },
                     grid: { drawOnChartArea: false },
                     title: { display: true, text: '输出 Tokens', color: 'rgba(16, 185, 129, 0.85)' }
@@ -424,7 +427,7 @@ function renderTokenTrendChart(dailyStats) {
                                 const isClipped = ratioMax !== undefined && rawVal > ratioMax;
                                 return context.dataset.label + ': ' + rawVal.toFixed(4) + 'x' + (isClipped ? ' ⚠️异常' : '');
                             }
-                            return context.dataset.label + ': ' + formatNumber(context.parsed.y);
+                            return context.dataset.label + ': ' + formatTokenNumber(context.parsed.y);
                         }
                     }
                 }
@@ -659,7 +662,7 @@ function renderTokenStatsTable(modelStats) {
                         : '<span style="color: var(--text-dim);">-</span>';
                     
                     const tpmDisplay = stat.tpm !== undefined && stat.tpm > 0
-                        ? `<span style="color: #3b82f6;">${stat.tpm >= 1000 ? (stat.tpm / 1000).toFixed(2) + 'K' : stat.tpm.toFixed(0)}</span>`
+                        ? `<span style="color: #3b82f6;">${stat.tpm >= 1000000 ? formatTokenNumber(stat.tpm) : stat.tpm >= 1000 ? (stat.tpm / 1000).toFixed(2) + 'K' : stat.tpm.toFixed(0)}</span>`
                         : '<span style="color: var(--text-dim);">-</span>';
                     
                     // 计算总消耗金额（按当前选中货币换算显示）
@@ -701,7 +704,7 @@ function renderTokenStatsTable(modelStats) {
                     // 缓存命中显示
                     const cachedTokens = stat.cached_tokens || 0;
                     const cachedDisplay = cachedTokens > 0
-                        ? `<span style="color: #22c55e; font-weight: 500;" title="缓存命中的输入Token">${formatNumber(cachedTokens)}</span>`
+                        ? `<span style="color: #22c55e; font-weight: 500;" title="缓存命中的输入Token">${formatTokenNumber(cachedTokens)}</span>`
                         : '<span style="color: var(--text-dim);">-</span>';
                     
                     return `
@@ -714,15 +717,15 @@ function renderTokenStatsTable(modelStats) {
                                 <small class="stat-source">${external ? sourceLabel + ' · ' + (stat.cost_kind === 'estimated' ? '估算金额' : '未定价') : 'LLMBridge'}</small>
                                 ${stat.display_name && stat.display_name !== stat.model ? `<br><small style="color: var(--text-dim);">(${escapeHtml(stat.model)})</small>` : ''}
                             </td>
-                            <td><span style="color: var(--accent);">${formatNumber(stat.total_tokens)}</span></td>
-                            <td>${formatNumber(stat.input_tokens)}</td>
-                            <td>${formatNumber(stat.output_tokens)}</td>
+                            <td><span style="color: var(--accent);">${formatTokenNumber(stat.total_tokens)}</span></td>
+                            <td>${formatTokenNumber(stat.input_tokens)}</td>
+                            <td>${formatTokenNumber(stat.output_tokens)}</td>
                             <td>${cachedDisplay}</td>
-                            <td>${formatNumber(stat.cache_write_tokens || 0)}</td>
-                            <td>${formatNumber(stat.cache_write_1h_tokens || 0)}</td>
-                            <td>${external ? formatNumber(stat.reasoning_tokens || 0) : '-'}</td>
+                            <td>${formatTokenNumber(stat.cache_write_tokens || 0)}</td>
+                            <td>${formatTokenNumber(stat.cache_write_1h_tokens || 0)}</td>
+                            <td>${external ? formatTokenNumber(stat.reasoning_tokens || 0) : '-'}</td>
                             <td>${external ? `${stat.event_count} 条用量事件` : stat.request_count}</td>
-                            <td>${stat.request_count > 0 ? formatNumber(Math.round(stat.total_tokens / stat.request_count)) : '-'}</td>
+                            <td>${stat.request_count > 0 ? formatTokenNumber(Math.round(stat.total_tokens / stat.request_count)) : '-'}</td>
                             <td>${rpmDisplay}</td>
                             <td>${tpmDisplay}</td>
                             <td${costTooltip ? ` title="${costTooltip}"` : ''}>${external && stat.cost_kind !== 'estimated' ? '未定价' : (external ? '≈ ' : '') + costDisplay}</td>

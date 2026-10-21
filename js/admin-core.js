@@ -41,6 +41,9 @@ let currentEndDate = null;
 let currentRequestStartDate = null;
 let currentRequestEndDate = null;
 
+// Token 单位只影响展示，默认沿用百万单位。
+let currentTokenUnit = 'M';
+
 // 捕获状态轮询
 let capturePollingInterval = null;
 
@@ -120,6 +123,13 @@ function formatNumber(num) {
         return (num / 1000).toFixed(1) + 'K';
     }
     return num.toString();
+}
+
+function formatTokenNumber(num) {
+    if (currentTokenUnit === 'B' && num >= 1000000000) {
+        return (num / 1000000000).toFixed(2) + 'B';
+    }
+    return formatNumber(num);
 }
 
 function formatMonitorDuration(seconds) {

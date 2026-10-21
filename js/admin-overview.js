@@ -6,13 +6,43 @@ let currentRatePeriod = 'day';
 // 成本显示货币：'USD' 或 'CNY'
 let currentCostCurrency = 'USD';
 
-// 缓存最新的 token stats 数据（用于货币切换时无需重新请求）
+// 缓存最新的 token stats 数据，货币和单位切换直接复用。
 let latestTokenStatsData = null;
 const tokenStatsRefresh = { serial: 0, controller: null, pollTimer: null };
 const overviewRefresh = { serial: 0 };
 
 // 汇率常量（与后端保持一致）
 const EXCHANGE_RATE = { USD_TO_CNY: 7.2, CNY_TO_USD: 1.0 / 7.2 };
+
+function updateTokenSummary(data) {
+    const totalTokens = data.total_tokens || 0;
+    const totalValue = document.getElementById('total-tokens-value');
+    totalValue.textContent = formatTokenNumber(totalTokens);
+    totalValue.title = totalTokens.toLocaleString() + ' Tokens';
+    document.getElementById('token-ratio').textContent = totalTokens > 0
+        ? `输入: ${formatTokenNumber(data.total_input_tokens || 0)} / 输出: ${formatTokenNumber(data.total_output_tokens || 0)}`
+        : '暂无数据';
+}
+
+function switchTokenUnit() {
+    currentTokenUnit = currentTokenUnit === 'M' ? 'B' : 'M';
+    const button = document.getElementById('token-unit-toggle');
+    button.setAttribute('aria-pressed', String(currentTokenUnit === 'B'));
+    button.setAttribute('aria-label', currentTokenUnit === 'B' ? '以百万 M 显示 Token' : '以十亿 B 显示大额 Token');
+    button.querySelectorAll('[data-token-unit]').forEach(label => {
+        label.classList.toggle('is-active', label.dataset.tokenUnit === currentTokenUnit);
+    });
+    // 复用已有统计同步更新卡片、表格和图表，切换单位不发起新请求。
+    if (latestTokenStatsData) {
+        updateTokenSummary(latestTokenStatsData);
+        renderLocalUsageStatus(latestTokenStatsData);
+        renderUsagePricing(latestTokenStatsData);
+        renderTokenStatsTable(latestTokenStatsData.model_stats);
+        renderTokenDistribution(latestTokenStatsData.model_stats);
+        renderTokenTrendChart(latestTokenStatsData.daily_stats || []);
+        updateOverallRatesFromCachedData();
+    }
+}
 
 // 切换成本显示货币
 function switchCostCurrency(currency) {
@@ -124,7 +154,8 @@ function updateOverallRatesFromCachedData() {
         // 更新显示
         document.getElementById('overall-rpm-value').textContent = totalRpm.toFixed(2);
         document.getElementById('overall-tpm-value').textContent =
-            totalTpm >= 1000 ? (totalTpm / 1000).toFixed(2) + 'K' : totalTpm.toFixed(0);
+            totalTpm >= 1000000 ? formatTokenNumber(totalTpm)
+                : totalTpm >= 1000 ? (totalTpm / 1000).toFixed(2) + 'K' : totalTpm.toFixed(0);
         document.getElementById('rate-total-requests').textContent = formatNumber(totalRequests);
         document.getElementById('rate-period-display').textContent =
             currentRatePeriod === 'day' ? '24小时' : '1小时';
@@ -329,18 +360,7 @@ async function refreshTokenStats(force = false) {
         renderUsagePricing(data);
         
         // 更新总计卡片
-        const totalTokens = data.total_tokens || 0;
-        const inputTokens = data.total_input_tokens || 0;
-        const outputTokens = data.total_output_tokens || 0;
-        
-        document.getElementById('total-tokens-value').textContent = formatNumber(totalTokens);
-        
-        if (totalTokens > 0) {
-            document.getElementById('token-ratio').textContent =
-                `输入: ${formatNumber(inputTokens)} / 输出: ${formatNumber(outputTokens)}`;
-        } else {
-            document.getElementById('token-ratio').textContent = '暂无数据';
-        }
+        updateTokenSummary(data);
         
         // 缓存数据并更新汇率（后端可能返回更新的汇率）
         latestTokenStatsData = data;
@@ -636,10 +656,10 @@ function renderLocalUsageStatus(data) {
         if (usage.status?.refreshing && !usage.status?.available) return `${label} 正在首次导入，导入完成后自动补齐。`;
         if (!usage.status?.available) return `服务所在机器未发现 ${label} 会话日志，可通过 ${homes} 指定目录。`;
         const updated = usage.status.scanned_at ? new Date(usage.status.scanned_at * 1000).toLocaleString() : '已有本地索引';
-        let text = `${label} · ${usage.session_count || 0} 个会话 · ${usage.event_count || 0} 条用量事件 · ${updated}\n缓存读取 ${formatNumber(usage.cached_tokens || 0)} · 缓存写入 ${formatNumber(usage.cache_write_tokens || 0)} · 推理输出 ${formatNumber(usage.reasoning_tokens || 0)}`;
-        if (label === 'Claude Code') text += ` · 其中 1 小时写入 ${formatNumber(usage.cache_write_1h_tokens || 0)}`;
+        let text = `${label} · ${usage.session_count || 0} 个会话 · ${usage.event_count || 0} 条用量事件 · ${updated}\n缓存读取 ${formatTokenNumber(usage.cached_tokens || 0)} · 缓存写入 ${formatTokenNumber(usage.cache_write_tokens || 0)} · 推理输出 ${formatTokenNumber(usage.reasoning_tokens || 0)}`;
+        if (label === 'Claude Code') text += ` · 其中 1 小时写入 ${formatTokenNumber(usage.cache_write_1h_tokens || 0)}`;
         if (usage.status.refreshing) text += ' · 正在后台检查更新';
-        if (usage.excluded_usage?.event_count) text += `\n合计已排除经 LLMBridge 转发的 ${usage.excluded_usage.event_count} 条事件，共 ${formatNumber(usage.excluded_usage.total_tokens)} Tokens；${label} 单独视图保留完整用量。`;
+        if (usage.excluded_usage?.event_count) text += `\n合计已排除经 LLMBridge 转发的 ${usage.excluded_usage.event_count} 条事件，共 ${formatTokenNumber(usage.excluded_usage.total_tokens)} Tokens；${label} 单独视图保留完整用量。`;
         return text;
     }).join('\n\n');
 }
@@ -657,6 +677,6 @@ function renderUsagePricing(data) {
         <td>${rate.input}</td><td>${rate.cached_input}</td><td>${rate.cache_write ?? '—'}</td><td>${rate.cache_write_1h ?? '—'}</td><td>${rate.output}</td><td>${rate.long_context ? '>' + formatNumber(rate.threshold || 272000) : '—'}</td></tr>`).join('');
     container.innerHTML = `<p>价格表最近更新：${escapeHtml(pricing.verified_at)}，单位 USD / 百万 Token。每个模型链接标明各自核对日期。输入包含普通输入、缓存读取和写入，推理属于输出，不重复相加。</p>
         ${aliases ? `<p>计价映射：${aliases}。</p>` : ''}
-        ${unknown.length ? `<p>未定价：${unknown.map(escapeHtml).join('、')}，共 ${formatNumber(data.unpriced_tokens || 0)} Tokens。</p>` : '<p>当前所选范围的本地工具模型均已配置估算价格。</p>'}
+        ${unknown.length ? `<p>未定价：${unknown.map(escapeHtml).join('、')}，共 ${formatTokenNumber(data.unpriced_tokens || 0)} Tokens。</p>` : '<p>当前所选范围的本地工具模型均已配置估算价格。</p>'}
         <table class="table"><thead><tr><th>模型 / 官方来源</th><th>普通输入</th><th>缓存读取</th><th>缓存写入</th><th>1小时写入</th><th>输出</th><th>长上下文</th></tr></thead><tbody>${rows}</tbody></table>`;
 }

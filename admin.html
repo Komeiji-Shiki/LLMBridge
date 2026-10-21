@@ -119,7 +119,12 @@
 <div class="stat-card-detail">成功率: -</div>
 </div>
 <div class="stat-card" id="token-stat">
-<div class="stat-card-label">所选来源 Token</div>
+<div class="stat-card-label token-stat-label">
+    <span>所选来源 Token</span>
+    <button class="token-unit-toggle" id="token-unit-toggle" type="button" onclick="switchTokenUnit()" aria-label="以十亿 B 显示大额 Token" aria-pressed="false" title="切换十亿（B）/百万（M）显示，较小数值保留原单位">
+        <span data-token-unit="B">B</span><span aria-hidden="true">/</span><span data-token-unit="M" class="is-active">M</span>
+    </button>
+</div>
 <div class="stat-card-value" id="total-tokens-value">-</div>
 <div class="stat-card-detail" id="token-ratio">输入/输出: -</div>
 </div>
