@@ -2,13 +2,15 @@
 
 import re
 
-VERIFIED_AT = '2026-09-27'
-PRICE_VERSION = '2026-09-27-standard-v2'
+VERIFIED_AT = '2026-10-21'
+PRICE_VERSION = '2026-10-21-standard-v3'
 SOURCE_ROOT = 'https://developers.openai.com/api/docs/models/'
 
 # 单位为 USD / 百万 Token；上下文范围遵循对应模型页的 request/session 说明。
 PRICES = {
     'gpt-6-astra': {'input': 10, 'cached_input': 1, 'output': 50, 'cache_write': 12.5, 'long_context': 'request'},
+    'gpt-6.1-sol': {'input': 2, 'cached_input': .1, 'output': 10, 'cache_write': 2.5,
+                    'long_context': 'request', 'verified_at': '2026-10-21'},
     'gpt-6-sol': {'input': 2, 'cached_input': .2, 'output': 10, 'cache_write': 2.5,
                   'long_context': 'request', 'verified_at': '2026-09-27'},
     'gpt-5.6-sol': {'input': 4, 'cached_input': .4, 'output': 20, 'cache_write': 5, 'long_context': 'request'},
