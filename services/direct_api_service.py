@@ -83,35 +83,40 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
             "_http_status": status_code if status_code else 500
         }
 
-    if 'error' in error_json and error_json.get('error') is not None:
-        error_val = error_json['error']
-        if isinstance(error_val, dict):
-            result = dict(error_json)
-            # 保留上游原始 HTTP 状态码，供后续重试/冷却判断使用
-            if status_code and status_code >= 400:
-                result['_http_status'] = status_code
-            return result
-        # error 是字符串 → 包装
-        return {
-            "error": {
-                "message": str(error_val),
-                "type": "api_error",
-                "code": status_code or 500
-            },
-            "_http_status": status_code if status_code else 500
+    error_val = error_json.get('error')
+    if isinstance(error_val, dict):
+        result = dict(error_json)
+        error = dict(error_val)
+    elif error_val is not None:
+        result = dict(error_json)
+        error = {
+            "message": str(error_val), "type": "api_error",
+            "code": error_json.get('code', status_code or 500)
+        }
+    else:
+        result = {}
+        error = {
+            "message": error_json.get('message') or error_json.get('msg') or str(error_json),
+            "type": "api_error",
+            "code": error_json.get('code', status_code or 500),
+            # 保留渠道原始错误，含多语言提示、请求编号和其他诊断字段。
+            "details": dict(error_json)
         }
 
-    # 其他格式（如 {"message": "..."}）
-    msg = error_json.get('message') or error_json.get('msg') or str(error_json)
-    code = error_json.get('code', status_code or 500)
-    return {
-        "error": {
-            "message": msg,
-            "type": "api_error",
-            "code": code
-        },
-        "_http_status": status_code if status_code else 500
-    }
+    upstream_request_id = (error.get('request_id') or error.get('requestId')
+                           or error_json.get('request_id') or error_json.get('requestId'))
+    if upstream_request_id:
+        error['request_id'] = upstream_request_id
+        message = str(error.get('message') or "上游返回错误")
+        # 有些客户端只展示 message，因此也在正文里保留可用于查日志的编号。
+        if str(upstream_request_id) not in message:
+            error['message'] = (
+                f"{message} (code: {error.get('code', status_code)}; "
+                f"request_id: {upstream_request_id})")
+    result['error'] = error
+    if status_code >= 400 or not isinstance(error_val, dict):
+        result['_http_status'] = status_code or 500
+    return result
 
 
 from services.sse import iter_sse_json_events as _iter_sse_json_events

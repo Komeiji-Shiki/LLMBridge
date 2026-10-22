@@ -381,6 +381,12 @@ async def handle_direct_api_request(
                     if retry_delay_seconds > 0:
                         await asyncio.sleep(retry_delay_seconds)
                     continue
+            if isinstance(http_exc.detail, dict) and 'error' in http_exc.detail:
+                return JSONResponse(
+                    status_code=http_exc.status_code,
+                    content={key: value for key, value in http_exc.detail.items()
+                             if not key.startswith('_')},
+                    headers=http_exc.headers)
             raise
 
         except Exception as exc:

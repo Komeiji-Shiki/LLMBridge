@@ -415,27 +415,39 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
 def build_anthropic_error_payload(error_obj: Any) -> Dict[str, Any]:
     error_type = "api_error"
     message = "请求失败"
+    error_details: Dict[str, Any] = {}
+    request_id = None
 
     if isinstance(error_obj, dict):
+        request_id = error_obj.get("request_id") or error_obj.get("requestId")
         if "error" in error_obj and isinstance(error_obj.get("error"), dict):
             nested = error_obj["error"]
             error_type = nested.get("type", error_type)
             message = nested.get("message", message)
+            error_details = dict(nested)
         else:
             error_type = error_obj.get("type", error_type)
             message = error_obj.get("message", message)
+            error_details = dict(error_obj)
+        request_id = (error_details.get("request_id")
+                      or error_details.get("requestId") or request_id)
     elif isinstance(error_obj, str):
         message = error_obj
     elif error_obj is not None:
         message = str(error_obj)
 
-    return {
+    # 保留扩展诊断字段，客户端仍按 Anthropic 的 type/error/message 读取错误。
+    payload = {
         "type": "error",
         "error": {
+            **error_details,
             "type": error_type,
             "message": message
         }
     }
+    if request_id:
+        payload["request_id"] = request_id
+    return payload
 
 
 def extract_anthropic_usage_tokens(usage: Any) -> tuple:

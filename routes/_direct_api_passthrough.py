@@ -421,9 +421,8 @@ async def _handle_passthrough_stream(
         except Exception:
             pass
         status_code = map_upstream_error_to_status_code(error_json, default_status_code=500)
-        error_details = error_json.get('error', {})
-        error_message = error_details.get('message', '') if isinstance(error_details, dict) else str(error_details)
-        raise HTTPException(status_code=status_code, detail=error_message or "上游返回错误")
+        # 将完整错误交给重试层，避免首块预读把错误码和上游请求编号压成一句文字。
+        raise HTTPException(status_code=status_code, detail=error_json)
 
     # ── 首块正常：创建 session 并处理首块 ──
     session = PassthroughStreamSession(
