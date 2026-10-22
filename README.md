@@ -262,6 +262,16 @@ pip install tiktoken     # GPT tokenizer
 total_cost = (uncached_input × input_price + cached_input × cached_input_price + output × output_price) ÷ unit
 ```
 
+### WorkBuddy 上游
+
+`model_endpoint_map.example.json` 提供 `deepseek-v4.1-flash_workbuddy`、`mimo-v2.6-pro_workbuddy` 和 `step-5-preview_workbuddy` 三个配置示例。将所需条目复制到 `model_endpoint_map.json` 并填入渠道密钥，客户端使用对应的 `_workbuddy` 模型名。
+
+该渠道使用 OpenAI Chat 兼容格式，配置 `api_type: "direct_api"`、`passthrough: true`、`force_stream: true`。`api_base_url` 填写 `https://www.workbuddy.cn/v2`，`endpoint_path` 填写 `/chat/completions`，上游认证由中转自动使用 `Authorization: Bearer ...` 发送。渠道仅支持流式请求，直接向上游发送 `stream: false` 会返回 HTTP 400（code 11101）。
+
+客户端调用中转时可以使用 `stream: true` 或 `stream: false`；中转始终向该上游发送流式请求，非流式客户端会收到聚合后的完整 JSON 响应。
+
+镜像地址可替换为 `https://www.codebuddy.cn/v2` 或 `https://copilot.tencent.com/v2`，均保留 `/v2` 路径。
+
 ### Gemini Interactions 上游
 
 `gemini_native` 模型可以通过 `upstream_protocol: "interactions"` 使用 Google 的 `/v1beta/interactions` 接口。桥接层会把 OpenAI Chat/Anthropic 归一化后的消息转换为 Interactions steps，再把 Interaction 或 SSE 事件转换回客户端协议。

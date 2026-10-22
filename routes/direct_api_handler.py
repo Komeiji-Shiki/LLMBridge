@@ -15,7 +15,7 @@ import uuid
 from typing import Any, Optional
 
 from fastapi import HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from ._direct_api_utils import (
     get_api_key,
@@ -27,6 +27,7 @@ from ._direct_api_utils import (
     should_retry_http_exception,
     inject_system_prompt,
     ensure_reasoning_noop_tool,
+    map_upstream_error_to_status_code,
 )
 from ._direct_api_gemini import handle_gemini_native_direct
 from ._direct_api_passthrough import handle_passthrough_direct
@@ -321,6 +322,18 @@ async def handle_direct_api_request(
                     if retry_delay_seconds > 0:
                         await asyncio.sleep(retry_delay_seconds)
                     continue
+
+            # 仅支持流式的上游仍按客户端要求返回完整 JSON，复用现有 Chat SSE 聚合器。
+            if (_stream_overridden and not original_stream
+                    and isinstance(response, StreamingResponse)):
+                from converters.responses_openai import collect_chat_stream_response
+
+                payload = await collect_chat_stream_response(response, model=model_name)
+                status_code = response.status_code
+                if payload.get("error") is not None:
+                    status_code = map_upstream_error_to_status_code(payload, default_status_code=502)
+                response = JSONResponse(
+                    content=payload, status_code=status_code, background=response.background)
 
             # 强制非流式时客户端期望 SSE → 将非流式 JSON 转为流式 chunk 再包装
             # 🔧 错误响应不应被改写——上游 4xx/5xx 的 JSONResponse 若被包成 SSE 流，

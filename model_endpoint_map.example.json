@@ -42,6 +42,38 @@
     "// 说明": "透传模式：客户端的请求原样转发，服务商的响应原样返回，不做任何格式转换"
   },
 
+  "// ==================== 仅支持流式的 WorkBuddy 渠道 ====================": "",
+  "deepseek-v4.1-flash_workbuddy": {
+    "api_type": "direct_api",
+    "api_base_url": "https://www.workbuddy.cn/v2",
+    "api_key": "ck-your-workbuddy-key",
+    "endpoint_path": "/chat/completions",
+    "model_id": "deepseek-v4.1-flash",
+    "display_name": "DeepSeek V4.1 Flash (WorkBuddy)",
+    "passthrough": true,
+    "force_stream": true
+  },
+  "mimo-v2.6-pro_workbuddy": {
+    "api_type": "direct_api",
+    "api_base_url": "https://www.workbuddy.cn/v2",
+    "api_key": "ck-your-workbuddy-key",
+    "endpoint_path": "/chat/completions",
+    "model_id": "mimo-v2.6-pro",
+    "display_name": "MiMo V2.6 Pro (WorkBuddy)",
+    "passthrough": true,
+    "force_stream": true
+  },
+  "step-5-preview_workbuddy": {
+    "api_type": "direct_api",
+    "api_base_url": "https://www.workbuddy.cn/v2",
+    "api_key": "ck-your-workbuddy-key",
+    "endpoint_path": "/chat/completions",
+    "model_id": "step-5-preview",
+    "display_name": "Step 5 Preview (WorkBuddy)",
+    "passthrough": true,
+    "force_stream": true
+  },
+
   "// ==================== 模式3.5: Anthropic原生 Messages 格式兼容 ====================": "",
   "claude-native-messages": {
     "api_type": "anthropic_native",
@@ -180,6 +212,7 @@
     "display_name": "在统计中显示的模型名称",
     
     "passthrough": "是否启用透传模式（true/false），适用于 OpenAI 兼容 API",
+    "force_stream": "可选，true 强制上游使用流式，false 强制上游使用非流式；省略时跟随客户端。仅支持 SSE 的渠道应设为 true",
     "sanitize_recursive_schemas": "废弃开关，统一写 false；始终保留 strict、required 和递归 Schema",
     "provider": "可选 openai/qwen/deepseek/gemini/custom；未指定时只按官方域名识别",
     "native_tools": "默认原生工具名称列表，例如 [web_search]；客户端 tools 优先",
