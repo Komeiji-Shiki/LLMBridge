@@ -240,6 +240,9 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
     openai_messages: List[Dict[str, Any]] = []
 
     system_text = extract_system_text(anthropic_req.get("system"))
+    # Claude Code 的专用计费标记不属于系统提示，不传给其他协议的上游。
+    system_text = re.sub(
+        r"\Ax-anthropic-billing-header:[^\r\n]*(?:\r?\n|$)", "", system_text)
     if system_text:
         openai_messages.append({"role": "system", "content": system_text})
 
