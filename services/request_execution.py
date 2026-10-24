@@ -18,7 +18,9 @@ def _error_chunk(message, byte_mode):
     return ('data: ' + json.dumps(value) + '\n\n').encode() if byte_mode else value
 
 
-def retry_before_output(method):
+def retry_before_output(method=None, *, output_bytes=False):
+    if method is None:
+        return lambda wrapped: retry_before_output(wrapped, output_bytes=output_bytes)
     signature = inspect.signature(method)
 
     @wraps(method)
@@ -72,7 +74,8 @@ def retry_before_output(method):
                 context.attempts.append(info)
                 context.mark('upstream_start')
                 prefix, total, committed, terminal = [], 0, False, False
-                failed, error_text, byte_mode = None, '', True
+                # 空响应没有首块可用于判断类型，沿用入口声明的输出格式。
+                failed, error_text, byte_mode = None, '', output_bytes
                 iterator = method(*bound.args, **bound.kwargs)
                 try:
                     async for chunk in iterator:

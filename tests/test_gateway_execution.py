@@ -6,6 +6,7 @@ from core.request_context import RequestContext, current_request
 from core.auth_observer import observe_authenticated_request
 from core.conversation_store import ConversationStore
 from services.request_execution import retry_before_output
+from services.protocol_events import payloads
 
 
 def test_auth_observer_does_not_turn_failure_into_success():
@@ -63,6 +64,40 @@ def test_retry_holds_prelude_but_never_replays_business_events(business):
     assert len(calls) == (1 if business else 2)
     assert result.count(b'response.created') == 1
     assert (b'503' in result) == business
+
+
+@pytest.mark.parametrize('output_bytes', [False, True])
+@pytest.mark.parametrize('retry_enabled', [False, True])
+def test_empty_stream_preserves_output_type(output_bytes, retry_enabled):
+    """空流及重试耗尽后仍应返回入口约定的类型，保留可读错误。"""
+    calls = []
+
+    @retry_before_output(output_bytes=output_bytes)
+    async def upstream(stream=False):
+        calls.append(stream)
+        for chunk in ():
+            yield chunk
+
+    async def run():
+        context = RequestContext(model='test', endpoint={'auto_retry': {
+            'enabled': retry_enabled, 'max_retries': 1,
+            'retry_on_other_errors': True, 'retry_delay_seconds': 0}})
+        token = current_request.set(context)
+        try:
+            result = [chunk async for chunk in upstream(stream=True)]
+            assert [attempt['status'] for attempt in context.attempts] == [502] * len(calls)
+            assert context.transport_depth == 0
+            return result
+        finally:
+            current_request.reset(token)
+
+    result = asyncio.run(run())
+    assert len(calls) == (2 if retry_enabled else 1)
+    assert len(result) == 1
+    assert isinstance(result[0], bytes if output_bytes else dict)
+    error = payloads(result[0])[0]['error']
+    assert error['code'] == 502
+    assert error['message'] == '上游流在终态事件之前中断'
 
 
 def test_request_cache_requires_auth_and_excludes_auth_headers(tmp_path, monkeypatch):

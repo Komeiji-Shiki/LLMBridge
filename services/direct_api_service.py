@@ -1392,7 +1392,7 @@ class DirectAPIService:
         else:
             return error_json_str.encode('utf-8')
 
-    @retry_before_output
+    @retry_before_output(output_bytes=True)
     async def call_api_passthrough(
         self,
         base_url: str,
