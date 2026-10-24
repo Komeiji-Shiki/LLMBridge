@@ -386,6 +386,14 @@ class PassthroughStreamSession:
         """
         line_modified = False
         delta = chunk_json['choices'][0].get('delta', {})
+        # 空字段没有增量内容；部分客户端会把它们当成新正文或工具调用，反复结束思考块。
+        for field in ('content', 'reasoning_content', 'reasoning'):
+            if delta.get(field) == '':
+                delta.pop(field)
+                line_modified = True
+        if delta.get('tool_calls') == []:
+            delta.pop('tool_calls')
+            line_modified = True
         raw_content = delta.get('content', '')
         raw_reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
         raw_tool_calls = delta.get('tool_calls')
