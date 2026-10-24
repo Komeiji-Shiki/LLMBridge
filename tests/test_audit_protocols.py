@@ -205,6 +205,62 @@ def test_anthropic_thinking_signatures_restore_gemini_parts_in_place():
     assert contents[3] == {'role': 'model', 'parts': [{'text': '北京晴，上海雨。', 'thoughtSignature': 'sig-text'}]}
 
 
+@pytest.mark.parametrize('stream', [False, True])
+def test_google_openai_signatures_round_trip_through_anthropic(stream):
+    """Google OAI 签名经 thinking 块回传后，仍绑定原工具调用。"""
+    from fastapi.responses import JSONResponse
+    from converters.anthropic_openai import convert_openai_non_stream_response_to_anthropic
+    from routes._direct_api_passthrough import _prepare_passthrough_request
+
+    calls = [
+        {'index': 0, 'id': 'call_1', 'type': 'function',
+         'function': {'name': 'get_weather', 'arguments': '{"city":"北京"}'},
+         'extra_content': {'google': {'thought_signature': 'sig-call'}}},
+        {'index': 1, 'id': 'call_2', 'type': 'function',
+         'function': {'name': 'get_weather', 'arguments': '{"city":"上海"}'}}]
+    message = {'role': 'assistant', 'reasoning_content': '先查两个城市', 'content': None, 'tool_calls': calls}
+    original = copy.deepcopy(message)
+    if stream:
+        chunks = [
+            {'choices': [{'delta': {'reasoning_content': message['reasoning_content']}}]},
+            {'choices': [{'delta': {'tool_calls': [
+                {**call, 'function': {**call['function'], 'arguments': ''}} for call in calls]}}]},
+            {'choices': [{'delta': {'tool_calls': [
+                {'index': call['index'], 'function': {'arguments': call['function']['arguments']}}
+                for call in calls]}, 'finish_reason': 'tool_calls'}]}]
+        blocks = anthropic_stream_blocks(chunks)
+    else:
+        response = JSONResponse({'choices': [{'message': message, 'finish_reason': 'tool_calls'}]})
+        converted = asyncio.run(convert_openai_non_stream_response_to_anthropic(response, 'demo'))
+        blocks = json.loads(converted.body)['content']
+    assert blocks == TOOL_TURN_BLOCKS
+    request = convert_anthropic_to_openai_request({'model': 'demo', 'messages': [
+        {'role': 'assistant', 'content': blocks}]})
+    prepared = _prepare_passthrough_request(request, 'demo', 'gemini-4-argon', {})
+    returned = prepared['messages'][0]
+    assert returned['tool_calls'][0]['extra_content'] == calls[0]['extra_content']
+    assert 'extra_content' not in returned['tool_calls'][1]
+    assert 'provider_metadata' not in returned
+    assert message == original
+    assert 'extra_content' not in request['messages'][0]['tool_calls'][0]
+
+
+def test_google_openai_preserves_client_signature_and_legacy_native_signature():
+    from routes._direct_api_passthrough import _prepare_passthrough_request
+
+    request = {'messages': [{'role': 'assistant', 'tool_calls': [
+        {'id': 'one', 'function': {'name': 'first', 'arguments': '{}'},
+         '_thought_signature': 'old', 'extra_content': {'google': {'thought_signature': 'client'}}},
+        {'id': 'two', 'function': {'name': 'second', 'arguments': '{}'}, '_thought_signature': 'legacy'}]}]}
+    original = copy.deepcopy(request)
+    prepared = _prepare_passthrough_request(request, 'demo', 'gemini-4-argon', {})
+    calls = prepared['messages'][0]['tool_calls']
+    assert calls[0]['extra_content']['google']['thought_signature'] == 'client'
+    assert calls[1]['extra_content']['google']['thought_signature'] == 'legacy'
+    assert all('_thought_signature' not in call for call in calls)
+    assert request == original
+
+
 def test_foreign_thinking_signatures_never_reach_gemini():
     from converters.anthropic_openai import sanitize_anthropic_thinking_blocks
     claude_turn = [{'type': 'thinking', 'thinking': 'Claude 的思考', 'signature': 'EqQBCkYIBRgCKkCx'},

@@ -10,6 +10,8 @@ import time
 import uuid
 from typing import Optional
 
+from converters.gemini_anthropic_signatures import restore_google_tool_signatures
+
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
@@ -174,10 +176,15 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
     # provider_metadata 是网关内部的原生回放载荷（如 Gemini parts），
     # 客户端中途切到 OpenAI 兼容模型时不能带给上游。
     if isinstance(passthrough_request.get("messages"), list):
-        passthrough_request["messages"] = [
-            {k: v for k, v in m.items() if k != "provider_metadata"} if isinstance(m, dict) else m
-            for m in passthrough_request["messages"]
-        ]
+        messages = []
+        is_gemini = "gemini" in target_model_id.lower()
+        for message in passthrough_request["messages"]:
+            if isinstance(message, dict):
+                if is_gemini:
+                    message = restore_google_tool_signatures(message)
+                message = {key: value for key, value in message.items() if key != "provider_metadata"}
+            messages.append(message)
+        passthrough_request["messages"] = messages
 
     # 🔍 诊断：打印实际发送的图片 URL 格式
     if "messages" in passthrough_request:

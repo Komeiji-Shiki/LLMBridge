@@ -25,17 +25,56 @@ def decode_signature(value: Any) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _google_signature(value: Dict[str, Any]) -> Optional[str]:
+    extra = value.get("extra_content") or {}
+    return (extra.get("google") or {}).get("thought_signature")
+
+
+def restore_google_tool_signatures(message: Dict[str, Any]) -> Dict[str, Any]:
+    """把 Anthropic 回传或旧原生历史的调用签名恢复为 Google OAI 扩展字段。"""
+    metadata = message.get("provider_metadata") or {}
+    parts = metadata.get("gemini_parts") or []
+    call_parts = [part for part in parts if isinstance(part, dict) and "functionCall" in part]
+    calls = []
+    for index, call in enumerate(message.get("tool_calls") or []):
+        signature = call.get("_thought_signature")
+        if index < len(call_parts):
+            signature = call_parts[index].get("thoughtSignature") or signature
+        call = {key: value for key, value in call.items() if key != "_thought_signature"}
+        if signature and not _google_signature(call):
+            extra = call.get("extra_content") or {}
+            call = {**call, "extra_content": {
+                **extra, "google": {**(extra.get("google") or {}), "thought_signature": signature}}}
+        calls.append(call)
+    return {**message, "tool_calls": calls} if calls else message
+
+
 def gemini_segments(delta: Dict[str, Any]) -> Optional[List[Tuple[str, Any]]]:
     """按 Gemini 原生 parts 顺序把 OpenAI delta/message 展开为片段序列。
 
     片段类型：thinking / text / tool_calls / signature（已编码）。同一块里
     思考、正文、调用的先后与每个签名的归属都按原生顺序保留。不是 Gemini
-    链路的 delta（没有 gemini_parts）返回 None。
+    链路的 delta（没有原生 parts 或 Google 签名）返回 None。
     """
     metadata = delta.get("provider_metadata")
     parts = metadata.get("gemini_parts") if isinstance(metadata, dict) else None
     if not isinstance(parts, list):
-        return None
+        # Google OAI 将签名附在原工具调用上，平行调用不能共用一个签名。
+        calls = delta.get("tool_calls") or []
+        if not any(_google_signature(call) for call in calls):
+            return None
+        segments = []
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+        if reasoning:
+            segments.append(("thinking", reasoning))
+        if delta.get("content"):
+            segments.append(("text", delta["content"]))
+        for call in calls:
+            signature = _google_signature(call)
+            if signature:
+                segments.append(("signature", encode_signature(CALL, signature)))
+            segments.append(("tool_calls", [call]))
+        return segments
     # tool_calls 由 parts 中的 functionCall 按序转换而来（id 可能是转换时补的）
     calls = iter(delta.get("tool_calls") or [])
     segments: List[Tuple[str, Any]] = []
