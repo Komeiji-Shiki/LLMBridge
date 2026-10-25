@@ -149,7 +149,7 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
     此函数仅做基础的内容块→OpenAI content 转换。
     """
     if isinstance(content, str):
-        if "<graywill_audio " not in content:
+        if "<graywill_audio" not in content:
             return content
         content = [{"type": "text", "text": content}]
 

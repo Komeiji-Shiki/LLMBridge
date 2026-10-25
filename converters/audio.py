@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional
 
 _AUDIO_ENVELOPE = re.compile(
     r'<graywill_audio mime_type="(audio/[^"<>\s]+)">([A-Za-z0-9+/=]+)</graywill_audio>'
+    r'|<graywill_audio_ref id="([a-f0-9]{32})"\s*/>'
 )
 
 
@@ -29,6 +30,8 @@ def extract_audio(block: Any) -> Optional[Dict[str, str]]:
     if not isinstance(source, dict):
         return None
 
+    if isinstance(source.get("file_id"), str) and re.fullmatch(r"[a-f0-9]{32}", source["file_id"]):
+        return {"file_id": source["file_id"]}
     mime_type = (source.get("mime_type") or source.get("media_type")
                  or source.get("mimeType") or block.get("mime_type")
                  or block.get("media_type") or block.get("mimeType"))
@@ -60,6 +63,8 @@ def audio_to_openai(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     audio = extract_audio(block)
     if audio is None:
         return None
+    if "file_id" in audio:
+        return {"type": "input_audio", "input_audio": {"file_id": audio["file_id"]}}
     if "data" in audio:
         return {"type": "input_audio", "input_audio": {
             "data": audio["data"], "format": audio["mime_type"].split("/", 1)[1],
@@ -72,16 +77,17 @@ def audio_to_openai(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def split_audio_text(text: str):
     """还原 Claude Code Read 的音频封装；普通文字及文件信息保持原序。"""
-    if "<graywill_audio " not in text:
+    if "<graywill_audio" not in text:
         return [{"type": "text", "text": text}]
     parts = []
     position = 0
     for match in _AUDIO_ENVELOPE.finditer(text):
         if match.start() > position:
             parts.append({"type": "text", "text": text[position:match.start()]})
-        parts.append(audio_to_openai({
+        block = {"type": "audio", "file_id": match[3]} if match[3] else {
             "type": "audio", "mime_type": match[1], "data": match[2],
-        }))
+        }
+        parts.append(audio_to_openai(block))
         position = match.end()
     if position < len(text):
         parts.append({"type": "text", "text": text[position:]})

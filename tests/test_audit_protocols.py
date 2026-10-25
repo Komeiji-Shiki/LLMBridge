@@ -478,6 +478,7 @@ def test_responses_content_filter_is_an_incomplete_result(stream):
     {"type": "audio", "data": "QUJD", "mimeType": "audio/mpeg"},
     {"type": "audio", "source": {"type": "base64", "data": "QUJD", "media_type": "audio/mpeg"}},
     {"type": "text", "text": '1→<graywill_audio mime_type="audio/mpeg">QUJD</graywill_audio>'},
+    {"type": "text", "text": '<graywill_audio_ref id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>'},
 ])
 def test_anthropic_tool_audio_keeps_parallel_results_before_media(protocol, audio_block):
     """音频经过入口转换后保留字节及 MIME，两个并行工具结果仍先配对完成。"""
@@ -496,6 +497,20 @@ def test_anthropic_tool_audio_keeps_parallel_results_before_media(protocol, audi
     ]}
     before = copy.deepcopy(original)
     messages = convert_anthropic_to_openai_request(original)["messages"]
+    if "graywill_audio_ref" in str(audio_block):
+        from core.audio_files import AudioFiles
+        from core.request_context import RequestContext, current_request
+        from services.audio_input import resolve_audio_references
+        store = AudioFiles()
+        store.root.mkdir(parents=True, exist_ok=True)
+        file_id = "a" * 32
+        store.paths(file_id)[0].write_bytes(b"ABC")
+        store.save_metadata(file_id, {"owner_id": "test-audio", "mime_type": "audio/mpeg", "filename": "a.mp3", "size": 3})
+        token = current_request.set(RequestContext(owner_id="test-audio", authenticated=True))
+        try:
+            messages = asyncio.run(resolve_audio_references(messages, None, "", None, {}))
+        finally:
+            current_request.reset(token)
     if protocol == "interactions":
         steps, _ = convert_oai_messages_to_interactions(messages)
         assert [step["call_id"] for step in steps if step["type"] == "function_result"] == ["read_1", "read_2"]

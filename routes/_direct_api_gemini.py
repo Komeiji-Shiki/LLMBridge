@@ -296,6 +296,11 @@ async def handle_gemini_native_direct(
         if thinking_separator and isinstance(messages_for_upstream, list):
             messages_for_upstream = restore_history_messages(messages_for_upstream)
 
+        # 文件引用只在发送前展开，监控和本地 Token 估算继续使用短引用。
+        from services.audio_input import resolve_audio_references
+        messages_for_upstream = await resolve_audio_references(
+            messages_for_upstream, direct_api_service.session, api_key, api_base_url, endpoint_config)
+
         # 🔧 上游协议选择：generate_content（默认，旧行为）或 interactions（新 API）
         upstream_protocol = endpoint_config.get("upstream_protocol", "generate_content")
         if upstream_protocol == "interactions":

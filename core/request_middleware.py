@@ -26,6 +26,8 @@ class GatewayRequestMiddleware:
 
     async def __call__(self, scope, receive, send):
         path = scope.get('path', '')
+        if path.startswith('/v1/bridge/audio/'):
+            return await self.app(scope, receive, send)
         if scope['type'] != 'http' or scope.get('method') != 'POST' or not (path.startswith(('/v1/', '/v1beta/')) or path == '/api/admin/playground/run'):
             return await self.app(scope, receive, send)
         headers = dict(scope.get('headers', []))
