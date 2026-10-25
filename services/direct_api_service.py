@@ -25,6 +25,7 @@ from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler, c
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
+from converters.audio import extract_audio, separate_tool_audio
 from converters.gemini_interactions import build_interactions_request_body
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage
 
@@ -664,7 +665,7 @@ class DirectAPIService:
         # 单遍遍历即可建立；旧版从 id 字符串猜函数名，call_xxx 会猜出错误名字）
         tool_id_to_name: Dict[str, str] = {}
         
-        for msg in messages:
+        for msg in separate_tool_audio(messages):
             role = msg.get("role")
             content = msg.get("content", "")
             
@@ -808,6 +809,17 @@ class DirectAPIService:
                                 })
                                 logger.debug(f"[GEMINI_NATIVE] 添加URL图片: {url[:50]}... ({image_mime})")
                         
+                        elif item_type in ("audio", "input_audio", "audio_url", "document"):
+                            audio = extract_audio(item)
+                            if audio and "data" in audio:
+                                parts.append({"inlineData": {
+                                    "mimeType": audio["mime_type"], "data": audio["data"],
+                                }})
+                            elif audio:
+                                parts.append({"fileData": {
+                                    "mimeType": audio["mime_type"], "fileUri": audio["uri"],
+                                }})
+
                         else:
                             # 未知类型块：能提取文本则保留，否则记录警告后丢弃
                             # （旧版静默丢弃，排查无从下手）

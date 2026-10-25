@@ -24,6 +24,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from converters.audio import extract_audio, separate_tool_audio
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage
 
 logger = logging.getLogger(__name__)
@@ -112,19 +113,14 @@ def _oai_part_to_interactions_block(item: Any) -> Optional[dict]:
             return {"type": "image", "uri": url, "mime_type": mime_type}
         return None
 
-    if item_type == "input_audio":
-        audio_data = item.get("input_audio") or {}
-        data = audio_data.get("data", "")
-        fmt = audio_data.get("format", "")
-        if data:
-            mime_type = f"audio/{fmt}" if fmt else "audio/wav"
-            return {"type": "audio", "data": data, "mime_type": mime_type}
-        return None
+    if item_type in ("audio", "input_audio", "audio_url", "document"):
+        audio = extract_audio(item)
+        return {"type": "audio", **audio} if audio else None
 
-    if item_type in ("audio_url", "video_url"):
-        url_data = item.get("audio_url") or item.get("video_url") or {}
+    if item_type == "video_url":
+        url_data = item.get("video_url") or {}
         url = url_data.get("url", "")
-        kind = "audio" if item_type == "audio_url" else "video"
+        kind = "video"
         if url.startswith(("http://", "https://")):
             guessed_mime, _ = mimetypes.guess_type(url.split("?", 1)[0])
             return {"type": kind, "uri": url, "mime_type": guessed_mime or f"{kind}/mp4"}
@@ -213,7 +209,7 @@ def convert_oai_messages_to_interactions(
     system_parts: List[str] = []
     tool_id_to_name: Dict[str, str] = {}
 
-    for msg in messages:
+    for msg in separate_tool_audio(messages):
         role = msg.get("role")
         content = msg.get("content", "")
 

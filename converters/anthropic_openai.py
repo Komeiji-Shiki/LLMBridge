@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from converters import is_content_parts
+from converters.audio import audio_to_openai, split_audio_text
 from converters.gemini_anthropic_signatures import (
     decode_signature,
     gemini_parts_from_anthropic,
@@ -142,13 +143,15 @@ def extract_system_text(system_field: Any) -> str:
 def convert_anthropic_content_to_openai(content: Any) -> Any:
     """将 Anthropic content 转换为 OpenAI content 格式。
 
-    处理 text / image / tool_result / tool_use / thinking 等块类型。
+    处理 text / image / audio / tool_result / tool_use / thinking 等块类型。
     注意：assistant 消息中的 tool_use 和 user 消息中的 tool_result
     的完整结构化转换在 convert_anthropic_to_openai_request 中处理，
     此函数仅做基础的内容块→OpenAI content 转换。
     """
     if isinstance(content, str):
-        return content
+        if "<graywill_audio " not in content:
+            return content
+        content = [{"type": "text", "text": content}]
 
     if not isinstance(content, list):
         return str(content) if content is not None else ""
@@ -161,7 +164,7 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
         block_type = block.get("type")
         if block_type in ("text", "input_text"):
             text = block.get("text", "")
-            converted_parts.append({"type": "text", "text": str(text)})
+            converted_parts.extend(split_audio_text(str(text)))
 
         elif block_type == "image":
             source = block.get("source", {}) if isinstance(block.get("source"), dict) else {}
@@ -184,6 +187,11 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
                         "type": "image_url",
                         "image_url": {"url": image_url}
                     })
+
+        elif block_type in ("audio", "input_audio", "audio_url", "document"):
+            audio_part = audio_to_openai(block)
+            if audio_part:
+                converted_parts.append(audio_part)
 
         elif block_type == "tool_result":
             tool_content = block.get("content")
@@ -227,7 +235,7 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
 def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[str, Any]:
     """将 Anthropic Messages API 请求转换为 OpenAI chat.completions 请求。
 
-    支持：text / image / tool_use / tool_result / thinking / tools / tool_choice
+    支持：text / image / audio / tool_use / tool_result / thinking / tools / tool_choice
     """
     model = anthropic_req.get("model")
     if not model:
@@ -316,7 +324,9 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
                     if block.get("type") == "tool_result":
                         tool_use_id = block.get("tool_use_id", "")
                         tool_content = block.get("content", "")
-                        if is_content_parts(tool_content):
+                        if isinstance(tool_content, str):
+                            tool_content = convert_anthropic_content_to_openai(tool_content)
+                        elif is_content_parts(tool_content):
                             tool_content = convert_anthropic_content_to_openai(tool_content)
                         elif isinstance(tool_content, list):
                             text_parts = [str(part.get("text", "")) for part in tool_content

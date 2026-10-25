@@ -471,3 +471,50 @@ def test_responses_content_filter_is_an_incomplete_result(stream):
         result = convert_chat_response_to_responses(chat, request)
     assert result['status'] == 'incomplete'
     assert result['incomplete_details'] == {'reason': 'content_filter'}
+
+
+@pytest.mark.parametrize("protocol", ["generate_content", "interactions"])
+@pytest.mark.parametrize("audio_block", [
+    {"type": "audio", "data": "QUJD", "mimeType": "audio/mpeg"},
+    {"type": "audio", "source": {"type": "base64", "data": "QUJD", "media_type": "audio/mpeg"}},
+    {"type": "text", "text": '1→<graywill_audio mime_type="audio/mpeg">QUJD</graywill_audio>'},
+])
+def test_anthropic_tool_audio_keeps_parallel_results_before_media(protocol, audio_block):
+    """音频经过入口转换后保留字节及 MIME，两个并行工具结果仍先配对完成。"""
+    from converters.gemini_interactions import convert_oai_messages_to_interactions
+
+    original = {"model": "demo", "messages": [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "read_1", "name": "Read", "input": {"file_path": "a.mp3"}},
+            {"type": "tool_use", "id": "read_2", "name": "Read", "input": {"file_path": "b.txt"}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "read_1", "content": [
+                {"type": "text", "text": "a.mp3"}, audio_block]},
+            {"type": "tool_result", "tool_use_id": "read_2", "content": "普通文件"},
+        ]},
+    ]}
+    before = copy.deepcopy(original)
+    messages = convert_anthropic_to_openai_request(original)["messages"]
+    if protocol == "interactions":
+        steps, _ = convert_oai_messages_to_interactions(messages)
+        assert [step["call_id"] for step in steps if step["type"] == "function_result"] == ["read_1", "read_2"]
+        assert [step["type"] for step in steps] == [
+            "function_call", "function_call", "function_result", "function_result", "user_input"]
+        assert steps[-1]["content"][-1] == {"type": "audio", "data": "QUJD", "mime_type": "audio/mpeg"}
+    else:
+        async def run():
+            session = MagicMock()
+            response = MagicMock(status=200)
+            response.json = AsyncMock(return_value={"candidates": []})
+            session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+            session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+            results = [item async for item in DirectAPIService(session).call_gemini_native_api(
+                "test-key", "demo", messages, stream=False)]
+            assert not any("error" in item for item in results)
+            return json.loads(session.post.call_args.kwargs["data"])
+        body = asyncio.run(run())
+        results = body["contents"][1]["parts"]
+        assert [part["functionResponse"]["id"] for part in results] == ["read_1", "read_2"]
+        assert body["contents"][-1]["parts"][-1] == {"inlineData": {"mimeType": "audio/mpeg", "data": "QUJD"}}
+    assert original == before
