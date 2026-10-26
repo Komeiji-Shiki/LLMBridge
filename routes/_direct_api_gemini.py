@@ -199,10 +199,9 @@ async def handle_gemini_native_direct(
         enable_thinking = True
     if enable_thinking is True:
         reasoning_effort = client_reasoning_effort or endpoint_config.get("reasoning_effort")
-        is_gemini_3 = "gemini-3" in (target_model_id or model_name or "").lower()
-        if reasoning_effort and is_gemini_3:
-            # Gemini 3 generateContent 使用 thinkingLevel；Responses 的
-            # reasoning.effort 在进入此处前已归一化为 reasoning_effort。
+        thinking_config = {"includeThoughts": True}
+        if reasoning_effort:
+            # 按用户选择的控制方式传参，不根据模型名称把强度换算成预算。
             level_map = {
                 "none": "MINIMAL",
                 "minimal": "MINIMAL",
@@ -212,38 +211,16 @@ async def handle_gemini_native_direct(
                 "xhigh": "HIGH",
                 "max": "HIGH",
             }
-            thinking_config = {
-                "thinkingLevel": level_map.get(str(reasoning_effort).lower(), "MEDIUM"),
-                "includeThoughts": True,
-            }
+            effort = str(reasoning_effort).lower()
+            thinking_config["thinkingLevel"] = level_map.get(effort, effort.upper())
             logger.info(
                 f"[GEMINI_NATIVE] reasoning_effort={reasoning_effort} "
                 f"映射为 thinkingLevel={thinking_config['thinkingLevel']}"
             )
-        elif reasoning_effort:
-            # Gemini 2.5 及旧模型使用 thinkingBudget。
-            effort_budget_map = {
-                "minimal": 512, "low": 4096, "medium": 12288,
-                "high": 24576, "xhigh": 32768, "max": 32768,
-            }
-            thinking_budget = effort_budget_map.get(str(reasoning_effort).lower(), 20000)
-            thinking_config = {
-                "thinkingBudget": thinking_budget,
-                "includeThoughts": True,
-            }
-            logger.info(f"[GEMINI_NATIVE] reasoning_effort={reasoning_effort} 映射为 thinkingBudget={thinking_budget}")
-        else:
-            if is_gemini_3:
-                thinking_level = str(endpoint_config.get("thinking_level", "MEDIUM")).upper()
-                thinking_config = {
-                    "thinkingLevel": thinking_level,
-                    "includeThoughts": True,
-                }
-            else:
-                thinking_config = {
-                    "thinkingBudget": endpoint_config.get("thinking_budget", 20000),
-                    "includeThoughts": True,
-                }
+        elif endpoint_config.get("thinking_level"):
+            thinking_config["thinkingLevel"] = str(endpoint_config["thinking_level"]).upper()
+        elif endpoint_config.get("thinking_budget") is not None:
+            thinking_config["thinkingBudget"] = endpoint_config["thinking_budget"]
         logger.info(
             f"[GEMINI_NATIVE] 已启用思维链模式 "
             f"(control={thinking_config.get('thinkingLevel', thinking_config.get('thinkingBudget'))})"
