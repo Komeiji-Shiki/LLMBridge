@@ -122,6 +122,7 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
 
 from services.sse import iter_sse_json_events as _iter_sse_json_events
 from services.request_execution import retry_before_output
+from core.upstream_auth import apply_api_key_auth
 
 
 def _assign_function_call_ids(value: Any) -> None:
@@ -412,6 +413,7 @@ class DirectAPIService:
             "Content-Type": "application/json"
         }
         self._apply_context_upstream_headers(headers)
+        apply_api_key_auth(headers, api_key)
         
         logger.info(f"[DIRECT_API] 调用API: {endpoint}")
         logger.info(f"[DIRECT_API] 模型: {model}, 流式: {stream}")
@@ -615,6 +617,7 @@ class DirectAPIService:
         extra_body: Optional[Dict[str, Any]] = None,
         response_format: Optional[Dict[str, Any]] = None,
         stop_sequences: Optional[List[str]] = None,
+        api_key_auth_mode: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         调用Gemini原生API（非OpenAI兼容格式）
@@ -633,6 +636,7 @@ class DirectAPIService:
             tool_choice: OAI tool_choice（将转换为 Gemini toolConfig）
             extra_body: 额外的 Gemini 原生请求体键值对（直接合并到 request_body）。
                 使用显式参数而非 **kwargs，消除配置键与命名形参碰撞导致 TypeError 的风险。
+            api_key_auth_mode: 显式指定鉴权方式；未指定时读取当前模型配置。
 
         Yields:
             响应数据块（Gemini原生格式）
@@ -992,6 +996,7 @@ class DirectAPIService:
                 headers["x-goog-api-key"] = api_key
             # 转换协议后仍保留客户端的会话标识和其他端到端请求头。
             self._apply_context_upstream_headers(headers)
+            apply_api_key_auth(headers, api_key, api_key_auth_mode)
             async with self.session.post(
                 endpoint,
                 data=request_body_json.encode('utf-8'),
@@ -1091,6 +1096,7 @@ class DirectAPIService:
         response_format: Optional[Any] = None,
         stop_sequences: Optional[List[str]] = None,
         extra_body: Optional[Dict[str, Any]] = None,
+        api_key_auth_mode: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """调用 Gemini Interactions API（基础地址后追加 /interactions）。
 
@@ -1114,6 +1120,7 @@ class DirectAPIService:
             response_format: OpenAI 结构化输出配置
             stop_sequences: OpenAI stop 列表，映射为 generation_config.stop_sequences
             extra_body: 额外的请求体键值对（直接合并到 request_body）
+            api_key_auth_mode: 显式指定鉴权方式；未指定时读取当前模型配置。
 
         Yields:
             流式：interactions SSE 事件 dict；非流式：interaction 对象 dict；
@@ -1167,6 +1174,7 @@ class DirectAPIService:
             if api_key:
                 headers["x-goog-api-key"] = api_key
             self._apply_context_upstream_headers(headers)
+            apply_api_key_auth(headers, api_key, api_key_auth_mode)
             async with self.session.post(
                 endpoint,
                 data=request_body_json.encode('utf-8'),
@@ -1456,6 +1464,8 @@ class DirectAPIService:
             if 'x-goog-api-key' in headers:
                 request_headers['x-goog-api-key'] = api_key
                 request_headers.pop('Authorization', None)
+
+        apply_api_key_auth(request_headers, api_key)
         
         is_stream = request_body.get("stream", False) if stream_override is None else stream_override
         

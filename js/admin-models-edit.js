@@ -21,6 +21,7 @@ function showAddModelModal() {
     document.getElementById('model-type').value = 'text';
     document.getElementById('api-type').value = 'direct_api';
     document.getElementById('api-base-url').value = '';
+    document.getElementById('api-key-auth-mode').value = 'auto';
     clearApiKeyRows();
     addApiKeyRow(); // 添加一个空行
     document.getElementById('api-key-strategy').value = 'round_robin';
@@ -126,6 +127,7 @@ function fillModelForm(config) {
         document.getElementById('config-type').value = 'direct_api';
         document.getElementById('api-type').value = config.api_type || 'direct_api';
         document.getElementById('api-base-url').value = config.api_base_url || '';
+        document.getElementById('api-key-auth-mode').value = config.api_key_auth_mode || 'auto';
         
         // 🔧 多 API Key 轮询支持：兼容 api_keys 数组和 api_key 字符串
         clearApiKeyRows();
@@ -459,6 +461,11 @@ async function saveModel() {
         // 🔧 只在有值时添加api_base_url字段
         if (apiBaseUrl) {
             config.api_base_url = apiBaseUrl;
+        }
+
+        const apiKeyAuthMode = document.getElementById('api-key-auth-mode').value;
+        if (apiKeyAuthMode !== 'auto') {
+            config.api_key_auth_mode = apiKeyAuthMode;
         }
         
         // 🔧 多 API Key 轮询：根据 key 数量决定存储格式

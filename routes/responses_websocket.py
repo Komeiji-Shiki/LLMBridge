@@ -14,6 +14,7 @@ from core.config_loader import get_setting
 from core.constants import TimeoutDefaults
 from core.model_archive import is_model_archived
 from core.request_context import RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request
+from core.upstream_auth import apply_api_key_auth
 from services.provider_capabilities import apply_native_tool_defaults
 from services.responses_websocket_monitor import ResponsesWebSocketMonitor
 from . import api_routes as api
@@ -39,6 +40,7 @@ def upstream_headers(websocket: WebSocket, api_key: str) -> dict[str, str]:
                and not name.lower().startswith("sec-websocket-")}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
+    apply_api_key_auth(headers, api_key)
     return headers
 
 

@@ -27,7 +27,7 @@ function mergeModelEditorConfig(config) {
         'enable_thinking', 'reasoning_effort', 'thinking_budget', 'thinking_effort', 'thinking_display',
         'responses_store', 'responses_reasoning_summary', 'auto_cache', 'tool_name_rewrite', 'verbosity',
         'oai_thinking_type', 'oai_thinking_effort', 'prefill_content', 'endpoint_path', 'upstream_protocol',
-        'api_base_url', 'api_key', 'api_keys', 'api_key_strategy', 'api_key_cooldown_seconds',
+        'api_base_url', 'api_key', 'api_keys', 'api_key_auth_mode', 'api_key_strategy', 'api_key_cooldown_seconds',
         'thinking_separator', 'custom_params', 'extra_body_params', 'pricing', 'max_temperature',
         'max_tokens', 'cached_tokens_mode', 'token_stats_mode', 'completion_tokens_mode',
         'image_compression', 'system_prompt_injection', 'auto_retry', 'session_id', 'mode',

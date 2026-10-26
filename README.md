@@ -23,6 +23,7 @@
 - **LMArena 集成（已弃用）**：兼容 LMArena 协议的会话管理和 Battle 模式（新版本不再依赖 LMArena）
 - **OpenAI Responses API 兼容**：`/v1/responses` 支持文本、图片、function tools、reasoning、usage 及 Responses SSE。Chat 转换分支为无状态；`responses_native` 可透传原生请求与内置工具，但本网关尚未提供 response 的查询、取消、删除等资源路由。
 - **多 API Key 轮询**：支持配置多个 API Key 并轮询调用，提升并发上限
+- **可选鉴权请求头**：在模型编辑页的“API Key 鉴权方式”中选择 `Authorization: Bearer`、`api-key`、`x-api-key` 或 `x-goog-api-key`。对应配置字段 `api_key_auth_mode` 的值分别为 `bearer`、`api-key`、`x-api-key`、`x-goog-api-key`；留空或设为 `auto` 时沿用协议默认方式。该选项同时用于推理请求、获取模型列表和测试 Key。
 
 ### 请求增强
 - **自动重试**：支持 429/503 错误自动重试，可配置重试次数和延迟

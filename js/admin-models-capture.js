@@ -240,12 +240,13 @@ async function fetchModelsFromAPI(event) {
                     'Content-Type': 'application/json'
                 };
                 
-                // 与推理请求保持一致，Gemini 使用 x-goog-api-key 鉴权。
+                // 获取模型列表与推理请求使用相同的鉴权选择。
                 if (hasApiKey) {
-                    if (isGeminiAPI) {
-                        headers['x-goog-api-key'] = apiKey;
-                    } else {
+                    const authMode = document.getElementById('api-key-auth-mode').value;
+                    if (authMode === 'bearer' || (authMode === 'auto' && !isGeminiAPI)) {
                         headers['Authorization'] = `Bearer ${apiKey}`;
+                    } else {
+                        headers[authMode === 'auto' ? 'x-goog-api-key' : authMode] = apiKey;
                     }
                 }
                 
@@ -447,6 +448,7 @@ async function testCurrentModelKeys() {
                 api_base_url: apiBaseUrl,
                 model_id: modelId,
                 api_type: apiType,
+                api_key_auth_mode: document.getElementById('api-key-auth-mode').value,
                 endpoint_path: endpointPath,
             })
         });

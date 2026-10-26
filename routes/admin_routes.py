@@ -19,6 +19,7 @@ from core.model_archive import (
     find_inactive_models, build_last_used_map,
 )
 from core.app_state import get_app_state
+from core.upstream_auth import apply_api_key_auth
 from core.db_stats import stats_db, get_exchange_rates
 from .admin_usage import selected_usage, usage_csv
 from utils.async_singleflight import AsyncSingleFlight
@@ -1211,6 +1212,7 @@ async def test_model_keys(
                     stream=False,
                     base_url=api_base_url if api_base_url else None,
                     thinking_config={"includeThoughts": False},
+                    api_key_auth_mode=data.get("api_key_auth_mode", "auto"),
                 )
                 response = None
                 async for chunk in generator:
@@ -1254,6 +1256,7 @@ async def test_model_keys(
                 headers = {"Content-Type": "application/json"}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
+                apply_api_key_auth(headers, key, data.get("api_key_auth_mode", "auto"))
 
                 async with shared_session.post(
                     url,

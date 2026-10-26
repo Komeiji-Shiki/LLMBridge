@@ -839,6 +839,18 @@
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             可添加多个 API Key 实现自动轮询。本地反代等无需认证的场景可留空
                         </small>
+</div><div class="form-group" data-direct-setting="">
+<label class="form-label" for="api-key-auth-mode">API Key 鉴权方式</label>
+<select class="form-select" id="api-key-auth-mode">
+<option value="auto">自动（沿用协议默认方式）</option>
+<option value="bearer">Authorization: Bearer</option>
+<option value="api-key">api-key</option>
+<option value="x-api-key">x-api-key</option>
+<option value="x-goog-api-key">x-goog-api-key</option>
+</select>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                            按上游要求选择请求头。Google 原生接口通常使用 x-goog-api-key，Anthropic 使用 x-api-key，OpenAI 兼容接口通常使用 Authorization: Bearer。显式选择后只发送这一种鉴权头。
+                        </small>
 </div><div class="form-group" data-direct-setting="" id="api-key-strategy-group">
 <label class="form-label" for="api-key-strategy">轮询策略</label>
 <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;">
