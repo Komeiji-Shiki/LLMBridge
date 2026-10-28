@@ -69,3 +69,9 @@ Responses 的缓存参数也不能直接作为 Anthropic 缓存参数使用。�
 流式转换会在最终 `message_delta.usage` 提供该用量。流开始时的
 `message.bridge_usage_pending` 为 `true`，最终事件变为 `false`，响应头
 `X-Bridge-Usage-Event` 指明应从 `message_delta` 读取最终用量。
+
+部分 Responses 上游不支持某些请求顶层字段。可以在模型端点中显式配置
+`"omit_request_fields": ["metadata"]`，网关会按配置移除该字段并在日志和
+`X-Bridge-Warnings` 响应头中列出；Anthropic 兼容响应还会在
+`bridge_warnings` 中标注，Responses WebSocket 会发送 `bridge.warning` 事件。
+未配置的字段继续按原有规则传递。

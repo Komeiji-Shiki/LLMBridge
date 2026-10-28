@@ -16,6 +16,14 @@ from routes._direct_api_responses import handle_responses_native_direct
 
 
 class ChatToResponsesRequestTests(unittest.TestCase):
+    def test_only_configured_fields_are_omitted(self):
+        request = {"model": "demo", "messages": [{"role": "user", "content": "hi"}],
+                   "metadata": {"user_id": "opaque"}}
+        self.assertEqual(convert_chat_request_to_responses(request)["metadata"], request["metadata"])
+        converted = convert_chat_request_to_responses(request, endpoint_config={"omit_request_fields": ["metadata"]})
+        self.assertNotIn("metadata", converted)
+        self.assertIn("metadata", request)
+
     def test_converts_messages_tools_images_and_config(self):
         chat_request = {
             "model": "public-model",
@@ -349,6 +357,7 @@ class ResponsesNativeHandlerTests(unittest.TestCase):
             openai_req={
                 "model": "public-model",
                 "messages": [{"role": "user", "content": "hi"}],
+                "metadata": {"user_id": "opaque"},
                 "stream": False,
             },
             model_name="public-model",
@@ -356,7 +365,7 @@ class ResponsesNativeHandlerTests(unittest.TestCase):
             display_name="Public Model",
             api_base_url="https://example.test/v1",
             api_key="key",
-            endpoint_config={"api_type": "responses_native"},
+            endpoint_config={"api_type": "responses_native", "omit_request_fields": ["metadata"]},
             pricing_config={},
             monitoring_service=monitoring,
             direct_api_service=service,
@@ -368,6 +377,8 @@ class ResponsesNativeHandlerTests(unittest.TestCase):
 
         chat_data = json.loads(response.body)
         self.assertEqual(service.endpoint_path, "/responses")
+        self.assertNotIn("metadata", service.request_body)
+        self.assertEqual(json.loads(response.headers["x-bridge-warnings"])[0]["field"], "metadata")
         self.assertEqual(service.request_body["input"][0]["content"][0]["text"], "hi")
         self.assertEqual(chat_data["choices"][0]["message"]["content"], "hello")
         self.assertTrue(monitoring.ends[0]["success"])

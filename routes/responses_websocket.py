@@ -17,6 +17,7 @@ from core.request_context import RequestContext, UPSTREAM_HEADER_EXCLUSIONS, cur
 from core.upstream_auth import apply_api_key_auth
 from services.provider_capabilities import apply_native_tool_defaults
 from services.responses_websocket_monitor import ResponsesWebSocketMonitor
+from utils.upstream_fields import omission_warnings, omit_configured_fields
 from . import api_routes as api
 from ._direct_api_utils import get_api_key
 
@@ -81,7 +82,16 @@ def prepare_event(event: dict, alias: str, config: dict) -> dict:
         raise HTTPException(400, "WebSocket 已绑定当前模型；切换模型时请建立新连接。")
     result = apply_native_tool_defaults(event, config, "responses")
     result["model"] = config.get("target_model_id") or config.get("model_id") or alias
-    return result
+    return omit_configured_fields(result, config)
+
+
+async def send_omission_warnings(websocket: WebSocket, event: dict, config: dict):
+    warnings = omission_warnings(event, config) if event.get("type") == "response.create" else []
+    if warnings:
+        message = {"type": "bridge.warning", "warnings": warnings}
+        if event.get("event_id"):
+            message["event_id"] = event["event_id"]
+        await websocket.send_json(message)
 
 
 def rewrite_model(raw: str | bytes, alias: str, target: str) -> str | bytes:
@@ -180,6 +190,7 @@ async def responses_websocket(websocket: WebSocket):
         target = config.get("target_model_id") or config.get("model_id") or alias
         monitor = ResponsesWebSocketMonitor(alias, config, service)
         monitor.request(first)
+        await send_omission_warnings(websocket, first, config)
         await upstream.send_json(prepare_event(first, alias, config), dumps=lambda value: json.dumps(value, ensure_ascii=False))
 
         async def client_to_upstream():
@@ -195,6 +206,7 @@ async def responses_websocket(websocket: WebSocket):
                         return 1008
                     continue
                 monitor.request(event)
+                await send_omission_warnings(websocket, event, config)
                 await upstream.send_json(prepared, dumps=lambda value: json.dumps(value, ensure_ascii=False))
 
         async def upstream_to_client():

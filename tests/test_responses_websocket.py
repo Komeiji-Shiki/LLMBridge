@@ -80,6 +80,19 @@ class ResponsesWebSocketTests(unittest.TestCase):
             client.send_json({"type": "response.create", "model": "alias", "input": "hello"})
             self.assertEqual(client.receive_json()["type"], "response.completed")
 
+    def test_configured_omission_is_visible_and_keeps_reasoning(self):
+        self.config["omit_request_fields"] = ["metadata"]
+        reasoning = {"type": "reasoning", "id": "rs-1", "encrypted_content": "opaque", "summary": []}
+        with self.connect() as client:
+            client.send_json({"type": "response.create", "event_id": "event-1", "model": "alias",
+                              "input": [reasoning], "metadata": {"user_id": "opaque"}})
+            warning = client.receive_json()
+            self.assertEqual(warning["type"], "bridge.warning")
+            self.assertEqual(warning["event_id"], "event-1")
+            self.assertEqual(warning["warnings"][0]["field"], "metadata")
+            self.assertEqual(client.receive_json()["response"]["output"], [reasoning])
+        self.assertNotIn("metadata", self.peer.sent[0])
+
     def test_native_fields_routing_and_steering_share_one_connection(self):
         original = {"type": "reasoning", "id": "rs-original", "encrypted_content": "opaque", "summary": []}
         tools = [{"type": "function", "name": "lookup", "async": True, "parameters": {"type": "object"}}]

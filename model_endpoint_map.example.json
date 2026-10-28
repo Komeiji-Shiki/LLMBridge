@@ -225,6 +225,7 @@
     "thinking_display": "思考内容显示模式（summarized/omitted），默认 summarized，仅 anthropic_native 上游消费。Opus 4.7+ 默认 omitted 不返回思维链，设为 summarized 可看到思考内容",
     "verbosity": "输出详细度（low/medium/high），direct_api 注入 Chat Completions 顶层 verbosity；responses_native 转换为 text.verbosity；客户端已传时优先",
     "responses_store": "仅 responses_native 生效，是否允许上游保存 Response；默认 false",
+    "omit_request_fields": "可选的请求顶层字段名称数组；明确列出的字段不发送至 Responses 上游，并在响应头提示。某些 Codex 中转服务可设为 [\"metadata\"]",
     "responses_reasoning_summary": "仅 responses_native 生效，可选 auto/concise/detailed，转换为 reasoning.summary",
     "auto_cache": "自动提示词缓存（true/false），仅 anthropic_native 上游生效。自动为 tools/system/最后两条 user 消息注入 cache_control ephemeral 断点（上限 4 个），多轮对话命中上游缓存可大幅降低成本；客户端已自带 cache_control 时不重复注入",
     "tool_name_rewrite": "工具名改写（true/false），仅 anthropic_native 上游生效。部分中转站按名称拦截 read_file 等工具并替换参数格式；开启后客户端声明的这些工具以别名发往上游（tools、tool_choice、历史 tool_use 与 system/工具描述中的独立原名一并替换），响应里的 tool_use 再恢复原名",

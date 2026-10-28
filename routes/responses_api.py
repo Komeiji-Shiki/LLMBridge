@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from converters.responses_bridge import convert_responses_response_to_chat
 from converters.cache_warnings import responses_cache_warnings, warning_headers
+from utils.upstream_fields import omission_warnings, omit_configured_fields
 from converters.responses_openai import (
     ResponsesRequestError,
     build_responses_error_response,
@@ -461,6 +462,7 @@ async def _handle_responses_native_passthrough(
     # ── 构造上游请求：仅替换 model，其余字段（含 reasoning item）原样保留 ──
     passthrough_body = copy.deepcopy(responses_request)
     passthrough_body["model"] = target_model_id
+    omit_configured_fields(passthrough_body, endpoint_config)
 
     # 工具 Schema、strict 与 required 保真转发。
 
@@ -823,12 +825,14 @@ async def responses_endpoint(request: Request):
             )
         endpoint_config = await _chat_api._select_endpoint_config_for_model(passthrough_model)
     if isinstance(endpoint_config, dict) and endpoint_config.get("api_type") == "responses_native":
-        return await _handle_responses_native_passthrough(
+        response = await _handle_responses_native_passthrough(
             responses_request=responses_request,
             model=passthrough_model,
             endpoint_config=endpoint_config,
             request=request,
         )
+        response.headers.update(warning_headers(omission_warnings(responses_request, endpoint_config)))
+        return response
 
     try:
         chat_request = convert_responses_to_chat_request(responses_request)

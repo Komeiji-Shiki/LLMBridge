@@ -32,6 +32,7 @@ from .direct_api_handler import handle_direct_api_request
 from .lmarena_handler import handle_lmarena_request
 from ._direct_api_anthropic import apply_auto_cache_control
 from converters.cache_warnings import anthropic_cache_warnings
+from utils.upstream_fields import omission_warnings
 from ._direct_api_utils import (
     get_round_robin_api_key,
     is_error_json,
@@ -521,7 +522,8 @@ async def anthropic_messages(request: Request):
 
     # 保存原始 stream 值（_dispatch_chat_completions_core 可能就地修改 openai_req）
     original_stream = openai_req.get("stream", False)
-    warnings = anthropic_cache_warnings(anthropic_req) if _endpoint_api_type == "responses_native" else []
+    warnings = (anthropic_cache_warnings(anthropic_req) + omission_warnings(anthropic_req, endpoint_config)
+                if _endpoint_api_type == "responses_native" else [])
     openai_response = await _dispatch_chat_completions_core(
         openai_req, request=request, skip_api_auth=True, selected_endpoint=endpoint_config
     )

@@ -10,6 +10,7 @@ import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from fastapi.responses import StreamingResponse
+from utils.upstream_fields import omit_configured_fields
 
 from utils.usage_tokens import MODE_MERGE, apply_usage_tokens
 from converters import is_content_parts
@@ -266,7 +267,7 @@ def convert_chat_request_to_responses(
         request.update(copy.deepcopy(extra_body_params))
     request["model"] = model
     request["stream"] = bool(chat_request.get("stream", False))
-    return request
+    return omit_configured_fields(request, endpoint_config)
 
 
 def _extract_output_text(item: Dict[str, Any]) -> str:

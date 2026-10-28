@@ -772,7 +772,9 @@ class EndpointRoutingTests(unittest.TestCase):
         request_body = {
             "model": "gpt-5.6-sol_sph",
             "input": [dict(REASONING_ITEM)],
+            "metadata": {"user_id": "opaque"},
         }
+        endpoint_config = {**NATIVE_CONFIG, "omit_request_fields": ["metadata"]}
         monitoring_mock = AsyncMock()
         monitoring_mock.request_start = MagicMock()
         monitoring_mock.request_end = MagicMock()
@@ -782,7 +784,7 @@ class EndpointRoutingTests(unittest.TestCase):
             patch("routes.api_routes._read_request_json_non_blocking",
                   new=AsyncMock(return_value=request_body)),
             patch("routes.api_routes._select_endpoint_config_for_model",
-                  new=AsyncMock(return_value=NATIVE_CONFIG)),
+                  new=AsyncMock(return_value=endpoint_config)),
             patch("routes.api_routes._validate_request_api_key"),
             patch("routes.responses_api.get_round_robin_api_key", new=AsyncMock(return_value="sk-upstream")),
             patch("routes.responses_api.monitoring_service", monitoring_mock),
@@ -793,6 +795,8 @@ class EndpointRoutingTests(unittest.TestCase):
         self.assertEqual(result.status_code, 200)
         # 确认走了透传分支而不是转换链路（转换链路会因 reasoning item 抛错）
         self.assertEqual(service.captured["request_body"]["model"], "gpt-5.6-sol")
+        self.assertNotIn("metadata", service.captured["request_body"])
+        self.assertEqual(json.loads(result.headers["x-bridge-warnings"])[0]["field"], "metadata")
         body = json.loads(result.body)
         self.assertEqual(body["output"][0], REASONING_ITEM)
 

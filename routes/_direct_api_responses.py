@@ -20,6 +20,8 @@ from converters.responses_bridge import (
 from core.constants import TimeoutDefaults
 from core.request_context import current_request
 from services.responses_history import ResponsesHistory
+from converters.cache_warnings import warning_headers
+from utils.upstream_fields import configured_omissions, omission_warnings
 from utils.monitor_params import build_monitor_request_params
 from utils.usage_tokens import MODE_MERGE, get_completion_tokens_mode, total_output_tokens
 from ._direct_api_utils import (
@@ -447,6 +449,7 @@ async def handle_responses_native_direct(
         # visible messages. Native client-supplied metadata still passes through.
         overrides_input = any(isinstance(endpoint_config.get(k), dict) and 'input' in endpoint_config[k]
                               for k in ('custom_params', 'extra_body_params'))
+        overrides_input = overrides_input or 'input' in configured_omissions(endpoint_config)
         if not overrides_input:
             context.responses_history = ResponsesHistory(context, openai_req, target_model_id,
                                                         endpoint_config, upstream_request)
@@ -474,7 +477,7 @@ async def handle_responses_native_direct(
 
     try:
         if openai_req.get("stream", False):
-            return await _handle_stream(
+            response = await _handle_stream(
                 upstream_request=upstream_request,
                 openai_req=openai_req,
                 request_id=request_id,
@@ -491,7 +494,9 @@ async def handle_responses_native_direct(
                 full_messages=full_messages,
                 CONFIG=CONFIG,
             )
-        return await _handle_non_stream(
+            response.headers.update(warning_headers(omission_warnings(openai_req, endpoint_config)))
+            return response
+        response = await _handle_non_stream(
             upstream_request=upstream_request,
             openai_req=openai_req,
             request_id=request_id,
@@ -507,6 +512,8 @@ async def handle_responses_native_direct(
             full_messages=full_messages,
             completion_tokens_mode=completion_tokens_mode,
         )
+        response.headers.update(warning_headers(omission_warnings(openai_req, endpoint_config)))
+        return response
     except HTTPException as exc:
         await _complete_monitoring(
             monitoring_service=monitoring_service,
