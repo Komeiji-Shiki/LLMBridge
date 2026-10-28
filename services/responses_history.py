@@ -32,6 +32,12 @@ def visible_message(message):
     # Normalize only this fingerprint; retain the original output for the model.
     if value.get('role') == 'assistant' and isinstance(value.get('content'), str):
         value['content'] = value['content'].strip()
+    # 客户端会重新序列化工具参数；匹配时比较 JSON 内容，原始输出仍原样保存。
+    calls = value.get('tool_calls') or []
+    for call in calls:
+        function = call.get('function') if isinstance(call, dict) else None
+        if isinstance(function, dict) and isinstance(function.get('arguments'), str):
+            function['arguments'] = json.loads(function['arguments'])
     if not value.get('tool_calls'):
         value.pop('tool_calls', None)
     return value

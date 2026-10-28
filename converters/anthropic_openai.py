@@ -201,13 +201,16 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
                 converted_parts.append({"type": "text", "text": prefix + tool_content})
             elif isinstance(tool_content, list):
                 # 工具结果复用普通内容块转换，保留其中的图片及原有顺序。
+                if is_error:
+                    converted_parts.append({"type": "text", "text": "[tool_result_error] "})
                 converted = convert_anthropic_content_to_openai(tool_content)
                 if isinstance(converted, list):
                     converted_parts.extend(converted)
                 else:
                     converted_parts.append({"type": "text", "text": converted})
             else:
-                converted_parts.append({"type": "text", "text": json.dumps(tool_content, ensure_ascii=False)})
+                prefix = "[tool_result_error] " if is_error else ""
+                converted_parts.append({"type": "text", "text": prefix + json.dumps(tool_content, ensure_ascii=False)})
 
         elif block_type == "tool_use":
             tool_name = block.get("name", "tool")
@@ -324,7 +327,9 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
                     if block.get("type") == "tool_result":
                         tool_use_id = block.get("tool_use_id", "")
                         tool_content = block.get("content", "")
-                        if isinstance(tool_content, str):
+                        if block.get("is_error"):
+                            tool_content = convert_anthropic_content_to_openai([block])
+                        elif isinstance(tool_content, str):
                             tool_content = convert_anthropic_content_to_openai(tool_content)
                         elif is_content_parts(tool_content):
                             tool_content = convert_anthropic_content_to_openai(tool_content)
