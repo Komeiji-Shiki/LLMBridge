@@ -45,3 +45,27 @@ instructions/tools 都参与隔离。有 `X-Bridge-Session-ID` 时继续按显�
 不要将旧账号状态用于新账号。
 
 测试：`python -m pytest tests/test_responses_history.py tests/test_responses_bridge.py tests/test_gateway_execution.py -q`。
+
+## Anthropic 与 Responses 的思考状态
+
+Anthropic 客户端通过 `/v1/messages` 调用 Responses 上游时，网关把原始
+Responses `reasoning` 项编码进对应思考块的 `signature`，并以 `responses.v1.`
+标明来源。客户端回传完整思考块后，网关恢复原始推理项。普通文本、工具调用
+和推理项按顺序回传；如果本地历史匹配到完整的原始输出，也会保留原始工具
+调用项。工具参数只在历史匹配时按 JSON 内容比较，发往上游的原始参数不变。
+升级前使用旧指纹保存的工具轮次不能按新指纹自动恢复，需要从升级后的轮次
+重新建立原始输出记录。
+
+Responses 客户端通过 `/v1/responses` 调用 Anthropic 上游时，网关把原始
+`thinking` 或 `redacted_thinking` 块编码进 Responses 推理项的
+`encrypted_content`，并以 `anthropic.v1.` 标明来源。客户端需要将响应的
+`reasoning`、`function_call` 和 `function_call_output` 一起放入下一次请求。
+这些带协议前缀的值是网关的传输载体，只有原始签名由对应上游验证。
+
+Anthropic 的 `cache_control` 断点不能直接作为 Responses 缓存断点使用；
+Responses 的缓存参数也不能直接作为 Anthropic 缓存参数使用。转换请求时，
+未应用的字段会在响应的 `bridge_warnings` 和 `X-Bridge-Warnings` 响应头中
+列出，字段 `applied` 为 `false`。实际缓存命中量仍由上游返回，Anthropic
+流式转换会在最终 `message_delta.usage` 提供该用量。流开始时的
+`message.bridge_usage_pending` 为 `true`，最终事件变为 `false`，响应头
+`X-Bridge-Usage-Event` 指明应从 `message_delta` 读取最终用量。

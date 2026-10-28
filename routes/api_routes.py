@@ -31,6 +31,7 @@ from .gemini_v1beta_api import gemini_native_api
 from .direct_api_handler import handle_direct_api_request
 from .lmarena_handler import handle_lmarena_request
 from ._direct_api_anthropic import apply_auto_cache_control
+from converters.cache_warnings import anthropic_cache_warnings
 from ._direct_api_utils import (
     get_round_robin_api_key,
     is_error_json,
@@ -279,6 +280,7 @@ async def _dispatch_chat_completions_core(
     openai_req: Dict[str, Any],
     request: Optional[Request] = None,
     skip_api_auth: bool = False,
+    selected_endpoint: Optional[Dict[str, Any]] = None,
 ):
     """将 OpenAI 格式请求分发到 Direct API 或 LMArena 处理链。
 
@@ -302,7 +304,7 @@ async def _dispatch_chat_completions_core(
         raise HTTPException(status_code=404, detail=f"模型 '{model_name}' 不存在")
 
     # 端点配置解析（列表配置轮询）
-    endpoint_config = await _select_endpoint_config_for_model(model_name)
+    endpoint_config = selected_endpoint if selected_endpoint is not None else await _select_endpoint_config_for_model(model_name)
 
     # 如果是Direct API模式，跳过浏览器连接检查
     endpoint_config_dict: Optional[Dict[str, Any]] = endpoint_config if isinstance(endpoint_config, dict) else None
@@ -519,8 +521,9 @@ async def anthropic_messages(request: Request):
 
     # 保存原始 stream 值（_dispatch_chat_completions_core 可能就地修改 openai_req）
     original_stream = openai_req.get("stream", False)
+    warnings = anthropic_cache_warnings(anthropic_req) if _endpoint_api_type == "responses_native" else []
     openai_response = await _dispatch_chat_completions_core(
-        openai_req, request=request, skip_api_auth=True
+        openai_req, request=request, skip_api_auth=True, selected_endpoint=endpoint_config
     )
 
     # 流式：OpenAI SSE -> Anthropic SSE
@@ -528,12 +531,15 @@ async def anthropic_messages(request: Request):
         return build_anthropic_streaming_response(
             openai_streaming_response=openai_response,
             request_model=model_name,
+            warnings=warnings,
+            usage_pending=_endpoint_api_type == "responses_native",
         )
 
     # 非流式：OpenAI JSON -> Anthropic JSON
     return await convert_openai_non_stream_response_to_anthropic(
         openai_response=openai_response,
         request_model=model_name,
+        warnings=warnings,
     )
 
 

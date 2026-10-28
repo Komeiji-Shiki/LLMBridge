@@ -17,6 +17,13 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from converters import is_content_parts
 from converters.audio import audio_to_openai, split_audio_text
+from converters.anthropic_responses_signatures import (
+    encode_thinking_item,
+    responses_items_from_anthropic,
+    responses_reasoning_text,
+    responses_segments,
+)
+from converters.cache_warnings import warning_headers
 from converters.gemini_anthropic_signatures import (
     decode_signature,
     gemini_parts_from_anthropic,
@@ -308,8 +315,14 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
                 msg["reasoning_content"] = "\n".join(thinking_texts)
             # 本网关下发的 Gemini 签名随 thinking 块回传：按块顺序还原原生 parts
             gemini_parts = gemini_parts_from_anthropic(raw_content)
+            metadata = {}
             if gemini_parts:
-                msg["provider_metadata"] = {"gemini_parts": gemini_parts}
+                metadata["gemini_parts"] = gemini_parts
+            responses_items = responses_items_from_anthropic(raw_content)
+            if responses_items is not None:
+                metadata["responses_items"] = responses_items
+            if metadata:
+                msg["provider_metadata"] = metadata
             openai_messages.append(msg)
             continue
 
@@ -817,7 +830,8 @@ def _flat_segments(reasoning: Any, text: Any, tool_calls: Any) -> List[tuple]:
 
 async def convert_openai_non_stream_response_to_anthropic(
     openai_response: Response,
-    request_model: str
+    request_model: str,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> Response:
     """非流式：OpenAI JSON 响应 → Anthropic JSON 响应（支持多 content blocks）"""
     status_code = getattr(openai_response, "status_code", 200)
@@ -848,7 +862,12 @@ async def convert_openai_non_stream_response_to_anthropic(
     anthropic_usage = convert_openai_usage_to_anthropic(data.get("usage"))
 
     # ── 构建 Anthropic content blocks（多 block 支持，规则与流式一致）──
-    segments = gemini_segments(message)
+    try:
+        segments = responses_segments(message)
+    except ValueError as exc:
+        return JSONResponse(status_code=502, content=build_anthropic_error_payload({"type": "api_error", "message": str(exc)}))
+    if segments is None:
+        segments = gemini_segments(message)
     if segments is None:
         segments = _flat_segments(extract_openai_message_reasoning(first_choice),
                                   extract_openai_message_text(first_choice),
@@ -884,13 +903,17 @@ async def convert_openai_non_stream_response_to_anthropic(
             tc_args_str = tc_func.get("arguments", "{}")
             try:
                 tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
-            except json.JSONDecodeError:
-                tc_args = {}
+            except json.JSONDecodeError as exc:
+                return JSONResponse(status_code=502, content=build_anthropic_error_payload({
+                    "type": "api_error", "message": f"上游工具调用参数不是有效 JSON: {exc.msg}"}))
+            if not isinstance(tc_args, dict):
+                return JSONResponse(status_code=502, content=build_anthropic_error_payload({
+                    "type": "api_error", "message": "上游工具调用参数必须是 JSON 对象。"}))
             content_blocks.append({
                 "type": "tool_use",
                 "id": tc.get("id") or f"toolu_{uuid.uuid4().hex}",
                 "name": tc_name,
-                "input": tc_args if isinstance(tc_args, dict) else {"raw": tc_args}
+                "input": tc_args
             })
 
     if not content_blocks:
@@ -906,8 +929,10 @@ async def convert_openai_non_stream_response_to_anthropic(
         "stop_sequence": None,
         "usage": anthropic_usage
     }
+    if warnings:
+        anthropic_response["bridge_warnings"] = warnings
 
-    return JSONResponse(status_code=200, content=anthropic_response)
+    return JSONResponse(status_code=200, content=anthropic_response, headers=warning_headers(warnings or []))
 
 
 # SSE 事件分隔符：兼容 LF 空行与 CRLF 空行
@@ -952,7 +977,9 @@ async def iter_openai_sse_payloads(upstream_response: StreamingResponse):
 
 def build_anthropic_streaming_response(
     openai_streaming_response: StreamingResponse,
-    request_model: str
+    request_model: str,
+    warnings: Optional[List[Dict[str, Any]]] = None,
+    usage_pending: bool = False,
 ) -> StreamingResponse:
     """流式：OpenAI SSE 流 → Anthropic SSE 事件流
 
@@ -1080,7 +1107,9 @@ def build_anthropic_streaming_response(
                         "id": message_id, "type": "message", "role": "assistant",
                         "model": model_name, "content": [],
                         "stop_reason": None, "stop_sequence": None,
-                        "usage": convert_openai_usage_to_anthropic(merged_usage)
+                        "usage": convert_openai_usage_to_anthropic(merged_usage),
+                        **({"bridge_warnings": warnings} if warnings else {}),
+                        **({"bridge_usage_pending": True} if usage_pending else {})
                     }
                 })
 
@@ -1090,6 +1119,32 @@ def build_anthropic_streaming_response(
 
             choice = choices[0]
             delta = choice.get("delta", {}) if isinstance(choice.get("delta"), dict) else {}
+
+            # Responses 推理项完成时才包含完整密文，随对应思考块的签名返回。
+            provider_event = delta.get("provider_event")
+            if isinstance(provider_event, dict) and provider_event.get("type") == "response.output_item.added":
+                item = provider_event.get("item") or {}
+                if item.get("type") not in ("reasoning", "message"):
+                    yield format_anthropic_sse_event("error", build_anthropic_error_payload({
+                        "type": "api_error", "message": f"Responses 输出项类型 '{item.get('type')}' 无法转换为 Anthropic 内容块"}))
+                    return
+            if isinstance(provider_event, dict) and provider_event.get("type") == "response.output_item.done":
+                item = provider_event.get("item") or {}
+                if item.get("type") == "reasoning":
+                    if active_thinking_idx is None:
+                        for ev in _close_current_blocks():
+                            yield ev
+                        active_thinking_idx = next_block_idx
+                        next_block_idx += 1
+                        yield _emit_block_start(active_thinking_idx, "thinking")
+                        text = responses_reasoning_text(item)
+                        if text:
+                            yield _emit_block_delta(active_thinking_idx, "thinking_delta", text)
+                    yield _emit_block_delta(active_thinking_idx, "signature_delta", encode_thinking_item("responses", item))
+                    yield _emit_block_stop(active_thinking_idx)
+                    active_thinking_idx = None
+                    prev_delta_type = None
+                    continue
 
             # Gemini 链路按原生 parts 顺序展开（签名随 thinking 块下发），其余来源按
             # 思考 → 正文 → 调用展开；同一 chunk 混有多种内容时逐段发送，不再只取一种
@@ -1196,7 +1251,9 @@ def build_anthropic_streaming_response(
                     "id": message_id, "type": "message", "role": "assistant",
                     "model": model_name, "content": [],
                     "stop_reason": None, "stop_sequence": None,
-                    "usage": convert_openai_usage_to_anthropic(merged_usage)
+                    "usage": convert_openai_usage_to_anthropic(merged_usage),
+                    **({"bridge_warnings": warnings} if warnings else {}),
+                    **({"bridge_usage_pending": True} if usage_pending else {})
                 }
             })
 
@@ -1205,7 +1262,8 @@ def build_anthropic_streaming_response(
         yield format_anthropic_sse_event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": convert_openai_usage_to_anthropic(merged_usage)
+            "usage": convert_openai_usage_to_anthropic(merged_usage),
+            **({"bridge_usage_pending": False} if usage_pending else {})
         })
 
         yield format_anthropic_sse_event("message_stop", {"type": "message_stop"})
@@ -1214,6 +1272,8 @@ def build_anthropic_streaming_response(
         anthropic_stream_generator(),
         media_type="text/event-stream",
         headers={
+            **warning_headers(warnings or []),
+            **({"X-Bridge-Usage-Event": "message_delta"} if usage_pending else {}),
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",

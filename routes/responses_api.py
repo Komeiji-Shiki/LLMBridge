@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from converters.responses_bridge import convert_responses_response_to_chat
+from converters.cache_warnings import responses_cache_warnings, warning_headers
 from converters.responses_openai import (
     ResponsesRequestError,
     build_responses_error_response,
@@ -835,6 +836,7 @@ async def responses_endpoint(request: Request):
         return build_responses_error_response(400, str(exc))
 
     model = chat_request["model"]
+    warnings = responses_cache_warnings(responses_request) if isinstance(endpoint_config, dict) and endpoint_config.get("api_type") == "anthropic_native" else []
     try:
         # 认证在兼容层完成一次，内部调度使用 skip_api_auth，避免重复计 RPM。
         _chat_api._validate_request_api_key(request, model)
@@ -842,6 +844,7 @@ async def responses_endpoint(request: Request):
             chat_request,
             request=None,
             skip_api_auth=True,
+            selected_endpoint=endpoint_config,
         )
     except HTTPException as exc:
         logger.warning("[RESPONSES_COMPAT] 上游请求失败: HTTP %s", exc.status_code)
@@ -856,6 +859,7 @@ async def responses_endpoint(request: Request):
             upstream_response,
             request=responses_request,
             model=model,
+            warnings=warnings,
         )
 
     if _is_stream_response(upstream_response):
@@ -877,11 +881,12 @@ async def responses_endpoint(request: Request):
         response_payload = convert_chat_response_to_responses(
             chat_response,
             request=responses_request,
+            warnings=warnings,
         )
     except ResponsesRequestError as exc:
         logger.error("[RESPONSES_COMPAT] 响应转换失败: %s", exc, exc_info=True)
         return build_responses_error_response(502, str(exc))
-    return JSONResponse(status_code=200, content=response_payload)
+    return JSONResponse(status_code=200, content=response_payload, headers=warning_headers(warnings))
 
 
 __all__ = ["router", "responses_endpoint"]

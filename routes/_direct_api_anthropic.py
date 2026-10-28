@@ -308,9 +308,10 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
         # ── assistant 消息：处理 tool_calls（reasoning_content 不转换，缺少 signature 会导致 Anthropic 400）──
         if role == "assistant":
             blocks: List[Dict[str, Any]] = []
-
-            # reasoning_content 不转为 thinking 块，因为缺少 Anthropic 要求的 signature 字段。
-            # Anthropic 官方文档允许省略历史消息中的 thinking 块。
+            metadata = msg.get("provider_metadata") or {}
+            native_blocks = metadata.get("anthropic_blocks") if isinstance(metadata, dict) else None
+            if isinstance(native_blocks, list):
+                blocks.extend(copy.deepcopy(native_blocks))
 
             # text 内容
             text_blocks = _convert_openai_content_to_anthropic_blocks(content, role)
@@ -329,13 +330,15 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
                     tc_args_str = func.get("arguments", "{}")
                     try:
                         tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
-                    except json.JSONDecodeError:
-                        tc_args = {}
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"工具调用参数不是有效 JSON: {exc.msg}") from exc
+                    if not isinstance(tc_args, dict):
+                        raise ValueError("工具调用参数必须是 JSON 对象。")
                     blocks.append({
                         "type": "tool_use",
                         "id": tc.get("id") or f"toolu_{uuid.uuid4().hex}",
                         "name": tc_name,
-                        "input": tc_args if isinstance(tc_args, dict) else {"raw": tc_args}
+                        "input": tc_args
                     })
 
             if not blocks:
@@ -416,6 +419,12 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
         if choice.get("type") != "none":
             choice["disable_parallel_tool_use"] = not openai_req["parallel_tool_calls"]
 
+    effort = openai_req.get("reasoning_effort")
+    if effort == "none":
+        anthropic_req["thinking"] = {"type": "disabled"}
+    elif effort:
+        set_output_effort(anthropic_req, effort)
+
     response_format = openai_req.get("response_format")
     if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
         schema = (response_format.get("json_schema") or {}).get("schema")
@@ -441,6 +450,12 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
     elif et_mode is False:
         et_mode = "disabled"
 
+    client_effort = (passthrough_body.get("output_config") or {}).get("effort")
+    client_thinking = passthrough_body.get("thinking") or {}
+    if client_thinking.get("type") == "disabled" and et_mode in ("enabled", "adaptive"):
+        set_output_effort(passthrough_body, None)
+        return passthrough_body
+
     if et_mode == "enabled":
         # 思考控制方式二选一：
         #   - 配置了 reasoning_effort（前端“强度等级”模式）：Anthropic 新模型
@@ -449,7 +464,7 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
         #   - 仅配置了 thinking_budget（前端“Token 预算”模式，旧模型兼容）：
         #     注入 thinking.type=enabled + budget_tokens，并协调 max_tokens。
         #   - 均未配置：不强改，透传客户端原始 thinking 参数。
-        configured_effort = endpoint_config.get("reasoning_effort")
+        configured_effort = client_effort or endpoint_config.get("reasoning_effort")
         thinking_budget = endpoint_config.get("thinking_budget")
         if configured_effort:
             set_output_effort(passthrough_body, configured_effort)
@@ -492,12 +507,10 @@ def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dic
         elif not isinstance(thinking, dict):
             passthrough_body["thinking"] = {"type": "adaptive"}
             logger.info(f"[OAI_TO_ANTHROPIC] thinking 注入 adaptive")
-        configured_effort = endpoint_config.get("thinking_effort")
+        configured_effort = client_effort or endpoint_config.get("thinking_effort")
         if configured_effort:
             set_output_effort(passthrough_body, configured_effort)
             logger.info(f"[OAI_TO_ANTHROPIC] output_config.effort={configured_effort}")
-        else:
-            set_output_effort(passthrough_body, None)
     elif et_mode == "disabled":
         passthrough_body["thinking"] = {"type": "disabled"}
         set_output_effort(passthrough_body, None)
@@ -746,6 +759,9 @@ def convert_anthropic_response_to_openai(
     # reasoning_content（如果有思考内容）
     if reasoning_text:
         message["reasoning_content"] = reasoning_text
+    native_blocks = response_json.get("content") or []
+    if any(block.get("type") in ("thinking", "redacted_thinking") for block in native_blocks):
+        message["provider_metadata"] = {"anthropic_blocks": copy.deepcopy(native_blocks)}
 
     # content
     message["content"] = content_text if content_text else ""
@@ -877,6 +893,8 @@ def build_openai_stream_from_anthropic(
         # tool_use 状态
         next_oai_idx = 0
         active_tool: Optional[Dict[str, Any]] = None  # {anthropic_idx, oai_idx, id, name}
+        native_blocks: Dict[int, Dict[str, Any]] = {}
+        native_tool_arguments: Dict[int, str] = {}
 
         # thinking_separator 流式切分状态
         accumulated_for_split = ""
@@ -938,6 +956,15 @@ def build_openai_stream_from_anthropic(
                         cb = event.get("content_block", {})
                         idx = event.get("index", 0)
                         cb_type = cb.get("type", "")
+                        native_blocks[idx] = copy.deepcopy(cb)
+                        if cb_type == "tool_use":
+                            native_blocks[idx]["name"] = restore_tool_name(cb.get("name", ""), tool_name_restore)
+                        elif cb_type in ("thinking", "redacted_thinking"):
+                            yield _make_delta_chunk({"provider_event": {"provider": "anthropic", "event": {
+                                "type": "content_block_start", "index": idx, "content_block": copy.deepcopy(cb)}}})
+                            if cb_type == "thinking" and cb.get("thinking"):
+                                reasoning_parts.append(cb["thinking"])
+                                yield _make_delta_chunk({"reasoning_content": cb["thinking"]})
 
                         if cb_type == "tool_use":
                             oai_idx = next_oai_idx
@@ -973,6 +1000,18 @@ def build_openai_stream_from_anthropic(
                     elif etype == "content_block_delta":
                         delta = event.get("delta", {})
                         dtype = delta.get("type", "")
+                        idx = event.get("index", 0)
+                        native_block = native_blocks[idx]
+                        if dtype == "thinking_delta":
+                            native_block["thinking"] = native_block.get("thinking", "") + delta.get("thinking", "")
+                        elif dtype == "signature_delta":
+                            native_block["signature"] = native_block.get("signature", "") + delta.get("signature", "")
+                        elif dtype == "text_delta":
+                            native_block["text"] = native_block.get("text", "") + delta.get("text", "")
+                        elif dtype == "input_json_delta":
+                            partial = delta.get("partial_json", "")
+                            if partial:
+                                native_tool_arguments[idx] = native_tool_arguments.get(idx, "") + partial
 
                         if dtype == "thinking_delta":
                             t = delta.get("thinking", "")
@@ -1027,6 +1066,11 @@ def build_openai_stream_from_anthropic(
 
                     elif etype == "content_block_stop":
                         idx = event.get("index", 0)
+                        if idx in native_tool_arguments:
+                            native_blocks[idx]["input"] = json.loads(native_tool_arguments.pop(idx))
+                        if native_blocks[idx].get("type") in ("thinking", "redacted_thinking"):
+                            yield _make_delta_chunk({"provider_event": {"provider": "anthropic", "event": {
+                                "type": "content_block_stop", "index": idx, "content_block": copy.deepcopy(native_blocks[idx])}}})
                         if active_tool and active_tool.get("anthropic_idx") == idx:
                             # 冲刷解码器残留（正常完整 JSON 无残留；截断流原样补发）
                             tail = active_tool["args_unescaper"].flush()
@@ -1058,13 +1102,10 @@ def build_openai_stream_from_anthropic(
                         if isinstance(usage, dict):
                             if usage:
                                 upstream_usage.update(usage)
-                            inp, outp, cached = extract_anthropic_usage_tokens(usage)
-                            if inp:
-                                input_tokens = inp
-                            if outp:
-                                output_tokens = outp
-                            if cached:
-                                cached_tokens = cached
+                            inp, outp, cached = extract_anthropic_usage_tokens(upstream_usage)
+                            input_tokens = inp
+                            output_tokens = outp
+                            cached_tokens = cached
 
                     elif etype == "message_stop":
                         pass
@@ -1094,6 +1135,9 @@ def build_openai_stream_from_anthropic(
                         yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
                         yield b"data: [DONE]\n\n"
                         return
+
+            if any(block.get("type") in ("thinking", "redacted_thinking") for block in native_blocks.values()):
+                yield _make_delta_chunk({"provider_metadata": {"anthropic_blocks": [native_blocks[i] for i in sorted(native_blocks)]}})
 
             # 发送 finish chunk
             finish_reason = _map_anthropic_stop_reason_to_openai(stop_reason)
@@ -1288,7 +1332,10 @@ async def handle_anthropic_native_from_openai(
                 logger.info(f"[MAX_TOKENS_LIMIT] 模型 '{model_name}' max_completion_tokens: {original_max} -> {max_tokens_limit}")
 
     # ── OpenAI 请求 → Anthropic 请求 ──
-    anthropic_body = convert_openai_to_anthropic_request(openai_req)
+    try:
+        anthropic_body = convert_openai_to_anthropic_request(openai_req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     anthropic_body["model"] = target_model_id
 
     # ── 应用 thinking 配置 ──

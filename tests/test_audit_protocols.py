@@ -533,3 +533,127 @@ def test_anthropic_tool_audio_keeps_parallel_results_before_media(protocol, audi
         assert [part["functionResponse"]["id"] for part in results] == ["read_1", "read_2"]
         assert body["contents"][-1]["parts"][-1] == {"inlineData": {"mimeType": "audio/mpeg", "data": "QUJD"}}
     assert original == before
+
+
+@pytest.mark.parametrize('stream', [False, True])
+def test_responses_reasoning_survives_anthropic_tool_round_trip(stream):
+    from fastapi.responses import JSONResponse
+    from converters.anthropic_openai import convert_openai_non_stream_response_to_anthropic
+    from converters.responses_bridge import _ChatStreamBuilder, convert_chat_request_to_responses, convert_responses_response_to_chat
+
+    reasoning = {'id': 'rs_1', 'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': '先查询'}],
+                 'encrypted_content': 'opaque-reasoning'}
+    call = {'id': 'fc_1', 'type': 'function_call', 'call_id': 'call_1', 'name': 'lookup', 'arguments': '{"city":"上海"}'}
+    native = {'id': 'resp_1', 'status': 'completed', 'model': 'demo', 'output': [reasoning, call],
+              'usage': {'input_tokens': 1000, 'output_tokens': 20, 'total_tokens': 1020,
+                        'input_tokens_details': {'cached_tokens': 800}}}
+    if stream:
+        builder = _ChatStreamBuilder('demo')
+        events = [
+            {'type': 'response.output_item.added', 'output_index': 0, 'item': {'id': 'rs_1', 'type': 'reasoning', 'summary': []}},
+            {'type': 'response.reasoning_summary_text.delta', 'delta': '先查询'},
+            {'type': 'response.output_item.done', 'output_index': 0, 'item': reasoning},
+            {'type': 'response.output_item.added', 'output_index': 1, 'item': {**call, 'arguments': ''}},
+            {'type': 'response.function_call_arguments.delta', 'item_id': 'fc_1', 'delta': call['arguments']},
+            {'type': 'response.output_item.done', 'output_index': 1, 'item': call},
+            {'type': 'response.completed', 'response': native},
+        ]
+        chunks = [json.loads(chunk.decode()[6:]) for event in events for chunk in builder.process(event)]
+        blocks = anthropic_stream_blocks(chunks)
+    else:
+        chat = convert_responses_response_to_chat(native, 'demo')
+        converted = asyncio.run(convert_openai_non_stream_response_to_anthropic(JSONResponse(chat), 'demo'))
+        body = json.loads(converted.body)
+        assert body['usage']['cache_read_input_tokens'] == 800
+        blocks = body['content']
+
+    request = {'model': 'demo', 'messages': [
+        {'role': 'user', 'content': '查询天气'}, {'role': 'assistant', 'content': blocks},
+        {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'call_1',
+                                      'content': '连接失败', 'is_error': True}]}]}
+    replay = convert_chat_request_to_responses(convert_anthropic_to_openai_request(request))['input']
+    assert replay[1] == reasoning
+    assert replay[2]['call_id'] == 'call_1'
+    assert json.loads(replay[2]['arguments']) == {'city': '上海'}
+    assert replay[3]['output'] == '[tool_result_error] 连接失败'
+
+
+@pytest.mark.parametrize('mode', ['json', 'stream', 'force_stream'])
+def test_anthropic_reasoning_survives_responses_tool_round_trip(mode):
+    from converters.cache_warnings import responses_cache_warnings
+    from converters.responses_openai import build_responses_streaming_response, collect_chat_stream_response, convert_chat_response_to_responses, convert_responses_to_chat_request
+    from routes._direct_api_anthropic import build_openai_stream_from_anthropic, convert_anthropic_response_to_openai
+
+    thinking = {'type': 'thinking', 'thinking': '先查询', 'signature': 'claude-signature'}
+    tool = {'type': 'tool_use', 'id': 'toolu_1', 'name': 'lookup', 'input': {'city': '上海'}}
+    usage = {'input_tokens': 100, 'cache_read_input_tokens': 800, 'cache_creation_input_tokens': 100, 'output_tokens': 20}
+    warnings = responses_cache_warnings({'prompt_cache_key': 'group'})
+    if mode == 'json':
+        chat = convert_anthropic_response_to_openai({'content': [thinking, tool], 'stop_reason': 'tool_use', 'usage': usage}, 'demo', 'r')
+        result = convert_chat_response_to_responses(chat, {'model': 'demo'}, warnings)
+    else:
+        events = [
+            {'type': 'message_start', 'message': {'usage': usage}},
+            {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'thinking', 'thinking': '', 'signature': ''}},
+            {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'thinking_delta', 'thinking': thinking['thinking']}},
+            {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'signature_delta', 'signature': thinking['signature']}},
+            {'type': 'content_block_stop', 'index': 0},
+            {'type': 'content_block_start', 'index': 1, 'content_block': {**tool, 'input': {}}},
+            {'type': 'content_block_delta', 'index': 1, 'delta': {'type': 'input_json_delta', 'partial_json': '{"city":"上海"}'}},
+            {'type': 'content_block_stop', 'index': 1},
+            {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use'}, 'usage': {'cache_read_input_tokens': 800, 'output_tokens': 20}},
+            {'type': 'message_stop'},
+        ]
+
+        async def run():
+            async def source():
+                for event in events:
+                    yield ('event: ' + event['type'] + '\ndata: ' + json.dumps(event, ensure_ascii=False) + '\n\n').encode()
+            monitor = MagicMock()
+            monitor.broadcast_to_monitors = AsyncMock()
+            chat_stream = build_openai_stream_from_anthropic(
+                source(), 'demo', 'r', monitor, {}, {}, None, lambda *args: 0, {'messages': []}, [])
+            if mode == 'force_stream':
+                collected = await collect_chat_stream_response(chat_stream, 'demo')
+                return convert_chat_response_to_responses(collected, {'model': 'demo'}, warnings)
+            response = build_responses_streaming_response(chat_stream, {'model': 'demo'}, 'demo', warnings)
+            assert 'x-bridge-warnings' in response.headers
+            raw = b''.join([chunk async for chunk in response.body_iterator])
+            payloads = [json.loads(line[6:]) for line in raw.decode().splitlines() if line.startswith('data: ')]
+            return next(item['response'] for item in payloads if item['type'] == 'response.completed')
+        result = asyncio.run(run())
+
+    assert result['bridge_warnings'][0]['field'] == 'prompt_cache_key'
+    assert result['usage']['input_tokens'] == 1000
+    assert result['usage']['input_tokens_details']['cached_tokens'] == 800
+    request = {'model': 'demo', 'reasoning': {'effort': 'high'}, 'input': [{'role': 'user', 'content': '查询天气'}, *result['output'],
+                {'type': 'function_call_output', 'call_id': 'toolu_1', 'output': '晴'}]}
+    replay = convert_openai_to_anthropic_request(convert_responses_to_chat_request(request))
+    replay = apply_thinking_config(replay, {'enable_thinking': True, 'reasoning_effort': 'low'})
+    assert replay['output_config']['effort'] == 'high'
+    assert replay['messages'][1]['content'] == [thinking, tool]
+    assert replay['messages'][2]['content'][0]['tool_use_id'] == 'toolu_1'
+
+
+def test_anthropic_cache_breakpoint_warning_is_returned():
+    from fastapi.responses import JSONResponse, StreamingResponse
+    from converters.anthropic_openai import build_anthropic_streaming_response, convert_openai_non_stream_response_to_anthropic
+    from converters.cache_warnings import anthropic_cache_warnings
+
+    warnings = anthropic_cache_warnings({'system': [{'type': 'text', 'text': 'system', 'cache_control': {'type': 'ephemeral'}}]})
+    chat = {'choices': [{'message': {'role': 'assistant', 'content': 'ok'}, 'finish_reason': 'stop'}]}
+    response = asyncio.run(convert_openai_non_stream_response_to_anthropic(JSONResponse(chat), 'demo', warnings))
+    assert json.loads(response.body)['bridge_warnings'][0]['field'] == 'system[0].cache_control'
+    assert json.loads(response.headers['x-bridge-warnings'])[0]['applied'] is False
+
+    async def stream():
+        async def source():
+            yield b'data: {"choices": [{"delta": {"content": "ok"}}]}\n\ndata: [DONE]\n\n'
+        response = build_anthropic_streaming_response(StreamingResponse(source()), 'demo', warnings, usage_pending=True)
+        assert response.headers['x-bridge-usage-event'] == 'message_delta'
+        raw = ''.join([part async for part in response.body_iterator])
+        return [json.loads(line[6:]) for line in raw.splitlines() if line.startswith('data: ')]
+
+    events = asyncio.run(stream())
+    assert events[0]['message']['bridge_usage_pending'] is True
+    assert next(event for event in events if event['type'] == 'message_delta')['bridge_usage_pending'] is False

@@ -170,6 +170,10 @@ def convert_chat_request_to_responses(
         if role == 'assistant' and isinstance(native_output, list):
             input_items.extend(copy.deepcopy(native_output))
             continue
+        native_items = (message.get('provider_metadata') or {}).get('responses_items') if isinstance(message.get('provider_metadata'), dict) else None
+        if role == 'assistant' and isinstance(native_items, list):
+            input_items.extend(copy.deepcopy(native_items))
+            continue
 
         if role in ("system", "developer"):
             text = _stringify(content)
@@ -630,6 +634,8 @@ class _ChatStreamBuilder:
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
             if item:
                 self.output_items[event.get('output_index', len(self.output_items))] = copy.deepcopy(item)
+            if item.get("type") == "reasoning":
+                return [self.chunk({'provider_event': {key: copy.deepcopy(value) for key, value in event.items() if key != '_event_type'}})]
             if item.get("type") != "function_call":
                 return []
             key, index = self._tool_index({**item, "output_index": event.get("output_index")})

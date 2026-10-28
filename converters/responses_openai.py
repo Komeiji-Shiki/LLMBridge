@@ -21,6 +21,8 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from utils.usage_tokens import total_output_tokens
 from converters import is_content_parts
+from converters.anthropic_responses_signatures import decode_thinking_item, encode_thinking_item
+from converters.cache_warnings import warning_headers
 
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
@@ -158,7 +160,19 @@ def _convert_input_item(item: Any) -> Dict[str, Any]:
         return _convert_function_call_item(item)
     if item_type == "function_call_output":
         return _convert_function_call_output_item(item)
-    if item_type in ("reasoning", "computer_call", "item_reference"):
+    if item_type == "reasoning":
+        try:
+            block = decode_thinking_item("anthropic", item.get("encrypted_content"))
+        except ValueError as exc:
+            raise ResponsesRequestError(str(exc)) from exc
+        if block is None:
+            raise ResponsesRequestError("reasoning 输入项没有可回传的 Anthropic 思考状态。")
+        summary = "".join(part.get("text", "") for part in item.get("summary", [])
+                          if isinstance(part, dict) and part.get("type") == "summary_text")
+        if block["type"] == "thinking" and summary != block.get("thinking", ""):
+            raise ResponsesRequestError("回传的 Anthropic 思考内容已改变。")
+        return {"role": "assistant", "content": "", "provider_metadata": {"anthropic_blocks": [block]}}
+    if item_type in ("computer_call", "item_reference"):
         raise ResponsesRequestError(f"输入项类型 '{item_type}' 当前暂不支持。")
     if item_type in ("input_text", "input_image"):
         return {
@@ -417,6 +431,7 @@ def _build_response_object(
     status: str,
     usage: Any = None,
     incomplete_details: Optional[Dict[str, Any]] = None,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "id": response_id,
@@ -431,6 +446,8 @@ def _build_response_object(
     }
     result.update(_responses_request_fields(request))
     result["usage"] = _usage_to_responses(usage)
+    if warnings:
+        result["bridge_warnings"] = copy.deepcopy(warnings)
     return result
 
 
@@ -452,9 +469,37 @@ def _convert_tool_call_to_output_item(tool_call: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _anthropic_blocks_to_output(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按上游顺序转换内容块，并将完整思考块放入 Responses 推理项。"""
+    output = []
+    for block in blocks:
+        kind = block.get("type")
+        if kind in ("thinking", "redacted_thinking"):
+            text = block.get("thinking", "")
+            output.append({
+                "id": "rs_" + uuid.uuid4().hex[:24], "type": "reasoning",
+                "status": "completed", "summary": [{"type": "summary_text", "text": text}] if text else [],
+                "encrypted_content": encode_thinking_item("anthropic", block),
+            })
+        elif kind == "text":
+            output.append({
+                "id": "msg_" + uuid.uuid4().hex[:24], "type": "message", "status": "completed",
+                "role": "assistant", "content": [{"type": "output_text", "text": block.get("text", ""), "annotations": []}],
+            })
+        elif kind == "tool_use":
+            output.append(_convert_tool_call_to_output_item({
+                "id": block["id"], "function": {"name": block["name"],
+                "arguments": json.dumps(block["input"], ensure_ascii=False, separators=(",", ":"))},
+            }))
+        else:
+            raise ResponsesRequestError(f"Anthropic 内容块类型 '{kind}' 无法转换为 Responses 输出。")
+    return output
+
+
 def convert_chat_response_to_responses(
     chat_response: Dict[str, Any],
     request: Optional[Dict[str, Any]] = None,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """将完整的 Chat Completions JSON 转换为 Responses JSON。"""
     if not isinstance(chat_response, dict):
@@ -468,9 +513,13 @@ def convert_chat_response_to_responses(
     if not isinstance(message, dict):
         message = {}
 
+    metadata = message.get("provider_metadata") or {}
+    anthropic_blocks = metadata.get("anthropic_blocks") if isinstance(metadata, dict) else None
     output: List[Dict[str, Any]] = []
+    if isinstance(anthropic_blocks, list):
+        output = _anthropic_blocks_to_output(anthropic_blocks)
     reasoning = _message_reasoning(message)
-    if reasoning:
+    if reasoning and anthropic_blocks is None:
         output.append({
             "id": "rs_" + uuid.uuid4().hex[:24],
             "type": "reasoning",
@@ -480,7 +529,7 @@ def convert_chat_response_to_responses(
 
     text = _message_text(message)
     tool_calls = _message_tool_calls(message)
-    if text or not tool_calls:
+    if anthropic_blocks is None and (text or not tool_calls):
         output.append({
             "id": "msg_" + uuid.uuid4().hex[:24],
             "type": "message",
@@ -492,7 +541,8 @@ def convert_chat_response_to_responses(
                 "annotations": [],
             }],
         })
-    output.extend(_convert_tool_call_to_output_item(call) for call in tool_calls)
+    if anthropic_blocks is None:
+        output.extend(_convert_tool_call_to_output_item(call) for call in tool_calls)
 
     finish_reason = first_choice.get("finish_reason", "stop")
     incomplete_reason = {"length": "max_output_tokens", "content_filter": "content_filter"}.get(finish_reason)
@@ -508,6 +558,7 @@ def convert_chat_response_to_responses(
         status=status,
         usage=chat_response.get("usage"),
         incomplete_details=incomplete_details,
+        warnings=warnings,
     )
 
 
@@ -585,6 +636,7 @@ async def collect_chat_stream_response(response: Response, model: str) -> Dict[s
     usage: Optional[Dict[str, Any]] = None
     finish_reason = "stop"
     response_id = None
+    provider_metadata = None
 
     async for payload in iter_chat_sse_payloads(response):
         if payload is _STREAM_DONE:
@@ -606,6 +658,8 @@ async def collect_chat_stream_response(response: Response, model: str) -> Dict[s
             delta = choice.get("message", {})
         if not isinstance(delta, dict):
             continue
+        if isinstance(delta.get("provider_metadata"), dict):
+            provider_metadata = copy.deepcopy(delta["provider_metadata"])
         text = delta.get("content")
         if isinstance(text, str):
             content_parts.append(text)
@@ -636,6 +690,8 @@ async def collect_chat_stream_response(response: Response, model: str) -> Dict[s
         message["reasoning_content"] = "".join(reasoning_parts)
     if ordered_tools:
         message["tool_calls"] = ordered_tools
+    if provider_metadata is not None:
+        message["provider_metadata"] = provider_metadata
     return {
         "id": response_id or "chatcmpl-" + uuid.uuid4().hex,
         "object": "chat.completion",
@@ -659,9 +715,10 @@ def _format_response_event(event_type: str, payload: Dict[str, Any], sequence: i
 class _ResponsesStreamBuilder:
     """将 chat.completion.chunk 增量转换为 Responses 生命周期事件。"""
 
-    def __init__(self, request: Dict[str, Any], model: str):
+    def __init__(self, request: Dict[str, Any], model: str, warnings: Optional[List[Dict[str, Any]]] = None):
         self.request = request
         self.model = model
+        self.warnings = warnings
         self.response_id = "resp_" + uuid.uuid4().hex
         self.output: List[Dict[str, Any]] = []
         self.sequence = 0
@@ -680,7 +737,7 @@ class _ResponsesStreamBuilder:
 
     def initial_events(self) -> List[bytes]:
         response = _build_response_object(
-            self.response_id, self.model, self.request, [], "in_progress"
+            self.response_id, self.model, self.request, [], "in_progress", warnings=self.warnings
         )
         return [
             self.event("response.created", {"response": response}),
@@ -843,6 +900,17 @@ class _ResponsesStreamBuilder:
             return []
 
         events: List[bytes] = []
+        provider_event = delta.get("provider_event")
+        if isinstance(provider_event, dict) and provider_event.get("provider") == "anthropic":
+            native_event = provider_event["event"]
+            event_type = native_event["type"]
+            if event_type == "content_block_start":
+                events.extend(self._start_reasoning())
+            elif event_type == "content_block_stop":
+                block = native_event["content_block"]
+                self.output[self.active_reasoning]["encrypted_content"] = encode_thinking_item("anthropic", block)
+                events.extend(self._close_reasoning())
+                return events
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if isinstance(reasoning, str) and reasoning:
             events.extend(self._start_reasoning())
@@ -899,7 +967,7 @@ class _ResponsesStreamBuilder:
         details = {"reason": incomplete_reason} if incomplete_reason else None
         response = _build_response_object(
             self.response_id, self.model, self.request, self.output, status,
-            self.usage, details,
+            self.usage, details, self.warnings,
         )
         event_type = "response.incomplete" if status == "incomplete" else "response.completed"
         return self.event(event_type, {"response": response})
@@ -907,7 +975,7 @@ class _ResponsesStreamBuilder:
     def failed_event(self, error: Any) -> bytes:
         error_obj = error if isinstance(error, dict) else {"type": "server_error", "message": str(error)}
         response = _build_response_object(
-            self.response_id, self.model, self.request, self.output, "failed", self.usage
+            self.response_id, self.model, self.request, self.output, "failed", self.usage, warnings=self.warnings
         )
         response["error"] = error_obj
         return self.event("response.failed", {"response": response})
@@ -917,10 +985,11 @@ def build_responses_streaming_response(
     chat_response: Response,
     request: Dict[str, Any],
     model: str,
+    warnings: Optional[List[Dict[str, Any]]] = None,
 ) -> StreamingResponse:
     """将内部 Chat SSE/JSON 响应实时转换为 Responses SSE 事件流。"""
     async def response_generator():
-        builder = _ResponsesStreamBuilder(request, model)
+        builder = _ResponsesStreamBuilder(request, model, warnings)
         for event in builder.initial_events():
             yield event
 
@@ -943,6 +1012,7 @@ def build_responses_streaming_response(
         response_generator(),
         media_type="text/event-stream",
         headers={
+            **warning_headers(warnings or []),
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",

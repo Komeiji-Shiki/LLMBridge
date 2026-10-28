@@ -115,10 +115,10 @@ def test_text_block_representation_and_tool_boundaries(store):
     async def run():
         messages = [{'role': 'user', 'content': [{'type': 'text', 'text': 'lookup'}]}]
         native = response(text='')
-        native['output'] = [native['output'][0], {'type': 'function_call', 'call_id': 'call-1', 'name': 'lookup', 'arguments': '{}'}]
+        native['output'] = [native['output'][0], {'type': 'function_call', 'call_id': 'call-1', 'name': 'lookup', 'arguments': '{"city":"上海"}'}]
         await history(context(), messages).remember(native)
         messages = [{'role': 'user', 'content': 'lookup'}, {'role': 'assistant', 'content': None,
-            'tool_calls': [{'id': 'call-1', 'type': 'function', 'function': {'name': 'lookup', 'arguments': '{}'}}]},
+            'tool_calls': [{'id': 'call-1', 'type': 'function', 'function': {'name': 'lookup', 'arguments': '{"city": "上海"}'}}]},
             {'role': 'tool', 'tool_call_id': 'call-1', 'content': 'result'}, {'role': 'user', 'content': 'continue'}]
         restored = await history(context(), messages).restore_input()
         assert restored[1:3] == native['output']
