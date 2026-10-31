@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from core.audio_files import AudioFiles
 from core.config_loader import get_setting
 from core.request_context import RequestContext, current_request
-from services.audio_input import INLINE_AUDIO_BYTES, supports_files_api
+from services.audio_input import INLINE_AUDIO_BYTES, inline_audio_limit, supports_files_api
 
 router = APIRouter(tags=["audio-files"])
 
@@ -42,7 +42,7 @@ async def audio_capabilities(request: Request):
         "audio_files_version": 1, "supported": supported,
         "upload_path": "bridge/audio/files",
         "max_upload_bytes": int(get_setting("request_limits.max_body_mb", 256)) * 1024 * 1024,
-        "inline_audio_bytes": INLINE_AUDIO_BYTES,
+        "inline_audio_bytes": min((inline_audio_limit(item) for item in endpoints), default=INLINE_AUDIO_BYTES),
         "files_api": supported and all(supports_files_api(item) for item in endpoints),
     }
 

@@ -93,7 +93,7 @@ def normalize_turn(item):
     for part in parts if isinstance(parts, list) else []:
         if not isinstance(part, dict) or part.get('thought'):
             continue
-        content = {key: copy.deepcopy(value) for key, value in part.items()
+        content = {key: value for key, value in part.items()
                    if key not in ('thoughtSignature', 'thought')}
         if not content:
             continue
@@ -108,7 +108,7 @@ def normalize_turn(item):
             continue
         call = content.get('functionCall')
         if isinstance(call, dict):
-            call['args'] = _canonical_args(call.get('args'))
+            content['functionCall'] = {**call, 'args': _canonical_args(call.get('args'))}
         visible.append(content)
     if role == 'model':
         for part in visible:
@@ -125,6 +125,11 @@ def _framed(item):
 
 def _is_model(item):
     return isinstance(item, dict) and item.get('role') in ('model', 'assistant')
+
+
+def _has_signature(item):
+    parts = item.get('parts') if isinstance(item, dict) else None
+    return isinstance(parts, list) and any(isinstance(part, dict) and part.get('thoughtSignature') for part in parts)
 
 
 def _turn_digest(window):
@@ -292,13 +297,20 @@ class GeminiThoughtHistory:
         contents = upstream_body.get('contents') if isinstance(upstream_body, dict) else None
         if not isinstance(contents, list) or not contents:
             return 0
-        boundaries = list(history_boundaries(contents))
-        if not boundaries:
+        if not any(_is_model(item) and not _has_signature(item) for item in contents):
             return 0
+
+        def _query():
+            boundaries = list(history_boundaries(contents))
+            if not boundaries:
+                return boundaries, {}
+            records = conversation_store.response_prefixes(
+                self.context.owner_id, self.scope(),
+                [key for _, prefix, turn in boundaries for key in (prefix, turn)])
+            return boundaries, records
+
         try:
-            records = await asyncio.to_thread(conversation_store.response_prefixes,
-                                              self.context.owner_id, self.scope(),
-                                              [key for _, prefix, turn in boundaries for key in (prefix, turn)])
+            boundaries, records = await asyncio.to_thread(_query)
         except Exception:
             logger.warning('Gemini 思考签名查询失败；按客户端原始内容请求上游')
             return 0
@@ -313,23 +325,30 @@ class GeminiThoughtHistory:
     async def remember(self, contents, assembler):
         if not self.context.authenticated or not self.context.owner_id or not isinstance(contents, list):
             return
-        if not isinstance(assembler, GeminiTurnAssembler) or not assembler.has_signatures():
+        if not isinstance(assembler, GeminiTurnAssembler):
             return
-        digest = hashlib.sha256(VERSION.encode())
-        window = []
-        for item in contents:
-            framed = _framed(item)
-            digest.update(framed)
-            window = [] if _is_model(item) else [*window, framed]
-        scope = self.scope()
-        try:
-            for parts in assembler.completed_parts():
+        completed = list(assembler.completed_parts())
+        if not completed:
+            return
+
+        def _save():
+            digest = hashlib.sha256(VERSION.encode())
+            window = []
+            for item in contents:
+                framed = _framed(item)
+                digest.update(framed)
+                window = [] if _is_model(item) else [*window, framed]
+            scope = self.scope()
+            for parts in completed:
                 framed = _framed({'role': 'model', 'parts': parts})
                 prefix = digest.copy()
                 prefix.update(framed)
-                await asyncio.to_thread(conversation_store.remember_response_prefixes,
-                                        self.context.owner_id, scope,
-                                        [prefix.hexdigest(), _turn_digest([*window, framed])],
-                                        {'v': 2, 'parts': parts})
+                conversation_store.remember_response_prefixes(
+                    self.context.owner_id, scope,
+                    [prefix.hexdigest(), _turn_digest([*window, framed])],
+                    {'v': 2, 'parts': parts})
+
+        try:
+            await asyncio.to_thread(_save)
         except Exception:
             logger.warning('Gemini 思考签名保存失败；下一轮将按客户端原始内容请求上游')

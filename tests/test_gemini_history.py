@@ -545,3 +545,28 @@ def test_empty_text_parts_are_compacted_before_sending():
     assert contents[2]['parts'] == [call]
     assert contents[3]['parts'] == [{'text': ' '}]
     assert contents[4]['parts'] == [{'text': '你好'}]
+
+
+def test_restore_skips_boundary_hashing_when_all_model_turns_already_signed(tmp_path, monkeypatch):
+    """客户端已完整回传签名时，restore 直接返回 0，不触发整段历史哈希与数据库查询。"""
+    store = bind_store(monkeypatch, tmp_path)
+    called = False
+
+    def forbidden(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("should not hash or query when all model turns carry thoughtSignature")
+
+    monkeypatch.setattr('services.gemini_history.history_boundaries', forbidden)
+    monkeypatch.setattr(store, 'response_prefixes', forbidden)
+
+    async def run():
+        body = {'contents': [
+            {'role': 'user', 'parts': [{'text': '问题'}, {'inlineData': {'mimeType': 'audio/mpeg', 'data': 'A' * 10000}}]},
+            {'role': 'model', 'parts': [{'thought': True, 'text': '思考'}, {'functionCall': {'id': 'c1', 'name': 'Read', 'args': {}}, 'thoughtSignature': 'sig-1'}]},
+        ]}
+        assert await GeminiThoughtHistory(context(), {'model_id': 'target'}, body).restore(body) == 0
+        assert called is False
+
+    asyncio.run(run())
+

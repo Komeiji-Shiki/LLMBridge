@@ -115,3 +115,74 @@ const env = {ANTHROPIC_BASE_URL:process.argv[3], ANTHROPIC_API_KEY:'test-audio-k
             stopping.set()
             await server
     asyncio.run(run())
+
+
+def test_crossing_inline_limit_preserves_previously_inlined_audio_prefix(tmp_path, monkeypatch):
+    """跨过内联阈值时，已按内联发送过的历史音频保持 input_audio，只把新增超限音频切到 Files API。"""
+    store = AudioFiles(tmp_path / "audio_files")
+    monkeypatch.setattr("services.audio_input.AudioFiles", lambda: store)
+    first_id = "1" * 32
+    second_id = "2" * 32
+    for file_id, payload, name in ((first_id, b"A" * 600, "first.mp3"), (second_id, b"B" * 600, "second.mp3")):
+        data_path, _ = store.paths(file_id)
+        store.root.mkdir(parents=True, exist_ok=True)
+        data_path.write_bytes(payload)
+        store.save_metadata(file_id, {
+            "owner_id": "admin", "mime_type": "audio/mpeg",
+            "filename": name, "size": len(payload),
+        })
+
+    uploaded_ids = []
+
+    async def fake_upload(_store, file_id, metadata, _session, _api_key, _base_url, _config):
+        uploaded_ids.append(file_id)
+        metadata.setdefault("upstream_files", {})["https://generativelanguage.googleapis.com:443/v1beta"] = {
+            "uri": f"https://generativelanguage.googleapis.com/v1beta/files/{file_id[:8]}",
+            "state": "ACTIVE",
+        }
+        store.save_metadata(file_id, metadata)
+        return f"https://generativelanguage.googleapis.com/v1beta/files/{file_id[:8]}"
+
+    monkeypatch.setattr("services.audio_input._uploaded_uri", fake_upload)
+
+    async def run():
+        token = current_request.set(RequestContext(owner_id="admin", authenticated=True))
+        try:
+            config = {"api_type": "gemini_native", "inline_audio_bytes": 1500, "audio_files_api": True}
+            turn1 = [{"role": "tool", "tool_call_id": "c1", "content": [
+                {"type": "input_audio", "input_audio": {"file_id": first_id}},
+            ]}]
+            resolved1 = await resolve_audio_references(turn1, None, "", None, config)
+            assert resolved1[0]["content"][0]["type"] == "input_audio"
+            assert uploaded_ids == []
+
+            # 第二轮新增 second.mp3 后总内联体积超过 1500：first.mp3 必须保持 input_audio，只有 second.mp3 走 audio_url
+            turn2 = [
+                *turn1,
+                {"role": "tool", "tool_call_id": "c2", "content": [
+                    {"type": "input_audio", "input_audio": {"file_id": second_id}},
+                ]},
+            ]
+            resolved2 = await resolve_audio_references(turn2, None, "", None, config)
+            assert resolved2[0] == resolved1[0]
+            assert resolved2[1]["content"][0] == {
+                "type": "audio_url",
+                "audio_url": {
+                    "url": f"https://generativelanguage.googleapis.com/v1beta/files/{second_id[:8]}",
+                    "mime_type": "audio/mpeg",
+                },
+            }
+            assert uploaded_ids == [second_id]
+
+            # 不支持 Files API 的端点：已内联的历史音频遇到后续纯文本增长不应被 413 误杀
+            relay_config = {"api_type": "gemini_native", "api_base_url": "https://relay.example/v1beta", "inline_audio_bytes": 1500}
+            relay_turn1 = await resolve_audio_references(turn1, None, "", None, relay_config)
+            assert relay_turn1[0]["content"][0]["type"] == "input_audio"
+            relay_turn2_text_growth = [*turn1, {"role": "user", "content": "x" * 2000}]
+            relay_turn2 = await resolve_audio_references(relay_turn2_text_growth, None, "", None, relay_config)
+            assert relay_turn2[0] == relay_turn1[0]
+        finally:
+            current_request.reset(token)
+
+    asyncio.run(run())
+

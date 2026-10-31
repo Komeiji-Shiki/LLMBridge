@@ -18,8 +18,13 @@ INLINE_AUDIO_BYTES = 20_000_000
 
 
 def supports_files_api(config):
-    base = config.get("api_base_url") or GeminiDefaults.BASE_URL
-    return config.get("audio_files_api", urlsplit(base).hostname == GeminiDefaults.HOST) is True
+    base = (config or {}).get("api_base_url") or GeminiDefaults.BASE_URL
+    return (config or {}).get("audio_files_api", urlsplit(base).hostname == GeminiDefaults.HOST) is True
+
+
+def inline_audio_limit(config):
+    limit = (config or {}).get("inline_audio_bytes")
+    return int(limit) if isinstance(limit, int) and limit > 0 else INLINE_AUDIO_BYTES
 
 
 async def _json_response(response, operation):
@@ -77,39 +82,67 @@ async def _uploaded_uri(store, file_id, metadata, session, api_key, base_url, co
 async def resolve_audio_references(messages, session, api_key, base_url, config):
     references = {}
     occurrences = {}
+    historical_ids = set()
+    last_assistant = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
     context = current_request.get()
     store = AudioFiles()
-    for message in messages:
+    for index, message in enumerate(messages):
         content = message.get("content")
         for part in content if isinstance(content, list) else []:
             audio = extract_audio(part)
             if audio and "file_id" in audio:
-                occurrences[audio["file_id"]] = occurrences.get(audio["file_id"], 0) + 1
-            if audio and "file_id" in audio and audio["file_id"] not in references:
-                if context is None or not context.authenticated:
-                    raise HTTPException(401, "音频文件引用需要经过身份验证")
                 file_id = audio["file_id"]
-                references[file_id] = await asyncio.to_thread(store.metadata, file_id, context.owner_id)
+                occurrences[file_id] = occurrences.get(file_id, 0) + 1
+                if index < last_assistant:
+                    historical_ids.add(file_id)
+                if file_id not in references:
+                    if context is None or not context.authenticated:
+                        raise HTTPException(401, "音频文件引用需要经过身份验证")
+                    references[file_id] = await asyncio.to_thread(store.metadata, file_id, context.owner_id)
     if not references:
         return messages
 
     # base64 只在最后构造媒体请求时生成，估算时按传输字节计算，不能当成文字 Token。
+    # 已经按内联或 Files API 发送过的历史音频保持原形态，避免跨阈值时改写前缀导致缓存丢失。
+    cache_key = endpoint_identity(config) + credential_identity(api_key)
+    limit = inline_audio_limit(config)
+    files_supported = supports_files_api(config)
     inline_size = len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
-    inline_size += sum(((info["size"] + 2) // 3 * 4 + 128) * occurrences[file_id]
-                       for file_id, info in references.items())
-    use_files = inline_size > INLINE_AUDIO_BYTES
-    if use_files and not supports_files_api(config):
-        raise HTTPException(413, "音频及对话超过当前端点的内联大小限制；请使用支持 Files API 的端点，或明确选择压缩、截取或分段")
+    use_files_by_id = {}
+    pending_ids = []
+    for file_id, info in references.items():
+        audio_bytes = ((info["size"] + 2) // 3 * 4 + 128) * occurrences[file_id]
+        if cache_key in info.get("upstream_files", {}):
+            use_files_by_id[file_id] = True
+        elif file_id in historical_ids or cache_key in info.get("inline_endpoints", []):
+            use_files_by_id[file_id] = False
+            inline_size += audio_bytes
+        else:
+            pending_ids.append((file_id, info, audio_bytes))
+
+    for file_id, info, audio_bytes in pending_ids:
+        if inline_size + audio_bytes <= limit:
+            use_files_by_id[file_id] = False
+            inline_size += audio_bytes
+            inline_endpoints = info.setdefault("inline_endpoints", [])
+            if cache_key not in inline_endpoints:
+                inline_endpoints.append(cache_key)
+                await asyncio.to_thread(store.save_metadata, file_id, info)
+        elif files_supported:
+            use_files_by_id[file_id] = True
+        else:
+            raise HTTPException(413, "音频及对话超过当前端点的内联大小限制；请使用支持 Files API 的端点，或明确选择压缩、截取或分段")
+
     resolved = {}
     for file_id, metadata in references.items():
-        if use_files:
+        if use_files_by_id[file_id]:
             uri = await _uploaded_uri(store, file_id, metadata, session, api_key, base_url, config)
             resolved[file_id] = {"type": "audio_url", "audio_url": {
                 "url": uri, "mime_type": metadata["mime_type"],
             }}
         else:
             data_path, _ = store.paths(file_id)
-            data = await asyncio.to_thread(lambda: base64.b64encode(data_path.read_bytes()).decode("ascii"))
+            data = await asyncio.to_thread(lambda path=data_path: base64.b64encode(path.read_bytes()).decode("ascii"))
             resolved[file_id] = {"type": "input_audio", "input_audio": {
                 "data": data, "mime_type": metadata["mime_type"],
                 "format": metadata["mime_type"].split("/", 1)[1],
