@@ -39,6 +39,8 @@ from utils.tool_name_rewrite import (
     restore_tool_names_in_response,
 )
 from ._direct_api_utils import (
+    cancel_and_wait,
+    close_quietly,
     detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
@@ -1226,8 +1228,8 @@ def build_openai_stream_from_anthropic(
                         cached_tokens=cached_tokens,
                         pricing=pricing_config, upstream_usage=upstream_usage
                     )
-                except Exception:
-                    pass
+                except Exception as cost_error:
+                    logger.warning(f"[OAI_FROM_ANTHROPIC] 成本计算失败，本次请求按无成本记录: {cost_error}", exc_info=True)
             # ── 把 stop_reason 写入日志，排查截断问题 ──
             if isinstance(cost_info, dict):
                 cost_info["stop_reason"] = stop_reason
@@ -1255,8 +1257,8 @@ def build_openai_stream_from_anthropic(
                     }),
                     name="anthropic-native-broadcast"
                 )
-            except Exception:
-                pass
+            except Exception as broadcast_error:
+                logger.debug(f"[ANTHROPIC_NATIVE] 监控广播未能提交: {broadcast_error}")
 
     return StreamingResponse(
         stream_generator(),
@@ -1455,16 +1457,9 @@ async def handle_anthropic_native_from_openai(
 
         while not api_task.done():
             if time.time() - wait_start > first_chunk_timeout:
-                api_task.cancel()
-                try:
-                    await api_task
-                except asyncio.CancelledError:
-                    pass
+                await cancel_and_wait(api_task)
                 # 🔧 资源回收：504 超时路径此前同样丢弃 api_iter，上游连接挂到超时
-                try:
-                    await api_iter.aclose()
-                except Exception:
-                    pass
+                await close_quietly(api_iter)
                 error_msg = f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                 logger.error(f"[OAI_TO_ANTHROPIC] {error_msg}")
                 await record_request_failure(
@@ -1486,10 +1481,7 @@ async def handle_anthropic_native_from_openai(
         except StopAsyncIteration:
             error_msg = "上游API返回空响应"
             # 🔧 资源回收：空响应路径此前直接把 api_iter 丢弃，上游连接挂到超时
-            try:
-                await api_iter.aclose()
-            except Exception:
-                pass
+            await close_quietly(api_iter)
             await record_request_failure(
                 monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
             raise HTTPException(status_code=502, detail=error_msg)
@@ -1625,8 +1617,8 @@ async def handle_anthropic_native_from_openai(
                             output_tokens=resp_output_tokens or 0,
                             cached_tokens=resp_cached_tokens or 0,
                             pricing=pricing_config, upstream_usage=resp_upstream_usage)
-                    except Exception:
-                        pass
+                    except Exception as cost_error:
+                        logger.warning(f"[ANTHROPIC_NATIVE] 成本计算失败，本次请求按无成本记录: {cost_error}", exc_info=True)
                 if isinstance(cost_info, dict) and resp_stop_reason:
                     cost_info["stop_reason"] = resp_stop_reason
 
@@ -1644,7 +1636,7 @@ async def handle_anthropic_native_from_openai(
                 try:
                     await monitoring_service.broadcast_to_monitors({
                         "type": "request_end", "request_id": request_id, "success": True})
-                except Exception:
-                    pass
+                except Exception as broadcast_error:
+                    logger.debug(f"[ANTHROPIC_NATIVE] 监控广播失败: {broadcast_error}")
 
         return Response(content=response_bytes, media_type="application/json")

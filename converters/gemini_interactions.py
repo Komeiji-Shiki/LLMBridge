@@ -537,14 +537,10 @@ def convert_interactions_to_openai_response(
             if text and signature:
                 thought_fragments.append((text, signature))
         elif stype == "function_call":
-            args = step.get("arguments")
-            if isinstance(args, dict):
-                try:
-                    args_str = json.dumps(args, ensure_ascii=False)
-                except (TypeError, ValueError):
-                    args_str = "{}"
-            else:
-                args_str = str(args) if args else "{}"
+            args = step.get("arguments") or {}
+            if not isinstance(args, dict):
+                raise ValueError(f"Interactions function_call '{step.get('name', '')}' 的 arguments 不是对象: {type(args).__name__}")
+            args_str = json.dumps(args, ensure_ascii=False)
             tool_calls.append({
                 "id": step.get("id") or f"call_{uuid.uuid4().hex[:24]}",
                 "type": "function",

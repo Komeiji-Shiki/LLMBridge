@@ -300,11 +300,8 @@ def get_gemini_model():
         import google.generativeai as genai
         api_key = os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY')
         if not api_key:
-            try:
-                from core.config_loader import CONFIG
-                api_key = CONFIG.get('google_api_key')
-            except Exception:
-                pass
+            from core.config_loader import CONFIG
+            api_key = CONFIG.get('google_api_key')
         if not api_key:
             logger.debug("[TOKEN_COUNTER] Google API密钥未配置，将使用Gemma tokenizer作为替代")
             return None

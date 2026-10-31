@@ -286,8 +286,6 @@ async def _async_save_sticky_state():
     _STICKY_SAVE_PENDING = True
     try:
         await asyncio.to_thread(_save_sticky_state)
-    except Exception:
-        pass
     finally:
         _STICKY_SAVE_PENDING = False
 
@@ -573,7 +571,7 @@ def extract_json_from_response(response: Response) -> Optional[dict]:
             return None
         parsed = json.loads(body_text)
         return parsed if isinstance(parsed, dict) else None
-    except Exception:
+    except json.JSONDecodeError:
         return None
 
 
@@ -866,6 +864,25 @@ async def iter_with_keepalive(iterator, interval: float):
         if pending is not None:
             pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
+
+
+async def close_quietly(iterator):
+    """释放上游迭代器的连接。收尾阶段的异常不能盖过主流程的结果，只留一条调试日志。"""
+    try:
+        await iterator.aclose()
+    except Exception as e:
+        logger.debug(f"[UPSTREAM_CLOSE] 关闭上游迭代器失败: {type(e).__name__}: {e}")
+
+
+async def cancel_and_wait(task):
+    """取消后台任务并等它收尾。取消和空流属于正常结局；任务自己的异常要留下记录。"""
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, StopAsyncIteration):
+        pass
+    except Exception as e:
+        logger.warning(f"[UPSTREAM_TASK] 被取消的上游任务带着异常结束: {type(e).__name__}: {e}")
 
 
 def extract_complete_sse_lines(decoded_chunk: str, pending_line: str) -> tuple:

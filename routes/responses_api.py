@@ -36,6 +36,7 @@ from utils.monitor_params import build_monitor_request_params, summarize_tools
 from . import api_routes as _chat_api
 from ._direct_api_utils import (
     build_response_message,
+    close_quietly,
     detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
@@ -556,10 +557,7 @@ async def _handle_responses_native_passthrough(
             clean_error = {k: v for k, v in error_json.items() if not k.startswith("_")}
             error_obj = clean_error.get("error")
             error_message = error_obj.get("message") if isinstance(error_obj, dict) else str(clean_error)
-            try:
-                await api_iter.aclose()
-            except Exception:
-                pass
+            await close_quietly(api_iter)
             await _complete_responses_monitoring(
                 monitoring_service=monitoring_service,
                 direct_api_service=direct_api_service,
@@ -662,10 +660,7 @@ async def _handle_responses_native_passthrough(
                 logger.error("[RESPONSES_NATIVE] 流式透传处理异常: %s", exc, exc_info=True)
                 raise
             finally:
-                try:
-                    await api_iter.aclose()
-                except Exception:
-                    pass
+                await close_quietly(api_iter)
                 if not monitoring_done:
                     await complete_monitoring_once()
 
@@ -685,10 +680,7 @@ async def _handle_responses_native_passthrough(
         async for chunk in api_iter:
             response_buffer.extend(chunk)
     except asyncio.CancelledError:
-        try:
-            await api_iter.aclose()
-        except Exception:
-            pass
+        await close_quietly(api_iter)
         await _complete_responses_monitoring(
             monitoring_service=monitoring_service,
             direct_api_service=direct_api_service,

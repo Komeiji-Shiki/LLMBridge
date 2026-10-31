@@ -8,10 +8,13 @@ import copy
 from functools import wraps
 import inspect
 import json
+import logging
 import time
 from core.request_context import current_request, credential_identity
 from services.protocol_events import payloads, error_status, is_business_event, is_terminal
 from core.constants import RetryDefaults
+
+logger = logging.getLogger(__name__)
 
 
 def _error_chunk(message, byte_mode):
@@ -63,7 +66,8 @@ def retry_before_output(method=None, *, output_bytes=False):
                     from core.conversation_store import conversation_store
                     try:
                         context.artifacts = await asyncio.to_thread(conversation_store.get, context.owner_id, context.cache_session(), 'signatures') or {}
-                    except Exception:
+                    except Exception as error:
+                        logger.warning(f"[RETRY] 读取思考签名存档失败，本次请求不带历史签名: {error}", exc_info=True)
                         context.artifacts = {}
                 if 'request_body' in bound.arguments:
                     if context.responses_history is not None:

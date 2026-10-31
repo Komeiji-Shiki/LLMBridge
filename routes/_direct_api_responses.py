@@ -27,6 +27,7 @@ from utils.usage_tokens import MODE_MERGE, get_completion_tokens_mode, total_out
 from ._direct_api_utils import (
     append_tool_call_delta,
     build_response_message,
+    close_quietly,
     detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
@@ -390,10 +391,7 @@ async def _handle_stream(
             logger.error("[RESPONSES_NATIVE] 流式处理异常: %s", exc, exc_info=True)
             raise
         finally:
-            try:
-                await upstream_iterator.aclose()
-            except Exception:
-                pass
+            await close_quietly(upstream_iterator)
             if not monitoring_completed:
                 await complete_monitoring_once()
 

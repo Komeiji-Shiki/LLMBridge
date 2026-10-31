@@ -29,6 +29,8 @@ from ._direct_api_reasoning_cache import lookup_reasoning_details, store_reasoni
 from ._direct_api_stream_session import PassthroughStreamSession
 from ._direct_api_utils import (
     build_response_message,
+    cancel_and_wait,
+    close_quietly,
     detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
@@ -400,10 +402,7 @@ async def _handle_passthrough_stream(
             monitoring_service, request_id, display_name, error_msg,
             openai_req, pricing_config, direct_api_service,
             estimate_message_tokens_func, full_messages)
-        try:
-            await api_iterator.aclose()
-        except Exception:
-            pass
+        await close_quietly(api_iterator)
         raise HTTPException(status_code=504, detail=error_msg)
     except StopAsyncIteration:
         error_msg = "上游API返回空响应"
@@ -412,10 +411,7 @@ async def _handle_passthrough_stream(
             monitoring_service, request_id, display_name, error_msg,
             openai_req, pricing_config, direct_api_service,
             estimate_message_tokens_func, full_messages)
-        try:
-            await api_iterator.aclose()
-        except Exception:
-            pass
+        await close_quietly(api_iterator)
         raise HTTPException(status_code=502, detail=error_msg)
 
     # ── 首块错误检测 → 直接抛 HTTPException，触发上层重试 ──
@@ -425,10 +421,7 @@ async def _handle_passthrough_stream(
             error_json, monitoring_service, request_id, display_name,
             openai_req, pricing_config, direct_api_service,
             estimate_message_tokens_func, full_messages)
-        try:
-            await api_iterator.aclose()
-        except Exception:
-            pass
+        await close_quietly(api_iterator)
         status_code = map_upstream_error_to_status_code(error_json, default_status_code=500)
         # 将完整错误交给重试层，避免首块预读把错误码和上游请求编号压成一句文字。
         raise HTTPException(status_code=status_code, detail=error_json)
@@ -455,16 +448,13 @@ async def _handle_passthrough_stream(
         if logprobs_collector is not None:
             try:
                 await logprobs_collector.finish(completed=False, error=session.error_msg)
-            except Exception:
-                pass
+            except Exception as collector_err:
+                logger.warning("[LOGPROBS_COLLECT] 首块错误后收尾失败 request_id=%s: %s", request_id[:8], collector_err)
         await _record_failed_request(
             monitoring_service, request_id, display_name, session.error_msg,
             openai_req, pricing_config, direct_api_service,
             estimate_message_tokens_func, full_messages)
-        try:
-            await api_iterator.aclose()
-        except Exception:
-            pass
+        await close_quietly(api_iterator)
         raise HTTPException(status_code=502, detail=session.error_msg)
 
     # ── 流式生成器（处理首块之后的剩余流）──
@@ -492,10 +482,7 @@ async def _handle_passthrough_stream(
                     except asyncio.CancelledError:
                         logger.warning(f"[DIRECT_API_PASSTHROUGH] 客户端在上游空闲期间断开: {request_id[:8]}")
                         await session.handle_client_disconnect()
-                        try:
-                            await api_iterator.aclose()
-                        except Exception:
-                            pass
+                        await close_quietly(api_iterator)
                         return
                     continue
 
@@ -507,10 +494,7 @@ async def _handle_passthrough_stream(
                     except asyncio.CancelledError:
                         logger.warning(f"[DIRECT_API_PASSTHROUGH] 客户端在错误块输出时断开: {request_id[:8]}")
                         await session.handle_client_disconnect()
-                        try:
-                            await api_iterator.aclose()
-                        except Exception:
-                            pass
+                        await close_quietly(api_iterator)
                         return
                     break
 
@@ -519,10 +503,7 @@ async def _handle_passthrough_stream(
                 except asyncio.CancelledError:
                     logger.warning(f"[DIRECT_API_PASSTHROUGH] 客户端在流式输出中断开: {request_id[:8]}")
                     await session.handle_client_disconnect()
-                    try:
-                        await api_iterator.aclose()
-                    except Exception:
-                        pass
+                    await close_quietly(api_iterator)
                     return
 
             session.stream_completed = not session.upstream_error_detected
@@ -542,17 +523,8 @@ async def _handle_passthrough_stream(
             logger.error(f"[DIRECT_API_PASSTHROUGH] 流式处理中发生异常: {e}", exc_info=True)
         finally:
             if api_task is not None and not api_task.done():
-                api_task.cancel()
-                try:
-                    await api_task
-                except (asyncio.CancelledError, StopAsyncIteration):
-                    pass
-                except Exception:
-                    pass
-            try:
-                await api_iterator.aclose()
-            except Exception:
-                pass
+                await cancel_and_wait(api_task)
+            await close_quietly(api_iterator)
 
             # 收尾统计与监控上报（断连路径已上报时返回空列表，不再补发）
             tail_chunks = await session.finalize()

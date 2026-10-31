@@ -33,6 +33,7 @@ from services.thinking_split_cache import (
 from ._direct_api_utils import (
     append_tool_call_delta,
     build_response_message,
+    cancel_and_wait,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     finalize_tool_calls,
@@ -600,11 +601,7 @@ async def handle_gemini_native_direct(
                     while not api_task.done():
                         yield f": keep-alive {int(time.time())}\n\n"
                         if time.time() - first_chunk_wait_start > first_chunk_timeout:
-                            api_task.cancel()
-                            try:
-                                await api_task
-                            except asyncio.CancelledError:
-                                pass
+                            await cancel_and_wait(api_task)
                             error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                             logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
                             yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"

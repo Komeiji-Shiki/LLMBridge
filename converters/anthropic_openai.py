@@ -572,11 +572,7 @@ def extract_anthropic_sse_content(chunk_bytes: bytes, state: dict) -> None:
         state["_sse_buf"] = buf
         return
     state["_sse_buf"] = buf[last_nl + 1:]
-    try:
-        chunk_str = buf[:last_nl + 1].decode("utf-8", errors="replace")
-    except Exception:
-        return
-    _parse_anthropic_sse_lines(chunk_str, state)
+    _parse_anthropic_sse_lines(buf[:last_nl + 1].decode("utf-8", errors="replace"), state)
 
 
 def flush_anthropic_sse_state(state: dict) -> None:
@@ -587,10 +583,7 @@ def flush_anthropic_sse_state(state: dict) -> None:
     """
     buf = state.pop("_sse_buf", b"")
     if buf:
-        try:
-            _parse_anthropic_sse_lines(buf.decode("utf-8", errors="replace"), state)
-        except Exception:
-            pass
+        _parse_anthropic_sse_lines(buf.decode("utf-8", errors="replace"), state)
     pending = state.pop("pending_tool_args", "")
     tidx = state.pop("current_tool_idx", None)
     if pending and tidx is not None and tidx < len(state.get("tool_calls", [])):

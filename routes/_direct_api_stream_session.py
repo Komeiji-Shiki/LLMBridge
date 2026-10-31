@@ -558,14 +558,11 @@ class PassthroughStreamSession:
 
         # 原样保留上游返回的原生 usage（必须在本地修正之前深拷贝；部分上游分批下发时增量合并）
         if isinstance(usage, dict) and usage:
-            try:
-                native_usage = copy.deepcopy(usage)
-                if isinstance(self.upstream_usage, dict):
-                    self.upstream_usage.update(native_usage)
-                else:
-                    self.upstream_usage = native_usage
-            except Exception:
-                pass
+            native_usage = copy.deepcopy(usage)
+            if isinstance(self.upstream_usage, dict):
+                self.upstream_usage.update(native_usage)
+            else:
+                self.upstream_usage = native_usage
 
         base_prompt = usage.get('prompt_tokens', 0) or usage.get('input_tokens', 0)
 

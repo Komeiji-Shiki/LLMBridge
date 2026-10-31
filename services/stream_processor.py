@@ -581,7 +581,7 @@ async def _handle_client_disconnect(request_id, exception, collected_content, re
         try:
             input_tokens = estimate_message_tokens(full_messages, model)
         except Exception:
-            pass
+            input_tokens = rough_message_tokens(full_messages)
     
     if partial_response:
         try:
@@ -614,7 +614,7 @@ async def _handle_stream_error(request_id, error_data, collected_content, reason
         try:
             input_tokens = estimate_message_tokens(full_messages, model)
         except Exception:
-            pass
+            input_tokens = rough_message_tokens(full_messages)
     
     if error_response:
         try:
@@ -821,7 +821,7 @@ async def _handle_non_stream_error(request_id, error_data, full_content, reasoni
         try:
             input_tokens = estimate_message_tokens(full_messages, model)
         except Exception:
-            pass
+            input_tokens = rough_message_tokens(full_messages)
     
     if error_content:
         try:

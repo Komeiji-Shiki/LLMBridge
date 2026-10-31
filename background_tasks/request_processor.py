@@ -73,8 +73,8 @@ async def process_pending_requests(
                     if queue is not None:
                         queue.put_nowait({"error": f"Retry failed: {e}"})
                         queue.put_nowait("[DONE]")
-                except Exception:
-                    pass
+                except Exception as notify_error:
+                    logger.warning(f"重试失败后无法通知原请求通道，客户端将等到超时: {notify_error}")
 
         # 添加短暂的延迟，避免同时发送过多请求
         await asyncio.sleep(1)

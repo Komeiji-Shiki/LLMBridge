@@ -307,11 +307,8 @@ async def handle_direct_api_request(
                 # sticky 策略：quota exceeded → 总是冷却 + 重试（不依赖 auto_retry）
                 if not should_retry:
                     resp_status = getattr(response, "status_code", 0)
-                    try:
-                        resp_body = response.body if hasattr(response, "body") else b""
-                        resp_body_text = resp_body.decode("utf-8", errors="ignore") if resp_body else ""
-                    except Exception:
-                        resp_body_text = ""
+                    resp_body = getattr(response, "body", b"")
+                    resp_body_text = resp_body.decode("utf-8", errors="ignore") if resp_body else ""
                     if await _sticky_cooldown_if_quota(resp_status, resp_body_text):
                         should_retry = True
                         retry_reason = f"Sticky quota exceeded (HTTP {resp_status}，换key重试)"
@@ -578,7 +575,7 @@ def _convert_non_stream_to_sse(resp_body: bytes) -> str:
 
     try:
         data = _json.loads(resp_body.decode("utf-8"))
-    except Exception:
+    except ValueError:
         return f"data: {resp_body.decode('utf-8', errors='replace')}\n\ndata: [DONE]\n\n"
 
     if not isinstance(data, dict):

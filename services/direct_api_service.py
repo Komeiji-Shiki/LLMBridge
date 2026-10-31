@@ -284,15 +284,14 @@ class DirectAPIService:
         """
         将 Gemini functionCall 转换为 OAI tool_call 格式。
         """
-        name = function_call.get("name", "unknown")
-        args = function_call.get("args", {})
-        
-        # 确保 args 是字符串（OAI 要求）
-        if isinstance(args, dict):
-            args_str = json.dumps(args, ensure_ascii=False)
-        else:
-            args_str = str(args)
-        
+        name = function_call.get("name")
+        if not name:
+            raise ValueError(f"Gemini 返回的 functionCall 没有 name: {json.dumps(function_call, ensure_ascii=False)[:200]}")
+        args = function_call.get("args") or {}
+        if not isinstance(args, dict):
+            raise ValueError(f"Gemini 返回的 functionCall '{name}' 的 args 不是对象: {type(args).__name__}")
+        args_str = json.dumps(args, ensure_ascii=False)
+
         # Gemini 3 返回 id 字段
         tool_call_id = function_call.get("id") or f"call_{uuid.uuid4().hex[:8]}"
         
@@ -670,8 +669,7 @@ class DirectAPIService:
         # 转换OpenAI格式消息为Gemini格式
         gemini_contents = []
         system_instruction_parts = []
-        # tool_call id → 函数名映射（assistant 消息先于对应 tool 结果出现，
-        # 单遍遍历即可建立；旧版从 id 字符串猜函数名，call_xxx 会猜出错误名字）
+        # tool_call id → 函数名映射（assistant 消息先于对应 tool 结果出现，单遍遍历即可建立）
         tool_id_to_name: Dict[str, str] = {}
         
         for msg in separate_tool_audio(messages):
@@ -683,10 +681,16 @@ class DirectAPIService:
                 tool_call_id = msg.get("tool_call_id", "")
                 image_parts = []
                 
-                # 优先用 assistant tool_calls 建立的映射；未命中时回退到旧版推断
-                func_name = tool_id_to_name.get(tool_call_id) or (
-                    tool_call_id.split("_", 1)[-1] if "_" in tool_call_id else "_unknown")
-                
+                # functionResponse 必须带上与 functionCall 一致的函数名，id 里推不出来
+                func_name = tool_id_to_name.get(tool_call_id)
+                if not func_name:
+                    yield {"error": {
+                        "message": f"tool message references tool_call_id '{tool_call_id}' "
+                                   "which has no matching assistant tool_call",
+                        "type": "invalid_request_error"
+                    }}
+                    return
+
                 # content 可能是 str / dict / list（OpenAI 允许 content parts 数组）
                 if isinstance(content, dict):
                     response_payload = content
@@ -885,12 +889,17 @@ class DirectAPIService:
                         fc_name = func.get("name", "")
                         args_raw = func.get("arguments", "{}")
                         try:
-                            fc_args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                            fc_args = (json.loads(args_raw) if args_raw.strip() else {}) if isinstance(args_raw, str) else args_raw
                         except json.JSONDecodeError:
+                            fc_args = None
+                        if not isinstance(fc_args, dict):
+                            # 客户端回传的历史参数不是 JSON 对象（常见于上一轮被 max_tokens 截断），
+                            # Gemini 只接受对象，只能按空参数发送
+                            logger.warning(f"[GEMINI_NATIVE] 历史工具调用 '{fc_name}' 的 arguments 不是 JSON 对象，按空参数发送")
                             fc_args = {}
                         function_call: Dict[str, Any] = {
                             "name": fc_name,
-                            "args": fc_args if isinstance(fc_args, dict) else {}
+                            "args": fc_args
                         }
                         tc_id = tc.get("id")
                         if tc_id:
