@@ -20,11 +20,13 @@ import base64
 import copy
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
-from services.protocol_events import gemini_termination
+from services.protocol_events import gemini_finish_to_openai, gemini_termination
+from services.gemini_continuation import GeminiContinuation
 from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler, compact_empty_text_parts
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
+from core.constants import GeminiDefaults
 from converters.audio import extract_audio, separate_tool_audio
 from converters.gemini_interactions import build_interactions_request_body
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage
@@ -971,7 +973,10 @@ class DirectAPIService:
             logger.info(f"[GEMINI_NATIVE] topP: {top_p}")
         if max_tokens is not None:
             logger.info(f"[GEMINI_NATIVE] maxOutputTokens: {max_tokens}")
-        
+
+        continuation = GeminiContinuation(
+            CONFIG.get("gemini_max_continuation_hops", GeminiDefaults.MAX_CONTINUATION_HOPS))
+
         try:
             context = current_request.get()
             history = assembler = None
@@ -997,87 +1002,106 @@ class DirectAPIService:
             # 转换协议后仍保留客户端的会话标识和其他端到端请求头。
             self._apply_context_upstream_headers(headers)
             apply_api_key_auth(headers, api_key, api_key_auth_mode)
-            async with self.session.post(
-                endpoint,
-                data=request_body_json.encode('utf-8'),
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(
-                    total=CONFIG.get("api_call_timeout_seconds", 3000),
-                    sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
-                )
-            ) as response:
-                # 检查响应状态
-                if response.status != 200:
-                    error_text = await response.text()
-                    error_message = error_text.strip() or f"Gemini API 返回 HTTP {response.status}（响应正文为空）"
-                    logger.error(f"[GEMINI_NATIVE] API调用失败: {response.status} - {error_message}")
-                    try:
-                        error_json = json.loads(error_text)
-                        yield _normalize_error_for_passthrough(
-                            error_json, response.status)
-                    except json.JSONDecodeError:
-                        yield {
-                            "error": {
-                                "message": error_message,
-                                "type": "api_error",
-                                "code": response.status
-                            }
-                        }
-                    return
-                
-                if stream:
-                    # 流式响应（公共 SSE 解析器；Gemini 兼容无前缀的裸 JSON 行）
-                    async for chunk in _iter_sse_json_events(response, "GEMINI_NATIVE", parse_bare_json=True):
-                        # 终止块本身可能带有最后一段内容和 usageMetadata：先原样交给
-                        # 调用方转换计费，再单独发出错误事件
-                        error = _termination_error(chunk)
-                        _assign_function_call_ids(chunk)
-                        if assembler is not None:
-                            assembler.feed(chunk)
-                        yield chunk
+            response_data = None
+            while True:
+                async with self.session.post(
+                    endpoint,
+                    data=request_body_json.encode('utf-8'),
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(
+                        total=CONFIG.get("api_call_timeout_seconds", 3000),
+                        sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
+                        sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
+                    )
+                ) as response:
+                    # 检查响应状态
+                    if response.status != 200:
+                        error_text = await response.text()
+                        error_message = error_text.strip() or f"Gemini API 返回 HTTP {response.status}（响应正文为空）"
+                        logger.error(f"[GEMINI_NATIVE] API调用失败: {response.status} - {error_message}")
+                        try:
+                            error_json = json.loads(error_text)
+                            yield continuation.with_usage(_normalize_error_for_passthrough(
+                                error_json, response.status))
+                        except json.JSONDecodeError:
+                            yield continuation.with_usage({
+                                "error": {
+                                    "message": error_message,
+                                    "type": "api_error",
+                                    "code": response.status
+                                }
+                            })
+                        return
+
+                    if stream:
+                        # 流式响应（公共 SSE 解析器；Gemini 兼容无前缀的裸 JSON 行）
+                        async for chunk in _iter_sse_json_events(response, "GEMINI_NATIVE", parse_bare_json=True):
+                            continuation.feed(chunk)
+                            # 终止块本身可能带有最后一段内容和 usageMetadata：先原样交给
+                            # 调用方转换计费，再单独发出错误事件
+                            error = _termination_error(chunk)
+                            _assign_function_call_ids(chunk)
+                            if assembler is not None:
+                                assembler.feed(chunk)
+                            yield chunk
+                            if error:
+                                yield {'error': error}
+                                return
+                    else:
+                        # 非流式响应：错误与原始响应合并，调用方仍可读取 usageMetadata
+                        response_data = continuation.merge_response(await response.json())
+                        error = _termination_error(response_data)
+                        _assign_function_call_ids(response_data)
                         if error:
-                            yield {'error': error}
+                            yield {**response_data, 'error': error}
                             return
-                    if history is not None:
-                        await history.remember(request_body.get("contents"), assembler)
-                else:
-                    # 非流式响应：错误与原始响应合并，调用方仍可读取 usageMetadata
-                    response_data = await response.json()
-                    error = _termination_error(response_data)
-                    _assign_function_call_ids(response_data)
-                    if history is not None and not error:
-                        assembler.feed(response_data)
-                        await history.remember(request_body.get("contents"), assembler)
-                    yield {**response_data, 'error': error} if error else response_data
-        
+
+                token = continuation.next_hop()
+                if token is None:
+                    break
+                logger.info(f"[GEMINI_NATIVE] 上游达到单次输出上限，开始第 {continuation.hops} 次续传")
+                # 已生成内容由 token 携带，不能追加到 contents
+                request_body_json = await asyncio.to_thread(
+                    json.dumps,
+                    {**request_body, "continuationToken": token},
+                    ensure_ascii=False,
+                    separators=(',', ':')
+                )
+
+            if history is not None:
+                if not stream:
+                    assembler.feed(response_data)
+                await history.remember(request_body.get("contents"), assembler)
+            if not stream:
+                yield response_data
+
         except asyncio.TimeoutError:
             logger.error(f"[GEMINI_NATIVE] 请求超时 (模型: {model})")
-            yield {
+            yield continuation.with_usage({
                 "error": {
                     "message": "Request timed out while waiting for Gemini API response",
                     "type": "timeout_error"
                 }
-            }
+            })
         except aiohttp.ClientError as e:
             # 网络异常可能包含请求信息，统一清除密钥后再返回。
             safe_err = _redact(str(e))
             logger.error(f"[GEMINI_NATIVE] 网络请求失败: {safe_err}")
-            yield {
+            yield continuation.with_usage({
                 "error": {
                     "message": f"Network error: {safe_err}",
                     "type": "network_error"
                 }
-            }
+            })
         except Exception as e:
             safe_err = _redact(str(e))
             logger.error(f"[GEMINI_NATIVE] 未知错误: {safe_err}", exc_info=True)
-            yield {
+            yield continuation.with_usage({
                 "error": {
                     "message": f"Unexpected error: {safe_err}",
                     "type": "internal_error"
                 }
-            }
+            })
 
     @retry_before_output
     async def call_gemini_interactions_api(
@@ -1262,82 +1286,70 @@ class DirectAPIService:
         usage = {}
         tool_calls = None  # 工具调用列表
         
-        try:
-            if "candidates" in gemini_response and len(gemini_response["candidates"]) > 0:
-                candidate = gemini_response["candidates"][0]
-                
-                if "content" in candidate and "parts" in candidate["content"]:
-                    parts = candidate["content"]["parts"]
-                    for part in parts:
-                        # 处理函数调用
-                        if "functionCall" in part:
-                            fc = part["functionCall"]
-                            if tool_calls is None:
-                                tool_calls = []
-                            # 🔧 修复：index 必须是 tool_calls 内部的连续序号。
-                            # 旧版用 parts 的下标，parts 里混有 text 块时会得到
-                            # 不连续的 index（如 [text, functionCall] → index=1），
-                            # 客户端按 index 聚合流式工具调用时直接错位。
-                            call = DirectAPIService._gemini_function_call_to_oai_tool_call(
-                                fc, index=len(tool_calls))
-                            # 签名属于 Part，不能从 Part.functionCall 中读取。
-                            if part.get("thoughtSignature"):
-                                call["_thought_signature"] = part["thoughtSignature"]
-                            if tool_call_indices is not None:
-                                call["index"] = tool_call_indices.setdefault(call["id"], len(tool_call_indices))
-                            tool_calls.append(call)
-                        # 处理文本
-                        elif "text" in part:
-                            text = part.get("text", "")
-                            # 检查是否为思考内容
-                            if part.get("thought", False):
-                                reasoning_content += text
-                            else:
-                                content += text
-                
-                # 提取finish_reason
-                if "finishReason" in candidate:
-                    gemini_reason = candidate["finishReason"]
-                    reason_map = {
-                        "STOP": "stop",
-                        "MAX_TOKENS": "length",
-                        "SAFETY": "content_filter",
-                        "RECITATION": "content_filter",
-                        "OTHER": "stop",
-                        "TOOL_USE": "tool_calls",
-                    }
-                    finish_reason = reason_map.get(gemini_reason, "stop")
+        if "candidates" in gemini_response and len(gemini_response["candidates"]) > 0:
+            candidate = gemini_response["candidates"][0]
             
-            # 提取usage信息
-            if "usageMetadata" in gemini_response:
-                metadata = gemini_response["usageMetadata"]
-                thoughts_tokens = metadata.get("thoughtsTokenCount", 0)
+            if "content" in candidate and "parts" in candidate["content"]:
+                parts = candidate["content"]["parts"]
+                for part in parts:
+                    # 处理函数调用
+                    if "functionCall" in part:
+                        fc = part["functionCall"]
+                        if tool_calls is None:
+                            tool_calls = []
+                        # 🔧 修复：index 必须是 tool_calls 内部的连续序号。
+                        # 旧版用 parts 的下标，parts 里混有 text 块时会得到
+                        # 不连续的 index（如 [text, functionCall] → index=1），
+                        # 客户端按 index 聚合流式工具调用时直接错位。
+                        call = DirectAPIService._gemini_function_call_to_oai_tool_call(
+                            fc, index=len(tool_calls))
+                        # 签名属于 Part，不能从 Part.functionCall 中读取。
+                        if part.get("thoughtSignature"):
+                            call["_thought_signature"] = part["thoughtSignature"]
+                        if tool_call_indices is not None:
+                            call["index"] = tool_call_indices.setdefault(call["id"], len(tool_call_indices))
+                        tool_calls.append(call)
+                    # 处理文本
+                    elif "text" in part:
+                        text = part.get("text", "")
+                        # 检查是否为思考内容
+                        if part.get("thought", False):
+                            reasoning_content += text
+                        else:
+                            content += text
+            
+            # 提取finish_reason
+            if "finishReason" in candidate:
+                finish_reason = gemini_finish_to_openai(candidate["finishReason"])
+        
+        # 提取usage信息
+        if "usageMetadata" in gemini_response:
+            metadata = gemini_response["usageMetadata"]
+            thoughts_tokens = metadata.get("thoughtsTokenCount", 0)
 
-                # 🔧 修复：旧版流式 chunk 在此提前 return "usage": None，把上游
-                # 给的精确 token 计数整个丢弃，下游只能退化为本地 tokenizer
-                # 估算。现在流式 chunk 与非流式共用下方的 usage 计算逻辑
-                # （Gemini 流式分块中的 usageMetadata 是累积快照，
-                # 下游以最后一个值为准）。
-                if thoughts_tokens == 0 and reasoning_content and not is_stream_chunk:
-                    # 仅非流式做估算兜底：流式 chunk 的 reasoning_content
-                    # 是增量，按增量估算会严重低估
-                    thoughts_tokens = len(reasoning_content) // 4
-                
-                prompt_tokens = metadata.get("promptTokenCount", 0)
-                candidates_tokens = metadata.get("candidatesTokenCount", 0)
+            # 🔧 修复：旧版流式 chunk 在此提前 return "usage": None，把上游
+            # 给的精确 token 计数整个丢弃，下游只能退化为本地 tokenizer
+            # 估算。现在流式 chunk 与非流式共用下方的 usage 计算逻辑
+            # （Gemini 流式分块中的 usageMetadata 是累积快照，
+            # 下游以最后一个值为准）。
+            if thoughts_tokens == 0 and reasoning_content and not is_stream_chunk:
+                # 仅非流式做估算兜底：流式 chunk 的 reasoning_content
+                # 是增量，按增量估算会严重低估
+                thoughts_tokens = len(reasoning_content) // 4
+            
+            prompt_tokens = metadata.get("promptTokenCount", 0)
+            candidates_tokens = metadata.get("candidatesTokenCount", 0)
 
-                # Gemini 的 candidatesTokenCount 不含思考，相加才是真实总输出；
-                # 下发给下游的 completion_tokens 按模型配置决定给总量还是仅正文
-                usage = compose_chat_usage(
-                    prompt_tokens=prompt_tokens,
-                    output_tokens=candidates_tokens + thoughts_tokens,
-                    reasoning_tokens=thoughts_tokens,
-                    cached_tokens=metadata.get("cachedContentTokenCount", 0),
-                    completion_mode=completion_tokens_mode,
-                    total_tokens=metadata.get("totalTokenCount", 0),
-                )
-        except Exception as e:
-            logger.error(f"[GEMINI_NATIVE] 响应转换失败: {e}", exc_info=True)
+            # Gemini 的 candidatesTokenCount 不含思考，相加才是真实总输出；
+            # 下发给下游的 completion_tokens 按模型配置决定给总量还是仅正文
+            usage = compose_chat_usage(
+                prompt_tokens=prompt_tokens,
+                output_tokens=candidates_tokens + thoughts_tokens,
+                reasoning_tokens=thoughts_tokens,
+                cached_tokens=metadata.get("cachedContentTokenCount", 0),
+                completion_mode=completion_tokens_mode,
+                total_tokens=metadata.get("totalTokenCount", 0),
+            )
         
         # 构建OpenAI格式响应
         if finish_reason == "stop" and (tool_calls or tool_call_indices):
@@ -1610,6 +1622,7 @@ class DirectAPIService:
         self, input_tokens: int, output_tokens: int, pricing: Dict[str, Any],
         cached_tokens: int = 0, cache_write_tokens: int = 0,
         cache_write_1h_tokens: int = 0, upstream_usage: Optional[dict] = None,
+        tier_input_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         """复用共享计费逻辑，输入总量已经包含缓存读取和写入。"""
         from utils.api_pricing import calculate_api_cost, uses_explicit_cache
@@ -1618,7 +1631,8 @@ class DirectAPIService:
             context = current_request.get()
             explicit = uses_explicit_cache(context.upstream_request) if context else False
             return calculate_api_cost(input_tokens, output_tokens, pricing, cached_tokens,
-                                      cache_write_tokens, cache_write_1h_tokens, upstream_usage, explicit)
+                                      cache_write_tokens, cache_write_1h_tokens, upstream_usage, explicit,
+                                      tier_input_tokens)
         except Exception as exc:
             logger.error(f"[DIRECT_API] 成本计算失败: {exc}")
             return {"input_tokens": input_tokens, "output_tokens": output_tokens,

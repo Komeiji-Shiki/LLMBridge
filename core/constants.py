@@ -42,6 +42,12 @@ class TimeoutDefaults:
     TOKENIZER_IDLE_TIMEOUT = 120  # 2分钟空闲即卸载，tokenizer占内存大
 
 
+class GeminiDefaults:
+    """Gemini 上游默认值"""
+    # 总预算上限 1048576 / 非流式单跳 32768，32 跳足以走满预算
+    MAX_CONTINUATION_HOPS = 32
+
+
 class CacheDefaults:
     """缓存相关默认值"""
     # 图片缓存

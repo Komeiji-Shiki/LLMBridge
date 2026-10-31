@@ -38,6 +38,8 @@
   "stream_response_timeout_seconds": 3000,
   "api_call_timeout_seconds": 3000,
   "first_chunk_timeout_seconds": 600,
+  // Gemini 输出达到单次上限（CONTINUATION）时的自动续传次数；0 表示不续传，按输出截断结束
+  "gemini_max_continuation_hops": 32,
   "max_concurrent_downloads": 20,
   "connection_pool": {
     "total_limit": 200,

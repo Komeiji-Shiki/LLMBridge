@@ -24,6 +24,28 @@ def payloads(chunk):
     return values
 
 
+# Gemini 结束原因的唯一语义表：表内是正常结束，值为对应的 OpenAI finish_reason；
+# 表外的值（含以后新增的）一律按异常终止上报，不能伪装成正常结束。
+GEMINI_NORMAL_FINISH = {
+    'STOP': 'stop',
+    'MAX_TOKENS': 'length',
+    # 能续传的中间跳不会走到这里；留到这里说明内容不完整，要让客户端知道被截断了。
+    'CONTINUATION': 'length',
+}
+GEMINI_UNSPECIFIED_REASONS = ('FINISH_REASON_UNSPECIFIED', 'BLOCK_REASON_UNSPECIFIED')
+GEMINI_FILTERED_FINISH = frozenset((
+    'SAFETY', 'RECITATION', 'LANGUAGE', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII',
+    'IMAGE_SAFETY', 'IMAGE_PROHIBITED_CONTENT', 'IMAGE_RECITATION',
+))
+
+
+def gemini_finish_to_openai(reason):
+    """异常终止返回 None：错误由 gemini_termination 单独上报。"""
+    if reason in GEMINI_FILTERED_FINISH:
+        return 'content_filter'
+    return GEMINI_NORMAL_FINISH.get(reason)
+
+
 def gemini_termination(value):
     """提取 Gemini 原始停止原因，将异常终止转换成可读错误。"""
     if not isinstance(value, dict):
@@ -34,8 +56,7 @@ def gemini_termination(value):
     feedback = value.get('promptFeedback')
     feedback = feedback if isinstance(feedback, dict) else {}
     reason = candidate.get('finishReason') or feedback.get('blockReason')
-    if not reason or reason in ('STOP', 'MAX_TOKENS', 'CONTINUATION', 'TOOL_USE',
-                                'FINISH_REASON_UNSPECIFIED', 'BLOCK_REASON_UNSPECIFIED'):
+    if not reason or reason in GEMINI_NORMAL_FINISH or reason in GEMINI_UNSPECIFIED_REASONS:
         return reason, None
     detail = candidate.get('finishMessage') or feedback.get('blockReasonMessage')
     message = f'Gemini 上游终止生成：{reason}'

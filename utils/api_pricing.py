@@ -55,13 +55,18 @@ def chat_cache_details(cached_tokens, usage):
 
 def calculate_api_cost(input_tokens, output_tokens, pricing, cached_tokens=0,
                        cache_write_tokens=0, cache_write_1h_tokens=0, upstream_usage=None,
-                       explicit_cache=False):
-    """缓存写入按完整单价替换普通输入价，额外费用仅作为明细，不再次加总。"""
+                       explicit_cache=False, tier_input_tokens=None):
+    """缓存写入按完整单价替换普通输入价，额外费用仅作为明细，不再次加总。
+
+    tier_input_tokens：一次响应跨多个上游请求时，input_tokens 是各请求之和，
+    阶梯仍要按单次请求的输入量选择。
+    """
     inputs, outputs = as_int(input_tokens), as_int(output_tokens)
     # 阶梯以单次请求总输入量选择，命中缓存的输入也参与判断。
     base = pricing
+    tier_basis = as_int(tier_input_tokens) or inputs
     for tier in sorted(base.get('input_tiers', []), key=lambda item: item['min_input_tokens']):
-        if inputs >= tier['min_input_tokens']:
+        if tier_basis >= tier['min_input_tokens']:
             pricing = {**base, **tier}
     cached = min(as_int(cached_tokens), inputs)
     if upstream_usage is not None:
