@@ -42,7 +42,7 @@ from core.config_loader import (  # noqa: E402
 from core.api_key_manager import api_key_manager  # noqa: E402
 from core.db_stats import stats_db  # noqa: E402
 from core.app_state import get_app_state, AppState  # noqa: E402
-from core.constants import CacheDefaults  # noqa: E402
+from core.constants import CacheDefaults, ServerDefaults  # noqa: E402
 from core.middleware import (  # noqa: E402
     SelectiveGZipMiddleware, SelectiveCORSMiddleware,
     CachedStaticFiles, WebAccessKeyMiddleware
@@ -145,7 +145,7 @@ async def lifespan(app: FastAPI):
     if mode == 'battle':
         logger.info(f"  - Battle 模式目标: Assistant {target}")
     logger.info("="*60)
-    server_port = CONFIG.get("server_port", 5102)
+    server_port = CONFIG.get("server_port", ServerDefaults.DEFAULT_PORT)
     logger.info(f"📊 监控面板: http://127.0.0.1:{server_port}/admin")
     logger.info("="*60)
 
@@ -292,7 +292,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"❌ 无法加载配置文件 config.jsonc，拒绝启动: {e}")
         sys.exit(1)
-    api_port = CONFIG.get("server_port", 5102)
+    api_port = CONFIG.get("server_port", ServerDefaults.DEFAULT_PORT)
     enable_ipv6 = CONFIG.get("enable_ipv6", True)
 
     logger.info(f"🚀 LMArena Bridge v2.0 API 服务器正在启动（Hypercorn / HTTP/2）...")

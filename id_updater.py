@@ -47,6 +47,12 @@ MODEL_ENDPOINT_MAP_PATH = 'model_endpoint_map.json'
 # 有效的自动保存模式
 VALID_AUTO_SAVE_MODES = ['model', 'global', 'ask']
 
+def api_server_base():
+    """主服务地址；端口跟随 config.jsonc，与 ServerDefaults.DEFAULT_PORT 使用同一默认值。"""
+    port = (read_config() or {}).get('server_port', 5102)
+    return f'http://127.0.0.1:{port}'
+
+
 def read_config():
     """读取并解析 config.jsonc 文件，移除注释以便解析。"""
     if not os.path.exists(CONFIG_PATH):
@@ -224,11 +230,11 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                     captured_data['session_id'] = session_id
                     captured_data['message_id'] = message_id
 
-                    # 🎯 新增：同时通知api_server（端口5102），让admin面板能检测到
+                    # 🎯 新增：同时通知api_server，让admin面板能检测到
                     try:
                         print("\n📡 正在通知主服务器...")
                         notify_response = requests.post(
-                            'http://127.0.0.1:5102/internal/receive_captured_ids',
+                            f'{api_server_base()}/internal/receive_captured_ids',
                             json={'sessionId': session_id, 'messageId': message_id},
                             timeout=3
                         )
@@ -237,7 +243,7 @@ class RequestHandler(http.server.SimpleHTTPRequestHandler):
                         else:
                             print(f"⚠️  通知主服务器失败: HTTP {notify_response.status_code}")
                     except requests.ConnectionError:
-                        print("⚠️  无法连接到主服务器（端口5102），admin面板将无法显示捕获结果")
+                        print(f"⚠️  无法连接到主服务器（{api_server_base()}），admin面板将无法显示捕获结果")
                         print("   - 提示：确保 api_server.py 正在运行")
                     except Exception as e:
                         print(f"⚠️  通知主服务器时出错: {e}")
@@ -280,7 +286,7 @@ def run_server():
 
 def notify_api_server():
     """通知主 API 服务器，ID 更新流程已开始。"""
-    api_server_url = "http://127.0.0.1:5102/internal/start_id_capture"
+    api_server_url = f"{api_server_base()}/internal/start_id_capture"
     try:
         response = requests.post(api_server_url, timeout=3)
         if response.status_code == 200:

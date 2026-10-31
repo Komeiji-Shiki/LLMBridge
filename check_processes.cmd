@@ -11,9 +11,15 @@ wmic process where "name='python.exe' or name='pythonw.exe'" get ProcessId,Comma
 
 echo.
 echo ========================================
-echo 端口 5102 占用情况:
+for /f "delims=" %%i in ('python "%~dp0scripts\read_config.py" server_port') do set PORT=%%i
+if not defined PORT (
+    echo [错误] 无法读取端口号，请确认 Python 可用。
+    pause
+    exit /b 1
+)
+echo 端口 %PORT% 占用情况:
 echo ========================================
-netstat -ano | findstr :5102
+netstat -ano | findstr :%PORT%
 
 echo.
 echo ========================================

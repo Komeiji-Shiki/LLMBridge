@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LMArena API Bridge
 // @namespace    http://tampermonkey.net/
-// @version      2.9
+// @version      2.10
 // @description  Bridges LMArena to a local API server via WebSocket. Uses new post-to-evaluation API endpoint.
 // @author       Lianues
 // @match        https://lmarena.ai/*
@@ -15,7 +15,8 @@
     'use strict';
 
     // --- 配置 ---
-    const SERVER_URL = "ws://localhost:5102/ws"; // 与 api_server.py 中的端口匹配
+    const SERVER_PORT = 5102; // 与 config.jsonc 的 server_port 保持一致
+    const SERVER_URL = `ws://localhost:${SERVER_PORT}/ws`;
     let socket;
     let isCaptureModeActive = false; // ID捕获模式的开关
 
@@ -798,7 +799,7 @@
     async function sendPageSource() {
         try {
             const htmlContent = document.documentElement.outerHTML;
-            await fetch('http://localhost:5102/internal/update_available_models', { // 新的端点
+            await fetch(`http://localhost:${SERVER_PORT}/internal/update_available_models`, { // 新的端点
                 method: 'POST',
                 headers: {
                     'Content-Type': 'text/html; charset=utf-8'
@@ -820,7 +821,7 @@
     console.log("  ✅ 支持 Direct 和 Battle 模式");
     console.log("  ✅ 支持多标签页并发");
     console.log("  ✅ 自动重试机制处理空响应");
-    console.log("  - 聊天功能已连接到 ws://localhost:5102");
+    console.log(`  - 聊天功能已连接到 ${SERVER_URL}`);
     console.log("  - ID 捕获器将发送到 http://localhost:5103");
     console.log("========================================");
 

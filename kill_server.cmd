@@ -5,8 +5,14 @@ echo 终止 LMArena Bridge 后端进程
 echo ========================================
 echo.
 
-echo 正在查找占用端口 5102 的进程...
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5102 ^| findstr LISTENING') do (
+for /f "delims=" %%i in ('python "%~dp0scripts\read_config.py" server_port') do set PORT=%%i
+if not defined PORT (
+    echo [错误] 无法读取端口号，请确认 Python 可用。
+    pause
+    exit /b 1
+)
+echo 正在查找占用端口 %PORT% 的进程...
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%PORT% ^| findstr LISTENING') do (
     echo 发现进程 PID: %%a
     echo 正在终止进程...
     taskkill /F /PID %%a

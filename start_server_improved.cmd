@@ -13,9 +13,13 @@ echo.
 REM 设置窗口标题，方便识别
 title LMArena Bridge Server
 
-REM 读取端口号（与 点击启动.CMD 同口径，缺配置时回退 5102）
-for /f "delims=" %%i in ('python -c "import re;c=open('config.jsonc',encoding='utf-8').read();m=re.search(r'\"server_port\"\s*:\s*(\d+)',c);print(m.group(1) if m else 5102)" 2^>nul') do set PORT=%%i
-if "%PORT%"=="" set PORT=5102
+REM 读取端口号（与 点击启动.CMD 同口径）
+for /f "delims=" %%i in ('python "%~dp0scripts\read_config.py" server_port') do set PORT=%%i
+if not defined PORT (
+    echo [错误] 无法读取端口号，请确认 Python 可用。
+    pause
+    exit /b 1
+)
 title LMArena Bridge Server - Port %PORT%
 
 REM 检查端口是否已被占用

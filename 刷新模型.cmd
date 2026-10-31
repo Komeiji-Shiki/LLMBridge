@@ -21,7 +21,13 @@ if not exist model_endpoint_map.json (
 )
 
 echo [1/2] 模型配置文件存在，正在检查服务状态...
-netstat -ano | findstr :5102 | findstr LISTENING >nul
+for /f "delims=" %%i in ('python "%~dp0scripts\read_config.py" server_port') do set PORT=%%i
+if not defined PORT (
+    echo [错误] 无法读取端口号，请确认 Python 可用。
+    pause
+    exit /b 1
+)
+netstat -ano | findstr :%PORT% | findstr LISTENING >nul
 if errorlevel 1 (
     echo 服务似乎没有在运行。
     echo 请先用 点击启动.CMD 启动服务，修改 model_endpoint_map.json
