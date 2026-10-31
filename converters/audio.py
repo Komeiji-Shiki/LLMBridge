@@ -5,8 +5,12 @@ from typing import Any, Dict, Iterable, Iterator, Optional
 
 
 _AUDIO_ENVELOPE = re.compile(
-    r'<graywill_audio mime_type="(audio/[^"<>\s]+)">([A-Za-z0-9+/=]+)</graywill_audio>'
-    r'|<graywill_audio_ref id="([a-f0-9]{32})"\s*/>'
+    # 封装必须独占一行，避免把源码字符串里的标签当成音频；兼容 Read 的行号前缀。
+    r'^[ \t]*(?:\d+[ \t]*→[ \t]*)?'
+    r'(?:<graywill_audio mime_type="(audio/[^"<>\s]+)">([A-Za-z0-9+/=]+)</graywill_audio>'
+    r'|<graywill_audio_ref id="([a-f0-9]{32})"[ \t]*/>)'
+    r'[ \t]*(?=\r?$)',
+    re.MULTILINE,
 )
 
 
@@ -76,7 +80,7 @@ def audio_to_openai(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def split_audio_text(text: str):
-    """还原 Claude Code Read 的音频封装；普通文字及文件信息保持原序。"""
+    """还原 Claude Code Read 独占一行的音频封装；其余文字保持原样及顺序。"""
     if "<graywill_audio" not in text:
         return [{"type": "text", "text": text}]
     parts = []
