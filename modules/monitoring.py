@@ -745,6 +745,10 @@ class MonitoringService:
                     response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None,
                     upstream_usage: Optional[dict] = None, system_fingerprint: Optional[str] = None):
         """记录请求结束（实际执行，在线程池中运行）"""
+        # 失败记录必须带原因；走到这里说明调用方漏传，要让这个疏漏能被看见。
+        if not success and not error:
+            error = '网关未记录失败原因'
+            logger.warning(f"请求 {request_id} 失败但调用方未提供原因")
         # 🔧 缩锁优化：锁内只做数据更新，asdict/日志构建移到锁外
         current_time = time.time()
         # 原始停止原因同时进入实时缓存和持久化日志，避免界面显示为空。

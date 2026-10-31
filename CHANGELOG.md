@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 2026-11-01：Gemini 长输出续传与失败上报
+
+- Gemini 上游返回 `CONTINUATION` 时自动带 `continuationToken` 续传，多跳合并成一次响应；无法续传时按 `length` / `max_tokens` 结束，不再把半截内容报成正常结束。跳数上限由 `gemini_max_continuation_hops` 配置（默认 32，0 为关闭）；原生 Gemini 客户端仍原样收到 token，由客户端决定是否续传。
+- 续传用量：`input_tokens` 只报第一跳，避免客户端误判上下文大小；成本按每跳实际计费累加，价格阶梯仍按单次请求输入量选择。
+- Gemini 结束原因统一到 `services/protocol_events.py` 一张语义表，表外的值一律按异常上报；响应转换异常不再被吞掉，会同时告知客户端和监控。
+- 心跳覆盖 Gemini 整条流并透传到 Anthropic 客户端，模型思考或续传期间不再静默。
+- 失败记录必须带原因：客户端中途断开记为 `Client disconnected`，有部分输出也不再算成功；结束原因已转发后的正常关流仍算成功。流式失败只落盘一次，非流式统一走 `record_request_failure`；透传首块错误保留上游原始信息。
+
 ### 2026-09-27：Codex 计价与首页刷新修复
 
 - 补充 GPT-6 Sol 标准 API 估算价：每百万 Token 普通输入 $2、缓存输入 $0.20、缓存写入 $2.50、输出 $10；单次输入超过 272K 时，输入与缓存单价乘 2、输出单价乘 1.5。

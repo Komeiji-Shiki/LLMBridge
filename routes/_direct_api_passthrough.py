@@ -36,6 +36,7 @@ from ._direct_api_utils import (
     is_error_json,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
+    record_request_failure,
 )
 
 logger = logging.getLogger(__name__)
@@ -452,14 +453,18 @@ async def _handle_passthrough_stream(
     if session.upstream_error_detected:
         if logprobs_collector is not None:
             try:
-                await logprobs_collector.finish(completed=False, error="上游返回错误响应")
+                await logprobs_collector.finish(completed=False, error=session.error_msg)
             except Exception:
                 pass
+        await _record_failed_request(
+            monitoring_service, request_id, display_name, session.error_msg,
+            openai_req, pricing_config, direct_api_service,
+            estimate_message_tokens_func, full_messages)
         try:
             await api_iterator.aclose()
         except Exception:
             pass
-        raise HTTPException(status_code=502, detail="上游返回错误响应")
+        raise HTTPException(status_code=502, detail=session.error_msg)
 
     # ── 流式生成器（处理首块之后的剩余流）──
     async def combined_stream_generator():
@@ -607,28 +612,13 @@ async def _handle_passthrough_non_stream(
             error_message = error_details.get('message', '') if isinstance(error_details, dict) else str(error_details)
             logger.error(f"[DIRECT_API_PASSTHROUGH] 非流式请求失败: {status_code} - {error_message}")
 
-            partial_input_tokens = 0
-            try:
-                partial_input_tokens = estimate_message_tokens_func(
-                    openai_req.get('messages', []), model=display_name)
-            except Exception as token_err:
-                logger.warning(f"[DIRECT_API_PASSTHROUGH] 非流式错误时输入token计算失败: {token_err}")
-
-            cost_info = direct_api_service.calculate_cost(
-                input_tokens=partial_input_tokens, output_tokens=0,
-                pricing=pricing_config, upstream_usage=response_json.get("usage")) if pricing_config else {}
-
-            if cost_info.get("total_cost"):
-                logger.info(f"[DIRECT_API_PASSTHROUGH] 非流式失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-
-            monitoring_service.request_end(
-                request_id=request_id, success=False, error=error_message,
-                input_tokens=partial_input_tokens, output_tokens=0,
-                cost_info=cost_info, full_messages=full_messages,
-                upstream_usage=response_json.get("usage") if isinstance(response_json.get("usage"), dict) else None,
+            usage = response_json.get("usage")
+            await record_request_failure(
+                monitoring_service, direct_api_service, request_id, error_message,
+                display_name=display_name, messages=openai_req.get('messages', []), pricing_config=pricing_config,
+                estimate_message_tokens_func=estimate_message_tokens_func, full_messages=full_messages,
+                log_tag="DIRECT_API_PASSTHROUGH", upstream_usage=usage if isinstance(usage, dict) else None,
                 system_fingerprint=response_json.get("system_fingerprint"))
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id, "success": False})
             return JSONResponse(status_code=status_code, content=normalized_error)
 
         if logprobs_collector is not None:
@@ -748,26 +738,11 @@ async def _record_failed_request(monitoring_service, request_id, display_name,
                                   direct_api_service, estimate_message_tokens_func,
                                   full_messages):
     """记录失败请求的token和成本"""
-    partial_input_tokens = 0
-    try:
-        partial_input_tokens = await estimate_message_tokens_non_blocking(
-            estimate_message_tokens_func,
-            openai_req.get('messages', []), display_name)
-    except Exception as token_err:
-        logger.warning(f"[DIRECT_API_PASSTHROUGH] 输入token计算失败: {token_err}")
-
-    cost_info = direct_api_service.calculate_cost(
-        input_tokens=partial_input_tokens, output_tokens=0,
-        pricing=pricing_config) if pricing_config else {}
-    if cost_info.get("total_cost"):
-        logger.info(f"[DIRECT_API_PASSTHROUGH] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-
-    monitoring_service.request_end(
-        request_id=request_id, success=False, error=error_msg,
-        input_tokens=partial_input_tokens, output_tokens=0,
-        cost_info=cost_info, full_messages=full_messages)
-    await monitoring_service.broadcast_to_monitors(
-        {"type": "request_end", "request_id": request_id, "success": False})
+    await record_request_failure(
+        monitoring_service, direct_api_service, request_id, error_msg,
+        display_name=display_name, messages=openai_req.get('messages', []), pricing_config=pricing_config,
+        estimate_message_tokens_func=estimate_message_tokens_func, full_messages=full_messages,
+        log_tag="DIRECT_API_PASSTHROUGH")
 
 
 async def _handle_first_chunk_error(error_json, monitoring_service, request_id,

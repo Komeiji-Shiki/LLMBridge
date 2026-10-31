@@ -45,6 +45,7 @@ from ._direct_api_utils import (
     is_error_json,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
+    record_request_failure,
 )
 
 logger = logging.getLogger(__name__)
@@ -1429,6 +1430,11 @@ async def handle_anthropic_native_from_openai(
     logger.info(f"[OAI_TO_ANTHROPIC] 发送请求体 keys={list(anthropic_body.keys())}")
     logger.info(f"[OAI_TO_ANTHROPIC] 请求体前500字符: {json.dumps(debug_body, ensure_ascii=False)[:500]}")
 
+    failure_context = dict(
+        display_name=display_name, messages=openai_req.get("messages", []), pricing_config=pricing_config,
+        estimate_message_tokens_func=estimate_message_tokens_func, full_messages=full_messages,
+        log_tag="OAI_TO_ANTHROPIC")
+
     # ── 首块超时配置 ──
     first_chunk_timeout = TimeoutDefaults.FIRST_CHUNK_TIMEOUT
     if CONFIG:
@@ -1462,12 +1468,8 @@ async def handle_anthropic_native_from_openai(
                     pass
                 error_msg = f"上游API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                 logger.error(f"[OAI_TO_ANTHROPIC] {error_msg}")
-                monitoring_service.request_end(
-                    request_id=request_id, success=False, error=error_msg,
-                    input_tokens=0, output_tokens=0,
-                    full_messages=full_messages)
-                await monitoring_service.broadcast_to_monitors({
-                    "type": "request_end", "request_id": request_id, "success": False})
+                await record_request_failure(
+                    monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
                 raise HTTPException(status_code=504, detail=error_msg)
             try:
                 await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
@@ -1489,11 +1491,8 @@ async def handle_anthropic_native_from_openai(
                 await api_iter.aclose()
             except Exception:
                 pass
-            monitoring_service.request_end(
-                request_id=request_id, success=False, error=error_msg,
-                full_messages=full_messages)
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id, "success": False})
+            await record_request_failure(
+                monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
             raise HTTPException(status_code=502, detail=error_msg)
 
         # 检测首个块是否为上游错误：裸 JSON 错误体，或
@@ -1504,11 +1503,8 @@ async def handle_anthropic_native_from_openai(
             status_code = map_upstream_error_to_status_code(normalized, default_status_code=500)
             error_msg = str(normalized.get("error", {}))
             logger.error(f"[OAI_TO_ANTHROPIC] 流式上游返回错误: {error_msg[:300]}")
-            monitoring_service.request_end(
-                request_id=request_id, success=False, error=error_msg,
-                full_messages=full_messages)
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id, "success": False})
+            await record_request_failure(
+                monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
             return JSONResponse(status_code=status_code, content=normalized)
 
         # 构建一个能先发送 first_chunk 再继续的迭代器
@@ -1566,11 +1562,8 @@ async def handle_anthropic_native_from_openai(
                 logger.warning(f"[OAI_TO_ANTHROPIC] 非流式上游返回错误: {error_msg[:300]}")
                 normalized = normalize_to_openai_error(response_json)
                 status_code = map_upstream_error_to_status_code(normalized, default_status_code=500)
-                monitoring_service.request_end(
-                    request_id=request_id, success=False, error=error_msg,
-                    full_messages=full_messages)
-                await monitoring_service.broadcast_to_monitors({
-                    "type": "request_end", "request_id": request_id, "success": False})
+                await record_request_failure(
+                    monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
                 return JSONResponse(status_code=status_code, content=normalized)
 
             # 工具名改写：先把别名恢复为原名，再提取监控内容和转换格式
@@ -1619,11 +1612,8 @@ async def handle_anthropic_native_from_openai(
             success = False
             error_msg = str(e)
             logger.error(f"[OAI_TO_ANTHROPIC] 非流式处理失败: {e}", exc_info=True)
-            monitoring_service.request_end(
-                request_id=request_id, success=False, error=error_msg,
-                full_messages=full_messages)
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id, "success": False})
+            await record_request_failure(
+                monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
             raise HTTPException(status_code=500, detail=f"Anthropic 原生透传失败: {str(e)}")
 
         finally:

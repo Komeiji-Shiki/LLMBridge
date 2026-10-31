@@ -36,10 +36,23 @@ from ._direct_api_utils import (
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     finalize_tool_calls,
+    iter_with_keepalive,
     map_upstream_error_to_status_code,
+    record_request_failure,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _gemini_cost(direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage):
+    """续传的每一跳都按完整提示计费；展示用的 input_tokens 只算第一跳。"""
+    if not pricing_config:
+        return {}
+    billed = upstream_usage or {}
+    return direct_api_service.calculate_cost(
+        input_tokens=billed.get("billedPromptTokenCount", input_tokens), output_tokens=output_tokens,
+        cached_tokens=billed.get("billedCachedTokenCount", cached_tokens),
+        pricing=pricing_config, tier_input_tokens=input_tokens)
 
 
 def upstream_signatures(response: dict) -> list:
@@ -264,6 +277,10 @@ async def handle_gemini_native_direct(
         "timestamp": time.time()
     })
 
+    failure_context = dict(
+        display_name=display_name, messages=openai_req.get("messages", []), pricing_config=pricing_config,
+        estimate_message_tokens_func=estimate_message_tokens_func, full_messages=full_messages, log_tag="GEMINI_NATIVE")
+
     try:
         is_stream = openai_req.get("stream", False)
         logger.info(f"[GEMINI_NATIVE] 模型映射: '{model_name}' -> '{target_model_id}'")
@@ -345,183 +362,96 @@ async def handle_gemini_native_direct(
                 signatures = []
                 request_success = False
                 stream_completed = False
+                finish_seen = False  # 结束原因已转发：此后客户端主动关流不算失败
                 error_msg = None
+                internal_error = None  # 网关自身处理异常，要在流尾告知客户端
                 # 客户端已消失时 finally 不能再 yield（见下方 GeneratorExit 处理）
                 client_gone = False
                 # 首块超时/空响应/预读错误时，已在分支中 yield 了 error 事件；
                 # 设此标志阻止 finally 再补发空的 usage/[DONE] 尾部块
                 tail_suppressed = False
+                first_chunk_seen = False
                 splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
+                # 下限 1 秒：避免配置为 0/负数时 busy-loop 狂发 keep-alive（与透传链路对齐）
+                heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
+                chunks = iter_with_keepalive(gemini_generator, heartbeat_interval)
+
+                def consume(gemini_chunk):
+                    """累积一个上游块，返回要转发的 SSE 文本（被思考分隔吞掉时为 None）。"""
+                    nonlocal upstream_usage, input_tokens, output_tokens, reasoning_tokens
+                    nonlocal cached_tokens, total_tokens, finish_seen
+                    _meta = gemini_chunk.get("usageMetadata")
+                    if isinstance(_meta, dict) and _meta:
+                        upstream_usage = _meta
+                    signatures.extend(upstream_signatures(gemini_chunk))
+                    openai_chunk = direct_api_service.convert_gemini_response_to_openai(
+                        gemini_chunk, display_name, request_id, is_stream_chunk=True,
+                        completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
+
+                    choice = openai_chunk.get("choices", [{}])[0]
+                    finish_seen = finish_seen or bool(choice.get("finish_reason"))
+                    delta = choice.get("delta", {})
+                    suppress_chunk = splitter.process(delta)
+                    delta_content = delta.get("content", "")
+                    delta_reasoning = delta.get("reasoning_content", "")
+                    delta_tool_calls = delta.get("tool_calls")
+
+                    if delta_content:
+                        content_parts.append(delta_content)
+                    if delta_reasoning:
+                        reasoning_parts.append(delta_reasoning)
+                    if delta_tool_calls:
+                        append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
+
+                    if "usage" in openai_chunk and openai_chunk["usage"]:
+                        usage = openai_chunk["usage"]
+                        input_tokens = extract_prompt_tokens(usage)
+                        # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
+                        output_tokens = total_output_tokens(usage)
+                        reasoning_tokens = extract_reasoning_tokens(usage)
+                        cached_tokens = extract_cached_tokens(usage)
+                        total_tokens = resolve_usage_tokens(usage).total_tokens
+
+                    return None if suppress_chunk else f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
                 try:
-                    api_task = asyncio.create_task(anext(gemini_generator))
-                    # 下限 1 秒：避免配置为 0/负数时 busy-loop 狂发 keep-alive（与透传链路对齐）
-                    heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
+                    yield f": keep-alive {int(time.time())}\n\n"
                     first_chunk_wait_start = time.time()
 
-                    while not api_task.done():
-                        yield f": keep-alive {int(time.time())}\n\n"
-                        if time.time() - first_chunk_wait_start > first_chunk_timeout:
-                            api_task.cancel()
-                            try:
-                                await api_task
-                            except asyncio.CancelledError:
-                                pass
-                            error_msg = f"Gemini Native API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
-                            logger.error(f"[GEMINI_NATIVE] {error_msg}")
-                            partial_input_tokens = 0
-                            try:
-                                partial_input_tokens = estimate_message_tokens_func(
-                                    openai_req.get('messages', []), model=display_name)
-                            except Exception as token_err:
-                                logger.warning(f"[GEMINI_NATIVE] 超时时输入token计算失败: {token_err}")
-                            cost_info = direct_api_service.calculate_cost(
-                                input_tokens=partial_input_tokens, output_tokens=0,
-                                pricing=pricing_config) if pricing_config else {}
-                            if cost_info.get("total_cost"):
-                                logger.info(f"[GEMINI_NATIVE] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-                            monitoring_service.request_end(
-                                request_id=request_id, success=False, error=error_msg,
-                                input_tokens=partial_input_tokens, output_tokens=0,
-                                cost_info=cost_info, full_messages=full_messages)
-                            await monitoring_service.broadcast_to_monitors(
-                                {"type": "request_end", "request_id": request_id, "success": False})
-                            # 向客户端发送错误事件，避免客户端看到空 SSE 流以为成功
-                            yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
-                            tail_suppressed = True
-                            return
-                        try:
-                            await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
-                        except asyncio.TimeoutError:
+                    async for gemini_chunk in chunks:
+                        if gemini_chunk is None:
+                            if not first_chunk_seen and time.time() - first_chunk_wait_start > first_chunk_timeout:
+                                error_msg = f"Gemini Native API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
+                                logger.error(f"[GEMINI_NATIVE] {error_msg}")
+                                # 向客户端发送错误事件，避免客户端看到空 SSE 流以为成功
+                                yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
+                                tail_suppressed = True
+                                return
+                            # 续传跳之间模型可能长时间静默，心跳覆盖整条流
+                            yield f": keep-alive {int(time.time())}\n\n"
                             continue
 
-                    try:
-                        first_gemini_chunk = await api_task
-                    except StopAsyncIteration:
+                        if "error" in gemini_chunk:
+                            error_msg = str(gemini_chunk.get("error"))
+                            yield f"data: {json.dumps({'error': gemini_chunk['error']}, ensure_ascii=False)}\n\n"
+                            if not first_chunk_seen:
+                                logger.error(f"[GEMINI_NATIVE] 流式预读检测到错误: {gemini_chunk}")
+                                yield "data: [DONE]\n\n"
+                                tail_suppressed = True
+                                return
+                            break
+
+                        first_chunk_seen = True
+                        sse_text = consume(gemini_chunk)
+                        if sse_text:
+                            yield sse_text
+
+                    if not first_chunk_seen:
                         error_msg = f"Gemini Native API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                         logger.error(f"[GEMINI_NATIVE] {error_msg}")
-                        partial_input_tokens = 0
-                        try:
-                            partial_input_tokens = estimate_message_tokens_func(
-                                openai_req.get('messages', []), model=display_name)
-                        except Exception as token_err:
-                            logger.warning(f"[GEMINI_NATIVE] 空响应时输入token计算失败: {token_err}")
-                        cost_info = direct_api_service.calculate_cost(
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            pricing=pricing_config) if pricing_config else {}
-                        if cost_info.get("total_cost"):
-                            logger.info(f"[GEMINI_NATIVE] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-                        monitoring_service.request_end(
-                            request_id=request_id, success=False, error=error_msg,
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            cost_info=cost_info, full_messages=full_messages)
-                        await monitoring_service.broadcast_to_monitors(
-                            {"type": "request_end", "request_id": request_id, "success": False})
                         yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'empty_response'}}, ensure_ascii=False)}\n\n"
                         tail_suppressed = True
                         return
-
-                    if "error" in first_gemini_chunk:
-                        error_detail = first_gemini_chunk.get("error")
-                        logger.error(f"[GEMINI_NATIVE] 流式预读检测到错误: {first_gemini_chunk}")
-                        partial_input_tokens = 0
-                        try:
-                            partial_input_tokens = estimate_message_tokens_func(
-                                openai_req.get('messages', []), model=display_name)
-                        except Exception as token_err:
-                            logger.warning(f"[GEMINI_NATIVE] 错误时输入token计算失败: {token_err}")
-                        cost_info = direct_api_service.calculate_cost(
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            pricing=pricing_config) if pricing_config else {}
-                        if cost_info.get("total_cost"):
-                            logger.info(f"[GEMINI_NATIVE] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-                        monitoring_service.request_end(
-                            request_id=request_id, success=False, error=str(error_detail),
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            cost_info=cost_info, full_messages=full_messages)
-                        await monitoring_service.broadcast_to_monitors(
-                            {"type": "request_end", "request_id": request_id, "success": False})
-                        yield f"data: {json.dumps({'error': first_gemini_chunk['error']}, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        tail_suppressed = True
-                        return
-
-                    # 处理预读的第一个块
-                    for gemini_chunk in [first_gemini_chunk]:
-                        _meta = gemini_chunk.get("usageMetadata")
-                        if isinstance(_meta, dict) and _meta:
-                            upstream_usage = _meta
-                        signatures.extend(upstream_signatures(gemini_chunk))
-                        openai_chunk = direct_api_service.convert_gemini_response_to_openai(
-                            gemini_chunk, display_name, request_id, is_stream_chunk=True,
-                            completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
-
-                        delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
-                        suppress_chunk = splitter.process(delta)
-                        delta_content = delta.get("content", "")
-                        delta_reasoning = delta.get("reasoning_content", "")
-                        delta_tool_calls = delta.get("tool_calls")
-
-                        if delta_content:
-                            content_parts.append(delta_content)
-                        if delta_reasoning:
-                            reasoning_parts.append(delta_reasoning)
-                        if delta_tool_calls:
-                            append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
-
-                        if "usage" in openai_chunk and openai_chunk["usage"]:
-                            usage = openai_chunk["usage"]
-                            input_tokens = extract_prompt_tokens(usage)
-                            # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
-                            output_tokens = total_output_tokens(usage)
-                            reasoning_tokens = extract_reasoning_tokens(usage)
-                            cached_tokens = extract_cached_tokens(usage)
-                            total_tokens = resolve_usage_tokens(usage).total_tokens
-
-                        if not suppress_chunk:
-                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
-
-                    # 继续处理剩余流
-                    async for gemini_chunk in gemini_generator:
-                        if "error" in gemini_chunk:
-                            error_msg = str(gemini_chunk.get("error"))
-                            openai_error = {"error": gemini_chunk["error"]}
-                            yield f"data: {json.dumps(openai_error, ensure_ascii=False)}\n\n"
-                            break
-
-                        _meta = gemini_chunk.get("usageMetadata")
-                        if isinstance(_meta, dict) and _meta:
-                            upstream_usage = _meta
-                        signatures.extend(upstream_signatures(gemini_chunk))
-
-                        openai_chunk = direct_api_service.convert_gemini_response_to_openai(
-                            gemini_chunk, display_name, request_id, is_stream_chunk=True,
-                            completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
-
-                        delta = openai_chunk.get("choices", [{}])[0].get("delta", {})
-                        suppress_chunk = splitter.process(delta)
-                        delta_content = delta.get("content", "")
-                        delta_reasoning = delta.get("reasoning_content", "")
-                        delta_tool_calls = delta.get("tool_calls")
-
-                        if delta_content:
-                            content_parts.append(delta_content)
-                        if delta_reasoning:
-                            reasoning_parts.append(delta_reasoning)
-                        if delta_tool_calls:
-                            append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
-
-                        if "usage" in openai_chunk and openai_chunk["usage"]:
-                            usage = openai_chunk["usage"]
-                            input_tokens = extract_prompt_tokens(usage)
-                            # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
-                            output_tokens = total_output_tokens(usage)
-                            reasoning_tokens = extract_reasoning_tokens(usage)
-                            cached_tokens = extract_cached_tokens(usage)
-                            total_tokens = resolve_usage_tokens(usage).total_tokens
-
-                        if not suppress_chunk:
-                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
                     if error_msg is None:
                         tail_text = splitter.flush()
@@ -545,28 +475,19 @@ async def handle_gemini_native_direct(
                     stream_completed = (error_msg is None)
                     request_success = (error_msg is None)
 
-                except GeneratorExit:
-                    # 🔧 GeneratorExit 必须重新抛出，否则 Python 在生成器结束时
-                    # 会报 "async generator ignored GeneratorExit"
+                except (GeneratorExit, asyncio.CancelledError):
+                    # 必须重新抛出：GeneratorExit 被吞会报 "async generator ignored GeneratorExit"，
+                    # CancelledError 被吞会让请求取消失效
                     client_gone = True
-                    if stream_completed or (content_parts and not error_msg):
+                    if stream_completed or finish_seen:
                         request_success = True
-                        logger.info(f"[GEMINI_NATIVE] 生成器被关闭，但流已完成或有有效输出，标记为成功")
-                    else:
-                        logger.warning(f"[GEMINI_NATIVE] 生成器被提前关闭")
-                    raise
-                except asyncio.CancelledError:
-                    # 🔧 客户端断开时 asyncio 向生成器注入 CancelledError（BaseException），
-                    # 不会被 except Exception 捕获，必须显式处理以防 request_end 丢失
-                    client_gone = True
-                    if stream_completed or (content_parts and not error_msg):
-                        request_success = True
-                        logger.info(f"[GEMINI_NATIVE] 请求被取消，但流已完成或有有效输出，标记为成功")
-                    else:
-                        logger.warning(f"[GEMINI_NATIVE] 请求被取消，客户端断开")
+                        logger.info(f"[GEMINI_NATIVE] 客户端关闭连接，但结束原因已转发，标记为成功")
+                    elif not error_msg:
+                        error_msg = "Client disconnected"
+                        logger.warning(f"[GEMINI_NATIVE] 客户端在流结束前断开: {request_id[:8]}")
                     raise
                 except Exception as e:
-                    error_msg = str(e)
+                    error_msg = internal_error = str(e)
                     logger.error(f"[GEMINI_NATIVE] 流式处理失败: {e}", exc_info=True)
                 finally:
                     if input_tokens == 0 or output_tokens == 0:
@@ -591,10 +512,8 @@ async def handle_gemini_native_direct(
                         except Exception as token_error:
                             logger.error(f"[GEMINI_NATIVE] Token计算失败: {token_error}")
 
-                    cost_info = direct_api_service.calculate_cost(
-                        input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=cached_tokens,
-                        pricing=pricing_config) if pricing_config else {}
+                    cost_info = _gemini_cost(
+                        direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage)
                     final_content = ''.join(content_parts)
                     final_reasoning = ''.join(reasoning_parts)
                     final_tool_calls = finalize_tool_calls(tool_call_accumulator)
@@ -623,8 +542,14 @@ async def handle_gemini_native_direct(
                     if cost_info.get("total_cost"):
                         logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
 
+                    # 客户端走了就不能再续传，及时释放上游连接
+                    await chunks.aclose()
+                    await gemini_generator.aclose()
+
                     if not client_gone and not tail_suppressed:
                         try:
+                            if internal_error:
+                                yield f"data: {json.dumps({'error': {'message': internal_error, 'type': 'internal_error'}}, ensure_ascii=False)}\n\n"
                             final_total_tokens = total_tokens if total_tokens > 0 else (input_tokens + output_tokens)
                             usage_final_chunk = {
                                 "id": f"chatcmpl-{request_id}",
@@ -667,6 +592,7 @@ async def handle_gemini_native_direct(
                 error_msg = None
                 client_gone = False
                 tail_suppressed = False
+                finish_seen = False  # 结束原因已转发：此后客户端主动关流不算失败
                 converter = InteractionsStreamConverter(display_name, request_id, completion_tokens_mode)
                 splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
 
@@ -685,23 +611,6 @@ async def handle_gemini_native_direct(
                                 pass
                             error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                             logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
-                            partial_input_tokens = 0
-                            try:
-                                partial_input_tokens = estimate_message_tokens_func(
-                                    openai_req.get('messages', []), model=display_name)
-                            except Exception as token_err:
-                                logger.warning(f"[GEMINI_INTERACTIONS] 超时时输入token计算失败: {token_err}")
-                            cost_info = direct_api_service.calculate_cost(
-                                input_tokens=partial_input_tokens, output_tokens=0,
-                                pricing=pricing_config) if pricing_config else {}
-                            if cost_info.get("total_cost"):
-                                logger.info(f"[GEMINI_INTERACTIONS] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-                            monitoring_service.request_end(
-                                request_id=request_id, success=False, error=error_msg,
-                                input_tokens=partial_input_tokens, output_tokens=0,
-                                cost_info=cost_info, full_messages=full_messages)
-                            await monitoring_service.broadcast_to_monitors(
-                                {"type": "request_end", "request_id": request_id, "success": False})
                             yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
                             tail_suppressed = True
                             return
@@ -715,47 +624,13 @@ async def handle_gemini_native_direct(
                     except StopAsyncIteration:
                         error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                         logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
-                        partial_input_tokens = 0
-                        try:
-                            partial_input_tokens = estimate_message_tokens_func(
-                                openai_req.get('messages', []), model=display_name)
-                        except Exception as token_err:
-                            logger.warning(f"[GEMINI_INTERACTIONS] 空响应时输入token计算失败: {token_err}")
-                        cost_info = direct_api_service.calculate_cost(
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            pricing=pricing_config) if pricing_config else {}
-                        if cost_info.get("total_cost"):
-                            logger.info(f"[GEMINI_INTERACTIONS] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-                        monitoring_service.request_end(
-                            request_id=request_id, success=False, error=error_msg,
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            cost_info=cost_info, full_messages=full_messages)
-                        await monitoring_service.broadcast_to_monitors(
-                            {"type": "request_end", "request_id": request_id, "success": False})
                         yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'empty_response'}}, ensure_ascii=False)}\n\n"
                         tail_suppressed = True
                         return
 
                     if "error" in first_event:
-                        error_detail = first_event.get("error")
+                        error_msg = str(first_event.get("error"))
                         logger.error(f"[GEMINI_INTERACTIONS] 流式预读检测到错误: {first_event}")
-                        partial_input_tokens = 0
-                        try:
-                            partial_input_tokens = estimate_message_tokens_func(
-                                openai_req.get('messages', []), model=display_name)
-                        except Exception as token_err:
-                            logger.warning(f"[GEMINI_INTERACTIONS] 错误时输入token计算失败: {token_err}")
-                        cost_info = direct_api_service.calculate_cost(
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            pricing=pricing_config) if pricing_config else {}
-                        if cost_info.get("total_cost"):
-                            logger.info(f"[GEMINI_INTERACTIONS] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-                        monitoring_service.request_end(
-                            request_id=request_id, success=False, error=str(error_detail),
-                            input_tokens=partial_input_tokens, output_tokens=0,
-                            cost_info=cost_info, full_messages=full_messages)
-                        await monitoring_service.broadcast_to_monitors(
-                            {"type": "request_end", "request_id": request_id, "success": False})
                         yield f"data: {json.dumps({'error': first_event['error']}, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
                         tail_suppressed = True
@@ -770,6 +645,7 @@ async def handle_gemini_native_direct(
                             return
 
                         choices = openai_chunk.get("choices") or []
+                        finish_seen = finish_seen or bool(choices and choices[0].get("finish_reason"))
                         delta = choices[0].get("delta", {}) if choices else {}
                         suppress_chunk = splitter.process(delta)
                         delta_content = delta.get("content", "")
@@ -806,6 +682,7 @@ async def handle_gemini_native_direct(
 
                         for openai_chunk in openai_chunks:
                             choices = openai_chunk.get("choices") or []
+                            finish_seen = finish_seen or bool(choices and choices[0].get("finish_reason"))
                             delta = choices[0].get("delta", {}) if choices else {}
                             suppress_chunk = splitter.process(delta)
                             delta_content = delta.get("content", "")
@@ -854,21 +731,14 @@ async def handle_gemini_native_direct(
                     stream_completed = (error_msg is None)
                     request_success = (error_msg is None)
 
-                except GeneratorExit:
+                except (GeneratorExit, asyncio.CancelledError):
                     client_gone = True
-                    if stream_completed or (content_parts and not error_msg):
+                    if stream_completed or finish_seen:
                         request_success = True
-                        logger.info(f"[GEMINI_INTERACTIONS] 生成器被关闭，但流已完成或有有效输出，标记为成功")
-                    else:
-                        logger.warning(f"[GEMINI_INTERACTIONS] 生成器被提前关闭")
-                    raise
-                except asyncio.CancelledError:
-                    client_gone = True
-                    if stream_completed or (content_parts and not error_msg):
-                        request_success = True
-                        logger.info(f"[GEMINI_INTERACTIONS] 请求被取消，但流已完成或有有效输出，标记为成功")
-                    else:
-                        logger.warning(f"[GEMINI_INTERACTIONS] 请求被取消，客户端断开")
+                        logger.info(f"[GEMINI_INTERACTIONS] 客户端关闭连接，但结束原因已转发，标记为成功")
+                    elif not error_msg:
+                        error_msg = "Client disconnected"
+                        logger.warning(f"[GEMINI_INTERACTIONS] 客户端在流结束前断开: {request_id[:8]}")
                     raise
                 except Exception as e:
                     error_msg = str(e)
@@ -970,27 +840,13 @@ async def handle_gemini_native_direct(
                 partial_input_tokens = int(usage_meta.get("promptTokenCount") or 0)
                 partial_output_tokens = (int(usage_meta.get("candidatesTokenCount") or 0)
                                          + int(usage_meta.get("thoughtsTokenCount") or 0))
-                if not partial_input_tokens:
-                    try:
-                        partial_input_tokens = estimate_message_tokens_func(
-                            openai_req.get('messages', []), model=display_name)
-                    except Exception as token_err:
-                        logger.warning(f"[GEMINI_NATIVE] 错误时输入token计算失败: {token_err}")
-
-                cost_info = direct_api_service.calculate_cost(
-                    input_tokens=partial_input_tokens, output_tokens=partial_output_tokens,
-                    pricing=pricing_config) if pricing_config else {}
-
-                if cost_info.get("total_cost"):
-                    logger.info(f"[GEMINI_NATIVE] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-
-                monitoring_service.request_end(
-                    request_id=request_id, success=False, error=error_msg,
-                    input_tokens=partial_input_tokens, output_tokens=partial_output_tokens,
-                    cost_info=cost_info, full_messages=full_messages,
+                await record_request_failure(
+                    monitoring_service, direct_api_service, request_id, error_msg,
+                    **failure_context, input_tokens=partial_input_tokens, output_tokens=partial_output_tokens,
+                    cost_info=_gemini_cost(direct_api_service, pricing_config, partial_input_tokens,
+                                           partial_output_tokens, int(usage_meta.get("cachedContentTokenCount") or 0),
+                                           usage_meta) if partial_input_tokens else None,
                     upstream_usage=usage_meta or None)
-                await monitoring_service.broadcast_to_monitors({
-                    "type": "request_end", "request_id": request_id, "success": False})
 
                 mapped_status_code = map_upstream_error_to_status_code(gemini_response, default_status_code=500)
                 return JSONResponse(status_code=mapped_status_code, content=gemini_response)
@@ -1058,10 +914,8 @@ async def handle_gemini_native_direct(
                 except Exception as token_error:
                     logger.error(f"[GEMINI_NATIVE] Token计算失败: {token_error}")
 
-            cost_info = direct_api_service.calculate_cost(
-                input_tokens=input_tokens, output_tokens=output_tokens,
-                cached_tokens=cached_tokens,
-                pricing=pricing_config) if pricing_config else {}
+            cost_info = _gemini_cost(
+                direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage)
 
             monitoring_service.request_end(
                 request_id=request_id, success=True,
@@ -1087,51 +941,12 @@ async def handle_gemini_native_direct(
 
     except HTTPException as http_exc:
         logger.error(f"[GEMINI_NATIVE] 请求处理失败(HTTPException): {http_exc}", exc_info=True)
-
-        partial_input_tokens = 0
-        try:
-            partial_input_tokens = estimate_message_tokens_func(
-                openai_req.get('messages', []), model=display_name)
-        except Exception as token_err:
-            logger.warning(f"[GEMINI_NATIVE] 异常时输入token计算失败: {token_err}")
-
-        cost_info = direct_api_service.calculate_cost(
-            input_tokens=partial_input_tokens, output_tokens=0,
-            pricing=pricing_config) if pricing_config else {}
-
-        if cost_info.get("total_cost"):
-            logger.info(f"[GEMINI_NATIVE] 异常请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-
-        monitoring_service.request_end(
-            request_id=request_id, success=False,
-            error=str(http_exc.detail) if http_exc.detail is not None else str(http_exc),
-            input_tokens=partial_input_tokens, output_tokens=0,
-            cost_info=cost_info, full_messages=full_messages)
-        await monitoring_service.broadcast_to_monitors({
-            "type": "request_end", "request_id": request_id, "success": False})
+        await record_request_failure(
+            monitoring_service, direct_api_service, request_id,
+            str(http_exc.detail) if http_exc.detail is not None else str(http_exc), **failure_context)
         raise
 
     except Exception as e:
         logger.error(f"[GEMINI_NATIVE] 请求处理失败: {e}", exc_info=True)
-
-        partial_input_tokens = 0
-        try:
-            partial_input_tokens = estimate_message_tokens_func(
-                openai_req.get('messages', []), model=display_name)
-        except Exception as token_err:
-            logger.warning(f"[GEMINI_NATIVE] 异常时输入token计算失败: {token_err}")
-
-        cost_info = direct_api_service.calculate_cost(
-            input_tokens=partial_input_tokens, output_tokens=0,
-            pricing=pricing_config) if pricing_config else {}
-
-        if cost_info.get("total_cost"):
-            logger.info(f"[GEMINI_NATIVE] 异常请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
-
-        monitoring_service.request_end(
-            request_id=request_id, success=False, error=str(e),
-            input_tokens=partial_input_tokens, output_tokens=0,
-            cost_info=cost_info, full_messages=full_messages)
-        await monitoring_service.broadcast_to_monitors({
-            "type": "request_end", "request_id": request_id, "success": False})
+        await record_request_failure(monitoring_service, direct_api_service, request_id, str(e), **failure_context)
         raise HTTPException(status_code=500, detail=f"Gemini Native API调用失败: {str(e)}")

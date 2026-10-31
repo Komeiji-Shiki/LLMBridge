@@ -940,7 +940,7 @@ _SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
 
 
 async def iter_openai_sse_payloads(upstream_response: StreamingResponse):
-    """从 OpenAI SSE 流中逐个提取负载字符串。
+    """从 OpenAI SSE 流中逐个提取负载字符串；SSE 注释（心跳）产出 None。
 
     🔧 修复：
     - bytes chunk 改用增量 UTF-8 解码器，旧版 errors="ignore" 会在
@@ -966,6 +966,8 @@ async def iter_openai_sse_payloads(upstream_response: StreamingResponse):
                 line = line.strip()
                 if line.startswith("data:"):
                     yield line[5:].strip()
+                elif line.startswith(":"):
+                    yield None
 
     buffer += decoder.decode(b"", final=True)
     if buffer.strip():
@@ -1077,6 +1079,11 @@ def build_anthropic_streaming_response(
 
         # ── 主循环：逐 chunk 处理 ──
         async for payload in iter_openai_sse_payloads(openai_streaming_response):
+            if payload is None:
+                # 模型思考或续传时可能长时间没有事件，客户端读超时前要持续有字节。
+                # 注释可出现在 message_start 之前，ping 则不行。
+                yield ": keep-alive\n\n"
+                continue
             if payload == "[DONE]":
                 break
 

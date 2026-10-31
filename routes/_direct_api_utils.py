@@ -811,8 +811,61 @@ async def estimate_text_tokens_non_blocking(estimate_tokens_func, text: str, mod
 
 
 # ============================================================
+# 失败上报
+# ============================================================
+
+async def record_request_failure(monitoring_service, direct_api_service, request_id, error, *,
+                                 display_name, messages, pricing_config, estimate_message_tokens_func,
+                                 full_messages, log_tag, input_tokens=0, output_tokens=0, cost_info=None,
+                                 upstream_usage=None, system_fingerprint=None):
+    """落盘一次失败请求并通知监控；缺输入量时按消息估算，并计入已产生的成本。"""
+    if not input_tokens:
+        try:
+            input_tokens = await estimate_message_tokens_non_blocking(
+                estimate_message_tokens_func, messages, display_name)
+        except Exception as token_err:
+            logger.warning(f"[{log_tag}] 失败请求的输入token计算失败: {token_err}")
+    if cost_info is None:
+        cost_info = direct_api_service.calculate_cost(
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            pricing=pricing_config, upstream_usage=upstream_usage) if pricing_config else {}
+    if cost_info.get("total_cost"):
+        logger.info(f"[{log_tag}] 失败请求成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+    monitoring_service.request_end(
+        request_id=request_id, success=False, error=error,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cost_info=cost_info, full_messages=full_messages,
+        upstream_usage=upstream_usage, system_fingerprint=system_fingerprint)
+    await monitoring_service.broadcast_to_monitors(
+        {"type": "request_end", "request_id": request_id, "success": False})
+
+
+# ============================================================
 # SSE 行处理
 # ============================================================
+
+async def iter_with_keepalive(iterator, interval: float):
+    """转发异步迭代器；上游空闲超过 interval 秒时产出 None，调用方借此发送心跳。"""
+    pending = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(anext(iterator))
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                yield None
+                continue
+            current, pending = pending, None
+            try:
+                item = current.result()
+            except StopAsyncIteration:
+                return
+            yield item
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
 
 def extract_complete_sse_lines(decoded_chunk: str, pending_line: str) -> tuple:
     """合并跨 chunk 的尾部残片，只返回完整的 SSE 行。
