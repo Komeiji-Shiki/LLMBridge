@@ -44,6 +44,7 @@ from utils.usage_tokens import (
     compose_chat_usage,
     get_completion_tokens_mode,
 )
+from utils.usage_tokens import rough_message_tokens, rough_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +141,7 @@ class PassthroughStreamSession:
         local_input_tokens = self.input_tokens or 0
         partial_tool_calls = finalize_tool_calls(self.tool_call_accumulator)
         local_output_tokens = self.output_tokens or (
-            len(partial_reasoning + partial_content) // 4
+            rough_token_count(partial_reasoning + partial_content)
             if (partial_reasoning or partial_content or partial_tool_calls) else 0)
 
         self.monitoring_service.request_end(
@@ -661,8 +662,7 @@ class PassthroughStreamSession:
                     self.openai_req.get('messages', []), self.display_name)
             except Exception as token_error:
                 logger.error(f"[DIRECT_API_PASSTHROUGH] Input token计算失败: {token_error}")
-                self.input_tokens = sum(
-                    len(str(m.get('content', ''))) for m in self.openai_req.get('messages', [])) // 4
+                self.input_tokens = rough_message_tokens(self.openai_req.get('messages', []))
 
         total_output_text = (final_reasoning or "") + (final_content or "")
         content_char_count = len(total_output_text) if total_output_text else 0
@@ -691,7 +691,7 @@ class PassthroughStreamSession:
                     self.output_tokens = calculated_output_tokens
             except Exception as token_error:
                 logger.error(f"[DIRECT_API_PASSTHROUGH] Output token计算失败: {token_error}")
-                fallback_tokens = len(total_output_text) // 4
+                fallback_tokens = rough_token_count(total_output_text)
                 if fallback_tokens >= 10:
                     self.output_tokens = fallback_tokens
 

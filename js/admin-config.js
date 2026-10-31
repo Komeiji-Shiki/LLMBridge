@@ -336,9 +336,9 @@ function buildPerformanceConfig() {
     // 超时配置
     const timeoutContent = `
         <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;">
-            ${buildCompactFormGroup('流响应(秒)', `<input type="number" class="form-input" id="form-stream_response_timeout_seconds" value="${currentConfigData.stream_response_timeout_seconds ?? 600}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('API调用(秒)', `<input type="number" class="form-input" id="form-api_call_timeout_seconds" value="${currentConfigData.api_call_timeout_seconds ?? 1200}" style="padding: 4px; font-size: 0.8rem;">`)}
-            ${buildCompactFormGroup('首块(秒)', `<input type="number" class="form-input" id="form-first_chunk_timeout_seconds" value="${currentConfigData.first_chunk_timeout_seconds ?? 180}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('流响应(秒)', `<input type="number" class="form-input" id="form-stream_response_timeout_seconds" value="${currentConfigData.stream_response_timeout_seconds ?? 3000}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('API调用(秒)', `<input type="number" class="form-input" id="form-api_call_timeout_seconds" value="${currentConfigData.api_call_timeout_seconds ?? 3000}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('首块(秒)', `<input type="number" class="form-input" id="form-first_chunk_timeout_seconds" value="${currentConfigData.first_chunk_timeout_seconds ?? 600}" style="padding: 4px; font-size: 0.8rem;">`)}
             ${buildCompactFormGroup('WebSocket(秒)', `<input type="number" class="form-input" id="form-websocket_send_timeout_seconds" value="${currentConfigData.websocket_send_timeout_seconds ?? 10}" style="padding: 4px; font-size: 0.8rem;">`)}
             ${buildCompactFormGroup('元数据(分)', `<input type="number" class="form-input" id="form-metadata_timeout_minutes" value="${currentConfigData.metadata_timeout_minutes ?? 30}" style="padding: 4px; font-size: 0.8rem;">`)}
             ${buildCompactFormGroup('活跃请求(分)', `<input type="number" class="form-input" id="form-active_request_timeout_minutes" value="${currentConfigData.active_request_timeout_minutes ?? 30}" style="padding: 4px; font-size: 0.8rem;">`)}

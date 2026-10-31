@@ -479,13 +479,18 @@ def test_native_tool_model_configuration_survives_save(ui):
     page, _, writes, _ = ui
     page.locator('.model-name', has_text='Beta').click()
     page.locator('[data-settings-page="messages"]').click()
+    assert page.locator('#model-provider option[value="openai"]').count() == 1
     page.locator('#model-provider').select_option('deepseek')
+    page.locator('#model-family').select_option('gemini')
+    page.locator('#model-first-chunk-timeout').fill('120')
     page.locator('#model-native-tools').fill('web_search')
     page.locator('#model-native-tool-options').fill('{"web_search": {}}')
     page.locator('#model-save-btn').click()
     page.wait_for_selector('#model-modal', state='hidden')
     assert writes[-1]['config']['native_tools'] == ['web_search']
     assert writes[-1]['config']['provider'] == 'deepseek'
+    assert writes[-1]['config']['model_family'] == 'gemini'
+    assert writes[-1]['config']['first_chunk_timeout_seconds'] == 120
     assert writes[-1]['config']['sanitize_recursive_schemas'] is False
 
 

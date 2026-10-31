@@ -7,6 +7,7 @@ import json
 import time
 import uuid
 from typing import Optional, Dict, Any
+from utils.usage_tokens import rough_token_count
 
 
 def format_openai_chunk(content: str, model: str, response_id: str) -> str:
@@ -165,8 +166,8 @@ def format_openai_non_stream_response(
         }],
         "usage": usage or {
             "prompt_tokens": 0,
-            "completion_tokens": len(content) // 4,
-            "total_tokens": len(content) // 4,
+            "completion_tokens": rough_token_count(content),
+            "total_tokens": rough_token_count(content),
         },
     }
     

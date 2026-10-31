@@ -11,20 +11,15 @@ from fastapi.responses import JSONResponse
 
 from core.api_key_manager import api_key_manager
 from core.config_loader import CONFIG, MODEL_ENDPOINT_MAP, MODEL_NAME_TO_ID_MAP
+from core.constants import ServerDefaults
 from core.model_archive import is_model_archived as _is_archived
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["models"])
 
-# 已知扫描/监控机器人 User-Agent 黑名单（不区分大小写）
-_BLOCKED_USER_AGENTS = (
-    "lmspeedbot",
-    "go-http-client",
-)
-
 _INVALID_KEY_RESPONSE_CONTENT = {
     "error": {
-        "message": "Incorrect API key provided. You can find your API key at https://platform.openai.com/account/api-keys.",
+        "message": "API Key 无效或缺失。请使用网关分配的 Key，而不是上游服务商的 Key。",
         "type": "invalid_request_error",
         "param": None,
         "code": "invalid_api_key"
@@ -32,10 +27,11 @@ _INVALID_KEY_RESPONSE_CONTENT = {
 }
 
 
-def _is_blocked_user_agent(request: Request) -> bool:
-    """检查请求是否来自已知扫描机器人"""
+def _is_quiet_user_agent(request: Request) -> bool:
+    """未通过鉴权的扫描器静默处理；持有效 Key 的客户端不受影响（如 Go 写的中转）。"""
     ua = request.headers.get("user-agent", "").lower()
-    return any(blocked in ua for blocked in _BLOCKED_USER_AGENTS)
+    agents = CONFIG.get("quiet_user_agents", ServerDefaults.QUIET_USER_AGENTS)
+    return any(agent.lower() in ua for agent in agents)
 
 
 def _matches_global_key(provided_key: str, global_api_key: str) -> bool:
@@ -190,10 +186,6 @@ async def get_gemini_models(MODEL_ENDPOINT_MAP: dict, allowed_models: list = Non
 @router.get("/v1/models")
 async def get_models_endpoint(request: Request):
     """提供兼容 OpenAI 的模型列表（根据 API Key 权限过滤）"""
-    # 直接拒绝已知扫描机器人，返回空列表，不产生 401 日志噪音
-    if _is_blocked_user_agent(request):
-        return {"object": "list", "data": []}
-
     provided_key = _extract_provided_key(request)
 
     global_api_key = CONFIG.get("api_key")
@@ -202,6 +194,8 @@ async def get_models_endpoint(request: Request):
     # 只要配置了任何一种认证，就必须提供有效 key 才能获取模型列表，防止模型名泄露
     if global_api_key or has_guest_keys:
         if not provided_key:
+            if _is_quiet_user_agent(request):
+                return {"object": "list", "data": []}
             user_agent = request.headers.get("user-agent", "unknown")
             logger.warning(f"[401-/v1/models] 未提供API Key | 来源: {request.client.host if request.client else '?'} | User-Agent: {user_agent}")
             return _invalid_key_response()
@@ -227,10 +221,6 @@ async def get_models_endpoint(request: Request):
 @router.get("/v1beta/models")
 async def get_gemini_models_endpoint(request: Request):
     """提供Gemini v1beta格式的模型列表"""
-    # 直接拒绝已知扫描机器人，返回空列表，不产生 401 日志噪音
-    if _is_blocked_user_agent(request):
-        return {"models": []}
-
     provided_key = _extract_provided_key(request, allow_gemini_style=True)
 
     global_api_key = CONFIG.get("api_key")
@@ -240,7 +230,7 @@ async def get_gemini_models_endpoint(request: Request):
     # 只要配置了任何一种认证，就必须提供有效 key 才能获取模型列表，防止模型名泄露
     if global_api_key or has_guest_keys:
         if not provided_key:
-            return _invalid_key_response()
+            return {"models": []} if _is_quiet_user_agent(request) else _invalid_key_response()
 
         is_valid = False
         if _matches_global_key(provided_key, global_api_key):

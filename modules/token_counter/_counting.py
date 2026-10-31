@@ -19,6 +19,7 @@ from ._tokenizers import (
     get_anthropic_count_tokens,
     get_tokenizer_for_model,
 )
+from utils.usage_tokens import rough_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +112,7 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
             logger.error(f"[TOKEN_COUNTER] tiktoken编码失败: {e}")
 
     # 最终回退到字符估算
-    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-    total_chars = len(text)
-    if chinese_chars > total_chars * 0.5:
-        base_estimate = total_chars // 2
-    else:
-        base_estimate = total_chars // 4
-    return int(base_estimate * multiplier)
+    return int(rough_token_count(text) * multiplier)
 
 
 def count_messages_tokens(messages: List[Dict[str, Any]], model_name: str = "gpt-4") -> Tuple[int, Dict[str, int]]:

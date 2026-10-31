@@ -11,7 +11,7 @@ import aiohttp
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from core.config_loader import get_setting
-from core.constants import TimeoutDefaults
+from core.constants import RetryDefaults, TimeoutDefaults, resolve_first_chunk_timeout
 from core.model_archive import is_model_archived
 from core.request_context import RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request
 from core.upstream_auth import apply_api_key_auth
@@ -161,7 +161,7 @@ async def responses_websocket(websocket: WebSocket):
         accepted = True
         limit = int(get_setting("request_limits.max_body_mb", 256)) * 1024 * 1024
         first = await asyncio.wait_for(receive_event(websocket, limit),
-                                       timeout=api.CONFIG.get("first_chunk_timeout_seconds", TimeoutDefaults.FIRST_CHUNK_TIMEOUT))
+                                       timeout=resolve_first_chunk_timeout(api.CONFIG))
         alias = first.get("model")
         if first.get("type") != "response.create" or not isinstance(alias, str) or not alias.strip():
             raise HTTPException(400, "首个事件必须是带有模型名的 response.create。")
@@ -180,7 +180,7 @@ async def responses_websocket(websocket: WebSocket):
             raise HTTPException(503, "Direct API service not initialized")
         key = await get_api_key(alias, config.get("api_keys") or config.get("api_key"),
                                 strategy=config.get("api_key_strategy", "round_robin"),
-                                cooldown_seconds=int(config.get("api_key_cooldown_seconds") or 172800))
+                                cooldown_seconds=int(config.get("api_key_cooldown_seconds") or RetryDefaults.API_KEY_COOLDOWN_SECONDS))
         headers = upstream_headers(websocket, key)
         context.upstream_headers = {name: value for name, value in headers.items()
                                    if name.lower() not in UPSTREAM_HEADER_EXCLUSIONS}

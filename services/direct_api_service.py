@@ -26,10 +26,10 @@ from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler, c
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
-from core.constants import GeminiDefaults
+from core.constants import GeminiDefaults, TimeoutDefaults
 from converters.audio import extract_audio, separate_tool_audio
 from converters.gemini_interactions import build_interactions_request_body
-from utils.usage_tokens import MODE_MERGE, compose_chat_usage
+from utils.usage_tokens import MODE_MERGE, compose_chat_usage, rough_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,13 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
 from services.sse import iter_sse_json_events as _iter_sse_json_events
 from services.request_execution import retry_before_output
 from core.upstream_auth import apply_api_key_auth
+
+
+def _upstream_timeout() -> aiohttp.ClientTimeout:
+    return aiohttp.ClientTimeout(
+        total=CONFIG.get("api_call_timeout_seconds", TimeoutDefaults.API_CALL_TIMEOUT),
+        sock_read=CONFIG.get("stream_response_timeout_seconds", TimeoutDefaults.STREAM_RESPONSE_TIMEOUT),
+        sock_connect=CONFIG.get("download_timeout", {}).get("connect", TimeoutDefaults.DOWNLOAD_CONNECT_TIMEOUT))
 
 
 def _assign_function_call_ids(value: Any) -> None:
@@ -435,11 +442,7 @@ class DirectAPIService:
                 endpoint,
                 data=request_body_json.encode('utf-8'),
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(
-                    total=CONFIG.get("api_call_timeout_seconds", 3000),
-                    sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
-                )
+                timeout=_upstream_timeout()
             ) as response:
                 # 检查响应状态
                 if response.status != 200:
@@ -661,7 +664,7 @@ class DirectAPIService:
             return error
 
         # 自定义地址的版本路径由用户决定，仅在未配置地址时使用官方默认值。
-        configured_base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        configured_base = (base_url or GeminiDefaults.BASE_URL).rstrip("/")
         endpoint = f"{configured_base}/models/{model}:{method}{sse_param}"
         
         # 转换OpenAI格式消息为Gemini格式
@@ -1008,11 +1011,7 @@ class DirectAPIService:
                     endpoint,
                     data=request_body_json.encode('utf-8'),
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(
-                        total=CONFIG.get("api_call_timeout_seconds", 3000),
-                        sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                        sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
-                    )
+                    timeout=_upstream_timeout()
                 ) as response:
                     # 检查响应状态
                     if response.status != 200:
@@ -1157,7 +1156,7 @@ class DirectAPIService:
             """脱敏异常消息中的 API key。"""
             return text.replace(api_key, "***") if api_key else text
 
-        configured_base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        configured_base = (base_url or GeminiDefaults.BASE_URL).rstrip("/")
         endpoint = f"{configured_base}/interactions{sse_param}"
 
         request_body = build_interactions_request_body(
@@ -1203,11 +1202,7 @@ class DirectAPIService:
                 endpoint,
                 data=request_body_json.encode('utf-8'),
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(
-                    total=CONFIG.get("api_call_timeout_seconds", 3000),
-                    sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
-                )
+                timeout=_upstream_timeout()
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
@@ -1335,7 +1330,7 @@ class DirectAPIService:
             if thoughts_tokens == 0 and reasoning_content and not is_stream_chunk:
                 # 仅非流式做估算兜底：流式 chunk 的 reasoning_content
                 # 是增量，按增量估算会严重低估
-                thoughts_tokens = len(reasoning_content) // 4
+                thoughts_tokens = rough_token_count(reasoning_content)
             
             prompt_tokens = metadata.get("promptTokenCount", 0)
             candidates_tokens = metadata.get("candidatesTokenCount", 0)
@@ -1512,11 +1507,7 @@ class DirectAPIService:
                 endpoint,
                 data=request_body_json.encode('utf-8'),
                 headers=request_headers,
-                timeout=aiohttp.ClientTimeout(
-                    total=CONFIG.get("api_call_timeout_seconds", 3000),
-                    sock_read=CONFIG.get("stream_response_timeout_seconds", 3000),
-                    sock_connect=CONFIG.get("download_timeout", {}).get("connect", 60)
-                )
+                timeout=_upstream_timeout()
             ) as response:
                 # 检查响应状态
                 if response.status != 200:

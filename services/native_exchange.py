@@ -11,6 +11,7 @@ from core.request_context import RequestContext, current_request, credential_ide
 from services.protocol_events import payloads, error_status, gemini_termination
 from services.provider_capabilities import protocol_name, apply_native_tool_defaults
 from utils.usage_tokens import resolve_usage_tokens
+from core.constants import GeminiDefaults, RetryDefaults, resolve_first_chunk_timeout
 
 
 logger = logging.getLogger(__name__)
@@ -367,11 +368,11 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
 
     try:
         key = await get_api_key(model, config.get('api_keys') or config.get('api_key'), strategy=config.get('api_key_strategy', 'round_robin'),
-                                cooldown_seconds=int(config.get('api_key_cooldown_seconds') or 172800))
+                                cooldown_seconds=int(config.get('api_key_cooldown_seconds') or RetryDefaults.API_KEY_COOLDOWN_SECONDS))
         context.credential_fingerprint = credential_identity(key)
         upstream = copy.deepcopy(body)
         target = config.get('model_id') or model
-        base = (config.get('api_base_url') or 'https://generativelanguage.googleapis.com/v1beta').rstrip('/')
+        base = (config.get('api_base_url') or GeminiDefaults.BASE_URL).rstrip('/')
         if protocol in ('gemini', 'interactions'):
             # 与转换调用一致，直接使用配置中的版本路径。
             if protocol == 'interactions':
@@ -413,7 +414,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                 status = generation_error['code']
             return JSONResponse(value, status, headers={'X-Bridge-Session-ID': context.session_id, 'X-Bridge-Request-ID': context.request_id})
         try:
-            first = await asyncio.wait_for(anext(iterator), timeout=float(CONFIG.get('first_chunk_timeout_seconds') or 180))
+            first = await asyncio.wait_for(anext(iterator), timeout=resolve_first_chunk_timeout(CONFIG, config))
         except (StopAsyncIteration, asyncio.TimeoutError) as error:
             raise HTTPException(502, '上游未返回有效响应') from error
         for value in payloads(first):

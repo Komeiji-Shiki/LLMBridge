@@ -1348,9 +1348,9 @@ async def query_key_balance(request: Request):
     if not api_base_url:
         return {"status": "error", "message": "缺少 api_base_url，无法查询余额。请先在模型配置中填写 API Base URL。", "results": []}
 
-    # 仅 deepseek 系 API 支持余额查询
-    base_lower = api_base_url.lower()
-    if "deepseek" not in base_lower:
+    # 仅 DeepSeek 官方 API 支持余额查询；Key 不能发给只是地址里带 deepseek 字样的其他服务
+    from services.provider_capabilities import provider_name
+    if provider_name({"api_base_url": api_base_url, "provider": data.get("provider")}) != "deepseek":
         return {
             "status": "unsupported",
             "message": "当前仅 DeepSeek API 支持余额查询。其他 API 暂不支持 /user/balance 接口。",

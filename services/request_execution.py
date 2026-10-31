@@ -11,6 +11,7 @@ import json
 import time
 from core.request_context import current_request, credential_identity
 from services.protocol_events import payloads, error_status, is_business_event, is_terminal
+from core.constants import RetryDefaults
 
 
 def _error_chunk(message, byte_mode):
@@ -45,7 +46,7 @@ def retry_before_output(method=None, *, output_bytes=False):
         retry = normalize_auto_retry_config(config)
         strategy = config.get('api_key_strategy', 'round_robin')
         keys = config.get('api_keys') or config.get('api_key')
-        cooldown = int(config.get('api_key_cooldown_seconds') or 172800)
+        cooldown = int(config.get('api_key_cooldown_seconds') or RetryDefaults.API_KEY_COOLDOWN_SECONDS)
         attempts = 1 + (retry.get('max_retries', 0) if retry.get('enabled') else 0)
         if strategy == 'sticky':
             attempts = max(attempts, len(_get_valid_keys(keys)) + 1)

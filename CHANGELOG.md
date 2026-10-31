@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-11-01：清理硬编码
+
+- 新增端点配置 `model_family`（gemini / deepseek / qwen / other），思考签名回传、DeepSeek `reasoning_content` 和 Qwen 思考参数不再各自猜模型名，统一按“显式配置 > 模型名 > 官方地址”判断；模型别名不含家族名时可在模型配置里指定。
+- OpenRouter 成为正式供应商：按 host 或显式 `provider` 识别，地址路径里带 `openrouter.ai` 字样不再误判。
+- 超时默认值统一：首块默认 600 秒（原生透传曾是 180，后台页面曾显示 180、保存 600），API 调用和流响应默认 3000 秒；首块超时支持按端点配置。心跳默认 30 秒，`client_disconnect_probe_interval` 不再被悄悄压到 30 秒以内。
+- Gemini 默认地址、Key 冷却时长、服务端口收敛为单一定义；启动脚本统一用 `scripts/read_config.py` 读端口，修复 `start_tunnel.cmd` 首行多余字符。
+- 粗估 token 收敛为 `rough_token_count` / `rough_message_tokens`：区分中日韩文字，且不把 base64 图片算进输入。
+- `/v1/models` 持有效 Key 的客户端不再因 User-Agent 被返回空列表（`go-http-client` 曾误伤 Go 写的中转），名单可用 `quiet_user_agents` 配置；密钥错误提示不再指向 OpenAI 官网；缺 `model` 时不再默认成 `claude-3-5-sonnet`。
+- 余额查询只向 DeepSeek 官方地址或显式选择 DeepSeek 的端点发送 Key；修复后台供应商下拉框缺失 OpenAI 选项；调试日志不再打印含 Key 的端点配置。
+
 ### 2026-11-01：Gemini 长输出续传与失败上报
 
 - Gemini 上游返回 `CONTINUATION` 时自动带 `continuationToken` 续传，多跳合并成一次响应；无法续传时按 `length` / `max_tokens` 结束，不再把半截内容报成正常结束。跳数上限由 `gemini_max_continuation_hops` 配置（默认 32，0 为关闭）；原生 Gemini 客户端仍原样收到 token，由客户端决定是否续传。

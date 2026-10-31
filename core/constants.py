@@ -10,7 +10,7 @@ from typing import Dict, Any
 class TimeoutDefaults:
     """超时相关默认值（秒）"""
     # 流响应超时
-    STREAM_RESPONSE_TIMEOUT = 2000
+    STREAM_RESPONSE_TIMEOUT = 3000
     
     # WebSocket发送超时
     WEBSOCKET_SEND_TIMEOUT = 10.0
@@ -27,7 +27,10 @@ class TimeoutDefaults:
     DOWNLOAD_TOTAL_TIMEOUT = 30
     
     # API调用超时
-    API_CALL_TIMEOUT = 1200  # 20分钟
+    API_CALL_TIMEOUT = 3000  # 50分钟
+
+    # 流式心跳间隔：要短于常见反向代理和隧道的空闲断连时间
+    STREAM_HEARTBEAT_INTERVAL = 30
     
     # 首个数据块等待超时
     FIRST_CHUNK_TIMEOUT = 600  # 10分钟
@@ -44,6 +47,8 @@ class TimeoutDefaults:
 
 class GeminiDefaults:
     """Gemini 上游默认值"""
+    HOST = "generativelanguage.googleapis.com"
+    BASE_URL = f"https://{HOST}/v1beta"
     # 总预算上限 1048576 / 非流式单跳 32768，32 跳足以走满预算
     MAX_CONTINUATION_HOPS = 32
 
@@ -105,6 +110,9 @@ class RetryDefaults:
     # 文件床恢复时间
     FILEBED_RECOVERY_TIME = 300
 
+    # sticky 策略下 Key 额度耗尽后的冷却时间（48小时）
+    API_KEY_COOLDOWN_SECONDS = 172800
+
 
 class MemoryDefaults:
     """内存管理默认值（MB）"""
@@ -120,8 +128,11 @@ class MemoryDefaults:
 
 class ServerDefaults:
     """服务器默认值"""
-    # 默认端口
+    # 默认端口（启动脚本的默认值在 scripts/read_config.py）
     DEFAULT_PORT = 5102
+
+    # 未通过鉴权时静默返回空模型列表的 User-Agent（避免扫描器刷 401 日志）
+    QUIET_USER_AGENTS = ("lmspeedbot", "go-http-client")
     
     # 人机验证冷却时间（秒）
     VERIFICATION_COOLDOWN_SECONDS = 25
@@ -133,6 +144,19 @@ class ServerDefaults:
     CONFIG_MONITOR_INTERVAL = 30
     MEMORY_MONITOR_INTERVAL = 60
     STALE_CLEANER_INTERVAL = 60
+
+
+def resolve_first_chunk_timeout(config=None, endpoint_config=None):
+    """首块等待时长：端点配置优先，其次全局配置。"""
+    return ((endpoint_config or {}).get("first_chunk_timeout_seconds")
+            or (config or {}).get("first_chunk_timeout_seconds")
+            or TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
+
+
+def resolve_heartbeat_interval(endpoint_config=None):
+    """流式心跳间隔；下限 1 秒，避免配置为 0/负数时 busy-loop 狂发心跳。"""
+    return max(1, (endpoint_config or {}).get("client_disconnect_probe_interval")
+               or TimeoutDefaults.STREAM_HEARTBEAT_INTERVAL)
 
 
 # ==================== 正则表达式模式 ====================

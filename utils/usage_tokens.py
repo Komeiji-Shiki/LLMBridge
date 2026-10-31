@@ -27,6 +27,32 @@ from typing import Any, Dict, Optional
 MODE_MERGE = "merge"
 MODE_SEPARATE = "separate"
 
+# 粗估比例：仅在上游没给用量且本地 tokenizer 也不可用时使用
+_CHARS_PER_TOKEN_LATIN = 4
+_CHARS_PER_TOKEN_CJK = 1.5
+_CJK_START = "\u2e80"
+
+
+def rough_token_count(text: Optional[str]) -> int:
+    """按字符粗估 token；中日韩文字每 token 的字符数远少于拉丁文。"""
+    if not text:
+        return 0
+    wide = sum(1 for char in text if char >= _CJK_START)
+    return round(wide / _CHARS_PER_TOKEN_CJK + (len(text) - wide) / _CHARS_PER_TOKEN_LATIN)
+
+
+def rough_message_tokens(messages: Any) -> int:
+    """粗估消息输入量；只统计文本，base64 图片不计入。"""
+    total = 0
+    for message in messages or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            total += rough_token_count(content)
+        elif isinstance(content, list):
+            total += sum(rough_token_count(part.get("text")) for part in content if isinstance(part, dict))
+    return total
+
+
 # 上游可能存放思考 token 的位置，按兼容性优先级排列
 _REASONING_DETAIL_KEYS = ("completion_tokens_details", "output_tokens_details")
 _REASONING_DETAIL_FIELDS = ("reasoning_tokens", "reasoning_output")

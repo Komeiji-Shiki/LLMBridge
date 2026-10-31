@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from core.constants import TimeoutDefaults
+from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from utils.monitor_params import build_monitor_request_params
 from utils.usage_tokens import (
     compose_chat_usage,
@@ -343,9 +343,7 @@ async def handle_gemini_native_direct(
                 extra_body=extra_kwargs if extra_kwargs else None,
             )
 
-        first_chunk_timeout = TimeoutDefaults.FIRST_CHUNK_TIMEOUT
-        if CONFIG:
-            first_chunk_timeout = CONFIG.get("first_chunk_timeout_seconds", TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
+        first_chunk_timeout = resolve_first_chunk_timeout(CONFIG, endpoint_config)
 
         if is_stream:
             async def gemini_stream_generator():
@@ -372,9 +370,7 @@ async def handle_gemini_native_direct(
                 tail_suppressed = False
                 first_chunk_seen = False
                 splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
-                # 下限 1 秒：避免配置为 0/负数时 busy-loop 狂发 keep-alive（与透传链路对齐）
-                heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
-                chunks = iter_with_keepalive(gemini_generator, heartbeat_interval)
+                chunks = iter_with_keepalive(gemini_generator, resolve_heartbeat_interval(endpoint_config))
 
                 def consume(gemini_chunk):
                     """累积一个上游块，返回要转发的 SSE 文本（被思考分隔吞掉时为 None）。"""
@@ -598,7 +594,7 @@ async def handle_gemini_native_direct(
 
                 try:
                     api_task = asyncio.create_task(anext(gemini_generator))
-                    heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
+                    heartbeat_interval = resolve_heartbeat_interval(endpoint_config)
                     first_chunk_wait_start = time.time()
 
                     while not api_task.done():

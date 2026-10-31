@@ -33,6 +33,7 @@ from ._custom import (
     load_custom_tokenizers_config,
     get_custom_tokenizer,
 )
+from utils.usage_tokens import rough_message_tokens, rough_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -203,15 +204,7 @@ def calculate_request_tokens(messages:List[Dict[str,Any]],model:str)->int:
         t = estimate_message_tokens(messages,model)
     except Exception as e:
         logger.warning(f"[TOKEN_SERVICE] token计算失败: {e}")
-        for msg in messages:
-            if isinstance(msg,dict) and 'content' in msg:
-                c = msg.get('content','')
-                if isinstance(c,str):
-                    t += len(c)//4
-                elif isinstance(c,list):
-                    for p in c:
-                        if isinstance(p,dict) and p.get('type')=='text':
-                            t += len(p.get('text',''))//4
+        t = rough_message_tokens(messages)
     return t
 
 
@@ -222,7 +215,7 @@ def calculate_response_tokens(response_content:str,model:str)->int:
         return estimate_tokens(response_content,model)
     except Exception as e:
         logger.warning(f"[TOKEN_SERVICE] token计算输出失败: {e}")
-        return len(response_content)//4
+        return rough_token_count(response_content)
 
 
 def calculate_full_usage(messages:List[Dict[str,Any]],response_content:str,model:str,lmarena_usage:Dict[str,int]=None,monitoring_service=None,request_id:str=None)->Dict[str,int]:

@@ -156,6 +156,8 @@ function fillModelForm(config) {
         document.getElementById('upstream-protocol').value = config.upstream_protocol || 'generate_content';
         document.getElementById('passthrough').checked = config.passthrough !== false;
         document.getElementById('model-provider').value = config.provider || '';
+        document.getElementById('model-family').value = config.model_family || '';
+        document.getElementById('model-first-chunk-timeout').value = config.first_chunk_timeout_seconds || '';
         document.getElementById('model-native-tools').value = (config.native_tools || []).join(', ');
         document.getElementById('model-native-tool-options').value = config.native_tool_options ? JSON.stringify(config.native_tool_options, null, 2) : '';
         document.getElementById('force-stream').value = config.force_stream !== undefined ? String(config.force_stream) : '';
@@ -348,6 +350,8 @@ async function saveModel() {
             passthrough: document.getElementById('passthrough').checked,
             sanitize_recursive_schemas: false,
             ...(document.getElementById('model-provider').value ? {provider: document.getElementById('model-provider').value} : {}),
+            ...(document.getElementById('model-family').value ? {model_family: document.getElementById('model-family').value} : {}),
+            ...(Number(document.getElementById('model-first-chunk-timeout').value) > 0 ? {first_chunk_timeout_seconds: Number(document.getElementById('model-first-chunk-timeout').value)} : {}),
             native_tools: document.getElementById('model-native-tools').value.split(',').map(value => value.trim()).filter(Boolean),
             native_tool_options: JSON.parse(document.getElementById('model-native-tool-options').value.trim() || '{}'),
             convert_system_to_user: document.getElementById('convert-system-to-user').checked,

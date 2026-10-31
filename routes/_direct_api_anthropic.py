@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
-from core.constants import TimeoutDefaults
+from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from utils.monitor_params import build_monitor_request_params
 from utils.task_registry import spawn
 from converters import is_content_parts
@@ -47,6 +47,7 @@ from ._direct_api_utils import (
     normalize_to_openai_error,
     record_request_failure,
 )
+from utils.usage_tokens import rough_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -1212,9 +1213,9 @@ def build_openai_stream_from_anthropic(
                             estimate_tokens_func, total_output, model_name)
                     except Exception as te:
                         logger.warning(f"[OAI_FROM_ANTHROPIC] output token估算失败: {te}")
-                        output_tokens = len(total_output) // 4
+                        output_tokens = rough_token_count(total_output)
                 else:
-                    output_tokens = len(total_output) // 4
+                    output_tokens = rough_token_count(total_output)
 
             cost_info = {}
             if pricing_config and direct_api_service:
@@ -1436,9 +1437,7 @@ async def handle_anthropic_native_from_openai(
         log_tag="OAI_TO_ANTHROPIC")
 
     # ── 首块超时配置 ──
-    first_chunk_timeout = TimeoutDefaults.FIRST_CHUNK_TIMEOUT
-    if CONFIG:
-        first_chunk_timeout = CONFIG.get("first_chunk_timeout_seconds", TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
+    first_chunk_timeout = resolve_first_chunk_timeout(CONFIG, endpoint_config)
 
     if is_stream:
         # ── 流式：Anthropic SSE → OpenAI SSE ──
@@ -1449,9 +1448,9 @@ async def handle_anthropic_native_from_openai(
             endpoint_path=endpoint_path
         )
 
-        # 预读第一个块，检测错误和超时（下限 1 秒，避免配置为 0/负数时 busy-loop）
+        # 预读第一个块，检测错误和超时
         api_task = asyncio.create_task(anext(api_iter))
-        heartbeat_interval = max(1, min(endpoint_config.get("client_disconnect_probe_interval", 30) or 30, 30))
+        heartbeat_interval = resolve_heartbeat_interval(endpoint_config)
         wait_start = time.time()
 
         while not api_task.done():

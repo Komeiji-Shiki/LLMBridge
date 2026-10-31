@@ -33,6 +33,7 @@ from ._direct_api_gemini import handle_gemini_native_direct
 from ._direct_api_passthrough import handle_passthrough_direct
 from ._direct_api_responses import handle_responses_native_direct
 from ._direct_api_anthropic import handle_anthropic_native_from_openai
+from core.constants import RetryDefaults
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,7 @@ async def handle_direct_api_request(
     api_key_strategy = endpoint_config.get("api_key_strategy", "round_robin")
     api_key_cooldown = int(endpoint_config.get("api_key_cooldown_seconds", 0) or 0)
     if api_key_cooldown <= 0:
-        api_key_cooldown = 172800  # 默认 48 小时
+        api_key_cooldown = RetryDefaults.API_KEY_COOLDOWN_SECONDS
     api_key = await get_api_key(model_name, raw_api_key, strategy=api_key_strategy, cooldown_seconds=api_key_cooldown)
     target_model_id = endpoint_config.get("model_id", model_name)
     display_name = endpoint_config.get("display_name", model_name)

@@ -2,6 +2,8 @@
 import copy
 from urllib.parse import urlparse
 
+from core.constants import GeminiDefaults
+
 PROVIDERS = {
     'openai': {'name': 'OpenAI', 'docs': 'https://developers.openai.com/api/docs/guides/tools',
                'responses_tools': ['web_search', 'file_search', 'code_interpreter', 'image_generation', 'mcp', 'shell', 'tool_search']},
@@ -11,8 +13,13 @@ PROVIDERS = {
                  'responses_tools': ['web_search'], 'stateless_responses': True},
     'gemini': {'name': 'Google Gemini', 'docs': 'https://ai.google.dev/gemini-api/docs/tools',
                'gemini_tools': ['google_search', 'url_context', 'code_execution', 'google_maps', 'file_search']},
+    'openrouter': {'name': 'OpenRouter', 'docs': 'https://openrouter.ai/docs/use-cases/reasoning-tokens'},
     'custom': {'name': '自定义兼容服务', 'docs': None},
 }
+
+# 同一模型经不同中转访问时协议细节不变，而中转地址看不出模型来源，所以按模型家族判断。
+MODEL_FAMILIES = ('gemini', 'deepseek', 'qwen')
+NO_MODEL_FAMILY = 'other'
 
 GEMINI_TOOL_FIELDS = {'google_search': 'googleSearch', 'url_context': 'urlContext',
                       'code_execution': 'codeExecution', 'google_maps': 'googleMaps', 'file_search': 'fileSearch'}
@@ -25,9 +32,27 @@ def provider_name(config):
     host = (urlparse(config.get('api_base_url') or '').hostname or '').lower()
     if host == 'api.openai.com': return 'openai'
     if host == 'api.deepseek.com': return 'deepseek'
-    if host == 'generativelanguage.googleapis.com' or (not host and config.get('api_type') == 'gemini_native'): return 'gemini'
+    if host == GeminiDefaults.HOST or (not host and config.get('api_type') == 'gemini_native'): return 'gemini'
     if host.endswith('.aliyuncs.com') or host in ('dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com'): return 'qwen'
+    if host == 'openrouter.ai' or host.endswith('.openrouter.ai'): return 'openrouter'
     return 'custom'
+
+
+def model_family(config, *model_names):
+    """判断端点实际跑的模型家族，返回 None 表示不需要任何家族专属处理。
+
+    优先级：端点显式配置 model_family > 模型名 > 官方供应商地址。模型名排在
+    供应商前面，是因为百炼这类平台也托管其他家族的模型。
+    """
+    explicit = config.get('model_family')
+    if explicit:
+        return None if explicit == NO_MODEL_FAMILY else explicit
+    names = [str(name).lower() for name in model_names if name]
+    for family in MODEL_FAMILIES:
+        if any(family in name for name in names):
+            return family
+    provider = provider_name(config)
+    return provider if provider in MODEL_FAMILIES else None
 
 
 def protocol_name(config):
@@ -47,6 +72,9 @@ def validate_tool_config(config):
     provider = config.get('provider')
     if provider is not None and provider not in PROVIDERS:
         raise ValueError('未知供应商配置')
+    family = config.get('model_family')
+    if family and family not in (*MODEL_FAMILIES, NO_MODEL_FAMILY):
+        raise ValueError('未知模型家族配置')
     selected = config.get('native_tools', [])
     options = config.get('native_tool_options', {})
     if not isinstance(selected, list) or not all(isinstance(tool, str) for tool in selected):

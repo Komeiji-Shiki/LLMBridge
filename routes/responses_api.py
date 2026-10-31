@@ -27,7 +27,7 @@ from converters.responses_openai import (
     convert_responses_to_chat_request,
     read_response_body_bytes,
 )
-from core.constants import TimeoutDefaults
+from core.constants import resolve_first_chunk_timeout
 from core.errors import BadRequestError
 from core.model_archive import is_model_archived
 from modules.monitoring import monitoring_service
@@ -517,8 +517,7 @@ async def _handle_responses_native_passthrough(
 
     if is_stream:
         # ── 流式：首块错误检测 + 原样逐块转发（边转发边累计监控统计）──
-        first_chunk_timeout = _chat_api.CONFIG.get(
-            "first_chunk_timeout_seconds", TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
+        first_chunk_timeout = resolve_first_chunk_timeout(_chat_api.CONFIG, endpoint_config)
         try:
             first_chunk = await asyncio.wait_for(anext(api_iter), timeout=first_chunk_timeout)
         except asyncio.TimeoutError:

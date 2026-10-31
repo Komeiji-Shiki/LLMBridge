@@ -15,7 +15,7 @@ from converters.gemini_anthropic_signatures import restore_google_tool_signature
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
-from core.constants import TimeoutDefaults
+from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from services.logprobs_collector import create_logprobs_collector
 from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
@@ -38,8 +38,12 @@ from ._direct_api_utils import (
     normalize_to_openai_error,
     record_request_failure,
 )
+from services.provider_capabilities import model_family, provider_name
+from utils.usage_tokens import rough_message_tokens, rough_token_count
 
 logger = logging.getLogger(__name__)
+
+OPENROUTER_DEFAULT_THINKING_BUDGET = 20000
 
 # 超过该大小的响应体才丢线程池解析/序列化（小 body 的线程切换开销比解析本身还大）
 _JSON_OFFLOAD_THRESHOLD_BYTES = 64 * 1024
@@ -178,7 +182,7 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
     # 客户端中途切到 OpenAI 兼容模型时不能带给上游。
     if isinstance(passthrough_request.get("messages"), list):
         messages = []
-        is_gemini = "gemini" in target_model_id.lower()
+        is_gemini = model_family(endpoint_config, target_model_id) == "gemini"
         for message in passthrough_request["messages"]:
             if isinstance(message, dict):
                 if is_gemini:
@@ -263,8 +267,8 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                 logger.info(f"[DIRECT_API_PARTIAL] 已启用 partial 模式（Kimi K2预填充）")
 
     # DeepSeek V4 reasoning_content 兼容
-    is_deepseek = "deepseek" in (model_name or "").lower() or "deepseek" in (target_model_id or "").lower()
-    if is_deepseek and "messages" in passthrough_request:
+    family = model_family(endpoint_config, model_name, target_model_id)
+    if family == "deepseek" and "messages" in passthrough_request:
         for msg in passthrough_request["messages"]:
             if isinstance(msg, dict) and msg.get("role") == "assistant":
                 rc = msg.get("reasoning_content")
@@ -272,12 +276,11 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                     msg["reasoning_content"] = " "
 
     # 判断是否为 OpenRouter 端点（用于走 OpenRouter 专属参数格式）
-    api_base_url = (endpoint_config.get("api_base_url") or "").lower()
-    is_openrouter = "openrouter.ai" in api_base_url
+    is_openrouter = provider_name(endpoint_config) == "openrouter"
 
     if is_openrouter:
         # OpenRouter：thinking 参数走 reasoning 对象
-        is_qwen = "qwen" in (target_model_id or "").lower()
+        is_qwen = family == "qwen"
         enable_thinking = endpoint_config.get("enable_thinking")
         if enable_thinking is True:
             passthrough_request.setdefault("reasoning", {})
@@ -287,8 +290,8 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                 passthrough_request["reasoning"]["effort"] = reasoning_effort
             else:
                 # Token 预算控制（默认，向后兼容）
-                thinking_budget = endpoint_config.get("thinking_budget", 20000)
-                passthrough_request["reasoning"]["max_tokens"] = thinking_budget
+                passthrough_request["reasoning"]["max_tokens"] = endpoint_config.get(
+                    "thinking_budget", OPENROUTER_DEFAULT_THINKING_BUDGET)
             passthrough_request["reasoning"]["exclude"] = False
             # Qwen 模型需要额外的原生参数：enable_thinking 启用思考，preserve_thinking 保留历史思考链
             # OpenRouter 会将这些参数透传给底层 Qwen API
@@ -297,7 +300,7 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                 passthrough_request["preserve_thinking"] = True
             logger.info(
                 f"[DIRECT_API_THINKING] OpenRouter reasoning 模式已启用 "
-                f"({'effort=' + reasoning_effort if reasoning_effort else 'max_tokens=' + str(endpoint_config.get('thinking_budget', 20000))}, "
+                f"({'effort=' + reasoning_effort if reasoning_effort else 'max_tokens=' + str(passthrough_request['reasoning']['max_tokens'])}, "
                 f"qwen_native={'yes' if is_qwen else 'no'})")
         elif enable_thinking is False:
             passthrough_request.setdefault("reasoning", {})
@@ -385,9 +388,7 @@ async def _handle_passthrough_stream(
         base_url=api_base_url, api_key=api_key,
         request_body=passthrough_request, endpoint_path=endpoint_path)
 
-    first_chunk_timeout = TimeoutDefaults.FIRST_CHUNK_TIMEOUT
-    if CONFIG:
-        first_chunk_timeout = CONFIG.get("first_chunk_timeout_seconds", TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
+    first_chunk_timeout = resolve_first_chunk_timeout(CONFIG, endpoint_config)
 
     # ── 预读首块（在 StreamingResponse 创建之前，错误可被上层重试循环捕获）──
     try:
@@ -474,8 +475,8 @@ async def _handle_passthrough_stream(
             # 先 yield 已处理的首块
             yield processed_first
 
-            # 继续处理剩余流（下限 1 秒，避免配置异常时 busy-loop）
-            heartbeat_interval = max(1, endpoint_config.get("client_disconnect_probe_interval", 180) or 180)
+            # 继续处理剩余流
+            heartbeat_interval = resolve_heartbeat_interval(endpoint_config)
             while True:
                 if api_task is None or api_task.done():
                     api_task = asyncio.create_task(anext(api_iterator))
@@ -665,8 +666,8 @@ async def _handle_passthrough_non_stream(
                 logger.info(f"[DIRECT_API] Tokenizer计算结果: 输入={input_tokens}, 输出={output_tokens}")
             except Exception as token_error:
                 logger.warning(f"[DIRECT_API] Tokenizer计算失败: {token_error}，使用简单估算")
-                input_tokens = sum(len(str(m.get('content', ''))) for m in openai_req.get('messages', [])) // 4
-                output_tokens = len(output_text) // 4
+                input_tokens = rough_message_tokens(openai_req.get('messages', []))
+                output_tokens = rough_token_count(output_text)
 
         # 按模型配置归一下发给客户端的 usage 口径：
         # merge=completion_tokens 含思考（总输出），separate=只含正文；

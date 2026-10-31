@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from converters.audio import extract_audio
 from core.audio_files import AudioFiles
 from core.request_context import current_request, credential_identity, endpoint_identity
+from core.constants import GeminiDefaults
 
 
 # 音频文档给出的内联限制包含整个请求；文件上传本身沿用网关已有的请求体上限。
@@ -17,8 +18,8 @@ INLINE_AUDIO_BYTES = 20_000_000
 
 
 def supports_files_api(config):
-    base = config.get("api_base_url") or "https://generativelanguage.googleapis.com/v1beta"
-    return config.get("audio_files_api", urlsplit(base).hostname == "generativelanguage.googleapis.com") is True
+    base = config.get("api_base_url") or GeminiDefaults.BASE_URL
+    return config.get("audio_files_api", urlsplit(base).hostname == GeminiDefaults.HOST) is True
 
 
 async def _json_response(response, operation):
@@ -36,7 +37,7 @@ async def _uploaded_uri(store, file_id, metadata, session, api_key, base_url, co
         if expires > now and cached.get("state") == "ACTIVE":
             return cached["uri"]
 
-    base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+    base = (base_url or GeminiDefaults.BASE_URL).rstrip("/")
     prefix, version = base.rsplit("/", 1)
     if version not in ("v1", "v1beta"):
         raise HTTPException(400, "Files API 基础地址必须包含 /v1 或 /v1beta")

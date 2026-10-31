@@ -460,7 +460,7 @@ def _convert_openai_to_lmarena_payload_sync(
         processed_messages = final_messages
 
     # 3. 确定目标模型 ID 和类型
-    model_name = openai_data.get("model", "claude-3-5-sonnet-20241022")
+    model_name = openai_data.get("model", "")
     
     # 优先从 MODEL_ENDPOINT_MAP 获取模型类型（如果定义了）
     model_type = "text"  # 默认类型
@@ -468,7 +468,7 @@ def _convert_openai_to_lmarena_payload_sync(
     
     # 诊断日志：记录模型类型判断过程
     logger.info(f"[BYPASS_DEBUG] 开始判断模型 '{model_name}' 的类型...")
-    logger.info(f"[BYPASS_DEBUG] endpoint_info 类型: {type(endpoint_info).__name__}, 内容: {endpoint_info}")
+    logger.info(f"[BYPASS_DEBUG] endpoint_info 类型: {type(endpoint_info).__name__}")
     
     if isinstance(endpoint_info, dict) and "type" in endpoint_info:
         model_type = endpoint_info.get("type", "text")

@@ -17,7 +17,7 @@ from converters.responses_bridge import (
     convert_chat_request_to_responses,
     convert_responses_response_to_chat,
 )
-from core.constants import TimeoutDefaults
+from core.constants import resolve_first_chunk_timeout
 from core.request_context import current_request
 from services.responses_history import ResponsesHistory
 from converters.cache_warnings import warning_headers
@@ -261,10 +261,7 @@ async def _handle_stream(
         request_body=upstream_request,
         endpoint_path=endpoint_path,
     )
-    first_chunk_timeout = (CONFIG or {}).get(
-        "first_chunk_timeout_seconds",
-        TimeoutDefaults.FIRST_CHUNK_TIMEOUT,
-    )
+    first_chunk_timeout = resolve_first_chunk_timeout(CONFIG, endpoint_config)
     try:
         first_chunk = await asyncio.wait_for(anext(upstream_iterator), timeout=first_chunk_timeout)
     except asyncio.TimeoutError as exc:

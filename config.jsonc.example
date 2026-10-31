@@ -40,6 +40,8 @@
   "first_chunk_timeout_seconds": 600,
   // Gemini 输出达到单次上限（CONTINUATION）时的自动续传次数；0 表示不续传，按输出截断结束
   "gemini_max_continuation_hops": 32,
+  // 未通过鉴权时静默返回空模型列表的 User-Agent 片段（不区分大小写），避免扫描器刷 401 日志
+  "quiet_user_agents": ["lmspeedbot", "go-http-client"],
   "max_concurrent_downloads": 20,
   "connection_pool": {
     "total_limit": 200,

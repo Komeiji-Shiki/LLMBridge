@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 
 from core.config_loader import MODEL_ROUND_ROBIN_LOCK
+from core.constants import RetryDefaults
 
 logger = logging.getLogger(__name__)
 
@@ -209,14 +210,14 @@ def _save_sticky_if_dirty():
         _save_sticky_state()
 
 
-async def mark_sticky_key_cooldown(model_name: str, api_key_config, key_value: str, cooldown_seconds: int = 172800):
+async def mark_sticky_key_cooldown(model_name: str, api_key_config, key_value: str, cooldown_seconds: int = RetryDefaults.API_KEY_COOLDOWN_SECONDS):
     """将指定的 key 标记为冷却状态。
 
     Args:
         model_name: 模型名称（作为命名空间）
         api_key_config: api_key 或 api_keys 配置
         key_value: 被标记冷却的 key 值
-        cooldown_seconds: 冷却时长（秒），默认 172800（48小时）
+        cooldown_seconds: 冷却时长（秒）
     """
     if not key_value or cooldown_seconds <= 0:
         return
@@ -307,7 +308,7 @@ def _mask_key(key: str) -> str:
     return key[:4] + "..." + key[-4:]
 
 
-async def get_sticky_api_key(model_name: str, api_key_config, cooldown_seconds: int = 172800) -> str:
+async def get_sticky_api_key(model_name: str, api_key_config, cooldown_seconds: int = RetryDefaults.API_KEY_COOLDOWN_SECONDS) -> str:
     """粘性轮询：优先使用上一次成功调用的 key，直到它被冷却。
 
     策略：
@@ -374,7 +375,7 @@ async def get_sticky_api_key(model_name: str, api_key_config, cooldown_seconds: 
 
 
 @observe_credential
-async def get_api_key(model_name: str, api_key_config, strategy: str = "round_robin", cooldown_seconds: int = 172800) -> str:
+async def get_api_key(model_name: str, api_key_config, strategy: str = "round_robin", cooldown_seconds: int = RetryDefaults.API_KEY_COOLDOWN_SECONDS) -> str:
     """统一的 API key 获取入口，根据策略分发。
 
     Args:

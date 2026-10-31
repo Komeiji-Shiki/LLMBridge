@@ -91,10 +91,6 @@ async function queryKeyBalances() {
         alert('请先填写 API Base URL');
         return;
     }
-    if (!apiBaseUrl.toLowerCase().includes('deepseek')) {
-        alert('当前仅 DeepSeek API 支持余额查询。\n\n检测到 API Base URL 不含 "deepseek"，无法使用 /user/balance 接口。');
-        return;
-    }
 
     // 隐藏之前的余额显示
     document.querySelectorAll('.key-balance-info').forEach(el => {
@@ -112,7 +108,8 @@ async function queryKeyBalances() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 api_keys: keys,
-                api_base_url: apiBaseUrl
+                api_base_url: apiBaseUrl,
+                provider: document.getElementById('model-provider').value
             })
         });
         const data = await resp.json();

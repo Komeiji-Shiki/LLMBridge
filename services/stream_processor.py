@@ -32,6 +32,8 @@ from services.image_handler import (
     CloudflareHandler,
 )
 from utils.task_registry import spawn
+from core.constants import TimeoutDefaults
+from utils.usage_tokens import rough_message_tokens, rough_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +79,7 @@ async def _process_lmarena_stream(request_id: str, queue, request_metadata: dict
     stream_cancelled = False
     logger.info(f"[STREAM_LIFECYCLE] 🚀 _process_lmarena_stream 开始处理: {request_id[:8]}")
     
-    timeout = CONFIG.get("stream_response_timeout_seconds", 360)
+    timeout = CONFIG.get("stream_response_timeout_seconds", TimeoutDefaults.STREAM_RESPONSE_TIMEOUT)
     has_yielded_content = False
     enable_reasoning_output = CONFIG.get("enable_lmarena_reasoning", False)
     reasoning_buffer = []
@@ -585,7 +587,7 @@ async def _handle_client_disconnect(request_id, exception, collected_content, re
         try:
             output_tokens = estimate_tokens(partial_response, model)
         except Exception:
-            output_tokens = len(partial_response) // 4
+            output_tokens = rough_token_count(partial_response)
     
     monitoring_service.request_end(
         request_id, success=False, error=f"Client disconnected: {type(exception).__name__}",
@@ -618,7 +620,7 @@ async def _handle_stream_error(request_id, error_data, collected_content, reason
         try:
             output_tokens = estimate_tokens(error_response, model)
         except Exception:
-            output_tokens = len(error_response) // 4
+            output_tokens = rough_token_count(error_response)
     
     monitoring_service.request_end(
         request_id, success=False, error=str(error_data),
@@ -674,28 +676,20 @@ async def _calculate_tokens(lmarena_usage, model, full_response, request_id,
         # 处理结果
         if isinstance(results[0], Exception):
             logger.warning(f"[TOKEN] 输入token计算失败: {results[0]}")
-            input_tokens = sum(
-                len(msg.get('content', '')) // 4
-                for msg in (request_messages or [])
-                if isinstance(msg, dict) and isinstance(msg.get('content'), str)
-            )
+            input_tokens = rough_message_tokens(request_messages)
         else:
             input_tokens = results[0]
         
         if isinstance(results[1], Exception):
             logger.warning(f"[TOKEN] 输出token计算失败: {results[1]}")
-            output_tokens = len(full_response) // 4
+            output_tokens = rough_token_count(full_response)
         else:
             output_tokens = results[1]
             
     except Exception as e:
         logger.warning(f"[TOKEN] token计算异常，使用估算: {e}")
-        input_tokens = sum(
-            len(msg.get('content', '')) // 4
-            for msg in (request_messages or [])
-            if isinstance(msg, dict) and isinstance(msg.get('content'), str)
-        )
-        output_tokens = len(full_response) // 4
+        input_tokens = rough_message_tokens(request_messages)
+        output_tokens = rough_token_count(full_response)
     
     return input_tokens, output_tokens
 
@@ -833,7 +827,7 @@ async def _handle_non_stream_error(request_id, error_data, full_content, reasoni
         try:
             output_tokens = estimate_tokens(error_content, model)
         except Exception:
-            output_tokens = len(error_content) // 4
+            output_tokens = rough_token_count(error_content)
     
     monitoring_service.request_end(
         request_id, success=False, error=str(error_data),
