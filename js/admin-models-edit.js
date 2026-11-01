@@ -39,6 +39,7 @@ function showAddModelModal() {
     document.getElementById('enable-prefix').checked = false;
     document.getElementById('enable-partial').checked = false;
     document.getElementById('prefill-content').value = '';
+    document.getElementById('prefill-reasoning-content').value = '';
     document.getElementById('enable-thinking').value = '';
     document.getElementById('thinking-control').value = 'budget';
     document.getElementById('thinking-budget').value = '20000';
@@ -165,6 +166,7 @@ function fillModelForm(config) {
         document.getElementById('enable-prefix').checked = config.enable_prefix || false;
         document.getElementById('enable-partial').checked = config.enable_partial || false;
         document.getElementById('prefill-content').value = config.prefill_content || '';
+        document.getElementById('prefill-reasoning-content').value = config.prefill_reasoning_content || '';
         // 思维链模式：兼容旧的 thinking_mode 配置和布尔值 enable_thinking
         const et = config.enable_thinking;
         const tm = config.thinking_mode;
@@ -440,10 +442,14 @@ async function saveModel() {
             }
         }
 
-        // 预填充内容：只在非空时保存
+        // 预填充内容/思维链：只在非空时保存
         const prefillContent = document.getElementById('prefill-content').value;
         if (prefillContent && prefillContent.trim()) {
             config.prefill_content = prefillContent;
+        }
+        const prefillReasoning = document.getElementById('prefill-reasoning-content').value;
+        if (prefillReasoning && prefillReasoning.trim()) {
+            config.prefill_reasoning_content = prefillReasoning;
         }
 
         // 可选模型端点：默认 /chat/completions，留空或默认值则不写入配置

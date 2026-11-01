@@ -1216,7 +1216,7 @@
                                     为最后一条assistant消息添加 <code>"partial": true</code> 参数（适用于Kimi K2等模型的预填充续写）
                                 </small>
 </div>
-<div class="form-group" style="margin-bottom: 0;">
+<div class="form-group">
 <label class="form-label" for="prefill-content">预填充内容（Assistant Prefill）</label>
 <textarea class="form-input" id="prefill-content" placeholder="在消息末尾追加一条 assistant 消息，用于跳过思考/引导输出。
 例如：&lt;think&gt;
@@ -1224,6 +1224,17 @@
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                     在此输入的内容将作为 <code>{"role": "assistant", "content": "..."}</code> 追加到消息列表末尾。
                                     常用于跳过模型思考阶段或预设回答开头。留空则不启用。
+                                </small>
+</div>
+<div class="form-group" style="margin-bottom: 0;">
+<label class="form-label" for="prefill-reasoning-content">预填充思维链（Reasoning Prefill）</label>
+<textarea class="form-input" id="prefill-reasoning-content" placeholder="给思维链起个头，模型会接着这段思路继续想。
+例如：好的，让我先分析一下用户的需求，
+留空则不启用" rows="3" style="font-family: monospace; font-size: 0.85rem; margin-top: 5px;"></textarea>
+<small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                    在此输入的内容将作为 <code>"reasoning_content": "..."</code> 写入末尾的 assistant 消息（DeepSeek 等思考模型）。
+                                    与上面的预填充内容同时填写时合并为同一条消息，此时思维链视为已写完，正文接着预填充内容往下写；
+                                    只填这一项则是续写思维链。需同时启用 Prefix 模式。留空则不启用。
                                 </small>
 </div>
 </div>

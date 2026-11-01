@@ -1078,3 +1078,28 @@ def ensure_reasoning_noop_tool(openai_req: dict, injection_config: dict) -> dict
     openai_req["tools"] = [_REASONING_NOOP_TOOL]
     logger.info("[SYSTEM_INJECT] 伪造思维链检测到，注入占位工具以触发历史 reasoning_content 拼接")
     return openai_req
+
+
+# ============================================================
+# 末尾 assistant 预填充
+# ============================================================
+
+def build_prefill_message(endpoint_config: dict) -> Optional[dict]:
+    """按端点配置构造追加到消息末尾的 assistant 预填充消息，未配置返回 None。
+
+    - 只填 content：模型接着正文往下写，DeepSeek 上相当于卡掉思维链；
+    - 只填 reasoning_content：给思维链起头，模型接着这段思路继续想；
+    - 两者都填：合并为同一条消息，思维链视为已写完，正文接着 content 写。
+    是否带 prefix / partial 标记由端点的 enable_prefix / enable_partial 决定。
+    """
+    content = endpoint_config.get("prefill_content")
+    reasoning = endpoint_config.get("prefill_reasoning_content")
+    has_content = isinstance(content, str) and bool(content.strip())
+    has_reasoning = isinstance(reasoning, str) and bool(reasoning.strip())
+    if not (has_content or has_reasoning):
+        return None
+
+    message = {"role": "assistant", "content": content if has_content else ""}
+    if has_reasoning:
+        message["reasoning_content"] = reasoning
+    return message

@@ -27,6 +27,7 @@ from ._direct_api_utils import (
     should_retry_http_exception,
     inject_system_prompt,
     ensure_reasoning_noop_tool,
+    build_prefill_message,
     map_upstream_error_to_status_code,
 )
 from ._direct_api_gemini import handle_gemini_native_direct
@@ -91,14 +92,15 @@ async def handle_direct_api_request(
             ensure_reasoning_noop_tool(openai_req, system_injection_config)
 
     # 预填充注入（anthropic_native 跳过，Anthropic 格式 prefilling 方式不同）
-    prefill_content = endpoint_config.get("prefill_content")
-    if api_type != "anthropic_native" and prefill_content and isinstance(prefill_content, str) and prefill_content.strip():
+    prefill_message = None if api_type == "anthropic_native" else build_prefill_message(endpoint_config)
+    if prefill_message:
         messages = openai_req.get("messages", [])
-        messages.append({"role": "assistant", "content": prefill_content})
+        messages.append(prefill_message)
         openai_req["messages"] = messages
         logger.info(
             f"[DIRECT_API] 预填充已启用: 在消息末尾追加 assistant 消息 "
-            f"({len(prefill_content)} 字符)")
+            f"(content {len(prefill_message['content'])} 字符, "
+            f"reasoning_content {len(prefill_message.get('reasoning_content', ''))} 字符)")
 
     # 获取配置
     api_base_url = endpoint_config.get("api_base_url")

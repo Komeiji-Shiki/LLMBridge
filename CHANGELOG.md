@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-11-01：预填充思维链
+
+- 新增端点配置 `prefill_reasoning_content`，后台「预填充/续写模式」里对应“预填充思维链”输入框。它作为 `reasoning_content` 写入末尾的 assistant 消息，配合 Prefix 模式让 DeepSeek 接着这段思路继续想；原有“预填充内容”（`content`）则是直接卡掉思维链。
+- 两项同时填写时合并为同一条 assistant 消息：思维链视为已写完，正文接着预填充内容往下写。构造逻辑收敛为 `build_prefill_message`，带单元测试。
+
 ### 2026-11-01：音频引用误识别修复
 
 - 音频封装仅在独占一行时解析，并兼容 Claude Code Read 的行号前缀。读取源码时，字符串中的音频标签保留为普通文字，避免测试样例中的假 ID 触发“音频文件不存在”。

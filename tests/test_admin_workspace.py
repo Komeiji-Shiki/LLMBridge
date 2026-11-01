@@ -239,20 +239,38 @@ def test_config_parser_escaped_backslashes_and_form_snapshot(ui):
 
 def test_edit_preserves_unrepresented_fields_and_other_endpoints(ui):
     page, models, writes, _ = ui
-    primary = {**models['Alpha'], 'custom_header_policy': {'tenant': 'keep'}, 'prefill_content': 'clear me'}
+    primary = {**models['Alpha'], 'custom_header_policy': {'tenant': 'keep'},
+               'prefill_content': 'clear me', 'prefill_reasoning_content': 'clear me too'}
     secondary = {'api_type': 'direct_api', 'api_base_url': 'https://backup.test', 'api_key': 'backup-key'}
     models['Alpha'] = [primary, secondary]
     page.evaluate('loadModels()')
     page.locator('.model-name', has_text='Alpha').click()
     page.locator('[data-settings-page="messages"]').click()
+    assert page.locator('#prefill-reasoning-content').input_value() == 'clear me too'
     page.locator('#prefill-content').fill('')
+    page.locator('#prefill-reasoning-content').fill('')
     page.locator('#model-save-btn').click()
     page.wait_for_selector('#model-modal', state='hidden')
     saved = writes[-1]
     assert saved['old_model_name'] == 'Alpha'
     assert saved['config'][0]['custom_header_policy'] == {'tenant': 'keep'}
     assert 'prefill_content' not in saved['config'][0]
+    assert 'prefill_reasoning_content' not in saved['config'][0]
     assert saved['config'][1] == secondary
+
+
+def test_edit_saves_reasoning_prefill(ui):
+    page, models, writes, _ = ui
+    page.evaluate('loadModels()')
+    page.locator('.model-name', has_text='Alpha').click()
+    page.locator('[data-settings-page="messages"]').click()
+    page.locator('#prefill-reasoning-content').fill('先分析需求，')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    saved = writes[-1]['config']
+    saved = saved[0] if isinstance(saved, list) else saved
+    assert saved['prefill_reasoning_content'] == '先分析需求，'
+    assert 'prefill_content' not in saved
 
 
 def test_monitor_keeps_newest_query_and_supports_programmatic_tabs(ui):
