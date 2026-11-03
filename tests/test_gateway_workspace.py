@@ -20,7 +20,8 @@ def test_metadata_sqlite_all_read_paths_and_history(tmp_path):
               'cache_write_extra_cost': 0, 'cache_mode': None,
               'cost_info': {'total_cost': 3.5, 'currency': 'CNY'},
               'caller_id': 'stable-key', 'caller_name': '用户', 'conversation_id': 'conversation',
-              'gateway_request_id': 'wire-id', 'timings': {'total_ms': 123}, 'pricing_snapshot': {'input': 7}}
+              'gateway_request_id': 'wire-id', 'endpoint_model': 'demo_vertex',
+              'timings': {'total_ms': 123}, 'pricing_snapshot': {'input': 7}}
     logger.write_request(record)
     from core.request_metadata import COLUMNS
     for fetched in [logger.get_request_details('request'), logger.get_recent_requests(1)[0], logger.query_requests(search='stable-key')['items'][0]]:
@@ -30,6 +31,26 @@ def test_metadata_sqlite_all_read_paths_and_history(tmp_path):
     assert result['items'][0]['historical_cost'] == 3.5
     assert result['items'][0]['current_estimate'] == 50
     assert logger.get_request_details('request')['total_cost'] == 3.5
+    logger.close()
+
+
+def test_endpoint_stats_separate_routes_sharing_a_display_name(tmp_path):
+    from modules.monitoring_sqlite import SQLiteLogger
+    from core.statistics_queries import query_token_stats
+    logger = SQLiteLogger(tmp_path / 'requests.db')
+    rows = [('a', 'demo_vertex', 100, 25), ('b', 'demo_vertex', 100, 75), ('c', 'demo_relay', 400, 400),
+            ('old', None, 900, 0), ('failed', 'demo_relay', 0, 0)]
+    for request_id, endpoint, input_tokens, cached in rows:
+        logger.write_request({'type': 'request_end', 'request_id': request_id, 'timestamp': 1000, 'model': 'demo',
+                              'success': True, 'input_tokens': input_tokens, 'cached_tokens': cached,
+                              'endpoint_model': endpoint})
+    stats = query_token_stats(logger._get_connection(), None, None, {}, 'day', 7)
+    assert [row['model'] for row in stats['model_stats']] == ['demo']
+    assert stats['endpoint_stats'] == [
+        {'endpoint_model': 'demo_relay', 'request_count': 1, 'input_tokens': 400, 'cached_tokens': 400, 'hit_rate': 1.0},
+        {'endpoint_model': 'demo_vertex', 'request_count': 2, 'input_tokens': 200, 'cached_tokens': 100, 'hit_rate': .5},
+    ]
+    assert query_token_stats(logger._get_connection(), 2000, None, {}, 'day', 7)['endpoint_stats'] == []
     logger.close()
 
 
@@ -177,7 +198,7 @@ def test_monitor_context_is_transferred_to_serial_worker(monkeypatch):
     from modules.monitoring import monitoring_service
     writes = MagicMock()
     monkeypatch.setattr(monitoring_service.log_manager, 'write_request_log', writes)
-    context = RequestContext(owner_id='caller', owner_name='User', endpoint={'pricing': {'input': 7}})
+    context = RequestContext(owner_id='caller', owner_name='User', model='demo_vertex', endpoint={'pricing': {'input': 7}})
     context.mark('upstream_start'); context.mark('first_byte'); context.mark('first_business')
     token = current_request.set(context)
     try:
@@ -189,4 +210,5 @@ def test_monitor_context_is_transferred_to_serial_worker(monkeypatch):
     finally: current_request.reset(token)
     saved = writes.call_args.args[0]
     assert saved['caller_id'] == 'caller' and saved['pricing_snapshot'] == {'input': 7}
+    assert saved['model'] == 'demo' and saved['endpoint_model'] == 'demo_vertex'
     assert saved['timings']['first_business_ms'] is not None

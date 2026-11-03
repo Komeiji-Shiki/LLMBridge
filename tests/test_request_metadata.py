@@ -14,7 +14,7 @@ def test_migration_preserves_old_amounts_and_covers_every_field():
     record = {'caller_id': 'key-id', 'caller_name': '用户', 'conversation_id': 'session',
               'cache_write_tokens': 12, 'cache_write_1h_tokens': 3,
               'cache_write_cost': .2, 'cache_write_extra_cost': .05, 'cache_mode': 'explicit',
-              'gateway_request_id': 'logical', 'timings': {'total_ms': 123},
+              'gateway_request_id': 'logical', 'endpoint_model': 'demo_vertex', 'timings': {'total_ms': 123},
               'pricing_snapshot': {'pricing': {'input': 1}, 'exchange_rate': {'USD_TO_CNY': 7.2}}}
     write_metadata(connection, 'old', record)
     row = connection.execute('SELECT * FROM requests').fetchone()

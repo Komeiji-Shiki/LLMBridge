@@ -9,6 +9,8 @@ COLUMNS = {
     'cache_write_extra_cost': 'REAL DEFAULT 0',
     'cache_mode': 'TEXT',
     'conversation_id': 'TEXT', 'gateway_request_id': 'TEXT', 'timings': 'TEXT', 'pricing_snapshot': 'TEXT',
+    # model 列存显示名，多条线路同名时只有这里能区分实际走的端点
+    'endpoint_model': 'TEXT',
 }
 
 

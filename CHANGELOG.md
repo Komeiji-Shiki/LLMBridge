@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-11-03：Gemini 上游正文归档与线路缓存统计
+
+- 协议转换到 Gemini（generateContent 和 Interactions）时，归档记录实际发往上游的正文。此前这条路径的 `upstream_request` 是空的，排查缓存只能离线重放转换。内联媒体只留长度和哈希，发送本身不受影响。
+- 请求表新增 `endpoint_model` 列，记录实际走的端点。`model` 存的是显示名，多条线路同名时无法区分；旧记录保持为空，不回填。
+- 后台用量页新增“线路缓存命中”表，按端点列出请求数、输入、缓存命中和命中率；`/api/monitor/compare` 的归属对比也包含端点。
+
 ### 2026-11-01：预填充思维链
 
 - 新增端点配置 `prefill_reasoning_content`，后台「预填充/续写模式」里对应“预填充思维链”输入框。它作为 `reasoning_content` 写入末尾的 assistant 消息，配合 Prefix 模式让 DeepSeek 接着这段思路继续想；原有“预填充内容”（`content`）则是直接卡掉思维链。

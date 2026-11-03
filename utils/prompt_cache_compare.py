@@ -51,7 +51,7 @@ VOLATILE_FIELDS = frozenset({
 
 # Attribution fields describe the gateway caller/session, not the upstream's
 # cache namespace. Compare them separately from the recorded prompt content.
-IDENTITY_FIELDS = ("conversation_id", "session_id", "user_id", "caller_id", "caller_name")
+IDENTITY_FIELDS = ("conversation_id", "session_id", "user_id", "caller_id", "caller_name", "endpoint_model")
 
 #: Radius (chars) of the context window shown around the first difference.
 CONTEXT_RADIUS = 140

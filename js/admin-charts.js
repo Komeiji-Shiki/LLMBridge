@@ -591,6 +591,27 @@ function sortTokenStatsTable(key) {
     renderTokenStatsTable(latestModelStatsCache);
 }
 
+function renderEndpointCacheTable(endpointStats) {
+    const container = document.getElementById('endpoint-cache-table');
+    if (!container) return;
+    const rows = Array.isArray(endpointStats) ? endpointStats : [];
+    container.hidden = rows.length === 0;
+    container.innerHTML = rows.length === 0 ? '' : `
+        <div class="usage-charts-header"><h3>线路缓存命中</h3></div>
+        <table class="table">
+            <thead><tr><th>线路</th><th>请求数</th><th>输入 Token</th><th>缓存命中 Token</th><th>命中率</th></tr></thead>
+            <tbody>
+                ${rows.map(row => `<tr>
+                    <td>${escapeHtml(row.endpoint_model)}</td>
+                    <td>${row.request_count}</td>
+                    <td>${formatTokenNumber(row.input_tokens)}</td>
+                    <td>${formatTokenNumber(row.cached_tokens)}</td>
+                    <td>${(row.hit_rate * 100).toFixed(1)}%</td>
+                </tr>`).join('')}
+            </tbody>
+        </table>`;
+}
+
 function renderTokenStatsTable(modelStats) {
     const container = document.getElementById('token-stats-table');
     if (!container) return;

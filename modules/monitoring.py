@@ -100,6 +100,7 @@ class RequestInfo:
     caller_name: str = '历史未归属'
     conversation_id: Optional[str] = None
     gateway_request_id: Optional[str] = None
+    endpoint_model: Optional[str] = None
     timings: Optional[dict] = None
     pricing_snapshot: Optional[dict] = None
 
@@ -700,6 +701,7 @@ class MonitoringService:
             caller_name=context.owner_name if context else '历史未归属',
             conversation_id=context.session_id if context else None,
             gateway_request_id=context.request_id if context else None,
+            endpoint_model=(context.model or None) if context else None,
             pricing_snapshot=copy.deepcopy(context.endpoint.get('pricing') or {}) if context else None,
         )
         
@@ -824,7 +826,7 @@ class MonitoringService:
 
         log_entry = {
             'type': 'request_end',
-            **{name: request_dict_for_recent[name] for name in ('caller_id', 'caller_name', 'conversation_id', 'gateway_request_id', 'timings', 'pricing_snapshot')},
+            **{name: request_dict_for_recent[name] for name in ('caller_id', 'caller_name', 'conversation_id', 'gateway_request_id', 'endpoint_model', 'timings', 'pricing_snapshot')},
             'timestamp': _original_timestamp,
             'end_timestamp': time.time(),
             'request_id': request_id,

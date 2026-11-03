@@ -17,7 +17,7 @@ def combine_usage(bridge, codex, source, claude_code=None):
     if source == 'bridge':
         return result
     if source != 'all':
-        result['model_stats'], result['daily_stats'] = [], []
+        result['model_stats'], result['daily_stats'], result['endpoint_stats'] = [], [], []
         for key in ('total_tokens', 'total_input_tokens', 'total_output_tokens', 'total_cached_tokens', 'total_cache_write_tokens', 'total_cache_write_1h_tokens',
                     *COST_FIELDS):
             result[key] = 0

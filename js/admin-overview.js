@@ -379,6 +379,7 @@ async function refreshTokenStats(force = false) {
         if (costPanel) costPanel.hidden = data.cost_scope === 'unavailable';
         if (!costPanel?.hidden) renderCostTrendChart(data.daily_stats || []);
         renderTokenStatsTable(data.model_stats);
+        renderEndpointCacheTable(data.endpoint_stats);
         
         // 🔧 优化：从 Token 统计数据中直接推算总体 RPM/TPM，不再重复请求
         updateOverallRatesFromCachedData();

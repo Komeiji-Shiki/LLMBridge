@@ -588,6 +588,8 @@ def test_estimated_cost_currency_chart_reuse_and_mobile_layout(ui):
             'total_tokens': 101000, 'total_input_tokens': 100000, 'total_output_tokens': 1000,
             'cost_usd': {'total_cost': 1, 'input_cost': .5, 'cached_cost': .1, 'output_cost': .4},
             'cost_cny': {'total_cost': 7.2, 'input_cost': 3.6, 'cached_cost': .72, 'output_cost': 2.88},
+            'endpoint_stats': [{'endpoint_model': 'argon_<vertex>', 'request_count': 2, 'input_tokens': 200,
+                                'cached_tokens': 100, 'hit_rate': .5}],
             'pricing': {**price_metadata(), 'unpriced_models': ['unpublished']}}
     page.route('**/api/admin/token_stats?*', lambda route: route.fulfill(json=data))
     page.locator('[data-page="overview"]').click()
@@ -595,6 +597,9 @@ def test_estimated_cost_currency_chart_reuse_and_mobile_layout(ui):
     page.wait_for_function("document.getElementById('total-cost-value').textContent === '≥ $1.0000'")
     assert page.locator('#total-cost-value').inner_text() == '≥ $1.0000'
     assert page.locator('#cached-cost-value').inner_text() == '$0.1000'
+    endpoint_row = page.locator('#endpoint-cache-table tbody tr')
+    assert endpoint_row.locator('td').first.inner_text() == 'argon_<vertex>'
+    assert endpoint_row.locator('td').last.inner_text() == '50.0%'
     page.locator('.pricing-details summary').click()
     pricing_text = page.locator('#codex-pricing-details').inner_text()
     assert '未定价：unpublished' in pricing_text

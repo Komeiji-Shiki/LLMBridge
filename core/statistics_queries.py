@@ -77,10 +77,20 @@ def query_token_stats(conn, start_ts, end_ts, model_config, rpm_period, usd_to_c
                       'cost_usd': round(values[-1] or 0, 6),
                       'cost_cny': round((values[-1] or 0) * usd_to_cny, 6)})
 
+    endpoint_stats = []
+    if 'endpoint_model' in columns:
+        endpoint_clause = ' AND '.join(where + ['endpoint_model IS NOT NULL', 'input_tokens > 0'])
+        for endpoint, count, input_tokens, cached in conn.execute(f'''
+            SELECT endpoint_model, COUNT(*), SUM(input_tokens), SUM(cached_tokens)
+            FROM requests WHERE {endpoint_clause} GROUP BY endpoint_model ORDER BY 3 DESC
+        ''', params):
+            endpoint_stats.append({'endpoint_model': endpoint, 'request_count': count, 'input_tokens': input_tokens,
+                                   'cached_tokens': cached, 'hit_rate': round(cached / input_tokens, 4)})
+
     cost_usd = {key: sum(values[key] / usd_to_cny if unit == 'CNY' else values[key]
                          for unit, values in costs_by_currency.items()) for key in COSTS}
     return {'model_stats': sorted(models.values(), key=lambda row: row['total_tokens'], reverse=True),
-            'daily_stats': daily, 'total_input_tokens': totals['input_tokens'],
+            'daily_stats': daily, 'endpoint_stats': endpoint_stats, 'total_input_tokens': totals['input_tokens'],
             'total_output_tokens': totals['output_tokens'], 'total_tokens': totals['total_tokens'],
             'total_cache_write_tokens': totals['cache_write_tokens'],
             'total_cache_write_1h_tokens': totals['cache_write_1h_tokens'],
