@@ -756,6 +756,7 @@ class MonitoringService:
         # 原始停止原因同时进入实时缓存和持久化日志，避免界面显示为空。
         context = current_request.get()
         stop_reason = (context.outcome.get('stop_reason') if context else None) or (cost_info or {}).get('stop_reason')
+        safety_details = context.outcome.get('safety') if context else None
         if not stop_reason and isinstance(response_message, dict):
             stop_reason = response_message.get('finish_reason') or response_message.get('stop_reason')
         
@@ -848,7 +849,8 @@ class MonitoringService:
             'cost_info': cost_info,
             'upstream_usage': upstream_usage,
             'system_fingerprint': system_fingerprint,
-            'stop_reason': stop_reason
+            'stop_reason': stop_reason,
+            'safety_details': safety_details
         }
         if isinstance(_request_params, dict):
             for param_key, param_value in _request_params.items():

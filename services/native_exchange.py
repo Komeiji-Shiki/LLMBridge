@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from core.config_loader import CONFIG
 from core.request_context import RequestContext, current_request, credential_identity
-from services.protocol_events import payloads, error_status, gemini_termination
+from services.protocol_events import payloads, error_status, gemini_termination, merge_gemini_safety
 from services.provider_capabilities import protocol_name, apply_native_tool_defaults
 from utils.usage_tokens import resolve_usage_tokens
 from core.constants import GeminiDefaults, RetryDefaults, resolve_first_chunk_timeout
@@ -318,6 +318,9 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
             reason, terminal_error = gemini_termination(native)
             if reason:
                 context.outcome['stop_reason'] = reason
+            safety = merge_gemini_safety(context.outcome.get('safety'), native)
+            if safety:
+                context.outcome['safety'] = safety
             if terminal_error:
                 generation_error = terminal_error
                 failure = terminal_error['message']

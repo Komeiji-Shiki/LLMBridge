@@ -39,6 +39,9 @@ GEMINI_FILTERED_FINISH = frozenset((
 ))
 
 
+GEMINI_PROBABILITY_RANK = {'NEGLIGIBLE': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3}
+
+
 def gemini_finish_to_openai(reason):
     """异常终止返回 None：错误由 gemini_termination 单独上报。"""
     if reason in GEMINI_FILTERED_FINISH:
@@ -46,20 +49,61 @@ def gemini_finish_to_openai(reason):
     return GEMINI_NORMAL_FINISH.get(reason)
 
 
+def _gemini_verdict(value):
+    """返回响应块里的（首个候选, promptFeedback），畸形字段按空处理。"""
+    candidates = value.get('candidates')
+    candidate = candidates[0] if isinstance(candidates, list) and candidates else {}
+    feedback = value.get('promptFeedback')
+    return (candidate if isinstance(candidate, dict) else {}, feedback if isinstance(feedback, dict) else {})
+
+
+def _rating_rank(rating):
+    score = rating.get('probabilityScore')
+    return (bool(rating.get('blocked')), GEMINI_PROBABILITY_RANK.get(rating.get('probability'), -1),
+            score if isinstance(score, (int, float)) else 0)
+
+
+def _merge_ratings(current, ratings):
+    merged = dict(current or {})
+    for rating in ratings if isinstance(ratings, list) else []:
+        category = rating.get('category') if isinstance(rating, dict) else None
+        if category and (category not in merged or _rating_rank(rating) >= _rating_rank(merged[category])):
+            merged[category] = rating
+    return merged
+
+
+def merge_gemini_safety(current, value):
+    """累积过滤依据：被拦的来源和原因，以及提示词、回复每个类别整条流里的最高评分。"""
+    if not isinstance(value, dict):
+        return current
+    candidate, feedback = _gemini_verdict(value)
+    result = dict(current or {})
+    for field, holder in (('prompt_ratings', feedback), ('response_ratings', candidate)):
+        ratings = _merge_ratings(result.get(field), holder.get('safetyRatings'))
+        if ratings:
+            result[field] = ratings
+    reason, error = gemini_termination(value)
+    if error:
+        result['blocked'] = {'source': 'response' if candidate.get('finishReason') else 'prompt', 'reason': reason,
+                             'message': candidate.get('finishMessage') or feedback.get('blockReasonMessage')}
+    return result or current
+
+
 def gemini_termination(value):
     """提取 Gemini 原始停止原因，将异常终止转换成可读错误。"""
     if not isinstance(value, dict):
         return None, None
-    candidates = value.get('candidates')
-    candidate = candidates[0] if isinstance(candidates, list) and candidates else {}
-    candidate = candidate if isinstance(candidate, dict) else {}
-    feedback = value.get('promptFeedback')
-    feedback = feedback if isinstance(feedback, dict) else {}
+    candidate, feedback = _gemini_verdict(value)
     reason = candidate.get('finishReason') or feedback.get('blockReason')
     if not reason or reason in GEMINI_NORMAL_FINISH or reason in GEMINI_UNSPECIFIED_REASONS:
         return reason, None
     detail = candidate.get('finishMessage') or feedback.get('blockReasonMessage')
     message = f'Gemini 上游终止生成：{reason}'
+    ratings = candidate.get('safetyRatings') or feedback.get('safetyRatings')
+    blocked = [f"{rating.get('category')}: {rating.get('probability')}" for rating in ratings
+               if isinstance(rating, dict) and rating.get('blocked')] if isinstance(ratings, list) else []
+    if blocked:
+        message += f"（{'，'.join(blocked)}）"
     if detail:
         message += f'。上游说明：{detail}'
     return reason, {'code': 422, 'type': 'upstream_generation_error',

@@ -21,6 +21,7 @@ def test_metadata_sqlite_all_read_paths_and_history(tmp_path):
               'cost_info': {'total_cost': 3.5, 'currency': 'CNY'},
               'caller_id': 'stable-key', 'caller_name': '用户', 'conversation_id': 'conversation',
               'gateway_request_id': 'wire-id', 'endpoint_model': 'demo_vertex',
+              'safety_details': {'blocked': {'reason': 'SAFETY'}},
               'timings': {'total_ms': 123}, 'pricing_snapshot': {'input': 7}}
     logger.write_request(record)
     from core.request_metadata import COLUMNS
@@ -200,6 +201,7 @@ def test_monitor_context_is_transferred_to_serial_worker(monkeypatch):
     monkeypatch.setattr(monitoring_service.log_manager, 'write_request_log', writes)
     context = RequestContext(owner_id='caller', owner_name='User', model='demo_vertex', endpoint={'pricing': {'input': 7}})
     context.mark('upstream_start'); context.mark('first_byte'); context.mark('first_business')
+    context.outcome['safety'] = {'blocked': {'reason': 'SAFETY'}}
     token = current_request.set(context)
     try:
         monitoring_service.request_start('metadata-worker', 'demo')
@@ -211,4 +213,5 @@ def test_monitor_context_is_transferred_to_serial_worker(monkeypatch):
     saved = writes.call_args.args[0]
     assert saved['caller_id'] == 'caller' and saved['pricing_snapshot'] == {'input': 7}
     assert saved['model'] == 'demo' and saved['endpoint_model'] == 'demo_vertex'
+    assert saved['safety_details'] == {'blocked': {'reason': 'SAFETY'}}
     assert saved['timings']['first_business_ms'] is not None

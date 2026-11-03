@@ -21,7 +21,7 @@ import copy
 from core.exchange_archive import upstream_snapshot
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
-from services.protocol_events import gemini_finish_to_openai, gemini_termination
+from services.protocol_events import gemini_finish_to_openai, gemini_termination, merge_gemini_safety
 from services.gemini_continuation import GeminiContinuation
 from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler, compact_empty_text_parts
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
@@ -661,6 +661,9 @@ class DirectAPIService:
             context = current_request.get()
             if reason and context:
                 context.outcome['stop_reason'] = reason
+            safety = merge_gemini_safety(context.outcome.get('safety'), value) if context else None
+            if safety:
+                context.outcome['safety'] = safety
             return error
 
         # 自定义地址的版本路径由用户决定，仅在未配置地址时使用官方默认值。
@@ -1004,6 +1007,8 @@ class DirectAPIService:
             compact_empty_text_parts(request_body.get("contents"))
             if context:
                 context.upstream_request = await asyncio.to_thread(upstream_snapshot, request_body)
+                # 重试复用同一个上下文，上一次尝试的过滤依据不能算到这一次
+                context.outcome.pop('safety', None)
             request_body_json = await asyncio.to_thread(
                 json.dumps,
                 request_body,

@@ -107,6 +107,57 @@ def test_converted_request_is_archived_without_inline_media_bytes(protocol):
     assert context.upstream_request == upstream_snapshot(sent)
 
 
+def rating(category, probability, score=None, **extra):
+    value = {'category': category, 'probability': probability, 'severity': 'HARM_SEVERITY_LOW', **extra}
+    return value if score is None else {**value, 'probabilityScore': score}
+
+
+def test_safety_block_saves_reason_and_highest_scores_for_each_category():
+    low = rating('HARM_CATEGORY_HARASSMENT', 'LOW', .2)
+    high = rating('HARM_CATEGORY_HARASSMENT', 'HIGH', .9)
+    blocked = rating('HARM_CATEGORY_SEXUALLY_EXPLICIT', 'MEDIUM', .6, blocked=True)
+    first = chunk('一半')
+    first['candidates'][0]['safetyRatings'] = [high]
+    last = chunk(finish='SAFETY', usage={'promptTokenCount': 5})
+    last['candidates'][0]['safetyRatings'] = [low, blocked]
+    session = session_with([first, last])
+    context = RequestContext(owner_id='owner')
+
+    async def run():
+        token = current_request.set(context)
+        try:
+            return [item async for item in DirectAPIService(session).call_gemini_native_api(
+                'test-key', 'demo', MESSAGES, stream=True)]
+        finally:
+            current_request.reset(token)
+
+    error = asyncio.run(run())[-1]['error']
+    assert error['message'] == 'Gemini 上游终止生成：SAFETY（HARM_CATEGORY_SEXUALLY_EXPLICIT: MEDIUM）'
+    assert context.outcome['safety'] == {
+        'blocked': {'source': 'response', 'reason': 'SAFETY', 'message': None},
+        'response_ratings': {'HARM_CATEGORY_HARASSMENT': high, 'HARM_CATEGORY_SEXUALLY_EXPLICIT': blocked},
+    }
+
+
+def test_prompt_block_is_attributed_to_the_prompt():
+    from services.protocol_events import merge_gemini_safety
+    ratings = [rating('HARM_CATEGORY_HATE_SPEECH', 'NEGLIGIBLE')]
+    details = merge_gemini_safety(None, {'promptFeedback': {
+        'blockReason': 'PROHIBITED_CONTENT', 'blockReasonMessage': '说明', 'safetyRatings': ratings}})
+    assert details == {'blocked': {'source': 'prompt', 'reason': 'PROHIBITED_CONTENT', 'message': '说明'},
+                       'prompt_ratings': {'HARM_CATEGORY_HATE_SPEECH': ratings[0]}}
+
+
+def test_passing_response_keeps_scores_without_a_block():
+    from services.protocol_events import merge_gemini_safety
+    passing = rating('HARM_CATEGORY_HARASSMENT', 'NEGLIGIBLE', .002)
+    value = chunk('好', 'STOP')
+    value['candidates'][0]['safetyRatings'] = [passing]
+    assert merge_gemini_safety(None, value) == {'response_ratings': {'HARM_CATEGORY_HARASSMENT': passing}}
+    assert merge_gemini_safety(None, chunk('好')) is None
+    assert merge_gemini_safety(None, {'candidates': ['oops'], 'promptFeedback': 'bad'}) is None
+
+
 def test_stream_resends_original_request_with_only_the_latest_token():
     session = session_with(
         [chunk('甲'), chunk('乙', 'CONTINUATION', 'token-1', usage(candidates=10, thoughts=5))],

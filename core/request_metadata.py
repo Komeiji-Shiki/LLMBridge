@@ -11,7 +11,10 @@ COLUMNS = {
     'conversation_id': 'TEXT', 'gateway_request_id': 'TEXT', 'timings': 'TEXT', 'pricing_snapshot': 'TEXT',
     # model 列存显示名，多条线路同名时只有这里能区分实际走的端点
     'endpoint_model': 'TEXT',
+    # Gemini 过滤依据：被拦的来源和原因，以及各类别评分
+    'safety_details': 'TEXT',
 }
+JSON_COLUMNS = ('timings', 'pricing_snapshot', 'safety_details')
 
 
 def migrate_metadata(connection):
@@ -33,7 +36,7 @@ def write_metadata(connection, request_id, record):
             value = (record.get('cost_info') or {}).get(name, value if value is not None else usage_counts.get(name, 0)) or 0
         elif name == 'cache_mode':
             value = (record.get('cost_info') or {}).get(name, value)
-        if name in ('timings', 'pricing_snapshot'):
+        if name in JSON_COLUMNS:
             value = json.dumps(value, ensure_ascii=False)
         elif name == 'caller_id':
             value = value or 'unattributed'
@@ -47,7 +50,7 @@ def read_metadata(row):
     result = {}
     for name in COLUMNS:
         value = row[name] if name in row.keys() else None
-        if name in ('timings', 'pricing_snapshot'):
+        if name in JSON_COLUMNS:
             try:
                 value = json.loads(value) if value else None
             except (TypeError, ValueError):
