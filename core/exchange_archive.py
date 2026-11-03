@@ -6,6 +6,7 @@ upstream_request 与 request 共享的大字段（整段 messages、tools、syst
 约减半。load_exchange() / restore_exchange() 读取时原样还原。
 """
 from datetime import datetime, timedelta
+import hashlib
 import gzip
 import json
 import os
@@ -19,6 +20,22 @@ _MIN_SHARED_TEXT = 256
 
 def _shareable(value):
     return isinstance(value, (list, dict)) or (isinstance(value, str) and len(value) > _MIN_SHARED_TEXT)
+
+
+def upstream_snapshot(value):
+    """协议转换后的上游正文副本：内联媒体只留长度和哈希，比较缓存前缀时仍能发现变化。
+
+    音频引用在发送前才展开成 base64，历史每轮都带一份，原样归档会让记录成倍膨胀。
+    """
+    if isinstance(value, list):
+        return [upstream_snapshot(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    copied = {key: upstream_snapshot(item) for key, item in value.items()}
+    data = value.get('data')
+    if isinstance(data, str) and ('mimeType' in value or 'mime_type' in value):
+        copied['data'] = {'omitted_chars': len(data), 'sha256': hashlib.sha256(data.encode()).hexdigest()}
+    return copied
 
 
 def dedupe_exchange(record):

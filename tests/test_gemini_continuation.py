@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.exchange_archive import upstream_snapshot
 from core.request_context import RequestContext, current_request
 from services.direct_api_service import DirectAPIService
 from services.gemini_continuation import GeminiContinuation
@@ -71,6 +72,39 @@ def collect(session, stream=True, **kwargs):
 def text_of(chunks):
     return ''.join(part.get('text', '') for item in chunks for candidate in item.get('candidates', [])
                    for part in (candidate.get('content') or {}).get('parts', []))
+
+
+@pytest.mark.parametrize('protocol', ['generate_content', 'interactions'])
+def test_converted_request_is_archived_without_inline_media_bytes(protocol):
+    data = 'QUJD' * 1000
+    messages = [{'role': 'user', 'content': [
+        {'type': 'text', 'text': '听这段'},
+        {'type': 'input_audio', 'input_audio': {'data': data, 'format': 'wav'}},
+    ]}]
+    session = MagicMock()
+    response = MagicMock(status=200)
+    response.json = AsyncMock(return_value={'candidates': [], 'id': 'test', 'status': 'completed', 'steps': []})
+    session.post.return_value.__aenter__ = AsyncMock(return_value=response)
+    session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+    context = RequestContext(owner_id='owner')
+    service = DirectAPIService(session)
+    method = service.call_gemini_native_api if protocol == 'generate_content' else service.call_gemini_interactions_api
+
+    async def run():
+        token = current_request.set(context)
+        try:
+            return [item async for item in method('test-key', 'demo', messages)]
+        finally:
+            current_request.reset(token)
+
+    assert not any('error' in item for item in asyncio.run(run()))
+    sent = json.loads(session.post.call_args.kwargs['data'])
+    stored = json.dumps(context.upstream_request, ensure_ascii=False)
+    assert data in session.post.call_args.kwargs['data'].decode()
+    assert data not in stored
+    assert '"omitted_chars": 4000' in stored
+    # 除媒体内容外，归档的就是发往上游的正文
+    assert context.upstream_request == upstream_snapshot(sent)
 
 
 def test_stream_resends_original_request_with_only_the_latest_token():
