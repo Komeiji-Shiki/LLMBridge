@@ -476,7 +476,8 @@ async def handle_gemini_native_direct(
                     # 必须重新抛出：GeneratorExit 被吞会报 "async generator ignored GeneratorExit"，
                     # CancelledError 被吞会让请求取消失效
                     client_gone = True
-                    if stream_completed or finish_seen:
+                    # 安全拦截也算结束原因，转换层收到错误后关流时不能因此记成成功
+                    if (stream_completed or finish_seen) and not error_msg:
                         request_success = True
                         logger.info(f"[GEMINI_NATIVE] 客户端关闭连接，但结束原因已转发，标记为成功")
                     elif not error_msg:
@@ -726,7 +727,7 @@ async def handle_gemini_native_direct(
 
                 except (GeneratorExit, asyncio.CancelledError):
                     client_gone = True
-                    if stream_completed or finish_seen:
+                    if (stream_completed or finish_seen) and not error_msg:
                         request_success = True
                         logger.info(f"[GEMINI_INTERACTIONS] 客户端关闭连接，但结束原因已转发，标记为成功")
                     elif not error_msg:

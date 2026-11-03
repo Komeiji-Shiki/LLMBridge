@@ -178,6 +178,20 @@ def test_client_closing_after_finish_reason_is_success():
     assert end['success'] is True and end['error'] is None
 
 
+def test_client_closing_after_safety_block_stays_a_failure():
+    error = {'code': 422, 'reason': 'SAFETY', 'message': 'Gemini 上游终止生成：SAFETY'}
+
+    async def upstream():
+        yield chunk('一半', 'SAFETY')
+        yield {'error': error}
+
+    # 第二个 data 块就是错误事件，转换层转发后立刻关流
+    monitor, _ = run_until_closed(upstream, 2)
+    end = only_end(monitor)
+    assert end['success'] is False and end['error'] == str(error)
+    assert end['response_content'] == '一半'
+
+
 def test_cost_bills_every_hop_but_tier_follows_single_request():
     usage = {'promptTokenCount': 100, 'candidatesTokenCount': 10, 'thoughtsTokenCount': 0, 'totalTokenCount': 110,
              'billedPromptTokenCount': 300, 'billedCachedTokenCount': 200, 'continuationHops': 2}
