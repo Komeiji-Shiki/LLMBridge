@@ -14,8 +14,12 @@ PROVIDERS = {
     'gemini': {'name': 'Google Gemini', 'docs': 'https://ai.google.dev/gemini-api/docs/tools',
                'gemini_tools': ['google_search', 'url_context', 'code_execution', 'google_maps', 'file_search']},
     'openrouter': {'name': 'OpenRouter', 'docs': 'https://openrouter.ai/docs/use-cases/reasoning-tokens'},
+    'workbuddy': {'name': 'WorkBuddy', 'docs': None},
     'custom': {'name': '自定义兼容服务', 'docs': None},
 }
+
+# WorkBuddy 国内版、国际版和 CodeBuddy 共用的上游域名。
+WORKBUDDY_DOMAINS = ('workbuddy.cn', 'workbuddy.ai', 'codebuddy.cn', 'codebuddy.ai', 'copilot.tencent.com')
 
 # 同一模型经不同中转访问时协议细节不变，而中转地址看不出模型来源，所以按模型家族判断。
 MODEL_FAMILIES = ('gemini', 'deepseek', 'qwen')
@@ -35,6 +39,7 @@ def provider_name(config):
     if host == GeminiDefaults.HOST or (not host and config.get('api_type') == 'gemini_native'): return 'gemini'
     if host.endswith('.aliyuncs.com') or host in ('dashscope.aliyuncs.com', 'dashscope-intl.aliyuncs.com'): return 'qwen'
     if host == 'openrouter.ai' or host.endswith('.openrouter.ai'): return 'openrouter'
+    if any(host == domain or host.endswith('.' + domain) for domain in WORKBUDDY_DOMAINS): return 'workbuddy'
     return 'custom'
 
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-11-04：WorkBuddy 思维链回传
+
+- 修复 WorkBuddy 渠道的历史思考进不了模型：上游静默丢弃 assistant 的 `reasoning_content`，只读 `reasoning`。转发时改用 `reasoning`，DeepSeek 的空白占位保持不变。
+- 新增供应商 `workbuddy`，按 `workbuddy.cn`、`workbuddy.ai`、`codebuddy.cn`、`codebuddy.ai`、`copilot.tencent.com` 识别，后台可手动选择。
+- 回传的思考从此计入上游输入 token，长会话的消耗会上升。
+
 ### 2026-11-03：Gemini 过滤依据与拦截状态
 
 - 请求表和日志新增 `safety_details`：保存被拦的来源（提示词或回复）、原因和上游说明，以及提示词、回复每个类别的最高评分。正常放行的请求也保留评分。

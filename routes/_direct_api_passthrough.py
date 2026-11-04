@@ -277,6 +277,17 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                 if rc is None or (isinstance(rc, str) and not rc.strip()):
                     msg["reasoning_content"] = " "
 
+    # WorkBuddy 只读历史 assistant 的 reasoning，reasoning_content 会被静默丢弃。
+    # 空白值是上面的 DeepSeek 占位，不算思考内容，留在原字段。
+    if provider_name(endpoint_config) == "workbuddy" and "messages" in passthrough_request:
+        for msg in passthrough_request["messages"]:
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                rc = msg.get("reasoning_content")
+                if isinstance(rc, str) and rc.strip():
+                    if not msg.get("reasoning"):
+                        msg["reasoning"] = rc
+                    del msg["reasoning_content"]
+
     # 判断是否为 OpenRouter 端点（用于走 OpenRouter 专属参数格式）
     is_openrouter = provider_name(endpoint_config) == "openrouter"
 

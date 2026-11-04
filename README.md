@@ -274,6 +274,8 @@ total_cost = (uncached_input × input_price + cached_input × cached_input_price
 
 客户端调用中转时可以使用 `stream: true` 或 `stream: false`；中转始终向该上游发送流式请求，非流式客户端会收到聚合后的完整 JSON 响应。
 
+转发时，assistant 历史里的 `reasoning_content` 会改成 `reasoning`：该上游只读这个字段，`reasoning_content` 会被静默丢弃。`workbuddy.cn`、`workbuddy.ai`、`codebuddy.cn`、`codebuddy.ai` 和 `copilot.tencent.com` 会自动识别，其他地址可把端点的 `provider` 设为 `workbuddy`。回传的思考会计入上游输入 token，长会话的消耗会明显上升。
+
 镜像地址可替换为 `https://www.codebuddy.cn/v2` 或 `https://copilot.tencent.com/v2`，均保留 `/v2` 路径。
 
 ### Gemini Interactions 上游

@@ -55,6 +55,51 @@ def test_openrouter_has_a_valid_diagnosis():
     assert diagnose_model('demo', {'api_base_url': 'https://openrouter.ai/api/v1', 'api_key': 'k'})['provider'] == 'openrouter'
 
 
+@pytest.mark.parametrize('url', [
+    'https://www.workbuddy.cn/v2', 'https://www.workbuddy.ai/v2',
+    'https://www.codebuddy.cn/v2', 'https://copilot.tencent.com/v2',
+])
+def test_workbuddy_is_detected_by_host(url):
+    assert provider_name({'api_base_url': url}) == 'workbuddy'
+
+
+@pytest.mark.parametrize('url', ['https://relay.example/www.workbuddy.cn/v2', 'https://notworkbuddy.cn/v2'])
+def test_workbuddy_lookalike_hosts_stay_custom(url):
+    assert provider_name({'api_base_url': url}) == 'custom'
+
+
+WORKBUDDY = {'api_base_url': 'https://www.workbuddy.cn/v2'}
+
+
+def test_workbuddy_replays_thinking_as_reasoning():
+    original = {'role': 'assistant', 'content': 'hi', 'reasoning_content': '思考'}
+    request = {'model': 'demo', 'messages': [dict(original)]}
+    message = _prepare_passthrough_request(request, 'hy4', 'hy4free', WORKBUDDY)['messages'][0]
+    assert message['reasoning'] == '思考'
+    assert 'reasoning_content' not in message
+    # 监控记录和重试线路共用原始请求，不能被改写
+    assert request['messages'][0] == original
+
+
+def test_other_upstreams_keep_reasoning_content():
+    request = {'model': 'demo', 'messages': [{'role': 'assistant', 'content': 'hi', 'reasoning_content': '思考'}]}
+    message = _prepare_passthrough_request(request, 'hy4', 'hy4', {'api_base_url': 'https://api.example/v1'})['messages'][0]
+    assert message['reasoning_content'] == '思考'
+    assert 'reasoning' not in message
+
+
+def test_workbuddy_keeps_deepseek_placeholder_and_client_reasoning():
+    request = {'model': 'demo', 'messages': [
+        {'role': 'assistant', 'content': 'a'},
+        {'role': 'assistant', 'content': 'b', 'reasoning': '自带', 'reasoning_content': '另一份'},
+    ]}
+    first, second = _prepare_passthrough_request(request, 'deepseek-v4', 'x', WORKBUDDY)['messages']
+    assert first['reasoning_content'] == ' '
+    assert 'reasoning' not in first
+    assert second['reasoning'] == '自带'
+    assert 'reasoning_content' not in second
+
+
 def assistant_call():
     return {'model': 'demo', 'messages': [{'role': 'assistant', 'content': '', 'tool_calls': [
         {'id': 'one', 'type': 'function', 'function': {'name': 'f', 'arguments': '{}'}, '_thought_signature': 'sig'}]}]}
