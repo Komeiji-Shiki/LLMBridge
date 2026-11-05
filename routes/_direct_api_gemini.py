@@ -27,7 +27,7 @@ from converters.gemini_interactions import (
     convert_interactions_to_openai_response,
 )
 from converters.message_shape import inline_mid_system, rewrite_trailing_prefill
-from core.conversion_report import note_loss, raise_if_strict
+from core.conversion_report import ConversionRejected, note_loss, raise_if_strict
 from services.model_capabilities import (
     budget_to_effort,
     drop_unsupported_sampling,
@@ -347,7 +347,10 @@ async def handle_gemini_native_direct(
             {key: openai_req[key] for key in ("temperature", "top_p", "top_k") if openai_req.get(key) is not None},
             target_model_id)
         generation_extras = _generation_extras(openai_req, sampling, limits.sampling)
-        raise_if_strict(endpoint_config)
+        try:
+            raise_if_strict(endpoint_config)
+        except ConversionRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         # 🔧 上游协议选择：generate_content（默认，旧行为）或 interactions（新 API）
         upstream_protocol = endpoint_config.get("upstream_protocol", "generate_content")
@@ -759,6 +762,12 @@ async def handle_gemini_native_direct(
                             if not suppress_chunk:
                                 yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
+                    if error_msg is None and not converter.completed:
+                        # 没收到结束事件说明上游中途断了，不能按成功收尾。
+                        error_msg = "Gemini Interactions API 的响应流在结束事件之前中断"
+                        logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
+                        yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'upstream_error', 'code': 502}}, ensure_ascii=False)}\n\n"
+
                     if error_msg is None:
                         tail_text = splitter.flush()
                         if tail_text:
@@ -794,6 +803,8 @@ async def handle_gemini_native_direct(
                     error_msg = str(e)
                     logger.error(f"[GEMINI_INTERACTIONS] 流式处理失败: {e}", exc_info=True)
                 finally:
+                    # 中途断开也保存已收到的步骤，签名不随失败的那次请求一起丢。
+                    converter.finalize()
                     if input_tokens == 0 or output_tokens == 0:
                         try:
                             if input_tokens == 0:

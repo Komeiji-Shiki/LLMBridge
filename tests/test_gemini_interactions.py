@@ -24,6 +24,8 @@ from converters.gemini_interactions import (
     convert_interactions_to_openai_response,
     convert_oai_messages_to_interactions,
     match_and_inject_thought_signatures,
+    interaction_failure,
+    remember_turn_steps,
 )
 from services.direct_api_service import DirectAPIService
 from routes._direct_api_gemini import upstream_signatures
@@ -126,9 +128,13 @@ class OaiMessagesToInteractionsTests(unittest.TestCase):
         self.assertEqual(steps[3]["type"], "model_output")
         self.assertEqual(steps[3]["content"][0]["text"], "Answer")
 
+    def test_developer_role_counts_as_system(self):
+        steps, system = convert_oai_messages_to_interactions([{"role": "developer", "content": "规则"}])
+        self.assertEqual(steps, [])
+        self.assertEqual(system, "规则")
+
     def test_unknown_role_skipped(self):
-        messages = [{"role": "developer", "content": "ignored"}]
-        steps, system = convert_oai_messages_to_interactions(messages)
+        steps, system = convert_oai_messages_to_interactions([{"role": "narrator", "content": "ignored"}])
         self.assertEqual(steps, [])
         self.assertEqual(system, "")
 
@@ -177,7 +183,8 @@ class BuildRequestBodyTests(unittest.TestCase):
         self.assertIs(body["store"], False)
         self.assertIs(body["stream"], True)
         self.assertEqual(body["input"][0]["type"], "user_input")
-        self.assertEqual(body["generation_config"]["temperature"], 0.7)
+        # 现行 schema 的 generation_config 没有采样字段
+        self.assertNotIn("temperature", body["generation_config"])
         self.assertEqual(body["generation_config"]["max_output_tokens"], 100)
         self.assertEqual(body["generation_config"]["thinking_level"], "low")
         self.assertEqual(body["generation_config"]["thinking_summaries"], "auto")
@@ -186,9 +193,14 @@ class BuildRequestBodyTests(unittest.TestCase):
         tools = [{"type": "function", "name": "f", "description": "d", "parameters": {"type": "object"}}]
         body = build_interactions_request_body("m", [{"role": "user", "content": "x"}], tools=tools)
         self.assertEqual(body["tools"], tools)
+        # tool_choice=none 保留 tools，缓存前缀才不会变
         body2 = build_interactions_request_body(
             "m", [{"role": "user", "content": "x"}], tools=tools, tool_choice="none")
-        self.assertNotIn("tools", body2)
+        self.assertEqual(body2["tools"], tools)
+        self.assertEqual(body2["generation_config"]["tool_choice"], "none")
+        no_tools = build_interactions_request_body(
+            "m", [{"role": "user", "content": "x"}], tool_choice="none")
+        self.assertNotIn("generation_config", no_tools)
 
     def test_nested_chat_tools_are_flattened(self):
         tools = [{
@@ -225,7 +237,7 @@ class BuildRequestBodyTests(unittest.TestCase):
     def test_response_format_json_object(self):
         body = build_interactions_request_body(
             "m", [{"role": "user", "content": "x"}], response_format={"type": "json_object"})
-        self.assertEqual(body["response_mime_type"], "application/json")
+        self.assertNotIn("response_mime_type", body)
         self.assertEqual(body["response_format"], {
             "type": "text",
             "mime_type": "application/json",
@@ -244,11 +256,30 @@ class BuildRequestBodyTests(unittest.TestCase):
         self.assertEqual(body["response_format"]["schema"], {"type": "object"})
         self.assertEqual(body["generation_config"]["stop_sequences"], ["END"])
 
-    def test_thinking_budget_ignored(self):
+    def test_thinking_budget_becomes_nearest_level(self):
         body = build_interactions_request_body(
             "m", [{"role": "user", "content": "x"}],
             thinking_config={"thinkingBudget": 20000, "includeThoughts": True})
-        self.assertNotIn("thinking_level", body.get("generation_config", {}))
+        self.assertEqual(body["generation_config"]["thinking_level"], "high")
+        dynamic = build_interactions_request_body(
+            "m", [{"role": "user", "content": "x"}],
+            thinking_config={"thinkingBudget": -1, "includeThoughts": True})
+        self.assertNotIn("thinking_level", dynamic["generation_config"])
+
+    def test_thinking_level_follows_model_limits(self):
+        body = build_interactions_request_body(
+            "gemini-3.8-flash", [{"role": "user", "content": "x"}],
+            thinking_config={"thinkingLevel": "MINIMAL"})
+        self.assertEqual(body["generation_config"]["thinking_level"], "low")
+
+    def test_allowed_tools_use_plain_names(self):
+        tools = [{"type": "function", "name": "f", "parameters": {"type": "object"}}]
+        body = build_interactions_request_body(
+            "m", [{"role": "user", "content": "x"}], tools=tools,
+            tool_choice={"type": "allowed_tools", "allowed_tools": {
+                "mode": "required", "tools": [{"type": "function", "function": {"name": "f"}}]}})
+        self.assertEqual(body["generation_config"]["tool_choice"],
+                         {"allowed_tools": {"mode": "any", "tools": ["f"]}})
 
     def test_include_thoughts_false_maps_to_none(self):
         body = build_interactions_request_body(
@@ -414,7 +445,7 @@ class GeminiGcInteractionsTests(unittest.TestCase):
         self.assertEqual(body["model"], "gemini-3-flash-preview")
         self.assertIs(body["store"], False)
         self.assertEqual(body["system_instruction"], "Be nice")
-        self.assertEqual(body["generation_config"]["temperature"], 0.5)
+        self.assertNotIn("temperature", body["generation_config"])
         self.assertEqual(body["generation_config"]["max_output_tokens"], 100)
         self.assertEqual(body["tools"][0]["type"], "function")
         self.assertEqual(body["tools"][0]["name"], "get_weather")
@@ -520,6 +551,297 @@ class GeminiGcInteractionsTests(unittest.TestCase):
         self.assertEqual(fc["id"], "fc7")
 
 
+
+
+def _feed_all(converter, events):
+    chunks = []
+    for event in events:
+        chunks.extend(converter.feed(event))
+    return chunks
+
+
+def _deltas(chunks):
+    return [chunk["choices"][0]["delta"] for chunk in chunks if chunk.get("choices")]
+
+
+class InteractionsAuditRegressionTests(unittest.TestCase):
+    """2026-11 审计发现的问题，流式和非流式都要覆盖。"""
+
+    def setUp(self):
+        from core.request_context import current_request
+        context = current_request.get()
+        context.artifacts.clear()
+        context.outcome.clear()
+
+    PARALLEL = [
+        {"event_type": "step.start", "index": 0, "step": {"type": "function_call", "id": "a", "name": "f", "arguments": {}}},
+        {"event_type": "step.delta", "index": 0, "delta": {"type": "arguments_delta", "arguments": '{"x": 1}'}},
+        {"event_type": "step.stop", "index": 0},
+        {"event_type": "step.start", "index": 1, "step": {"type": "function_call", "id": "b", "name": "g", "arguments": {}}},
+        {"event_type": "step.delta", "index": 1, "delta": {"type": "arguments_delta", "arguments": '{"y": 2}'}},
+        {"event_type": "step.stop", "index": 1},
+        {"event_type": "interaction.completed", "interaction": {"status": "requires_action", "usage": {}}},
+    ]
+
+    def test_parallel_stream_calls_get_their_own_index(self):
+        chunks = _feed_all(InteractionsStreamConverter("m", "r"), self.PARALLEL)
+        calls = [delta["tool_calls"][0] for delta in _deltas(chunks) if delta.get("tool_calls")]
+        self.assertEqual([call["index"] for call in calls], [0, 1])
+        self.assertEqual([json.loads(call["function"]["arguments"]) for call in calls], [{"x": 1}, {"y": 2}])
+
+    def test_tool_calls_force_tool_finish_even_when_status_is_completed(self):
+        events = self.PARALLEL[:-1] + [{"event_type": "interaction.completed",
+                                        "interaction": {"status": "completed", "usage": {}}}]
+        finishes = [chunk["choices"][0]["finish_reason"] for chunk in
+                    _feed_all(InteractionsStreamConverter("m", "r"), events) if chunk.get("choices")]
+        self.assertIn("tool_calls", finishes)
+
+    def test_failed_status_is_an_error_not_a_stop(self):
+        interaction = {"status": "failed", "errors": [{"code": "internal", "message": "炸了"}],
+                       "usage": {"total_input_tokens": 9}}
+        chunks = InteractionsStreamConverter("m", "r").feed(
+            {"event_type": "interaction.completed", "interaction": interaction})
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["error"]["message"], "炸了")
+        failure = interaction_failure(interaction)
+        self.assertEqual(failure["error"]["code"], 502)
+        self.assertEqual(failure["usageMetadata"]["promptTokenCount"], 9)
+        self.assertEqual(interaction_failure({"status": "failed", "errors": [{"code": "safety"}]})["error"]["code"], 400)
+        self.assertIsNone(interaction_failure({"status": "completed"}))
+
+    def test_incomplete_and_continuation_report_length(self):
+        for status in ("incomplete", "requires_continuation"):
+            response = convert_interactions_to_openai_response({"status": status, "steps": [], "usage": {}}, "m", "r")
+            self.assertEqual(response["choices"][0]["finish_reason"], "length")
+
+    def test_transport_error_without_event_type_is_not_swallowed(self):
+        chunks = InteractionsStreamConverter("m", "r").feed({"error": {"message": "断了"}})
+        self.assertEqual(chunks[0]["error"]["message"], "断了")
+
+    def _thought_turn(self):
+        return [
+            {"event_type": "step.start", "index": 0, "step": {"type": "thought"}},
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "thought_summary", "content": {"type": "text", "text": "第一段"}}},
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "thought_signature", "signature": "s1"}},
+            {"event_type": "step.stop", "index": 0},
+            {"event_type": "step.start", "index": 1, "step": {"type": "thought"}},
+            {"event_type": "step.delta", "index": 1, "delta": {"type": "thought_summary", "content": {"type": "text", "text": "第二段"}}},
+            {"event_type": "step.delta", "index": 1, "delta": {"type": "thought_signature", "signature": "s2"}},
+            {"event_type": "step.stop", "index": 1},
+            {"event_type": "step.start", "index": 2, "step": {"type": "model_output"}},
+            {"event_type": "step.delta", "index": 2, "delta": {"type": "text", "text": "答"}},
+            {"event_type": "step.stop", "index": 2},
+            {"event_type": "interaction.completed", "interaction": {"status": "completed", "usage": {}}},
+        ]
+
+    def test_multi_segment_thoughts_replay_from_joined_reasoning(self):
+        converter = InteractionsStreamConverter("m", "r")
+        chunks = _feed_all(converter, self._thought_turn())
+        self.assertEqual(converter.signatures, ["s1", "s2"])
+        reasoning = "".join(delta.get("reasoning_content", "") for delta in _deltas(chunks))
+        self.assertEqual(reasoning, "第一段第二段")
+        steps, _ = convert_oai_messages_to_interactions([
+            {"role": "assistant", "content": "答", "reasoning_content": reasoning}])
+        self.assertEqual([step.get("signature") for step in steps if step["type"] == "thought"], ["s1", "s2"])
+
+    def test_stream_metadata_matches_non_stream_steps(self):
+        chunks = _feed_all(InteractionsStreamConverter("m", "r"), self._thought_turn())
+        steps = next(delta["provider_metadata"]["interactions_steps"] for delta in _deltas(chunks)
+                     if delta.get("provider_metadata"))
+        self.assertEqual([step["type"] for step in steps], ["thought", "thought", "model_output"])
+        self.assertEqual(steps[1]["summary"], [{"type": "text", "text": "第二段"}])
+        self.assertEqual(steps[2]["content"], [{"type": "text", "text": "答"}])
+
+    def _signed_call_turn(self):
+        return [
+            {"event_type": "step.start", "index": 0, "step": {"type": "thought", "signature": "only_sig"}},
+            {"event_type": "step.stop", "index": 0},
+            {"event_type": "step.start", "index": 1, "step": {"type": "function_call", "id": "c1", "name": "f", "arguments": {"a": 1}}},
+            {"event_type": "step.stop", "index": 1},
+            {"event_type": "interaction.completed", "interaction": {"status": "requires_action", "usage": {}}},
+        ]
+
+    def test_signature_only_thought_is_restored_by_tool_call_id(self):
+        _feed_all(InteractionsStreamConverter("m", "r"), self._signed_call_turn())
+        message = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "f", "arguments": '{"a": 1}'}}]}
+        steps, _ = convert_oai_messages_to_interactions([
+            message, {"role": "tool", "tool_call_id": "c1", "content": "ok"}])
+        self.assertEqual([step["type"] for step in steps], ["thought", "function_call", "function_result"])
+        self.assertEqual(steps[0]["signature"], "only_sig")
+        self.assertEqual(steps[2]["name"], "f")
+
+    def test_edited_history_does_not_receive_a_signature(self):
+        _feed_all(InteractionsStreamConverter("m", "r"), self._signed_call_turn())
+        steps, _ = convert_oai_messages_to_interactions([{"role": "assistant", "content": "改过的正文", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}])
+        self.assertNotIn("thought", [step["type"] for step in steps])
+
+    def test_turn_cache_is_bounded(self):
+        for index in range(80):
+            remember_turn_steps([{"type": "thought", "signature": "s"},
+                                 {"type": "function_call", "id": f"c{index}", "name": "f", "arguments": {}}])
+        from core.request_context import current_request
+        self.assertLessEqual(len(current_request.get().artifacts["interaction_turns"]), 64)
+
+    def test_visible_output_is_identical_for_stream_and_non_stream(self):
+        annotation = {"type": "url_citation", "url": "https://a.test", "title": "A"}
+        code = {"language": "python", "code": "print(1)"}
+        steps = [
+            {"type": "code_execution_call", "id": "x", "arguments": code},
+            {"type": "code_execution_result", "call_id": "x", "result": "1"},
+            {"type": "google_search_call", "id": "g", "arguments": {"queries": ["q"]}},
+            {"type": "model_output", "content": [
+                {"type": "text", "text": "正文", "annotations": [annotation]},
+                {"type": "image", "data": "QUJD", "mime_type": "image/png"}]},
+        ]
+        message = convert_interactions_to_openai_response(
+            {"status": "completed", "steps": steps, "usage": {}}, "m", "r")["choices"][0]["message"]
+        events = []
+        for index, step in enumerate(steps):
+            events.append({"event_type": "step.start", "index": index, "step": {"type": step["type"], "id": step.get("id")}})
+            if step["type"] == "model_output":
+                events.append({"event_type": "step.delta", "index": index, "delta": {"type": "text", "text": "正文"}})
+                events.append({"event_type": "step.delta", "index": index, "delta": {"type": "text_annotation_delta", "annotations": [annotation]}})
+                events.append({"event_type": "step.delta", "index": index, "delta": {"type": "image", "data": "QUJD", "mime_type": "image/png"}})
+            else:
+                events.append({"event_type": "step.delta", "index": index,
+                               "delta": {k: v for k, v in step.items() if k != "id"}})
+            events.append({"event_type": "step.stop", "index": index})
+        events.append({"event_type": "interaction.completed", "interaction": {"status": "completed", "usage": {}}})
+        deltas = _deltas(_feed_all(InteractionsStreamConverter("m", "r"), events))
+        self.assertEqual("".join(delta.get("content", "") for delta in deltas), message["content"])
+        self.assertEqual([item for delta in deltas for item in delta.get("images", [])], message["images"])
+        self.assertEqual([item for delta in deltas for item in delta.get("annotations", [])], message["annotations"])
+        self.assertIn("```python\nprint(1)\n```", message["content"])
+        self.assertEqual(message["annotations"][0]["url_citation"]["url"], "https://a.test")
+
+    def test_usage_counts_tool_prompts_and_first_hop_only(self):
+        usage = {"total_input_tokens": 300, "initial_input_tokens": 100, "total_tool_use_tokens": 20,
+                 "total_output_tokens": 10, "total_thought_tokens": 5, "total_cached_tokens": 50, "total_tokens": 999}
+        result = convert_interactions_to_openai_response({"status": "completed", "steps": [], "usage": usage}, "m", "r")["usage"]
+        self.assertEqual(result["prompt_tokens"], 120)
+        self.assertEqual(result["total_tokens"], 135)
+
+    def test_tool_error_and_media_results(self):
+        pdf = {"type": "file", "file": {"file_data": "data:application/pdf;base64,QUJD", "filename": "a.pdf"}}
+        call = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "read", "arguments": "{}"}}]}
+        steps, _ = convert_oai_messages_to_interactions(
+            [call, {"role": "tool", "tool_call_id": "a", "content": "[tool_result_error] 失败"}], "gemini-3.8-flash")
+        self.assertTrue(steps[-1]["is_error"])
+        self.assertEqual(steps[-1]["result"][0]["text"], "失败")
+        modern, _ = convert_oai_messages_to_interactions(
+            [call, {"role": "tool", "tool_call_id": "a", "content": [pdf]}], "gemini-3.8-flash")
+        self.assertEqual(modern[-1]["result"][0]["type"], "document")
+        older, _ = convert_oai_messages_to_interactions(
+            [call, {"role": "tool", "tool_call_id": "a", "content": [pdf]}], "gemini-2.5-flash-lite")
+        self.assertEqual(older[-1]["type"], "user_input")
+        self.assertEqual(older[-1]["content"][-1]["type"], "document")
+
+    def test_orphan_tool_result_does_not_invent_a_name(self):
+        steps, _ = convert_oai_messages_to_interactions([{"role": "tool", "tool_call_id": "call_x", "content": "r"}])
+        self.assertNotIn("name", steps[0])
+
+
+class GenerateContentAuditRegressionTests(unittest.TestCase):
+    def setUp(self):
+        from core.request_context import current_request
+        current_request.get().outcome.clear()
+
+    def test_function_declarations_read_json_schema_and_builtin_tools_survive(self):
+        schema = {"type": "object", "properties": {"x": {"type": "number"}}}
+        body = convert_gemini_gc_to_interactions({
+            "contents": "hi",
+            "tools": [{"functionDeclarations": [{"name": "f", "parametersJsonSchema": schema}]},
+                      {"googleSearch": {}}, {"urlContext": {}}, {"codeExecution": {}},
+                      {"fileSearch": {"fileSearchStoreNames": ["s"], "topK": 3}}],
+        }, "gemini-3.8-flash")
+        self.assertEqual(body["tools"][0]["parameters"], schema)
+        self.assertEqual([tool["type"] for tool in body["tools"][1:]],
+                         ["google_search", "url_context", "code_execution", "file_search"])
+        self.assertEqual(body["tools"][4]["file_search_store_names"], ["s"])
+        self.assertEqual(body["tools"][4]["top_k"], 3)
+
+    def test_generation_config_and_safety_mapping(self):
+        schema = {"type": "object"}
+        body = convert_gemini_gc_to_interactions({
+            "contents": "hi",
+            "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema, "seed": 7,
+                                 "temperature": 0.2, "responseModalities": ["TEXT", "IMAGE"]},
+            "safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}],
+        }, "m")
+        self.assertNotIn("response_mime_type", body)
+        self.assertEqual(body["response_format"], [
+            {"type": "text", "mime_type": "application/json", "schema": schema}, {"type": "image"}])
+        self.assertEqual(body["generation_config"], {"seed": 7})
+        self.assertEqual(body["safety_settings"], [{"type": "harassment", "threshold": "off"}])
+        from core.conversion_report import conversion_notes
+        self.assertIn("generationConfig.temperature", [note["field"] for note in conversion_notes()])
+
+    def test_mode_none_keeps_tools(self):
+        body = convert_gemini_gc_to_interactions({
+            "contents": "hi",
+            "tools": [{"functionDeclarations": [{"name": "f"}]}],
+            "toolConfig": {"functionCallingConfig": {"mode": "NONE"}},
+        }, "m")
+        self.assertEqual(len(body["tools"]), 1)
+        self.assertEqual(body["generation_config"]["tool_choice"], "none")
+
+    def test_calls_without_ids_get_stable_ids_and_results_match(self):
+        request = {"contents": [
+            {"role": "model", "parts": [{"functionCall": {"name": "f", "args": {}}},
+                                        {"functionCall": {"name": "f", "args": {"n": 2}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "f", "response": {"result": "1"}}},
+                                       {"functionResponse": {"name": "f", "response": {"error": "坏了"}}}]},
+        ]}
+        first = convert_gemini_gc_to_interactions(request, "m")["input"]
+        self.assertEqual(first, convert_gemini_gc_to_interactions(request, "m")["input"])
+        self.assertEqual([first[2]["call_id"], first[3]["call_id"]], [first[0]["id"], first[1]["id"]])
+        self.assertNotEqual(first[0]["id"], first[1]["id"])
+        self.assertTrue(first[3]["is_error"])
+
+    def test_response_maps_code_grounding_usage_and_signature_position(self):
+        response = convert_interactions_to_gemini_gc({"status": "completed", "steps": [
+            {"type": "google_search_call", "id": "g", "arguments": {"queries": ["q"]}},
+            {"type": "google_search_result", "call_id": "g", "result": [], "search_suggestions": "<div/>"},
+            {"type": "code_execution_call", "id": "x", "arguments": {"language": "python", "code": "1"}},
+            {"type": "code_execution_result", "call_id": "x", "result": "1", "is_error": True},
+            {"type": "model_output", "content": [{"type": "text", "text": "答", "annotations": [
+                {"type": "url_citation", "url": "https://a.test", "title": "A"}]}]},
+            {"type": "function_call", "id": "c", "name": "f", "arguments": {}, "signature": "s"},
+        ], "usage": {"total_input_tokens": 5, "total_tool_use_tokens": 2, "total_output_tokens": 1, "total_tokens": 8}})
+        candidate = response["candidates"][0]
+        parts = candidate["content"]["parts"]
+        self.assertEqual(parts[0]["executableCode"]["language"], "PYTHON")
+        self.assertEqual(parts[1]["codeExecutionResult"]["outcome"], "OUTCOME_FAILED")
+        self.assertEqual(parts[3]["thoughtSignature"], "s")
+        self.assertNotIn("thoughtSignature", parts[3]["functionCall"])
+        self.assertEqual(candidate["groundingMetadata"]["webSearchQueries"], ["q"])
+        self.assertEqual(candidate["groundingMetadata"]["groundingChunks"][0]["web"]["uri"], "https://a.test")
+        self.assertEqual(response["usageMetadata"]["promptTokenCount"], 5)
+        self.assertEqual(response["usageMetadata"]["toolUsePromptTokenCount"], 2)
+
+    def test_stream_thoughts_arrive_incrementally_and_failure_stays_quiet(self):
+        converter = InteractionsToGeminiGCConverter()
+        chunks = _feed_all(converter, [
+            {"event_type": "step.start", "index": 0, "step": {"type": "thought"}},
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "thought_summary", "content": {"type": "text", "text": "想"}}},
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "thought_signature", "signature": "s"}},
+            {"event_type": "step.stop", "index": 0},
+        ])
+        self.assertEqual(chunks[0]["candidates"][0]["content"]["parts"], [{"text": "想", "thought": True}])
+        self.assertEqual(chunks[1]["candidates"][0]["content"]["parts"], [{"thought": True, "thoughtSignature": "s"}])
+        self.assertEqual(converter.feed({"event_type": "interaction.completed",
+                                         "interaction": {"status": "failed", "usage": {}}}), [])
+
+    def test_native_accounting_reads_tool_tokens_and_step_text(self):
+        from services.native_exchange import native_usage, text_from_native
+        inputs, outputs, _, _ = native_usage({"usage": {"total_input_tokens": 10, "total_tool_use_tokens": 4,
+                                                        "total_output_tokens": 3, "total_thought_tokens": 2}})
+        self.assertEqual((inputs, outputs), (14, 5))
+        self.assertEqual(text_from_native({"event_type": "step.delta", "delta": {"type": "text", "text": "片"}}), "片")
+        self.assertEqual(text_from_native({"steps": [{"type": "model_output", "content": [{"type": "text", "text": "整"}]}]}), "整")
 
 
 class _FakeInteractionsResponse:

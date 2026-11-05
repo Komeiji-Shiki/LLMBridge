@@ -7,6 +7,7 @@ import uuid
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from core.config_loader import CONFIG
+from core.conversion_report import ConversionRejected, raise_if_strict
 from core.request_context import RequestContext, current_request, credential_identity
 from services.protocol_events import payloads, error_status, gemini_termination, merge_gemini_safety
 from services.provider_capabilities import protocol_name, apply_native_tool_defaults
@@ -35,7 +36,9 @@ def native_usage(value):
     if 'promptTokenCount' in usage:
         return usage.get('promptTokenCount', 0), (usage.get('candidatesTokenCount') or 0) + (usage.get('thoughtsTokenCount') or 0), usage.get('cachedContentTokenCount', 0), usage
     if 'total_input_tokens' in usage:
-        return usage.get('total_input_tokens', 0), (usage.get('total_output_tokens') or 0) + (usage.get('total_thought_tokens') or 0), usage.get('total_cached_tokens', 0), usage
+        # 工具提示按输入计费，但不含在 total_input_tokens 里。
+        inputs = (usage.get('total_input_tokens') or 0) + (usage.get('total_tool_use_tokens') or 0)
+        return inputs, (usage.get('total_output_tokens') or 0) + (usage.get('total_thought_tokens') or 0), usage.get('total_cached_tokens', 0), usage
     if 'cache_read_input_tokens' in usage or 'cache_creation_input_tokens' in usage:
         return (usage.get('input_tokens') or 0) + (usage.get('cache_read_input_tokens') or 0) + (usage.get('cache_creation_input_tokens') or 0), usage.get('output_tokens', 0), usage.get('cache_read_input_tokens', 0), usage
     resolved = resolve_usage_tokens(usage)
@@ -50,6 +53,13 @@ def text_from_native(value):
     if value.get('type') == 'content_block_delta':
         delta = value.get('delta') or {}
         return delta.get('text') or delta.get('thinking') or ''
+    if value.get('event_type') == 'step.delta':
+        delta = value.get('delta') or {}
+        summary = delta.get('content') if isinstance(delta.get('content'), dict) else {}
+        return delta.get('text') or summary.get('text') or ''
+    if isinstance(value.get('steps'), list):
+        return ''.join(str(block.get('text') or '') for step in value['steps'] if isinstance(step, dict) and step.get('type') == 'model_output'
+                       for block in step.get('content') or [] if isinstance(block, dict))
     if value.get('candidates'):
         return ''.join(str(part.get('text') or '') for candidate in value['candidates'] for part in (candidate.get('content') or {}).get('parts') or [])
     if value.get('choices'):
@@ -100,7 +110,7 @@ def _content_from_blocks(blocks):
             continue
         if block.get('thought'):
             continue
-        if any(key in block for key in ('inlineData', 'inline_data', 'fileData', 'file_data')) or block.get('type') in ('image', 'image_url', 'input_image', 'input_file'):
+        if any(key in block for key in ('inlineData', 'inline_data', 'fileData', 'file_data')) or block.get('type') in ('image', 'image_url', 'input_image', 'input_file', 'audio', 'video', 'document'):
             media = block.get('inlineData') or block.get('inline_data') or block.get('fileData') or block.get('file_data') or block
             mime = media.get('mimeType') or media.get('mime_type') or block.get('type') or 'media'
             out.append({'type': 'text', 'text': '[附件: ' + str(mime) + ']'})
@@ -187,11 +197,16 @@ def _messages_from_interactions(body):
     if isinstance(input_items, str):
         messages.append({'role': 'user', 'content': input_items})
         return messages
+    if isinstance(input_items, dict):
+        input_items = [input_items]
     for step in input_items or []:
         if not isinstance(step, dict):
             continue
         kind = step.get('type') or ''
-        if kind in ('user_input', 'model_output'):
+        if kind in ('text', 'image', 'audio', 'video', 'document'):
+            # input 也可以直接是内容块，不包 user_input。
+            messages.append({'role': 'user', 'content': _content_from_blocks([step])})
+        elif kind in ('user_input', 'model_output'):
             content = _content_from_blocks(step.get('content'))
             if not content:
                 continue
@@ -280,7 +295,7 @@ def display_messages_for(body, protocol):
 
 async def forward_native_exchange(body, config, model, service, monitor, *, stream=False, context=None, gemini_response=False):
     from routes._direct_api_utils import get_api_key
-    from converters.gemini_interactions import convert_gemini_gc_to_interactions, convert_interactions_to_gemini_gc, InteractionsToGeminiGCConverter
+    from converters.gemini_interactions import convert_gemini_gc_to_interactions, convert_interactions_to_gemini_gc, interaction_failure, InteractionsToGeminiGCConverter
     from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler
     context = context or current_request.get() or RequestContext()
     context.model, context.endpoint = model, copy.deepcopy(config)
@@ -314,6 +329,18 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         if value.get('type') == 'response.incomplete' or value.get('status') == 'incomplete':
             incomplete = True
         native = value.get('response') or value.get('interaction') or value
+        if protocol == 'interactions':
+            if native.get('status') in ('incomplete', 'requires_continuation'):
+                incomplete = True
+            terminal = interaction_failure(native)
+            if terminal:
+                failure = terminal['error']['message']
+                # 客户端直连 Interactions 时自己能看到失败状态，只有转换成 generateContent 才要补错误。
+                if gemini_response:
+                    generation_error = terminal['error']
+            step = value.get('step')
+            if isinstance(step, dict) and str(step.get('type', '')).endswith('_call') and step['type'] != 'function_call':
+                observed_tools.add(step['type'])
         if protocol == 'gemini':
             reason, terminal_error = gemini_termination(native)
             if reason:
@@ -381,6 +408,10 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
             if protocol == 'interactions':
                 if gemini_response:
                     upstream = convert_gemini_gc_to_interactions(upstream, target)
+                    try:
+                        raise_if_strict(config)
+                    except ConversionRejected as error:
+                        raise HTTPException(400, str(error)) from error
                 upstream.update(model=target, stream=stream)
                 endpoint = '/interactions' + ('?alt=sse' if stream else '')
             else:

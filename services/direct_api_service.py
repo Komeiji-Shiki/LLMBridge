@@ -29,8 +29,9 @@ from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
 from core.constants import GeminiDefaults, TimeoutDefaults
+from core.conversion_report import ConversionRejected, raise_if_strict
 from converters.gemini_generate import GeminiRequestError, build_gemini_contents
-from converters.gemini_interactions import build_interactions_request_body
+from converters.gemini_interactions import build_interactions_request_body, interaction_failure
 from converters.media import gemini_code_text
 from services.model_capabilities import limits_for
 from services.provider_capabilities import provider_name
@@ -1021,6 +1022,12 @@ class DirectAPIService:
             stop_sequences=stop_sequences,
             extra_body=extra_body,
         )
+        request_context = current_request.get()
+        try:
+            raise_if_strict(request_context.endpoint if request_context else {})
+        except ConversionRejected as exc:
+            yield {"error": {"message": str(exc), "type": "invalid_request_error", "code": 400}}
+            return
 
         logger.info(f"[GEMINI_INTERACTIONS] 调用Interactions API: {_redact(endpoint)}")
         logger.info(f"[GEMINI_INTERACTIONS] 模型: {model}, 流式: {stream}, 步骤数: {len(request_body.get('input', []))}")
@@ -1033,6 +1040,7 @@ class DirectAPIService:
             context = current_request.get()
             if context:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'interactions')
+                omit_configured_fields(request_body, context.endpoint)
                 context.upstream_request = await asyncio.to_thread(upstream_snapshot, request_body)
             request_body_json = await asyncio.to_thread(
                 json.dumps,
@@ -1079,7 +1087,7 @@ class DirectAPIService:
                         yield event
                 else:
                     response_data = await response.json()
-                    yield response_data
+                    yield interaction_failure(response_data) or response_data
 
         except asyncio.TimeoutError:
             logger.error(f"[GEMINI_INTERACTIONS] 请求超时 (模型: {model})")
