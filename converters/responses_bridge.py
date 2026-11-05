@@ -14,6 +14,10 @@ from utils.upstream_fields import omit_configured_fields
 
 from utils.usage_tokens import MODE_MERGE, apply_usage_tokens
 from converters import is_content_parts
+from converters.media import FILE_PART_TYPES, file_to_responses
+from converters.message_shape import MID_SYSTEM_HOIST, SYSTEM_ROLES, inline_mid_system
+from core.conversion_report import note_loss
+from services.model_capabilities import drop_unsupported_sampling, supported_effort
 
 
 _SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
@@ -68,14 +72,24 @@ def _chat_content_to_responses(content: Any, role: str) -> List[Dict[str, Any]]:
             if detail is not None:
                 converted["detail"] = detail
             result.append(converted)
+        elif part_type in FILE_PART_TYPES:
+            converted = file_to_responses(part)
+            if converted is None:
+                raise ResponsesBridgeError(f"{part_type} 内容块缺少文件数据。")
+            result.append(converted)
         else:
-            raise ResponsesBridgeError(f"不支持转换到 Responses 的内容类型: {part_type}")
+            # 音视频 Responses 收不了：留一句占位，模型才知道这里本来有东西。
+            note_loss(f"content.{part_type}", f"Responses 上游不接受 {part_type} 内容块，已用文字占位")
+            result.append({"type": text_type, "text": f"[{part_type} 内容未发送：当前上游不支持]"})
     return result
 
 
 def _chat_tool_to_responses(tool: Any) -> Dict[str, Any]:
     if not isinstance(tool, dict):
         raise ResponsesBridgeError("Chat tools 中的每项必须是对象。")
+    if tool.get('type') == 'custom' and isinstance(tool.get('custom'), dict):
+        # Chat 把字段包在 custom 里，Responses 是扁平的。
+        return {'type': 'custom', **copy.deepcopy(tool['custom'])}
     if tool.get('type') not in (None, 'function'):
         return copy.deepcopy(tool)
     function = tool.get("function")
@@ -128,6 +142,10 @@ def _chat_response_format_to_text(response_format: Any) -> Optional[Dict[str, An
 def _function_call_to_responses(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
     call_id = tool_call.get("id") or "call_" + uuid.uuid4().hex[:24]
+    custom = tool_call.get("custom")
+    if tool_call.get("type") == "custom" and isinstance(custom, dict):
+        return {"type": "custom_tool_call", "id": "ctc_" + uuid.uuid4().hex[:24], "status": "completed",
+                "call_id": call_id, "name": custom.get("name", ""), "input": custom.get("input", "")}
     arguments = function.get("arguments", "{}")
     if not isinstance(arguments, str):
         arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
@@ -161,25 +179,35 @@ def convert_chat_request_to_responses(
     if not isinstance(messages, list):
         raise ResponsesBridgeError("Chat 请求缺少有效的 messages。")
 
-    for message in messages:
+    # 中段系统消息留在原位：instructions 排在最前，随提醒变化会让整段缓存失效。
+    mid_system_mode = endpoint_config.get("mid_system_mode")
+    custom_call_ids = set()
+    conversation_started = False
+    for message in inline_mid_system(messages, mid_system_mode, role="developer"):
         if not isinstance(message, dict):
             continue
         role = message.get("role", "user")
         content = message.get("content", "")
 
+        if role in SYSTEM_ROLES:
+            text = _stringify(content)
+            if conversation_started and mid_system_mode != MID_SYSTEM_HOIST:
+                input_items.append({"type": "message", "role": "developer",
+                                    "content": [{"type": "input_text", "text": text}]})
+            elif text:
+                instructions.append(text)
+            continue
+        conversation_started = True
+
         native_output = (message.get('provider_metadata') or {}).get('responses_output') if isinstance(message.get('provider_metadata'), dict) else None
         if role == 'assistant' and isinstance(native_output, list):
             input_items.extend(copy.deepcopy(native_output))
+            custom_call_ids.update(item.get('call_id') for item in native_output
+                                   if isinstance(item, dict) and item.get('type') == 'custom_tool_call')
             continue
         native_items = (message.get('provider_metadata') or {}).get('responses_items') if isinstance(message.get('provider_metadata'), dict) else None
         if role == 'assistant' and isinstance(native_items, list):
             input_items.extend(copy.deepcopy(native_items))
-            continue
-
-        if role in ("system", "developer"):
-            text = _stringify(content)
-            if text:
-                instructions.append(text)
             continue
 
         if role == "tool":
@@ -187,7 +215,7 @@ def convert_chat_request_to_responses(
             if not call_id:
                 raise ResponsesBridgeError("tool 消息缺少 tool_call_id。")
             input_items.append({
-                "type": "function_call_output",
+                "type": "custom_tool_call_output" if call_id in custom_call_ids else "function_call_output",
                 "call_id": call_id,
                 # 多模态工具结果必须保留内容块，JSON 字符串无法作为图片输入。
                 "output": (_chat_content_to_responses(content, "tool")
@@ -209,6 +237,8 @@ def convert_chat_request_to_responses(
         if role == "assistant":
             for tool_call in message.get("tool_calls") or []:
                 if isinstance(tool_call, dict):
+                    if tool_call.get("type") == "custom":
+                        custom_call_ids.add(tool_call.get("id"))
                     input_items.append(_function_call_to_responses(tool_call))
 
     request: Dict[str, Any] = {
@@ -223,9 +253,17 @@ def convert_chat_request_to_responses(
     if instructions:
         request["instructions"] = "\n\n".join(instructions)
 
-    for key in ("temperature", "top_p", "user", "metadata"):
+    for key in ("temperature", "top_p", "user", "metadata", "prompt_cache_key", "prompt_cache_retention",
+                "prompt_cache_options", "service_tier", "safety_identifier", "top_logprobs"):
         if key in chat_request:
             request[key] = copy.deepcopy(chat_request[key])
+    if chat_request.get("logprobs"):
+        request["include"] = ["message.output_text.logprobs"]
+    for key in ("stop", "seed", "frequency_penalty", "presence_penalty", "logit_bias", "modalities", "audio", "prediction"):
+        if chat_request.get(key) is not None:
+            note_loss(key, f"Responses 上游没有对应的 {key} 字段，未发送")
+    if (chat_request.get("n") or 1) > 1:
+        note_loss("n", "Responses 上游只返回一个候选")
 
     max_output_tokens = chat_request.get("max_completion_tokens")
     if max_output_tokens is None:
@@ -233,7 +271,8 @@ def convert_chat_request_to_responses(
     if max_output_tokens is not None:
         request["max_output_tokens"] = max_output_tokens
 
-    reasoning_effort = chat_request.get("reasoning_effort") or endpoint_config.get("reasoning_effort")
+    reasoning_effort = supported_effort(model, chat_request.get("reasoning_effort") or endpoint_config.get("reasoning_effort"))
+    drop_unsupported_sampling(request, model, reasoning_effort)
     reasoning_summary = endpoint_config.get("responses_reasoning_summary")
     if reasoning_effort or reasoning_summary:
         reasoning: Dict[str, Any] = {}
@@ -254,6 +293,9 @@ def convert_chat_request_to_responses(
     tools = chat_request.get("tools")
     if isinstance(tools, list):
         request["tools"] = [_chat_tool_to_responses(tool) for tool in tools]
+    web_search_options = chat_request.get("web_search_options")
+    if isinstance(web_search_options, dict):
+        request.setdefault("tools", []).append({"type": "web_search", **copy.deepcopy(web_search_options)})
     if "tool_choice" in chat_request:
         request["tool_choice"] = _chat_tool_choice_to_responses(chat_request["tool_choice"])
     if "parallel_tool_calls" in chat_request:
@@ -279,6 +321,39 @@ def _extract_output_text(item: Dict[str, Any]) -> str:
         for part in content
         if isinstance(part, dict) and part.get("type") in ("output_text", "text")
     )
+
+
+def _extract_refusal(item: Dict[str, Any]) -> str:
+    content = item.get("content")
+    return "".join(str(part.get("refusal", "")) for part in content if isinstance(part, dict)
+                   and part.get("type") == "refusal") if isinstance(content, list) else ""
+
+
+def _chat_annotations(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Responses 的引用是扁平字段，Chat 包在 url_citation 里。"""
+    annotations = []
+    for part in item.get("content") or []:
+        for annotation in (part.get("annotations") or []) if isinstance(part, dict) else []:
+            converted = _chat_annotation(annotation)
+            if converted:
+                annotations.append(converted)
+    return annotations
+
+
+def _chat_annotation(annotation: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(annotation, dict) or annotation.get("type") != "url_citation":
+        return None
+    return {"type": "url_citation", "url_citation": {key: annotation[key] for key in
+            ("url", "title", "start_index", "end_index") if key in annotation}}
+
+
+def _image_part(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    result = item.get("result")
+    if not isinstance(result, str) or not result:
+        return None
+    # 生图结果没有声明类型时按默认输出格式。
+    mime_type = f"image/{item.get('output_format') or 'png'}"
+    return {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{result}"}}
 
 
 def _extract_reasoning_text(item: Dict[str, Any]) -> str:
@@ -339,7 +414,10 @@ def convert_responses_response_to_chat(
         output = []
     text_parts: List[str] = []
     reasoning_parts: List[str] = []
+    refusal_parts: List[str] = []
     tool_calls: List[Dict[str, Any]] = []
+    annotations: List[Dict[str, Any]] = []
+    images: List[Dict[str, Any]] = []
 
     for item in output:
         if not isinstance(item, dict):
@@ -347,6 +425,8 @@ def convert_responses_response_to_chat(
         item_type = item.get("type")
         if item_type == "message":
             text_parts.append(_extract_output_text(item))
+            refusal_parts.append(_extract_refusal(item))
+            annotations.extend(_chat_annotations(item))
         elif item_type == "reasoning":
             reasoning_parts.append(_extract_reasoning_text(item))
         elif item_type == "function_call":
@@ -361,11 +441,21 @@ def convert_responses_response_to_chat(
                     "arguments": arguments,
                 },
             })
+        elif item_type == "custom_tool_call":
+            tool_calls.append({
+                "id": item.get("call_id") or item.get("id") or "call_" + uuid.uuid4().hex[:24],
+                "type": "custom",
+                "custom": {"name": item.get("name", ""), "input": item.get("input", "")},
+            })
+        elif item_type == "image_generation_call" and _image_part(item):
+            images.append(_image_part(item))
 
     content = "".join(text_parts)
     if not content and isinstance(responses_response.get("output_text"), str):
         content = responses_response["output_text"]
-    message: Dict[str, Any] = {"role": "assistant", "content": content}
+    refusal = "".join(refusal_parts)
+    # 很多客户端只读 content：拒答同时写进正文，否则用户只看到一片空白。
+    message: Dict[str, Any] = {"role": "assistant", "content": content or refusal}
     # Native output carries reasoning signatures, citations and server tool calls.
     # Clients that retain this extension can return it verbatim on the next turn.
     message['provider_metadata'] = {'responses_output': copy.deepcopy(output)}
@@ -373,12 +463,20 @@ def convert_responses_response_to_chat(
         message["reasoning_content"] = "".join(reasoning_parts)
     if tool_calls:
         message["tool_calls"] = tool_calls
+    if refusal:
+        message["refusal"] = refusal
+    if annotations:
+        message["annotations"] = annotations
+    if images:
+        message["images"] = images
 
     status = responses_response.get("status")
     incomplete_details = responses_response.get("incomplete_details")
     incomplete_reason = incomplete_details.get("reason") if isinstance(incomplete_details, dict) else None
     if tool_calls:
         finish_reason = "tool_calls"
+    elif refusal:
+        finish_reason = "content_filter"
     elif status == "incomplete" or incomplete_details:
         finish_reason = "content_filter" if incomplete_reason == "content_filter" else "length"
     else:
@@ -497,6 +595,10 @@ class _ChatStreamBuilder:
         self.failed = False
         self.native_response = None
         self.output_items = {}
+        self.refused = False
+        self.saw_output_text = False
+        self.custom_tools = set()
+        self.error = None
 
     def chunk(self, delta: Dict[str, Any], finish_reason: Optional[str] = None) -> bytes:
         payload = {
@@ -545,6 +647,7 @@ class _ChatStreamBuilder:
                 "message": str(event["error"]),
                 "type": "api_error",
             }
+            self.error = error
             return [f"data: {json.dumps({'error': error}, ensure_ascii=False)}\n\n".encode("utf-8")]
 
         if not event_type and (
@@ -563,9 +666,16 @@ class _ChatStreamBuilder:
                 chunks.append(self.chunk({"reasoning_content": reasoning}))
             content = message.get("content")
             if isinstance(content, str) and content:
-                chunks.append(self.chunk({"content": content}))
+                chunks.append(self.chunk({"content": content, **({"refusal": message["refusal"]} if message.get("refusal") else {})}))
+            for field in ("images", "annotations"):
+                if message.get(field):
+                    chunks.append(self.chunk({field: message[field]}))
             for position, tool_call in enumerate(message.get("tool_calls") or []):
                 if not isinstance(tool_call, dict):
+                    continue
+                if tool_call.get("type") == "custom":
+                    _, index = self._tool_index({"id": tool_call.get("id"), "output_index": position})
+                    chunks.append(self.chunk({"tool_calls": [{**tool_call, "index": index}]}))
                     continue
                 function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
                 key, index = self._tool_index({
@@ -595,6 +705,14 @@ class _ChatStreamBuilder:
 
         if event_type == "response.output_item.added":
             item = event.get("item") if isinstance(event.get("item"), dict) else {}
+            if item.get("type") == "custom_tool_call":
+                key, index = self._tool_index({**item, "output_index": event.get("output_index")})
+                self.tool_ids[key] = item.get("call_id") or item.get("id") or "call_" + uuid.uuid4().hex[:24]
+                self.tool_names[key] = item.get("name", "")
+                self.tool_arguments.setdefault(key, "")
+                self.custom_tools.add(key)
+                return [self.chunk({"tool_calls": [{"index": index, "id": self.tool_ids[key], "type": "custom",
+                                                    "custom": {"name": self.tool_names[key], "input": ""}}]})]
             if item.get("type") != "function_call":
                 return [self.chunk({'provider_event': {key: copy.deepcopy(value) for key, value in event.items() if key != '_event_type'}})]
             key, index = self._tool_index({**item, "output_index": event.get("output_index")})
@@ -612,7 +730,29 @@ class _ChatStreamBuilder:
 
         if event_type == "response.output_text.delta":
             delta = event.get("delta")
-            return [self.chunk({"content": delta})] if isinstance(delta, str) and delta else []
+            if isinstance(delta, str) and delta:
+                self.saw_output_text = True
+                return [self.chunk({"content": delta})]
+            return []
+
+        if event_type == "response.refusal.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str) and delta:
+                self.refused = True
+                return [self.chunk({"content": delta, "refusal": delta})]
+            return []
+
+        if event_type == "response.output_text.annotation.added":
+            annotation = _chat_annotation(event.get("annotation"))
+            return [self.chunk({"annotations": [annotation]})] if annotation else []
+
+        if event_type == "response.custom_tool_call_input.delta":
+            delta = event.get("delta")
+            if not isinstance(delta, str):
+                return []
+            key, index = self._tool_index(event)
+            self.tool_arguments[key] = self.tool_arguments.get(key, "") + delta
+            return [self.chunk({"tool_calls": [{"index": index, "custom": {"input": delta}}]})]
 
         if event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
             delta = event.get("delta")
@@ -637,6 +777,15 @@ class _ChatStreamBuilder:
                 self.output_items[event.get('output_index', len(self.output_items))] = copy.deepcopy(item)
             if item.get("type") == "reasoning":
                 return [self.chunk({'provider_event': {key: copy.deepcopy(value) for key, value in event.items() if key != '_event_type'}})]
+            if item.get("type") == "image_generation_call" and _image_part(item):
+                return [self.chunk({"images": [_image_part(item)]})]
+            if item.get("type") == "custom_tool_call":
+                key, index = self._tool_index({**item, "output_index": event.get("output_index")})
+                text = item.get("input")
+                if isinstance(text, str) and not self.tool_arguments.get(key):
+                    self.tool_arguments[key] = text
+                    return [self.chunk({"tool_calls": [{"index": index, "custom": {"input": text}}]})]
+                return []
             if item.get("type") != "function_call":
                 return []
             key, index = self._tool_index({**item, "output_index": event.get("output_index")})
@@ -667,9 +816,30 @@ class _ChatStreamBuilder:
                 details = response.get("incomplete_details")
                 reason = details.get("reason") if isinstance(details, dict) else None
                 self.finish_reason = "content_filter" if reason == "content_filter" else "length"
-            else:
-                self.finish_reason = "tool_calls" if self.tool_indexes else "stop"
-            return [self.chunk({'provider_metadata': {'responses_output': copy.deepcopy(response.get('output') or [])}})]
+            chunks = []
+            # 个别上游和中转不发增量，只在终态给完整输出，正文和调用不能因此丢掉。
+            if not self.saw_output_text and not self.refused or not self.tool_indexes:
+                recovered = convert_responses_response_to_chat(response, self.request_model, self.completion_tokens_mode)
+                message = recovered["choices"][0]["message"]
+                if message.get("content") and not self.saw_output_text and not self.refused:
+                    self.refused = bool(message.get("refusal"))
+                    chunks.append(self.chunk({"content": message["content"], **(
+                        {"refusal": message["refusal"]} if message.get("refusal") else {})}))
+                for position, call in enumerate(message.get("tool_calls") or [] if not self.tool_indexes else []):
+                    key, index = self._tool_index({"id": call.get("id"), "output_index": position})
+                    self.tool_ids[key] = call.get("id")
+                    if call.get("type") == "custom":
+                        self.custom_tools.add(key)
+                        self.tool_names[key] = call["custom"].get("name", "")
+                        self.tool_arguments[key] = call["custom"].get("input", "")
+                    else:
+                        self.tool_names[key] = call["function"].get("name", "")
+                        self.tool_arguments[key] = call["function"].get("arguments", "")
+                    chunks.append(self.chunk({"tool_calls": [{**call, "index": index}]}))
+            if event_type == "response.completed":
+                self.finish_reason = "tool_calls" if self.tool_indexes else "content_filter" if self.refused else "stop"
+            chunks.append(self.chunk({'provider_metadata': {'responses_output': copy.deepcopy(response.get('output') or [])}}))
+            return chunks
 
         if event_type in ("response.failed", "error"):
             self.failed = True
@@ -683,10 +853,9 @@ class _ChatStreamBuilder:
                     if key in event:
                         error[key] = event[key]
             error = error if isinstance(error, dict) else {"message": str(error or "上游 Responses 请求失败"), "type": "api_error"}
+            self.error = error
             payload = {"error": error}
             return [f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")]
-        if event_type.startswith('response.'):
-            return [self.chunk({'provider_event': {key: copy.deepcopy(value) for key, value in event.items() if key != '_event_type'}})]
         return []
 
     @staticmethod
@@ -761,26 +930,51 @@ async def collect_responses_stream_to_chat(
             chunks.append(event)
 
     builder = _ChatStreamBuilder(request_model, completion_tokens_mode)
-    for event in chunks:
-        builder.process(event)
     message: Dict[str, Any] = {"role": "assistant", "content": ""}
     text_parts = []
     reasoning_parts = []
+    refusal_parts = []
+    annotations = []
+    images = []
     tool_calls = []
     for event in chunks:
+        # 构建器产出的增量就是客户端会看到的内容，这里只需要把它们累加起来。
+        for chunk in builder.process(event):
+            payload = json.loads(chunk.decode("utf-8")[len("data: "):])
+            choices = payload.get("choices") or []
+            delta = choices[0].get("delta", {}) if choices else {}
+            if isinstance(delta.get("content"), str):
+                text_parts.append(delta["content"])
+            if isinstance(delta.get("reasoning_content"), str):
+                reasoning_parts.append(delta["reasoning_content"])
+            if isinstance(delta.get("refusal"), str):
+                refusal_parts.append(delta["refusal"])
+            annotations.extend(delta.get("annotations") or [])
+            images.extend(delta.get("images") or [])
         event_type = event.get("_event_type") or event.get("type", "")
-        if event_type == "response.output_text.delta" and isinstance(event.get("delta"), str):
-            text_parts.append(event["delta"])
-        elif event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta") and isinstance(event.get("delta"), str):
-            reasoning_parts.append(event["delta"])
-        elif event_type in ('response.completed', 'response.incomplete'):
+        if event_type in ('response.completed', 'response.incomplete'):
             message['provider_metadata'] = {'responses_output': copy.deepcopy((event.get('response') or {}).get('output') or [])}
+    if builder.failed:
+        # 失败不能伪装成正常结束，半截内容也不算成功。
+        return {"error": builder.error if isinstance(builder.error, dict) else {
+            "message": str(builder.error or "上游 Responses 请求失败"), "type": "api_error"}}
     message["content"] = "".join(text_parts)
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
+    if refusal_parts:
+        message["refusal"] = "".join(refusal_parts)
+    if annotations:
+        message["annotations"] = annotations
+    if images:
+        message["images"] = images
     for key, index in sorted(builder.tool_indexes.items(), key=lambda pair: pair[1]):
+        call_id = builder.tool_ids.get(key) or "call_" + uuid.uuid4().hex[:24]
+        if key in builder.custom_tools:
+            tool_calls.append({"id": call_id, "type": "custom", "custom": {
+                "name": builder.tool_names.get(key, ""), "input": builder.tool_arguments.get(key, "")}})
+            continue
         tool_calls.append({
-            "id": builder.tool_ids.get(key) or "call_" + uuid.uuid4().hex[:24],
+            "id": call_id,
             "type": "function",
             "function": {
                 "name": builder.tool_names.get(key, ""),

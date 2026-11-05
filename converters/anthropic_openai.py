@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from converters import is_content_parts
 from converters.audio import audio_to_openai, split_audio_text
+from converters.media import document_text, extract_file, file_part, search_result_text
 from converters.anthropic_responses_signatures import (
     encode_thinking_item,
     responses_items_from_anthropic,
@@ -29,6 +30,9 @@ from converters.gemini_anthropic_signatures import (
     gemini_parts_from_anthropic,
     gemini_segments,
 )
+from core.conversion_report import note_loss
+from services.error_translation import translate_anthropic_error
+from services.model_capabilities import budget_to_effort
 from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
 from utils.usage_tokens import total_output_tokens
 
@@ -66,15 +70,79 @@ def map_openai_finish_reason_to_anthropic(reason: Optional[str]) -> str:
     mapping = {
         "stop": "end_turn",
         "length": "max_tokens",
-        "content_filter": "stop_sequence",
+        "content_filter": "refusal",
         "tool_calls": "tool_use",
         "function_call": "tool_use",
     }
     return mapping.get(reason or "stop", "end_turn")
 
 
+def _stop_reason(finish_reason: Optional[str], has_tool_use: bool) -> str:
+    """有工具调用就是 tool_use：部分上游和中转在调用后仍报 stop，靠它判断的 Agent 循环会提前结束。"""
+    reason = map_openai_finish_reason_to_anthropic(finish_reason)
+    return "tool_use" if has_tool_use and reason == "end_turn" else reason
+
+
+def _source_lines(annotations: Any) -> str:
+    """引用来源没有通用的 Anthropic 表示（citations 要上游签发的 encrypted_index），写成文字。"""
+    seen, lines = set(), []
+    for annotation in annotations if isinstance(annotations, list) else []:
+        citation = annotation.get("url_citation") if isinstance(annotation, dict) else None
+        url = citation.get("url") if isinstance(citation, dict) else None
+        if url and url not in seen:
+            seen.add(url)
+            lines.append(f"- [{citation.get('title') or url}]({url})")
+    return "\n\nSources:\n" + "\n".join(lines) if lines else ""
+
+
 def format_anthropic_sse_event(event_name: str, payload: Dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+_OBJECT_WITH_ACTION = {"type": "object", "properties": {"action": {"type": "string"}}, "required": ["action"]}
+# 客户端自己执行的内置工具：其他上游不认识这些版本化类型，按官方参数补上 schema 和说明，
+# 模型才能正确调用，调用照常回到客户端执行。
+_CLIENT_TOOL_DEFINITIONS = {
+    "bash_": ("Run a shell command and return its output.", {
+        "type": "object",
+        "properties": {"command": {"type": "string"}, "restart": {"type": "boolean"}},
+    }),
+    "text_editor_": ("View, create and edit files.", {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "enum": ["view", "create", "str_replace", "insert", "undo_edit"]},
+            "path": {"type": "string"},
+            "file_text": {"type": "string"},
+            "old_str": {"type": "string"},
+            "new_str": {"type": "string"},
+            "insert_line": {"type": "integer"},
+            "insert_text": {"type": "string"},
+            "view_range": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["command", "path"],
+    }),
+    "memory_": ("Read and write files in the persistent memory directory.", {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "enum": ["view", "create", "str_replace", "insert", "delete", "rename"]},
+            "path": {"type": "string"},
+            "file_text": {"type": "string"},
+            "old_str": {"type": "string"},
+            "new_str": {"type": "string"},
+            "insert_line": {"type": "integer"},
+            "insert_text": {"type": "string"},
+            "old_path": {"type": "string"},
+            "new_path": {"type": "string"},
+            "view_range": {"type": "array", "items": {"type": "integer"}},
+        },
+        "required": ["command"],
+    }),
+    "computer_": ("Control the computer: screenshots, mouse and keyboard.", _OBJECT_WITH_ACTION),
+    "browser_": ("Control a web browser.", _OBJECT_WITH_ACTION),
+}
+# 由 Anthropic 服务端执行的工具，其他上游没有执行者，声明了只会得到一个没人处理的调用。
+# web_search、web_fetch 不在此列：多数上游和中转会按名字接管。
+_SERVER_ONLY_TOOL_PREFIXES = ("code_execution_", "tool_search_tool_", "advisor_", "mcp_toolset")
 
 
 def convert_anthropic_tools_to_openai(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -86,12 +154,20 @@ def convert_anthropic_tools_to_openai(tools: List[Dict[str, Any]]) -> List[Dict[
         [{"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}]
     """
     openai_tools: List[Dict[str, Any]] = []
-    for tool in tools:
+    for index, tool in enumerate(tools):
         if not isinstance(tool, dict):
             continue
         name = tool.get("name", "")
         description = tool.get("description", "")
         input_schema = tool.get("input_schema", {})
+        kind = str(tool.get("type") or "")
+        if kind.startswith(_SERVER_ONLY_TOOL_PREFIXES):
+            note_loss(f"tools[{index}]", f"内置工具 {kind} 只能由 Anthropic 服务端执行，已移除")
+            continue
+        for prefix, (default_description, schema) in _CLIENT_TOOL_DEFINITIONS.items():
+            if kind.startswith(prefix):
+                description = description or default_description
+                input_schema = input_schema or schema
         if not name:
             continue
         openai_tools.append({
@@ -194,11 +270,32 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
                         "type": "image_url",
                         "image_url": {"url": image_url}
                     })
+            else:
+                note_loss("image.source", f"图片来源 {source_type} 只在 Anthropic 有效，已用文字占位")
+                converted_parts.append({"type": "text", "text": "[图片未发送：引用的文件只在 Anthropic 有效]"})
 
-        elif block_type in ("audio", "input_audio", "audio_url", "document"):
+        elif block_type in ("audio", "input_audio", "audio_url"):
             audio_part = audio_to_openai(block)
             if audio_part:
                 converted_parts.append(audio_part)
+
+        elif block_type == "document":
+            # 音频、纯文本和文件三种形态都走 document，按内容分流。
+            audio_part = audio_to_openai(block)
+            text = None if audio_part else document_text(block)
+            found = None if audio_part or text is not None else extract_file(block)
+            if audio_part:
+                converted_parts.append(audio_part)
+            elif text is not None:
+                converted_parts.append({"type": "text", "text": text})
+            elif found and "file_id" not in found:
+                converted_parts.append(file_part(found))
+            else:
+                note_loss("document", "文档引用的文件只在 Anthropic 有效，已用文字占位")
+                converted_parts.append({"type": "text", "text": "[文档未发送：引用的文件只在 Anthropic 有效]"})
+
+        elif block_type == "search_result":
+            converted_parts.append({"type": "text", "text": search_result_text(block)})
 
         elif block_type == "tool_result":
             tool_content = block.get("content")
@@ -233,7 +330,9 @@ def convert_anthropic_content_to_openai(content: Any) -> Any:
             if thinking_text:
                 converted_parts.append({"type": "text", "text": f"<thinking>{thinking_text}</thinking>"})
 
-        # 跳过其他未知类型（如 redacted_thinking）
+        elif block_type != "redacted_thinking":
+            # 服务端工具记录、压缩块等只有 Anthropic 能用。
+            note_loss(f"content.{block_type}", f"内容块 {block_type} 无法转换到当前上游，已跳过")
 
     if not converted_parts:
         return " "
@@ -264,12 +363,21 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
     if system_text:
         openai_messages.append({"role": "system", "content": system_text})
 
+    output = anthropic_req.get("output_config") or {}
+    effort = output.get("effort")
+
     for msg in messages_in:
         if not isinstance(msg, dict):
             continue
 
         role = msg.get("role", "user")
         raw_content = msg.get("content", "")
+
+        if role == "system":
+            # 中段 system 条目可以带本轮的思考强度，内容可能是空的。
+            effort = (msg.get("output_config") or {}).get("effort") or effort
+            if not raw_content:
+                continue
 
         # ── assistant 消息：检查是否包含 tool_use 块 ──
         if role == "assistant" and isinstance(raw_content, list):
@@ -382,12 +490,10 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
         "stream": bool(anthropic_req.get("stream", False)),
     }
 
-    # 常见参数映射
+    # 常见参数映射。top_k、metadata 不转：其他上游多数不接受，严格校验时整个请求报 400。
     passthrough_fields = [
         "temperature",
         "top_p",
-        "top_k",
-        "metadata",
         "stop",
         "user",
     ]
@@ -415,23 +521,23 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
             openai_req["tool_choice"] = oai_tool_choice
             logger.info(f"[ANTHROPIC_CONVERT] tool_choice: {tool_choice} → {oai_tool_choice}")
 
-    # ── thinking 参数 ──
-    # Anthropic thinking 没有 OpenAI 标准对应，保留为自定义字段
-    thinking = anthropic_req.get("thinking")
-    if isinstance(thinking, dict):
-        openai_req["_anthropic_thinking"] = thinking
-        logger.info(f"[ANTHROPIC_CONVERT] thinking 配置已保留: budget_tokens={thinking.get('budget_tokens', 'N/A')}")
-
     if isinstance(tool_choice, dict) and isinstance(tool_choice.get("disable_parallel_tool_use"), bool):
         openai_req["parallel_tool_calls"] = not tool_choice["disable_parallel_tool_use"]
 
-    output = anthropic_req.get("output_config") or {}
     output_format = output.get("format")
     if isinstance(output_format, dict) and output_format.get("type") == "json_schema":
         openai_req["response_format"] = {"type": "json_schema", "json_schema": {
             "name": "response", "schema": output_format.get("schema", {})}}
-    if output.get("effort") is not None:
-        openai_req["reasoning_effort"] = output["effort"]
+
+    # thinking 在内部统一成 reasoning_effort，各上游的转换器再换成自己的写法。
+    thinking = anthropic_req.get("thinking")
+    if isinstance(thinking, dict):
+        if thinking.get("type") == "disabled":
+            effort = "none"
+        elif thinking.get("type") == "enabled" and effort is None:
+            effort = budget_to_effort(thinking.get("budget_tokens"))
+    if effort is not None:
+        openai_req["reasoning_effort"] = effort
 
     return openai_req
 
@@ -440,7 +546,7 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
 # Anthropic 错误 / 响应构建
 # ============================================================================
 
-def build_anthropic_error_payload(error_obj: Any) -> Dict[str, Any]:
+def build_anthropic_error_payload(error_obj: Any, status: Optional[int] = None) -> Dict[str, Any]:
     error_type = "api_error"
     message = "请求失败"
     error_details: Dict[str, Any] = {}
@@ -449,14 +555,11 @@ def build_anthropic_error_payload(error_obj: Any) -> Dict[str, Any]:
     if isinstance(error_obj, dict):
         request_id = error_obj.get("request_id") or error_obj.get("requestId")
         if "error" in error_obj and isinstance(error_obj.get("error"), dict):
-            nested = error_obj["error"]
-            error_type = nested.get("type", error_type)
-            message = nested.get("message", message)
-            error_details = dict(nested)
+            error_details = translate_anthropic_error(dict(error_obj["error"]), status)
         else:
-            error_type = error_obj.get("type", error_type)
-            message = error_obj.get("message", message)
-            error_details = dict(error_obj)
+            error_details = translate_anthropic_error(dict(error_obj), status)
+        error_type = error_details.get("type", error_type)
+        message = error_details.get("message", message)
         request_id = (error_details.get("request_id")
                       or error_details.get("requestId") or request_id)
     elif isinstance(error_obj, str):
@@ -712,7 +815,7 @@ def extract_openai_message_text(choice: Dict[str, Any]) -> str:
 def extract_openai_message_reasoning(choice: Dict[str, Any]) -> str:
     """从 OpenAI choice 中提取 reasoning_content。"""
     message = choice.get("message", {}) if isinstance(choice, dict) else {}
-    reasoning = message.get("reasoning_content", "")
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
     return reasoning if isinstance(reasoning, str) else ""
 
 
@@ -844,7 +947,7 @@ async def convert_openai_non_stream_response_to_anthropic(
     if status_code >= 400 or (isinstance(data, dict) and data.get("error") is not None):
         return JSONResponse(
             status_code=status_code if status_code >= 400 else 500,
-            content=build_anthropic_error_payload(data.get("error", data))
+            content=build_anthropic_error_payload(data.get("error", data), status_code)
         )
 
     choices = data.get("choices", [])
@@ -863,7 +966,7 @@ async def convert_openai_non_stream_response_to_anthropic(
         segments = gemini_segments(message)
     if segments is None:
         segments = _flat_segments(extract_openai_message_reasoning(first_choice),
-                                  extract_openai_message_text(first_choice),
+                                  extract_openai_message_text(first_choice) or message.get("refusal"),
                                   message.get("tool_calls"))
     content_blocks: List[Dict[str, Any]] = []
     open_thinking: Optional[Dict[str, Any]] = None
@@ -909,19 +1012,30 @@ async def convert_openai_non_stream_response_to_anthropic(
                 "input": tc_args
             })
 
+    sources = _source_lines(message.get("annotations"))
+    if sources:
+        content_blocks.append({"type": "text", "text": sources})
+    if message.get("images"):
+        note_loss("images", "Anthropic 协议的回复不能带图片，生成的图片未返回")
+        content_blocks.append({"type": "text", "text": "[上游生成了图片，Anthropic 协议的回复无法携带]"})
     if not content_blocks:
         content_blocks = [{"type": "text", "text": ""}]
 
+    stop_reason = "refusal" if message.get("refusal") else _stop_reason(
+        finish_reason, any(block["type"] == "tool_use" for block in content_blocks))
     anthropic_response = {
         "id": data.get("id") or f"msg_{uuid.uuid4().hex}",
         "type": "message",
         "role": "assistant",
         "model": request_model,
         "content": content_blocks,
-        "stop_reason": map_openai_finish_reason_to_anthropic(finish_reason),
+        "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": anthropic_usage
     }
+    if stop_reason == "refusal":
+        anthropic_response["stop_details"] = {"type": "refusal", "category": None,
+                                              "explanation": message.get("refusal")}
     if warnings:
         anthropic_response["bridge_warnings"] = warnings
 
@@ -970,6 +1084,110 @@ async def iter_openai_sse_payloads(upstream_response: StreamingResponse):
                 yield line[5:].strip()
 
 
+class _ToolBlocks:
+    """保证同一时间只有一个 tool_use 块打开：官方事件流就是这样，客户端也按此处理。
+
+    下一个调用到来时，当前块的参数已经是完整 JSON 就先关闭；否则说明上游在交错发送，
+    把后到的增量缓存起来，等当前块收齐再放出。个别中转所有调用都用 index 0，
+    所以同一个 index 出现新的 id 也算新调用。
+    """
+
+    def __init__(self, next_index, emit_start, emit_delta, emit_stop):
+        self.next_index = next_index
+        self.emit_start, self.emit_delta, self.emit_stop = emit_start, emit_delta, emit_stop
+        self.current: Optional[Dict[str, Any]] = None
+        self.waiting: List[Dict[str, Any]] = []
+        self.closed_keys = set()
+        self.seen = False
+
+    @staticmethod
+    def _new(key: Any) -> Dict[str, Any]:
+        # 把 arguments 增量中的 \uXXXX 转义提前解码为明文（跨 chunk 安全）
+        return {"key": key, "id": "", "name": "", "raw": "", "started": False, "buffered": [],
+                "unescaper": StreamingUnicodeUnescaper()}
+
+    def _write(self, block: Dict[str, Any], tc_id: Any, name: Any, args: Any) -> List[str]:
+        block["id"] = block["id"] or tc_id or ""
+        block["name"] = block["name"] or name or ""
+        events: List[str] = []
+        if not block["started"] and (block["id"] or block["name"] or args):
+            block["started"] = True
+            self.seen = True
+            block["index"] = self.next_index()
+            events.append(self.emit_start(block["index"], "tool_use", {
+                "id": block["id"] or f"toolu_{uuid.uuid4().hex}", "name": block["name"]}))
+        if args:
+            block["raw"] += args
+            decoded = block["unescaper"].feed(args)
+            if decoded:
+                events.append(self.emit_delta(block["index"], "input_json_delta", decoded))
+        return events
+
+    @staticmethod
+    def _complete(block: Dict[str, Any]) -> bool:
+        # 还没收到参数不算完整：常见上游先发齐所有调用的 id，再发参数。
+        if not block["raw"]:
+            return False
+        try:
+            json.loads(block["raw"])
+            return True
+        except ValueError:
+            return False
+
+    def _close_current(self) -> List[str]:
+        block, self.current = self.current, None
+        if block is None or not block["started"]:
+            return []
+        self.closed_keys.add(block["key"])
+        # 冲刷参数解码器残留（正常完整 JSON 无残留；截断流原样补发）
+        tail = block["unescaper"].flush()
+        events = [self.emit_delta(block["index"], "input_json_delta", tail)] if tail else []
+        events.append(self.emit_stop(block["index"]))
+        return events
+
+    def _activate_next(self) -> List[str]:
+        events: List[str] = []
+        while self.current is None and self.waiting:
+            block = self.waiting.pop(0)
+            self.current = block
+            for fragment in block.pop("buffered"):
+                events.extend(self._write(block, *fragment))
+            if self.waiting and self._complete(block):
+                events.extend(self._close_current())
+        return events
+
+    def feed(self, tool_call: Dict[str, Any]) -> List[str]:
+        key = tool_call.get("index", 0)
+        tc_id = tool_call.get("id")
+        function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+        fragment = (tc_id, function.get("name", ""), function.get("arguments", ""))
+        events: List[str] = []
+        current = self.current
+        if current is not None and current["key"] == key and not (tc_id and current["id"] and tc_id != current["id"]):
+            return self._write(current, *fragment)
+        if not tc_id and key in self.closed_keys:
+            # 块已经关闭，再开一个没有 id 的块客户端也没法回传结果。
+            logger.warning(f"[ANTHROPIC_CONVERT] 工具调用 index={key} 的块关闭后又收到增量，已丢弃")
+            return events
+        waiting = next((block for block in self.waiting if block["key"] == key
+                        and not (tc_id and block["buffered"][0][0] and tc_id != block["buffered"][0][0])), None)
+        if waiting is not None:
+            waiting["buffered"].append(fragment)
+        else:
+            self.waiting.append({**self._new(key), "buffered": [fragment]})
+        if current is None or self._complete(current):
+            events.extend(self._close_current())
+            events.extend(self._activate_next())
+        return events
+
+    def close_all(self) -> List[str]:
+        events = self._close_current()
+        while self.waiting:
+            events.extend(self._activate_next())
+            events.extend(self._close_current())
+        return events
+
+
 def build_anthropic_streaming_response(
     openai_streaming_response: StreamingResponse,
     request_model: str,
@@ -993,7 +1211,10 @@ def build_anthropic_streaming_response(
 
         # ── 消息级状态 ──
         sent_message_start = False
-        stop_reason = "end_turn"
+        finish_reason: Optional[str] = None
+        refusal_parts: List[str] = []
+        annotations: List[Dict[str, Any]] = []
+        saw_images = False
         # 累积上游 usage（OpenAI 流式 usage 为最终累计值而非增量，合并覆盖即可）
         merged_usage: Dict[str, Any] = {}
 
@@ -1001,9 +1222,12 @@ def build_anthropic_streaming_response(
         next_block_idx = 0
         active_thinking_idx: Optional[int] = None
         active_text_idx: Optional[int] = None
-        # tool_use:  {OAI_index: {"real_idx": int, "id": str, "name": str}}
-        active_tool_use: Dict[int, Dict[str, Any]] = {}
         prev_delta_type: Optional[str] = None  # "thinking" | "text" | "tool_calls"
+
+        def _allocate_block_index() -> int:
+            nonlocal next_block_idx
+            next_block_idx += 1
+            return next_block_idx - 1
 
         def _emit_block_start(idx: int, block_type: str, extra: Optional[Dict[str, Any]] = None) -> str:
             if block_type == "thinking":
@@ -1057,18 +1281,10 @@ def build_anthropic_streaming_response(
             if active_text_idx is not None:
                 events.append(_emit_block_stop(active_text_idx))
                 active_text_idx = None
-            for oai_idx in sorted(active_tool_use.keys()):
-                info = active_tool_use[oai_idx]
-                # 未发过 content_block_start 的块不能发 block_stop（协议顺序）
-                if info.get("started"):
-                    # 冲刷参数解码器残留（正常完整 JSON 无残留；截断流原样补发）
-                    unescaper = info.get("args_unescaper")
-                    tail = unescaper.flush() if unescaper else ""
-                    if tail:
-                        events.append(_emit_block_delta(info["real_idx"], "input_json_delta", tail))
-                    events.append(_emit_block_stop(info["real_idx"]))
-            active_tool_use.clear()
+            events.extend(tool_blocks.close_all())
             return events
+
+        tool_blocks = _ToolBlocks(_allocate_block_index, _emit_block_start, _emit_block_delta, _emit_block_stop)
 
         # ── 主循环：逐 chunk 处理 ──
         async for payload in iter_openai_sse_payloads(openai_streaming_response):
@@ -1125,9 +1341,8 @@ def build_anthropic_streaming_response(
             if isinstance(provider_event, dict) and provider_event.get("type") == "response.output_item.added":
                 item = provider_event.get("item") or {}
                 if item.get("type") not in ("reasoning", "message"):
-                    yield format_anthropic_sse_event("error", build_anthropic_error_payload({
-                        "type": "api_error", "message": f"Responses 输出项类型 '{item.get('type')}' 无法转换为 Anthropic 内容块"}))
-                    return
+                    # 托管工具由上游执行完了，结果已体现在后面的正文里；Anthropic 没有对应的块。
+                    note_loss(f"output.{item.get('type')}", f"Responses 输出项 {item.get('type')} 没有对应的 Anthropic 内容块，已跳过")
             if isinstance(provider_event, dict) and provider_event.get("type") == "response.output_item.done":
                 item = provider_event.get("item") or {}
                 if item.get("type") == "reasoning":
@@ -1148,9 +1363,15 @@ def build_anthropic_streaming_response(
 
             # Gemini 链路按原生 parts 顺序展开（签名随 thinking 块下发），其余来源按
             # 思考 → 正文 → 调用展开；同一 chunk 混有多种内容时逐段发送，不再只取一种
+            if isinstance(delta.get("refusal"), str):
+                refusal_parts.append(delta["refusal"])
+            if isinstance(delta.get("annotations"), list):
+                annotations.extend(delta["annotations"])
+            saw_images = saw_images or bool(delta.get("images"))
             segments = gemini_segments(delta)
             if segments is None:
-                segments = _flat_segments(delta.get("reasoning_content"), delta.get("content"),
+                segments = _flat_segments(delta.get("reasoning_content") or delta.get("reasoning"),
+                                          delta.get("content") or delta.get("refusal"),
                                           delta.get("tool_calls"))
 
             for current_type, value in segments:
@@ -1189,59 +1410,32 @@ def build_anthropic_streaming_response(
 
                 else:
                     for tc in value:
-                        if not isinstance(tc, dict):
-                            continue
-                        oai_idx = tc.get("index", 0)
-                        tc_id = tc.get("id")
-                        tc_func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
-                        tc_name = tc_func.get("name", "")
-                        tc_args = tc_func.get("arguments", "")
-
-                        if oai_idx not in active_tool_use:
-                            real_idx = next_block_idx
-                            next_block_idx += 1
-                            active_tool_use[oai_idx] = {
-                                "real_idx": real_idx,
-                                "id": tc_id or "",
-                                "name": tc_name or "",
-                                # 把 arguments 增量中的 \uXXXX 转义提前解码为明文
-                                "args_unescaper": StreamingUnicodeUnescaper()
-                            }
-                            # 发送 content_block_start（等到有 id/name 或第一个 delta 时）
-                            if tc_id or tc_name:
-                                yield _emit_block_start(real_idx, "tool_use", {"id": tc_id or "", "name": tc_name or ""})
-                                active_tool_use[oai_idx]["started"] = True
-                        else:
-                            info = active_tool_use[oai_idx]
-                            # 如果之前没有 id/name，现在补充
-                            if not info.get("started") and (tc_id or tc_name):
-                                info["id"] = tc_id or info["id"]
-                                info["name"] = tc_name or info["name"]
-                                yield _emit_block_start(info["real_idx"], "tool_use", {"id": info["id"], "name": info["name"]})
-                                info["started"] = True
-
-                        info = active_tool_use.get(oai_idx)
-                        if info and tc_args:
-                            if not info.get("started"):
-                                # 上游首个 delta 只有 arguments 没有 id/name：
-                                # 先补发 content_block_start 保证协议顺序，再发 input_json_delta
-                                yield _emit_block_start(info["real_idx"], "tool_use",
-                                                        {"id": info["id"], "name": info["name"]})
-                                info["started"] = True
-                            # 提前把 \uXXXX 转义解码为明文再发给下游（跨 chunk 安全）
-                            decoded = info["args_unescaper"].feed(tc_args)
-                            if decoded:
-                                yield _emit_block_delta(info["real_idx"], "input_json_delta", decoded)
+                        if isinstance(tc, dict):
+                            for ev in tool_blocks.feed(tc):
+                                yield ev
 
                 prev_delta_type = current_type
 
-            finish_reason = choice.get("finish_reason")
-            if finish_reason:
-                stop_reason = map_openai_finish_reason_to_anthropic(finish_reason)
+            finish_reason = choice.get("finish_reason") or finish_reason
+
+        # ── 流尾补充：来源和图片说明接在最后一段正文后面 ──
+        trailing = _source_lines(annotations)
+        if saw_images:
+            note_loss("images", "Anthropic 协议的回复不能带图片，生成的图片未返回")
+            trailing += "\n\n[上游生成了图片，Anthropic 协议的回复无法携带]"
+        if trailing:
+            if active_text_idx is None:
+                for ev in _close_current_blocks():
+                    yield ev
+                active_text_idx = _allocate_block_index()
+                yield _emit_block_start(active_text_idx, "text")
+            yield _emit_block_delta(active_text_idx, "text_delta", trailing)
 
         # ── 关闭所有剩余 block ──
         for ev in _close_current_blocks():
             yield ev
+
+        stop_reason = "refusal" if refusal_parts else _stop_reason(finish_reason, tool_blocks.seen)
 
         # ── 消息收尾事件 ──
         if not sent_message_start:
@@ -1259,9 +1453,11 @@ def build_anthropic_streaming_response(
 
         # 统一按 Anthropic 官方格式输出最终用量（含缓存字段），
         # 多数客户端从 message_delta.usage 读取计费数据
+        stop_details = ({"stop_details": {"type": "refusal", "category": None, "explanation": "".join(refusal_parts)}}
+                        if stop_reason == "refusal" else {})
         yield format_anthropic_sse_event("message_delta", {
             "type": "message_delta",
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None, **stop_details},
             "usage": convert_openai_usage_to_anthropic(merged_usage),
             **({"bridge_usage_pending": False} if usage_pending else {})
         })

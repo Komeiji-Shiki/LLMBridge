@@ -4,6 +4,8 @@ import base64
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.conversion_report import note_loss
+
 
 _PREFIXES = {"anthropic": "anthropic.v1.", "responses": "responses.v1."}
 
@@ -55,6 +57,8 @@ def responses_segments(message: Dict[str, Any]) -> Optional[List[Tuple[str, Any]
             for part in item.get("content", []):
                 if part.get("type") in ("output_text", "text") and part.get("text"):
                     segments.append(("text", part["text"]))
+                elif part.get("type") == "refusal" and part.get("refusal"):
+                    segments.append(("text", part["refusal"]))
         elif kind == "function_call":
             segments.append(("tool_calls", [{
                 "id": item["call_id"],
@@ -62,7 +66,8 @@ def responses_segments(message: Dict[str, Any]) -> Optional[List[Tuple[str, Any]
                 "function": {"name": item["name"], "arguments": item["arguments"]},
             }]))
         else:
-            raise ValueError(f"Responses 输出项类型 '{kind}' 无法转换为 Anthropic 内容块")
+            # 托管工具由上游执行完了，结果已体现在后面的正文里；Anthropic 没有对应的块。
+            note_loss(f"output.{kind}", f"Responses 输出项 {kind} 没有对应的 Anthropic 内容块，已跳过")
     return segments
 
 

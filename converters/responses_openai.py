@@ -22,13 +22,31 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from utils.usage_tokens import total_output_tokens
 from converters import is_content_parts
 from converters.anthropic_responses_signatures import decode_thinking_item, encode_thinking_item
+from converters.audio import audio_to_openai
 from converters.cache_warnings import warning_headers
+from converters.media import extract_file, file_part
+from converters.message_shape import merge_assistant_items
+from core.conversion_report import note_loss
+from services.error_translation import translate_openai_error
 
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 
 _SSE_EVENT_SPLIT = re.compile(r"\r?\n\r?\n")
 _STREAM_DONE = object()
+
+# 经 Chat 中转时工具要压平：custom 包成只有 input 参数的函数，namespace 里的函数加前缀。
+_NAMESPACE_SEPARATOR = "__"
+_CUSTOM_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {"input": {"type": "string", "description": "The raw input for this tool."}},
+    "required": ["input"],
+}
+# 客户端本地执行的调用：历史里还原成普通函数调用和结果，模型才知道做过什么。
+_LOCAL_TOOL_CALLS = {"local_shell_call": "local_shell", "shell_call": "shell",
+                     "apply_patch_call": "apply_patch", "computer_call": "computer"}
+_LOCAL_TOOL_OUTPUTS = ("local_shell_call_output", "shell_call_output",
+                       "apply_patch_call_output", "computer_call_output")
 
 
 class ResponsesRequestError(ValueError):
@@ -76,8 +94,20 @@ def _convert_input_content_part(part: Any) -> Optional[Dict[str, Any]]:
             converted["detail"] = detail
         return {"type": "image_url", "image_url": converted}
 
-    if part_type in ("input_file", "file", "file_search"):
-        raise ResponsesRequestError("input_file 和文件工具当前暂不支持。")
+    if part_type in ("input_file", "file"):
+        found = extract_file(part)
+        if found is None:
+            raise ResponsesRequestError("input_file 缺少 file_data、file_url 或 file_id。")
+        return file_part(found)
+
+    if part_type in ("input_audio", "audio", "audio_url"):
+        audio = audio_to_openai(part)
+        if audio is None:
+            raise ResponsesRequestError(f"{part_type} 缺少有效的音频数据。")
+        return audio
+
+    if part_type == "refusal":
+        return {"type": "text", "text": str(part.get("refusal", ""))}
 
     raise ResponsesRequestError(f"不支持的 Responses 输入内容类型: {part_type}")
 
@@ -118,8 +148,12 @@ def _convert_message_item(item: Dict[str, Any]) -> Dict[str, Any]:
     return message
 
 
+def _flat_tool_name(name: Any, namespace: Any) -> Any:
+    return f"{namespace}{_NAMESPACE_SEPARATOR}{name}" if namespace else name
+
+
 def _convert_function_call_item(item: Dict[str, Any]) -> Dict[str, Any]:
-    name = item.get("name")
+    name = _flat_tool_name(item.get("name"), item.get("namespace"))
     call_id = item.get("call_id") or item.get("id")
     if not name or not call_id:
         raise ResponsesRequestError("function_call 必须包含 name 和 call_id。")
@@ -149,47 +183,132 @@ def _convert_function_call_output_item(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _convert_input_item(item: Any) -> Dict[str, Any]:
+def _convert_reasoning_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """本网关签发的 Anthropic 思考原样恢复；其他来源只保留摘要文本。
+
+    Chat 或 Gemini 上游转出来的推理项没有密文，OpenAI 的密文也不能跨上游使用，
+    客户端按官方做法整段回传时不能因此报错。
+    """
+    try:
+        block = decode_thinking_item("anthropic", item.get("encrypted_content"))
+    except ValueError as exc:
+        raise ResponsesRequestError(str(exc)) from exc
+    summary = "".join(part.get("text", "") for part in item.get("summary") or []
+                      if isinstance(part, dict) and part.get("type") == "summary_text")
+    if block is not None:
+        if block["type"] == "thinking" and summary != block.get("thinking", ""):
+            raise ResponsesRequestError("回传的 Anthropic 思考内容已改变。")
+        return {"role": "assistant", "content": "", "provider_metadata": {"anthropic_blocks": [block]}}
+    return {"role": "assistant", "content": "", "reasoning_content": summary} if summary else None
+
+
+def _convert_local_tool_call(item: Dict[str, Any]) -> Dict[str, Any]:
+    call_id = item.get("call_id") or item.get("id")
+    if not call_id:
+        raise ResponsesRequestError(f"{item['type']} 必须包含 call_id。")
+    payload = {key: value for key, value in item.items() if key in ("action", "operation", "input")}
+    return {"role": "assistant", "content": "", "tool_calls": [{
+        "id": call_id, "type": "function",
+        "function": {"name": _LOCAL_TOOL_CALLS[item["type"]],
+                     "arguments": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
+    }]}
+
+
+def _convert_input_item(item: Any, index: int = 0) -> Optional[Dict[str, Any]]:
     if isinstance(item, str):
         return {"role": "user", "content": item}
     if not isinstance(item, dict):
         raise ResponsesRequestError("input 数组中的每一项必须是对象。")
 
     item_type = item.get("type")
+    if item_type in (None, "message"):
+        return _convert_message_item(item)
     if item_type == "function_call":
         return _convert_function_call_item(item)
     if item_type == "function_call_output":
         return _convert_function_call_output_item(item)
+    if item_type == "custom_tool_call":
+        return _convert_function_call_item({**item, "arguments": json.dumps(
+            {"input": item.get("input", "")}, ensure_ascii=False, separators=(",", ":"))})
+    if item_type == "custom_tool_call_output":
+        return _convert_function_call_output_item(item)
     if item_type == "reasoning":
-        try:
-            block = decode_thinking_item("anthropic", item.get("encrypted_content"))
-        except ValueError as exc:
-            raise ResponsesRequestError(str(exc)) from exc
-        if block is None:
-            raise ResponsesRequestError("reasoning 输入项没有可回传的 Anthropic 思考状态。")
-        summary = "".join(part.get("text", "") for part in item.get("summary", [])
-                          if isinstance(part, dict) and part.get("type") == "summary_text")
-        if block["type"] == "thinking" and summary != block.get("thinking", ""):
-            raise ResponsesRequestError("回传的 Anthropic 思考内容已改变。")
-        return {"role": "assistant", "content": "", "provider_metadata": {"anthropic_blocks": [block]}}
-    if item_type in ("computer_call", "item_reference"):
-        raise ResponsesRequestError(f"输入项类型 '{item_type}' 当前暂不支持。")
-    if item_type in ("input_text", "input_image"):
+        return _convert_reasoning_item(item)
+    if item_type in _LOCAL_TOOL_CALLS:
+        return _convert_local_tool_call(item)
+    if item_type in _LOCAL_TOOL_OUTPUTS:
+        return _convert_function_call_output_item({**item, "call_id": item.get("call_id") or item.get("id")})
+    if item_type == "item_reference":
+        raise ResponsesRequestError("无状态转换无法解析 item_reference，请改为回传完整内容。")
+    if item_type in ("input_text", "input_image", "input_file"):
         return {
             "role": "user",
             "content": _convert_message_content([item]),
         }
-    return _convert_message_item(item)
+    # 托管工具的调用记录和压缩项只有原上游能用；结果已体现在后续消息里。
+    note_loss(f"input[{index}]", f"输入项类型 {item_type} 无法转换到当前上游，已跳过")
+    return None
+
+
+def _custom_tool_to_function(tool: Dict[str, Any], flat_name: str) -> Dict[str, Any]:
+    description = tool.get("description") or ""
+    tool_format = tool.get("format")
+    if isinstance(tool_format, dict) and tool_format.get("definition"):
+        description = f"{description}\n\nThe input must follow this {tool_format.get('syntax', 'grammar')} grammar:\n{tool_format['definition']}".strip()
+    return {"type": "function", "function": {
+        "name": flat_name, "description": description, "parameters": copy.deepcopy(_CUSTOM_TOOL_PARAMETERS)}}
+
+
+def _convert_tools(tools: List[Any]) -> List[Dict[str, Any]]:
+    """托管工具只有原上游能执行，移除并记录，请求照常继续。"""
+    converted: List[Dict[str, Any]] = []
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            raise ResponsesRequestError("tools 中的每一项必须是对象。")
+        kind = tool.get("type")
+        if kind == "function":
+            converted.append(_convert_tool(tool))
+        elif kind == "custom":
+            if not tool.get("name"):
+                raise ResponsesRequestError("custom tool 缺少 name。")
+            converted.append(_custom_tool_to_function(tool, tool["name"]))
+        elif kind == "namespace":
+            for inner in tool.get("tools") or []:
+                flat = _flat_tool_name(inner.get("name"), tool.get("name"))
+                converted.append(_custom_tool_to_function(inner, flat) if inner.get("type") == "custom"
+                                 else _convert_tool({**inner, "type": "function", "name": flat}))
+        else:
+            note_loss(f"tools[{index}]", f"内置工具 {kind} 只能在原上游执行，已移除")
+    return converted
+
+
+def _tool_aliases(request: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """压平后的工具名 → 原始形态，响应转换时用来还原。"""
+    aliases: Dict[str, Dict[str, Any]] = {}
+    tools = request.get("tools") if isinstance(request, dict) else None
+    for tool in tools if isinstance(tools, list) else []:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") == "custom":
+            aliases[tool.get("name")] = {"custom": True, "name": tool.get("name")}
+        elif tool.get("type") == "namespace":
+            for inner in tool.get("tools") or []:
+                aliases[_flat_tool_name(inner.get("name"), tool.get("name"))] = {
+                    "custom": inner.get("type") == "custom", "name": inner.get("name"),
+                    "namespace": tool.get("name")}
+    return aliases
+
+
+def _custom_input(arguments: Any) -> str:
+    try:
+        parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+    except ValueError:
+        return arguments if isinstance(arguments, str) else ""
+    value = parsed.get("input", "") if isinstance(parsed, dict) else parsed
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
 def _convert_tool(tool: Any) -> Dict[str, Any]:
-    if not isinstance(tool, dict):
-        raise ResponsesRequestError("tools 中的每一项必须是对象。")
-    if tool.get("type") != "function":
-        raise ResponsesRequestError(
-            f"Responses 内置工具 '{tool.get('type', 'unknown')}' 当前暂不支持。"
-        )
-
     function = tool.get("function")
     if isinstance(function, dict):
         converted_function = dict(function)
@@ -214,16 +333,20 @@ def _convert_tool_choice(tool_choice: Any) -> Any:
         raise ResponsesRequestError("tool_choice 必须是字符串或对象。")
 
     choice_type = tool_choice.get("type")
-    if choice_type != "function":
-        raise ResponsesRequestError(
-            f"Responses tool_choice 类型 '{choice_type}' 当前暂不支持。"
-        )
+    if choice_type == "allowed_tools":
+        # Chat 上游没有统一的工具子集写法，保留强制与否，子集本身放宽。
+        mode = tool_choice.get("mode")
+        note_loss("tool_choice", "allowed_tools 的工具子集无法转换到当前上游，已放宽")
+        return "required" if mode == "required" else "auto"
+    if choice_type not in ("function", "custom"):
+        note_loss("tool_choice", f"tool_choice 指定的 {choice_type} 只能在原上游执行，已改为 auto")
+        return "auto"
     name = tool_choice.get("name")
     if not name and isinstance(tool_choice.get("function"), dict):
         name = tool_choice["function"].get("name")
     if not name:
         raise ResponsesRequestError("function tool_choice 缺少 name。")
-    return {"type": "function", "function": {"name": name}}
+    return {"type": "function", "function": {"name": _flat_tool_name(name, tool_choice.get("namespace"))}}
 
 
 def _convert_text_format(text_config: Any) -> Optional[Dict[str, Any]]:
@@ -264,12 +387,18 @@ def convert_responses_to_chat_request(responses_request: Dict[str, Any]) -> Dict
         _unsupported("store=true")
     if responses_request.get("background") is True:
         _unsupported("background=true")
+    if responses_request.get("prompt"):
+        raise ResponsesRequestError("prompt 模板保存在 OpenAI 服务端，无法转换到当前上游。")
 
     input_value = responses_request.get("input")
     if isinstance(input_value, str):
         messages = [{"role": "user", "content": input_value}]
     elif isinstance(input_value, list):
-        messages = [_convert_input_item(item) for item in input_value]
+        converted = (_convert_input_item(item, index) for index, item in enumerate(input_value))
+        # 一轮的思考、正文和并行调用是独立的输入项，Chat 和 Gemini 要求它们在同一条消息里。
+        messages = [message for message in merge_assistant_items(item for item in converted if item is not None)
+                    if message.get("role") != "assistant" or message.get("content")
+                    or message.get("tool_calls") or message.get("provider_metadata")]
     elif input_value is None:
         raise ResponsesRequestError("Responses 请求缺少 input。")
     else:
@@ -295,9 +424,16 @@ def convert_responses_to_chat_request(responses_request: Dict[str, Any]) -> Dict
         "stream": bool(responses_request.get("stream", False)),
     }
 
-    for key in ("temperature", "top_p", "stop", "user", "metadata", "parallel_tool_calls"):
+    for key in ("temperature", "top_p", "stop", "user", "metadata", "parallel_tool_calls",
+                "prompt_cache_key", "prompt_cache_retention", "prompt_cache_options",
+                "service_tier", "safety_identifier", "top_logprobs"):
         if key in responses_request:
             chat_request[key] = copy.deepcopy(responses_request[key])
+    if "top_logprobs" in chat_request:
+        chat_request["logprobs"] = True
+    for key in ("context_management", "max_tool_calls"):
+        if responses_request.get(key):
+            note_loss(key, f"{key} 只有 Responses 上游支持，未生效")
 
     if "max_output_tokens" in responses_request:
         chat_request["max_completion_tokens"] = responses_request["max_output_tokens"]
@@ -319,9 +455,11 @@ def convert_responses_to_chat_request(responses_request: Dict[str, Any]) -> Dict
     if tools is not None:
         if not isinstance(tools, list):
             raise ResponsesRequestError("tools 必须是数组。")
-        chat_request["tools"] = [_convert_tool(tool) for tool in tools]
+        converted_tools = _convert_tools(tools)
+        if converted_tools or not tools:
+            chat_request["tools"] = converted_tools
 
-    if "tool_choice" in responses_request:
+    if "tool_choice" in responses_request and (chat_request.get("tools") or not tools):
         chat_request["tool_choice"] = _convert_tool_choice(responses_request["tool_choice"])
 
     return chat_request
@@ -420,6 +558,9 @@ def _responses_request_fields(request: Optional[Dict[str, Any]]) -> Dict[str, An
         result["tools"] = copy.deepcopy(request["tools"])
     else:
         result["tools"] = []
+    result["parallel_tool_calls"] = request.get("parallel_tool_calls", True)
+    result["instructions"] = request.get("instructions")
+    result["truncation"] = request.get("truncation", "disabled")
     return result
 
 
@@ -451,7 +592,7 @@ def _build_response_object(
     return result
 
 
-def _convert_tool_call_to_output_item(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+def _convert_tool_call_to_output_item(tool_call: Dict[str, Any], aliases: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     function = tool_call.get("function", {})
     if not isinstance(function, dict):
         function = {}
@@ -459,14 +600,41 @@ def _convert_tool_call_to_output_item(tool_call: Dict[str, Any]) -> Dict[str, An
     arguments = function.get("arguments", "{}")
     if not isinstance(arguments, str):
         arguments = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    name = function.get("name", "")
+    alias = (aliases or {}).get(name) or {}
+    namespace = {"namespace": alias["namespace"]} if alias.get("namespace") else {}
+    if alias.get("custom"):
+        return {"id": "ctc_" + uuid.uuid4().hex[:24], "type": "custom_tool_call", "status": "completed",
+                "call_id": call_id, "name": alias["name"], "input": _custom_input(arguments), **namespace}
     return {
         "id": "fc_" + uuid.uuid4().hex[:24],
         "type": "function_call",
         "status": "completed",
         "call_id": call_id,
-        "name": function.get("name", ""),
+        "name": alias.get("name", name),
         "arguments": arguments,
+        **namespace,
     }
+
+
+def _image_output_items(images: Any) -> List[Dict[str, Any]]:
+    """Chat 的 images 字段对应 Responses 的生图结果项，result 只放 base64。"""
+    items = []
+    for image in images if isinstance(images, list) else []:
+        url = ((image.get("image_url") or {}).get("url") or "") if isinstance(image, dict) else ""
+        if url.startswith("data:"):
+            items.append({"id": "ig_" + uuid.uuid4().hex[:24], "type": "image_generation_call",
+                          "status": "completed", "result": url.partition(",")[2]})
+    return items
+
+
+def _responses_annotations(annotations: Any) -> List[Dict[str, Any]]:
+    """Chat 的引用把字段包在 url_citation 里，Responses 是扁平的。"""
+    result = []
+    for annotation in annotations if isinstance(annotations, list) else []:
+        if isinstance(annotation, dict) and annotation.get("type") == "url_citation":
+            result.append({"type": "url_citation", **(annotation.get("url_citation") or {})})
+    return result
 
 
 def _anthropic_blocks_to_output(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -529,23 +697,30 @@ def convert_chat_response_to_responses(
 
     text = _message_text(message)
     tool_calls = _message_tool_calls(message)
-    if anthropic_blocks is None and (text or not tool_calls):
+    refusal = message.get("refusal") if isinstance(message.get("refusal"), str) else ""
+    if anthropic_blocks is None and (text or refusal or not tool_calls):
+        parts: List[Dict[str, Any]] = []
+        # 中转时拒答也写进了正文，好让只读 content 的客户端看得到；这里不用重复。
+        if text and text != refusal or not refusal:
+            parts.append({"type": "output_text", "text": text,
+                          "annotations": _responses_annotations(message.get("annotations"))})
+        if refusal:
+            parts.append({"type": "refusal", "refusal": refusal})
         output.append({
             "id": "msg_" + uuid.uuid4().hex[:24],
             "type": "message",
             "status": "completed",
             "role": "assistant",
-            "content": [{
-                "type": "output_text",
-                "text": text,
-                "annotations": [],
-            }],
+            "content": parts,
         })
     if anthropic_blocks is None:
-        output.extend(_convert_tool_call_to_output_item(call) for call in tool_calls)
+        aliases = _tool_aliases(request)
+        output.extend(_convert_tool_call_to_output_item(call, aliases) for call in tool_calls)
+    output.extend(_image_output_items(message.get("images")))
 
     finish_reason = first_choice.get("finish_reason", "stop")
-    incomplete_reason = {"length": "max_output_tokens", "content_filter": "content_filter"}.get(finish_reason)
+    # 拒答是模型的完整回答，不算被截断。
+    incomplete_reason = None if refusal else {"length": "max_output_tokens", "content_filter": "content_filter"}.get(finish_reason)
     status = "incomplete" if incomplete_reason else "completed"
     incomplete_details = {"reason": incomplete_reason} if incomplete_reason else None
     response_id = _response_id(chat_response.get("id"))
@@ -637,6 +812,9 @@ async def collect_chat_stream_response(response: Response, model: str) -> Dict[s
     finish_reason = "stop"
     response_id = None
     provider_metadata = None
+    refusal_parts: List[str] = []
+    images: List[Dict[str, Any]] = []
+    annotations: List[Dict[str, Any]] = []
 
     async for payload in iter_chat_sse_payloads(response):
         if payload is _STREAM_DONE:
@@ -663,6 +841,12 @@ async def collect_chat_stream_response(response: Response, model: str) -> Dict[s
         text = delta.get("content")
         if isinstance(text, str):
             content_parts.append(text)
+        if isinstance(delta.get("refusal"), str):
+            refusal_parts.append(delta["refusal"])
+        if isinstance(delta.get("images"), list):
+            images.extend(delta["images"])
+        if isinstance(delta.get("annotations"), list):
+            annotations.extend(delta["annotations"])
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if isinstance(reasoning, str):
             reasoning_parts.append(reasoning)
@@ -692,6 +876,12 @@ async def collect_chat_stream_response(response: Response, model: str) -> Dict[s
         message["tool_calls"] = ordered_tools
     if provider_metadata is not None:
         message["provider_metadata"] = provider_metadata
+    if refusal_parts:
+        message["refusal"] = "".join(refusal_parts)
+    if images:
+        message["images"] = images
+    if annotations:
+        message["annotations"] = annotations
     return {
         "id": response_id or "chatcmpl-" + uuid.uuid4().hex,
         "object": "chat.completion",
@@ -726,10 +916,14 @@ class _ResponsesStreamBuilder:
         self.usage: Optional[Dict[str, Any]] = None
         self.active_text: Optional[int] = None
         self.active_reasoning: Optional[int] = None
+        self.active_refusal: Optional[int] = None
         self.active_tools: Dict[str, int] = {}
         self._text_content: Dict[int, str] = {}
         self._reasoning_content: Dict[int, str] = {}
+        self._refusal_content: Dict[int, str] = {}
         self._tool_arguments: Dict[int, str] = {}
+        self._aliases = _tool_aliases(request)
+        self.refused = False
 
     def event(self, event_type: str, payload: Dict[str, Any]) -> bytes:
         self.sequence += 1
@@ -789,21 +983,68 @@ class _ResponsesStreamBuilder:
         ])
         return events
 
+    def _start_refusal(self) -> List[bytes]:
+        if self.active_refusal is not None:
+            return []
+        events = self._close_text() + self._close_reasoning() + self._close_tools()
+        index = len(self.output)
+        part = {"type": "refusal", "refusal": ""}
+        item = {
+            "id": "msg_" + uuid.uuid4().hex[:24],
+            "type": "message",
+            "status": "in_progress",
+            "role": "assistant",
+            "content": [part],
+        }
+        self.output.append(item)
+        self.active_refusal = index
+        self._refusal_content[index] = ""
+        events.extend([
+            self.event("response.output_item.added", {"output_index": index, "item": copy.deepcopy(item)}),
+            self.event("response.content_part.added", {"output_index": index, "content_index": 0,
+                                                       "item_id": item["id"], "part": copy.deepcopy(part)}),
+        ])
+        return events
+
+    def _close_refusal(self) -> List[bytes]:
+        if self.active_refusal is None:
+            return []
+        index = self.active_refusal
+        item = self.output[index]
+        text = self._refusal_content.get(index, "")
+        item["status"] = "completed"
+        item["content"][0]["refusal"] = text
+        self.active_refusal = None
+        return [
+            self.event("response.refusal.done", {"output_index": index, "content_index": 0,
+                                                 "item_id": item["id"], "refusal": text}),
+            self.event("response.content_part.done", {"output_index": index, "content_index": 0,
+                                                      "item_id": item["id"], "part": copy.deepcopy(item["content"][0])}),
+            self.event("response.output_item.done", {"output_index": index, "item": copy.deepcopy(item)}),
+        ]
+
     def _start_tool(self, tool_call: Dict[str, Any], position: int) -> Tuple[int, List[bytes]]:
         tool_index = str(tool_call.get("index", position))
         if tool_index in self.active_tools:
             return self.active_tools[tool_index], []
-        events = self._close_text() + self._close_reasoning()
+        events = self._close_text() + self._close_reasoning() + self._close_refusal()
         function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
         call_id = tool_call.get("id") or "call_" + uuid.uuid4().hex[:24]
-        item = {
-            "id": "fc_" + uuid.uuid4().hex[:24],
-            "type": "function_call",
-            "status": "in_progress",
-            "call_id": call_id,
-            "name": function.get("name", ""),
-            "arguments": "",
-        }
+        alias = self._aliases.get(function.get("name", "")) or {}
+        namespace = {"namespace": alias["namespace"]} if alias.get("namespace") else {}
+        if alias.get("custom"):
+            item = {"id": "ctc_" + uuid.uuid4().hex[:24], "type": "custom_tool_call", "status": "in_progress",
+                    "call_id": call_id, "name": alias["name"], "input": "", **namespace}
+        else:
+            item = {
+                "id": "fc_" + uuid.uuid4().hex[:24],
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": call_id,
+                "name": alias.get("name", function.get("name", "")),
+                "arguments": "",
+                **namespace,
+            }
         index = len(self.output)
         self.output.append(item)
         self.active_tools[tool_index] = index
@@ -855,6 +1096,12 @@ class _ResponsesStreamBuilder:
                 "summary_index": 0,
                 "text": text,
             }))
+            events.append(self.event("response.reasoning_summary_part.done", {
+                "output_index": index,
+                "item_id": item["id"],
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": text},
+            }))
         events.append(self.event("response.output_item.done", {"output_index": index, "item": copy.deepcopy(item)}))
         self.active_reasoning = None
         return events
@@ -864,12 +1111,21 @@ class _ResponsesStreamBuilder:
         for tool_index, output_index in list(self.active_tools.items()):
             item = self.output[output_index]
             item["status"] = "completed"
-            item["arguments"] = self._tool_arguments.get(output_index, "")
-            events.append(self.event("response.function_call_arguments.done", {
-                "item_id": item["id"],
-                "output_index": output_index,
-                "arguments": item["arguments"],
-            }))
+            if item["type"] == "custom_tool_call":
+                # 上游给的是包着 input 的函数参数，只有收齐才能解开成原始输入。
+                item["input"] = _custom_input(self._tool_arguments.get(output_index, ""))
+                events.append(self.event("response.custom_tool_call_input.delta", {
+                    "item_id": item["id"], "output_index": output_index, "delta": item["input"]}))
+                events.append(self.event("response.custom_tool_call_input.done", {
+                    "item_id": item["id"], "output_index": output_index, "input": item["input"]}))
+            else:
+                item["arguments"] = self._tool_arguments.get(output_index, "")
+                events.append(self.event("response.function_call_arguments.done", {
+                    "item_id": item["id"],
+                    "output_index": output_index,
+                    "name": item["name"],
+                    "arguments": item["arguments"],
+                }))
             events.append(self.event("response.output_item.done", {
                 "output_index": output_index,
                 "item": copy.deepcopy(item),
@@ -878,7 +1134,7 @@ class _ResponsesStreamBuilder:
         return events
 
     def close_all(self) -> List[bytes]:
-        return self._close_reasoning() + self._close_text() + self._close_tools()
+        return self._close_reasoning() + self._close_text() + self._close_refusal() + self._close_tools()
 
     def process_chunk(self, chunk: Dict[str, Any]) -> List[bytes]:
         if not isinstance(chunk, dict):
@@ -915,6 +1171,13 @@ class _ResponsesStreamBuilder:
         if isinstance(reasoning, str) and reasoning:
             events.extend(self._start_reasoning())
             index = self.active_reasoning
+            if not self._reasoning_content[index]:
+                events.append(self.event("response.reasoning_summary_part.added", {
+                    "output_index": index,
+                    "item_id": self.output[index]["id"],
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": ""},
+                }))
             self._reasoning_content[index] += reasoning
             events.append(self.event("response.reasoning_summary_text.delta", {
                 "output_index": index,
@@ -923,8 +1186,20 @@ class _ResponsesStreamBuilder:
                 "delta": reasoning,
             }))
 
+        refusal = delta.get("refusal")
         content = delta.get("content")
-        if isinstance(content, str) and content:
+        if isinstance(refusal, str) and refusal:
+            self.refused = True
+            events.extend(self._start_refusal())
+            index = self.active_refusal
+            self._refusal_content[index] += refusal
+            events.append(self.event("response.refusal.delta", {
+                "output_index": index,
+                "content_index": 0,
+                "item_id": self.output[index]["id"],
+                "delta": refusal,
+            }))
+        elif isinstance(content, str) and content:
             events.extend(self._start_text())
             index = self.active_text
             self._text_content[index] += content
@@ -935,6 +1210,27 @@ class _ResponsesStreamBuilder:
                 "delta": content,
                 "logprobs": [],
             }))
+
+        annotations = _responses_annotations(delta.get("annotations"))
+        if annotations and self.active_text is not None:
+            index = self.active_text
+            part = self.output[index]["content"][0]
+            for annotation in annotations:
+                part["annotations"].append(annotation)
+                events.append(self.event("response.output_text.annotation.added", {
+                    "output_index": index,
+                    "content_index": 0,
+                    "item_id": self.output[index]["id"],
+                    "annotation_index": len(part["annotations"]) - 1,
+                    "annotation": annotation,
+                }))
+
+        for item in _image_output_items(delta.get("images")):
+            events.extend(self._close_text() + self._close_reasoning() + self._close_refusal() + self._close_tools())
+            index = len(self.output)
+            self.output.append(item)
+            events.append(self.event("response.output_item.added", {"output_index": index, "item": copy.deepcopy(item)}))
+            events.append(self.event("response.output_item.done", {"output_index": index, "item": copy.deepcopy(item)}))
 
         raw_tool_calls = delta.get("tool_calls") or []
         if isinstance(raw_tool_calls, dict):
@@ -954,15 +1250,18 @@ class _ResponsesStreamBuilder:
                 if arguments is not None:
                     arguments = str(arguments)
                     self._tool_arguments[index] += arguments
-                    events.append(self.event("response.function_call_arguments.delta", {
-                        "item_id": self.output[index]["id"],
-                        "output_index": index,
-                        "delta": arguments,
-                    }))
+                    if self.output[index]["type"] != "custom_tool_call":
+                        events.append(self.event("response.function_call_arguments.delta", {
+                            "item_id": self.output[index]["id"],
+                            "output_index": index,
+                            "delta": arguments,
+                        }))
         return events
 
     def final_event(self) -> bytes:
-        incomplete_reason = {"length": "max_output_tokens", "content_filter": "content_filter"}.get(self.finish_reason)
+        # 拒答是模型的完整回答，不算被截断。
+        incomplete_reason = None if self.refused else {
+            "length": "max_output_tokens", "content_filter": "content_filter"}.get(self.finish_reason)
         status = "incomplete" if incomplete_reason else "completed"
         details = {"reason": incomplete_reason} if incomplete_reason else None
         response = _build_response_object(
@@ -973,7 +1272,7 @@ class _ResponsesStreamBuilder:
         return self.event(event_type, {"response": response})
 
     def failed_event(self, error: Any) -> bytes:
-        error_obj = error if isinstance(error, dict) else {"type": "server_error", "message": str(error)}
+        error_obj = translate_openai_error(error) if isinstance(error, dict) else {"type": "server_error", "message": str(error)}
         response = _build_response_object(
             self.response_id, self.model, self.request, self.output, "failed", self.usage, warnings=self.warnings
         )
