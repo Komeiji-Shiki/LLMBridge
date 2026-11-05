@@ -32,7 +32,8 @@ from .direct_api_handler import handle_direct_api_request
 from .lmarena_handler import handle_lmarena_request
 from ._direct_api_anthropic import apply_auto_cache_control
 from converters.cache_warnings import anthropic_cache_warnings
-from utils.upstream_fields import omission_warnings
+from services.model_capabilities import sanitize_anthropic_body
+from utils.upstream_fields import omission_warnings, omit_configured_fields
 from ._direct_api_utils import (
     get_round_robin_api_key,
     is_error_json,
@@ -789,6 +790,8 @@ async def _handle_anthropic_passthrough(
 
     _apply_native_thinking_config(passthrough_body, endpoint_config)
     _apply_native_system_injection(passthrough_body, endpoint_config)
+    # 只修正模型一定会拒绝的字段；其余字段和 anthropic-* 请求头继续原样透传。
+    sanitize_anthropic_body(passthrough_body, target_model_id)
 
     # ── 自定义参数 / 附加主体参数合并（provider 路由指定等依赖此注入）──
     # 与 handle_anthropic_native_from_openai 保持一致：custom 先、extra 后，同名键 extra 优先
@@ -803,6 +806,7 @@ async def _handle_anthropic_passthrough(
     if isinstance(extra_body_params, dict) and extra_body_params:
         passthrough_body.update(copy.deepcopy(extra_body_params))
         logger.info(f"[ANTHROPIC_COMPAT] 已合并附加主体参数: {list(extra_body_params.keys())}")
+    omit_configured_fields(passthrough_body, endpoint_config)
 
     # 工具名改写：在合并参数之后执行（覆盖 extra_body 注入的工具），
     # 在自动缓存之前执行（断点打在最终发送的对象上）

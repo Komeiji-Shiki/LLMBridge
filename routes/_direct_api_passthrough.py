@@ -15,10 +15,13 @@ from converters.gemini_anthropic_signatures import restore_google_tool_signature
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
+from converters.media import adapt_chat_files
 from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from services.logprobs_collector import create_logprobs_collector
+from services.model_capabilities import drop_unsupported_sampling, supported_effort
 from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
+from utils.upstream_fields import omit_configured_fields
 from utils.usage_tokens import (
     MODE_MERGE,
     apply_usage_tokens,
@@ -176,6 +179,13 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
     passthrough_request = openai_req.copy()
     passthrough_request["model"] = target_model_id
 
+    # 模型一定会拒绝的字段先去掉；放在自定义参数之前，显式配置仍然优先。
+    effort = supported_effort(target_model_id, passthrough_request.get("reasoning_effort"))
+    if effort:
+        passthrough_request["reasoning_effort"] = effort
+    drop_unsupported_sampling(passthrough_request, target_model_id,
+                              endpoint_config.get("reasoning_effort") or effort)
+
     # 🔧 写时复制：后续会直接修改消息 dict（空文本过滤/system转user/
     # prefix/partial/reasoning 占位）。openai_req.copy() 是浅拷贝，
     # 消息 dict 与监控记录的 full_messages 共享引用，不复制会污染
@@ -191,7 +201,7 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                     message = restore_google_tool_signatures(message)
                 message = {key: value for key, value in message.items() if key != "provider_metadata"}
             messages.append(message)
-        passthrough_request["messages"] = messages
+        passthrough_request["messages"] = adapt_chat_files(messages, provider_name(endpoint_config))
 
     # 🔍 诊断：打印实际发送的图片 URL 格式
     if "messages" in passthrough_request:
@@ -268,8 +278,13 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                 last_message["partial"] = True
                 logger.info(f"[DIRECT_API_PARTIAL] 已启用 partial 模式（Kimi K2预填充）")
 
-    # DeepSeek V4 reasoning_content 兼容
+    # DeepSeek 用 thinking 开关表示关闭思考，reasoning_effort 没有 none 这一档
     family = model_family(endpoint_config, model_name, target_model_id)
+    if family == "deepseek" and passthrough_request.get("reasoning_effort") == "none":
+        del passthrough_request["reasoning_effort"]
+        passthrough_request.setdefault("thinking", {"type": "disabled"})
+
+    # DeepSeek V4 reasoning_content 兼容
     if family == "deepseek" and "messages" in passthrough_request:
         for msg in passthrough_request["messages"]:
             if isinstance(msg, dict) and msg.get("role") == "assistant":
@@ -376,7 +391,7 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
 
     # 工具 Schema、strict 与 required 保真转发。
 
-    return passthrough_request
+    return omit_configured_fields(passthrough_request, endpoint_config)
 
 
 # ============================================================

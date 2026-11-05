@@ -30,6 +30,12 @@ from utils.monitor_params import build_monitor_request_params
 from utils.task_registry import spawn
 from converters import is_content_parts
 from converters.anthropic_openai import extract_anthropic_usage_tokens
+from converters.media import FILE_PART_TYPES, file_to_anthropic
+from converters.message_shape import SYSTEM_ROLES, inline_mid_system, rewrite_trailing_prefill
+from core.conversion_report import note_loss, raise_if_strict
+from services.model_capabilities import ANTHROPIC_EFFORTS, limits_for, sanitize_anthropic_body, supported_effort
+from utils.upstream_fields import omit_configured_fields
+from ._direct_api_reasoning_cache import restore_anthropic_thinking, store_anthropic_thinking
 from utils.api_pricing import chat_cache_details
 from utils.json_unescape import StreamingUnicodeUnescaper
 from utils.tool_name_rewrite import (
@@ -201,6 +207,19 @@ def _convert_openai_content_to_anthropic_blocks(content: Any, role: str) -> List
                     "source": {"type": "url", "url": url}
                 })
 
+        elif ptype in FILE_PART_TYPES:
+            document = file_to_anthropic(part)
+            if document:
+                blocks.append(document)
+            else:
+                note_loss(f"content.{ptype}", "Anthropic 只接受 PDF 和纯文本文档，此文件已用文字占位")
+                blocks.append({"type": "text", "text": "[文件未发送：Anthropic 只接受 PDF 和纯文本文档]"})
+
+        else:
+            # 音视频等 Anthropic 收不了：留一句占位，模型才知道这里本来有东西。
+            note_loss(f"content.{ptype}", f"Anthropic 不接受 {ptype} 内容块，已用文字占位")
+            blocks.append({"type": "text", "text": f"[{ptype} 内容未发送：当前上游不支持]"})
+
     return blocks
 
 
@@ -264,14 +283,20 @@ def _convert_openai_tool_choice_to_anthropic(tool_choice: Any) -> Any:
     return None
 
 
-def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str, Any]:
+def convert_openai_to_anthropic_request(openai_req: Dict[str, Any], target_model_id: Optional[str] = None,
+                                        endpoint_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """将 OpenAI chat.completions 请求转换为 Anthropic Messages 请求。
 
-    支持：system / text / image / tool_calls / tool 结果 / tools / tool_choice / thinking
+    支持：system / text / image / 文件 / tool_calls / tool 结果 / tools / tool_choice / thinking
+    target_model_id 决定模型相关的限制（采样参数、预填充、思考强度），缺省时用请求里的模型名。
     """
     messages_in = openai_req.get("messages", [])
     if not isinstance(messages_in, list):
         messages_in = []
+    target_model = target_model_id or openai_req.get("model", "")
+    limits = limits_for(target_model)
+    messages_in = rewrite_trailing_prefill(
+        inline_mid_system(messages_in, (endpoint_config or {}).get("mid_system_mode")), limits.prefill)
 
     # ── 提取 system 消息 ──
     system_blocks: List[Dict[str, Any]] = []
@@ -283,7 +308,7 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
         role = msg.get("role", "user")
         content = msg.get("content")
 
-        if role == "system":
+        if role in SYSTEM_ROLES:
             converted = _convert_openai_system_to_anthropic(content)
             if isinstance(converted, str) and converted:
                 system_blocks.append({"type": "text", "text": converted})
@@ -314,18 +339,22 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
             blocks: List[Dict[str, Any]] = []
             metadata = msg.get("provider_metadata") or {}
             native_blocks = metadata.get("anthropic_blocks") if isinstance(metadata, dict) else None
-            if isinstance(native_blocks, list):
-                blocks.extend(copy.deepcopy(native_blocks))
+            native_blocks = native_blocks if isinstance(native_blocks, list) else []
+            blocks.extend(copy.deepcopy(native_blocks))
+            # 原始块可能已含正文和调用（客户端整轮回传），不能再按消息字段追加一遍，
+            # 否则同一个 tool_use id 出现两次，上游直接 400。
+            native_has_text = any(block.get("type") == "text" for block in native_blocks)
+            native_tool_ids = {block.get("id") for block in native_blocks if block.get("type") == "tool_use"}
 
             # text 内容
-            text_blocks = _convert_openai_content_to_anthropic_blocks(content, role)
-            blocks.extend(text_blocks)
+            if not native_has_text:
+                blocks.extend(_convert_openai_content_to_anthropic_blocks(content, role))
 
             # tool_calls → tool_use 块
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
-                    if not isinstance(tc, dict):
+                    if not isinstance(tc, dict) or tc.get("id") in native_tool_ids:
                         continue
                     func = tc.get("function", {})
                     if not isinstance(func, dict):
@@ -424,10 +453,10 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
             choice["disable_parallel_tool_use"] = not openai_req["parallel_tool_calls"]
 
     effort = openai_req.get("reasoning_effort")
-    if effort == "none":
+    if effort == "none" and limits.thinking_disable:
         anthropic_req["thinking"] = {"type": "disabled"}
     elif effort:
-        set_output_effort(anthropic_req, effort)
+        set_output_effort(anthropic_req, supported_effort(target_model, "low" if effort == "none" else effort, ANTHROPIC_EFFORTS))
 
     response_format = openai_req.get("response_format")
     if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
@@ -435,8 +464,12 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any]) -> Dict[str,
         if isinstance(schema, dict):
             anthropic_req.setdefault("output_config", {})["format"] = {
                 "type": "json_schema", "schema": copy.deepcopy(schema)}
+    elif isinstance(response_format, dict) and response_format.get("type") == "json_object":
+        # Anthropic 的结构化输出必须有 schema，没有 schema 的 JSON 模式只能靠指令。
+        anthropic_req.setdefault("system", []).append(
+            {"type": "text", "text": "Respond only with a valid JSON object, without any surrounding text."})
 
-    return anthropic_req
+    return sanitize_anthropic_body(anthropic_req, target_model)
 
 
 def apply_thinking_config(passthrough_body: Dict[str, Any], endpoint_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -695,9 +728,29 @@ def _map_anthropic_stop_reason_to_openai(stop_reason: Optional[str]) -> str:
         "max_tokens": "length",
         "stop_sequence": "stop",
         "tool_use": "tool_calls",
-        "pause_turn": "stop",
+        # 这三种都不是模型说完了，不能让客户端以为回答是完整的。
+        "pause_turn": "length",
+        "model_context_window_exceeded": "length",
+        "refusal": "content_filter",
     }
     return mapping.get(stop_reason or "", "stop")
+
+
+def _citation_annotations(block: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Anthropic 文本块上带网址的引用转成 Chat 的 annotations。"""
+    annotations = []
+    for citation in block.get("citations") or []:
+        annotation = _citation_annotation(citation)
+        if annotation:
+            annotations.append(annotation)
+    return annotations
+
+
+def _citation_annotation(citation: Any) -> Optional[Dict[str, Any]]:
+    url = (citation.get("url") or citation.get("source")) if isinstance(citation, dict) else None
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return None
+    return {"type": "url_citation", "url_citation": {"url": url, "title": citation.get("title") or url}}
 
 
 def extract_anthropic_response_content(response_json: dict) -> Tuple[str, str, List[Dict[str, Any]], int, int, int]:
@@ -740,7 +793,8 @@ def extract_anthropic_response_content(response_json: dict) -> Tuple[str, str, L
                         "arguments": json.dumps(block.get("input", {}), ensure_ascii=False)
                     }
                 })
-        content_text = "\n".join(text_parts)
+        # 文本块的边界不是换行：带引用的句子会被切成多个块，加换行等于改写模型的回答。
+        content_text = "".join(text_parts)
         reasoning_text = "\n".join(thinking_parts)
 
     input_tokens, output_tokens, cached_tokens = extract_anthropic_usage_tokens(
@@ -767,15 +821,26 @@ def convert_anthropic_response_to_openai(
     if any(block.get("type") in ("thinking", "redacted_thinking") for block in native_blocks):
         message["provider_metadata"] = {"anthropic_blocks": copy.deepcopy(native_blocks)}
 
+    stop_reason = response_json.get("stop_reason")
+    finish_reason = _map_anthropic_stop_reason_to_openai(stop_reason)
+
+    # 拒答的说明写进 refusal，也写进正文：很多客户端只读 content，否则用户只看到一片空白。
+    refusal = None
+    if stop_reason == "refusal":
+        refusal = (response_json.get("stop_details") or {}).get("explanation") or content_text or "模型拒绝回答此请求"
+        message["refusal"] = refusal
+
     # content
-    message["content"] = content_text if content_text else ""
+    message["content"] = content_text or refusal or ""
+
+    annotations = [annotation for block in native_blocks if block.get("type") == "text"
+                   for annotation in _citation_annotations(block)]
+    if annotations:
+        message["annotations"] = annotations
 
     # tool_calls
     if tool_calls:
         message["tool_calls"] = tool_calls
-
-    stop_reason = response_json.get("stop_reason")
-    finish_reason = _map_anthropic_stop_reason_to_openai(stop_reason)
 
     openai_response = {
         "id": f"chatcmpl-{request_id[:24]}",
@@ -1012,6 +1077,10 @@ def build_openai_stream_from_anthropic(
                             native_block["signature"] = native_block.get("signature", "") + delta.get("signature", "")
                         elif dtype == "text_delta":
                             native_block["text"] = native_block.get("text", "") + delta.get("text", "")
+                        elif dtype == "citations_delta":
+                            annotation = _citation_annotation(delta.get("citation"))
+                            if annotation:
+                                yield _make_delta_chunk({"annotations": [annotation]})
                         elif dtype == "input_json_delta":
                             partial = delta.get("partial_json", "")
                             if partial:
@@ -1071,7 +1140,11 @@ def build_openai_stream_from_anthropic(
                     elif etype == "content_block_stop":
                         idx = event.get("index", 0)
                         if idx in native_tool_arguments:
-                            native_blocks[idx]["input"] = json.loads(native_tool_arguments.pop(idx))
+                            try:
+                                native_blocks[idx]["input"] = json.loads(native_tool_arguments.pop(idx))
+                            except ValueError:
+                                # 被 max_tokens 截断的调用参数不完整，已发出的增量如实反映了这一点。
+                                native_blocks[idx]["input"] = {}
                         if native_blocks[idx].get("type") in ("thinking", "redacted_thinking"):
                             yield _make_delta_chunk({"provider_event": {"provider": "anthropic", "event": {
                                 "type": "content_block_stop", "index": idx, "content_block": copy.deepcopy(native_blocks[idx])}}})
@@ -1103,6 +1176,10 @@ def build_openai_stream_from_anthropic(
                         sr = delta.get("stop_reason")
                         if sr:
                             stop_reason = sr
+                        if sr == "refusal":
+                            explanation = (delta.get("stop_details") or {}).get("explanation") or "模型拒绝回答此请求"
+                            # 还没有正文时拒答说明就是回答，否则客户端只看到一片空白。
+                            yield _make_delta_chunk({"refusal": explanation, **({} if content_parts else {"content": explanation})})
                         if isinstance(usage, dict):
                             if usage:
                                 upstream_usage.update(usage)
@@ -1141,7 +1218,9 @@ def build_openai_stream_from_anthropic(
                         return
 
             if any(block.get("type") in ("thinking", "redacted_thinking") for block in native_blocks.values()):
-                yield _make_delta_chunk({"provider_metadata": {"anthropic_blocks": [native_blocks[i] for i in sorted(native_blocks)]}})
+                ordered_blocks = [native_blocks[i] for i in sorted(native_blocks)]
+                await asyncio.to_thread(store_anthropic_thinking, ordered_blocks)
+                yield _make_delta_chunk({"provider_metadata": {"anthropic_blocks": ordered_blocks}})
 
             # 发送 finish chunk
             finish_reason = _map_anthropic_stop_reason_to_openai(stop_reason)
@@ -1337,13 +1416,18 @@ async def handle_anthropic_native_from_openai(
 
     # ── OpenAI 请求 → Anthropic 请求 ──
     try:
-        anthropic_body = convert_openai_to_anthropic_request(openai_req)
+        restored_messages = await asyncio.to_thread(restore_anthropic_thinking, openai_req.get("messages"))
+        anthropic_body = convert_openai_to_anthropic_request(
+            {**openai_req, "messages": restored_messages}, target_model_id, endpoint_config)
+        raise_if_strict(endpoint_config)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     anthropic_body["model"] = target_model_id
 
     # ── 应用 thinking 配置 ──
     anthropic_body = apply_thinking_config(anthropic_body, endpoint_config)
+    # 配置里的预算对新模型可能已经不合法，放在自定义参数之前，显式配置仍然优先。
+    sanitize_anthropic_body(anthropic_body, target_model_id)
 
     # ── 应用系统提示词注入 ──
     anthropic_body = apply_system_injection(anthropic_body, endpoint_config)
@@ -1361,6 +1445,7 @@ async def handle_anthropic_native_from_openai(
     if isinstance(extra_body_params, dict) and extra_body_params:
         anthropic_body.update(copy.deepcopy(extra_body_params))
         logger.info(f"[OAI_TO_ANTHROPIC] 已合并附加主体参数: {list(extra_body_params.keys())}")
+    omit_configured_fields(anthropic_body, endpoint_config)
 
     # ── 工具名改写（合并参数之后、自动缓存之前）──
     tool_name_restore = apply_tool_name_rewrite(
@@ -1582,6 +1667,7 @@ async def handle_anthropic_native_from_openai(
                     logger.warning(f"[TOKEN_STATS_LOCAL] 本地token估算失败，保留上游值: {te}")
 
             # 转换为 OpenAI 格式
+            await asyncio.to_thread(store_anthropic_thinking, response_json.get("content") or [])
             openai_response = convert_anthropic_response_to_openai(
                 response_json, display_name, request_id)
 
