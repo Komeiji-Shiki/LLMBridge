@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### 2026-11-06：Interactions 长输出续传与错误状态码
+
+- Interactions 上游返回 `requires_continuation` 时，网关替 Chat、Anthropic、Responses 客户端续传，客户端看到一条完整的回答。`store: false` 下每跳重发原始请求并带上 `continuation_token`；跳数上限沿用 `gemini_max_continuation_hops`。此前的提示说无状态模式不能续传，是错的。
+- 流断在检查点上、之后没有新内容时接着生成；已经有新内容时报错，不重复生成。
+- 续传时提示量只报第一跳，成本按各跳实际计费；后续跳失败时已计费的用量照样记账。Interactions 流现在全程有心跳。
+- generateContent 客户端接 Interactions 上游时，响应带 `CONTINUATION` 和 `continuationToken`，回传的 token 会转给上游。
+- 上游在输出前就报错时，流式请求也返回真实状态码和 `retry-after`。开始发流前最多等 10 秒（`TimeoutDefaults.UPSTREAM_ERROR_WAIT`）；超过窗口才报错的仍走流内错误。
+- 修复 Anthropic 透传把上游的 429、529、401 都报成 502 或 200。
+- Chat 和 Responses 客户端的错误补上 OpenAI 的 `type` 和 `code`，超长错误能触发客户端的自动处理。
+- Responses 原生透传按模型去掉一定会被拒绝的采样参数；Anthropic 透传在模型不支持预填充时改写末尾的纯文本 assistant。
+- 新增协议矩阵测试：本地 HTTP 假上游加真实路由，覆盖 3 种客户端 × 5 种上游的回答和请求两个方向。
+
 ### 2026-11-06：格式转换修复和新路由
 
 - 中段 `role:system` 留在原位，不再搬到顶层破坏缓存前缀。端点配置 `mid_system_mode: "hoist"` 可恢复旧行为。

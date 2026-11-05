@@ -226,7 +226,7 @@ pip install tiktoken     # GPT tokenizer
 | `id_updater_last_mode` | string | ID 更新模式（已弃用） |
 | `enable_auto_retry` | bool | 全局自动重试开关 |
 | `first_chunk_timeout_seconds` | int | 等待上游首个数据块的时长（默认 600）；模型配置里可按端点覆盖 |
-| `gemini_max_continuation_hops` | int | Gemini 输出达到单次上限时的自动续传次数（默认 32，0 为关闭） |
+| `gemini_max_continuation_hops` | int | Gemini 输出达到单次上限时的自动续传次数，generateContent 和 Interactions 共用（默认 32，0 为关闭） |
 | `quiet_user_agents` | list | 未通过鉴权时静默返回空模型列表的 User-Agent 片段 |
 | `image_optimization` | dict | 图片优化全局配置 |
 
