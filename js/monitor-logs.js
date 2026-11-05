@@ -104,6 +104,31 @@ function _renderPagination() {
     document.getElementById('pagination-total-count').textContent = currentLogTotal.toLocaleString();
 }
 
+// 缓存命中率分档配色：低于 50% 红、50%~80% 黄、80%~90% 橙，90% 及以上保持绿色。
+// 输入量不足 CACHE_COLOR_MIN_INPUT 的请求凑不满上游的最小缓存块，低命中属于正常，
+// 不上色以免整列长期报警；命中数量与百分比仍然显示。
+const CACHE_COLOR_MIN_INPUT = 10000;
+function cacheRateColor(rate, input) {
+    if (input < CACHE_COLOR_MIN_INPUT) return 'var(--text-dim)';
+    if (rate < 50) return '#ef4444';
+    if (rate < 80) return '#facc15';
+    if (rate < 90) return '#f97316';
+    return '#22c55e';
+}
+
+// 输入 token 单元格：主行是上游口径的输入量，副行是其中的缓存命中量与命中率。
+// 个别上游的 cached_tokens 口径大于 input_tokens，命中率按输入封顶，精确值留在 title 里。
+function renderInputTokens(log) {
+    const input = Number(log.input_tokens) || 0;
+    const cached = Number(log.cached_tokens) || 0;
+    const main = input ? input.toLocaleString() : '-';
+    if (!input || cached <= 0) return main;
+    const rawRate = Math.min(cached, input) / input * 100;
+    const rate = rawRate.toFixed(1);
+    const title = `缓存命中 ${cached.toLocaleString()} / 输入 ${input.toLocaleString()}`;
+    return `${main}<div style="font-size:11px;color:${cacheRateColor(rawRate, input)};opacity:.85;" title="${escapeHtml(title)}">${cached.toLocaleString()} (${rate}%)</div>`;
+}
+
 // 刷新请求日志
 let _requestLogsSequence = 0;
 function refreshRequestLogs() {
@@ -163,7 +188,7 @@ function refreshRequestLogs() {
             const time = new Date(log.timestamp * 1000).toLocaleString();
             const statusClass = log.status === 'success' ? 'success' : 'failed';
             const duration = log.duration ? formatDuration(log.duration) : '-';
-            const inTokens = log.input_tokens ? log.input_tokens.toLocaleString() : '-';
+            const inTokens = renderInputTokens(log);
             const outTokens = log.output_tokens ? log.output_tokens.toLocaleString() : '-';
             // 按记录自身的货币显示符号，CNY 计价的费用不再被误标成美元
             const costCurrency = log.currency || 'USD';

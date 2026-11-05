@@ -289,6 +289,49 @@ def test_anthropic_content_blocks_render_in_request_details(monitor_ui):
     assert '这是测试环境中的模拟回答。' in boxes.last.inner_text()
 
 
+def test_input_tokens_show_cache_hit_breakdown(monitor_ui):
+    page, logs = monitor_ui
+    # 第三条没有缓存命中，第二条的命中量大于输入（个别上游口径如此）
+    logs[0].update(input_tokens=60000, cached_tokens=45000)
+    logs[1].update(input_tokens=20000, cached_tokens=25000)
+    logs[2]['cached_tokens'] = 0
+    page.evaluate('refreshRequestLogs()')
+    cells = page.locator('#request-logs tr td:nth-child(7)')
+    first, capped, empty = [cells.nth(index).inner_text().split('\n') for index in range(3)]
+    assert first == ['60,000', '45,000 (75.0%)']
+    assert capped == ['20,000', '25,000 (100.0%)']
+    assert empty == ['8,192']
+    title = cells.nth(1).locator('div').get_attribute('title')
+    assert title == '缓存命中 25,000 / 输入 20,000'
+    # 75% 落在 50~80 档
+    assert '#facc15' in cells.nth(0).locator('div').get_attribute('style')
+
+
+def test_cache_rate_color_tiers(monitor_ui):
+    page, _ = monitor_ui
+    result = page.evaluate('''() => {
+        const samples = {90: 9000, 89.9: 8990, 80: 8000, 79.9: 7990, 50: 5000, 49.9: 4990};
+        const colors = {}, colorsAt10000 = {};
+        for (const [label, cached] of Object.entries(samples)) {
+            colors[label] = renderInputTokens({input_tokens: 10000, cached_tokens: cached})
+                .match(/color:([^;]+);/)[1];
+        }
+        // 输入量不足一万时一律中性灰，比例再低也不报警。
+        colorsAt10000['9999_49'] = renderInputTokens({input_tokens: 9999, cached_tokens: 4900})
+            .match(/color:([^;]+);/)[1];
+        colorsAt10000['9999_99'] = renderInputTokens({input_tokens: 9999, cached_tokens: 9700})
+            .match(/color:([^;]+);/)[1];
+        return {colors, colorsAt10000};
+    }''')
+    assert result['colors'] == {'90': '#22c55e', '89.9': '#f97316', '80': '#f97316',
+                                '79.9': '#facc15', '50': '#facc15', '49.9': '#ef4444'}
+    # 9999 与 10000 是边界两侧，前者灰、后者照常分档
+    assert result['colorsAt10000'] == {'9999_49': 'var(--text-dim)', '9999_99': 'var(--text-dim)'}
+    assert page.evaluate(
+        "renderInputTokens({input_tokens: 10000, cached_tokens: 4900}).match(/color:([^;]+);/)[1]"
+    ) == '#ef4444'
+
+
 def test_gemini_signatures_render_from_provider_metadata(monitor_ui):
     page, logs = monitor_ui
     logs[0]['request_messages'] = [
