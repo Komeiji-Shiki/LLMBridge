@@ -500,3 +500,140 @@ def read_responses(response, stream):
 
 
 READERS = {'chat': read_chat, 'anthropic': read_anthropic, 'responses': read_responses}
+
+
+# ---- 上游收到的正文 → 统一的对话序列 ----
+# 每项是 ('user'|'assistant', 'text', 文本)、('reminder', 文本)、('call', id, 名字, 参数)
+# 或 ('result', id, 文本, 是否报错)。系统提示单独返回；纯空白文本是网关为满足协议补的占位，不计入。
+
+TOOL_ERROR_PREFIX = '[tool_result_error] '
+_REMINDER_OPEN, _REMINDER_CLOSE = '<system-reminder>', '</system-reminder>'
+
+
+def _text_item(role, text):
+    stripped = text.strip()
+    if stripped.startswith(_REMINDER_OPEN) and stripped.endswith(_REMINDER_CLOSE):
+        return ('reminder', stripped[len(_REMINDER_OPEN):-len(_REMINDER_CLOSE)].strip())
+    return (role, 'text', text)
+
+
+def _plain(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return _plain(content.get('text') or content.get('content') or '')
+    if isinstance(content, list):
+        return ''.join(_plain(part) for part in content if not isinstance(part, dict)
+                       or part.get('type') in (None, 'text', 'input_text', 'output_text'))
+    return '' if content is None else str(content)
+
+
+def _result(call_id, text, is_error=False):
+    if text.startswith(TOOL_ERROR_PREFIX):
+        text, is_error = text[len(TOOL_ERROR_PREFIX):], True
+    return ('result', call_id, text, bool(is_error))
+
+
+def wire_chat(body):
+    system, turns = '', []
+    for message in body.get('messages') or []:
+        role, content = message.get('role'), message.get('content')
+        if role in ('system', 'developer'):
+            if turns:
+                turns.append(('reminder', _plain(content)))
+            else:
+                system += _plain(content)
+        elif role == 'tool':
+            turns.append(_result(message.get('tool_call_id'), _plain(content)))
+        else:
+            parts = content if isinstance(content, list) else [content]
+            for part in parts:
+                text = _plain(part)
+                if text:
+                    turns.append(_text_item(role, text))
+            for call in message.get('tool_calls') or []:
+                turns.append(('call', call['id'], call['function']['name'], json.loads(call['function']['arguments'] or '{}')))
+    return system, turns
+
+
+def wire_anthropic(body):
+    system = _plain(body.get('system'))
+    turns = []
+    for message in body.get('messages') or []:
+        role, content = message.get('role'), message.get('content')
+        if role == 'system':
+            turns.append(('reminder', _plain(content)))
+            continue
+        for block in content if isinstance(content, list) else [{'type': 'text', 'text': content}]:
+            kind = block.get('type')
+            if kind == 'text' and block.get('text', '').strip():
+                turns.append(_text_item(role, block['text']))
+            elif kind == 'tool_use':
+                turns.append(('call', block['id'], block['name'], block.get('input') or {}))
+            elif kind == 'tool_result':
+                turns.append(_result(block['tool_use_id'], _plain(block.get('content')), block.get('is_error')))
+    return system, turns
+
+
+def wire_responses(body):
+    system, turns = _plain(body.get('instructions')), []
+    for item in body.get('input') or []:
+        kind = item.get('type') or 'message'
+        if kind == 'message':
+            role = item.get('role')
+            if role in ('system', 'developer'):
+                if turns:
+                    turns.append(('reminder', _plain(item.get('content'))))
+                else:
+                    system += _plain(item.get('content'))
+            elif _plain(item.get('content')):
+                turns.append(_text_item(role, _plain(item.get('content'))))
+        elif kind == 'function_call':
+            turns.append(('call', item['call_id'], item['name'], json.loads(item.get('arguments') or '{}')))
+        elif kind == 'function_call_output':
+            turns.append(_result(item['call_id'], _plain(item.get('output'))))
+    return system, turns
+
+
+def wire_gemini(body):
+    system = ''.join(part.get('text', '') for part in (body.get('systemInstruction') or {}).get('parts') or [])
+    turns = []
+    for content in body.get('contents') or []:
+        role = 'assistant' if content.get('role') == 'model' else 'user'
+        for part in content.get('parts') or []:
+            if part.get('text', '').strip() and not part.get('thought'):
+                turns.append(_text_item(role, part['text']))
+            elif 'functionCall' in part:
+                call = part['functionCall']
+                turns.append(('call', call.get('id'), call.get('name'), call.get('args') or {}))
+            elif 'functionResponse' in part:
+                response = part['functionResponse'].get('response') or {}
+                is_error = 'error' in response
+                turns.append(_result(part['functionResponse'].get('id'),
+                                     _plain(response.get('error') if is_error else response.get('content')), is_error))
+    return system, turns
+
+
+def wire_interactions(body):
+    system, turns = _plain(body.get('system_instruction')), []
+    for step in body.get('input') or []:
+        kind = step.get('type')
+        if kind in ('user_input', 'model_output'):
+            role = 'assistant' if kind == 'model_output' else 'user'
+            for block in step.get('content') or []:
+                if block.get('type') == 'text' and block.get('text', '').strip():
+                    turns.append(_text_item(role, block['text']))
+        elif kind == 'function_call':
+            turns.append(('call', step.get('id'), step.get('name'), step.get('arguments') or {}))
+        elif kind == 'function_result':
+            turns.append(_result(step.get('call_id'), _plain(step.get('result')), step.get('is_error')))
+    return system, turns
+
+
+WIRE_READERS = {'chat': wire_chat, 'anthropic': wire_anthropic, 'responses': wire_responses,
+                'gemini': wire_gemini, 'interactions': wire_interactions}
+
+
+def upstream_body(fake):
+    """假上游收到的最后一个请求正文。"""
+    return fake.requests[-1]['body']
