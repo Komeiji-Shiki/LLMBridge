@@ -23,7 +23,7 @@ from core.exchange_archive import upstream_snapshot
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
 from services.protocol_events import gemini_finish_to_openai, gemini_termination, merge_gemini_safety
-from services.gemini_continuation import GeminiContinuation
+from services.gemini_continuation import GeminiContinuation, InteractionsContinuation
 from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler, compact_empty_text_parts
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
@@ -1029,6 +1029,9 @@ class DirectAPIService:
             yield {"error": {"message": str(exc), "type": "invalid_request_error", "code": 400}}
             return
 
+        continuation = InteractionsContinuation(
+            CONFIG.get("gemini_max_continuation_hops", GeminiDefaults.MAX_CONTINUATION_HOPS))
+
         logger.info(f"[GEMINI_INTERACTIONS] 调用Interactions API: {_redact(endpoint)}")
         logger.info(f"[GEMINI_INTERACTIONS] 模型: {model}, 流式: {stream}, 步骤数: {len(request_body.get('input', []))}")
         if request_body.get("system_instruction"):
@@ -1055,66 +1058,97 @@ class DirectAPIService:
                 headers["x-goog-api-key"] = api_key
             self._apply_context_upstream_headers(headers)
             apply_api_key_auth(headers, api_key, api_key_auth_mode)
-            async with self.session.post(
-                endpoint,
-                data=request_body_json.encode('utf-8'),
-                headers=headers,
-                timeout=_upstream_timeout()
-            ) as response:
-                _remember_response_headers(response)
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"[GEMINI_INTERACTIONS] API调用失败: {response.status} - {error_text}")
-                    try:
-                        error_json = json.loads(error_text)
-                        yield _normalize_error_for_passthrough(
-                            error_json, response.status)
-                    except json.JSONDecodeError:
-                        yield {
-                            "error": {
-                                "message": error_text,
-                                "type": "api_error",
-                                "code": response.status
-                            }
-                        }
-                    return
+            response_data = None
+            while True:
+                interrupted = None
+                try:
+                    async with self.session.post(
+                        endpoint,
+                        data=request_body_json.encode('utf-8'),
+                        headers=headers,
+                        timeout=_upstream_timeout()
+                    ) as response:
+                        _remember_response_headers(response)
+                        if response.status != 200:
+                            error_text = await response.text()
+                            logger.error(f"[GEMINI_INTERACTIONS] API调用失败: {response.status} - {error_text}")
+                            try:
+                                error_json = json.loads(error_text)
+                                yield continuation.with_usage(_normalize_error_for_passthrough(
+                                    error_json, response.status))
+                            except json.JSONDecodeError:
+                                yield continuation.with_usage({
+                                    "error": {
+                                        "message": error_text,
+                                        "type": "api_error",
+                                        "code": response.status
+                                    }
+                                })
+                            return
 
-                if stream:
-                    # 流式：复用公共 SSE 解析器。interactions 官方是 event:+data: 双行，
-                    # event: 行会被跳过；parse_bare_json=True 兼容反代发裸 JSON 行。
-                    async for event in _iter_sse_json_events(
-                        response, "GEMINI_INTERACTIONS", parse_bare_json=True):
-                        yield event
-                else:
-                    response_data = await response.json()
-                    yield interaction_failure(response_data) or response_data
+                        if stream:
+                            # 流式：复用公共 SSE 解析器。interactions 官方是 event:+data: 双行，
+                            # event: 行会被跳过；parse_bare_json=True 兼容反代发裸 JSON 行。
+                            async for event in _iter_sse_json_events(
+                                response, "GEMINI_INTERACTIONS", parse_bare_json=True):
+                                if continuation.feed(event):
+                                    yield event
+                        else:
+                            response_data = continuation.merge_response(await response.json())
+                            failure = interaction_failure(response_data)
+                            if failure:
+                                yield failure
+                                return
+                except (asyncio.TimeoutError, aiohttp.ClientError) as error:
+                    interrupted = error
+
+                token = continuation.next_hop()
+                if token is None:
+                    if interrupted is not None:
+                        raise interrupted
+                    break
+                logger.info(f"[GEMINI_INTERACTIONS] 上游到达单次输出上限或连接中断，开始第 {continuation.hops} 次续传")
+                if continuation.step_open:
+                    # 断线时步骤还没收尾，转换器要靠 step.stop 才会把它写完。
+                    continuation.step_open = False
+                    yield {"event_type": "step.stop"}
+                # 已生成内容由 token 携带，不能追加到 input
+                request_body_json = await asyncio.to_thread(
+                    json.dumps,
+                    {**request_body, "continuation_token": token},
+                    ensure_ascii=False,
+                    separators=(',', ':')
+                )
+
+            if not stream:
+                yield response_data
 
         except asyncio.TimeoutError:
             logger.error(f"[GEMINI_INTERACTIONS] 请求超时 (模型: {model})")
-            yield {
+            yield continuation.with_usage({
                 "error": {
                     "message": "Request timed out while waiting for Gemini Interactions API response",
                     "type": "timeout_error"
                 }
-            }
+            })
         except aiohttp.ClientError as e:
             safe_err = _redact(str(e))
             logger.error(f"[GEMINI_INTERACTIONS] 网络请求失败: {safe_err}")
-            yield {
+            yield continuation.with_usage({
                 "error": {
                     "message": f"Network error: {safe_err}",
                     "type": "network_error"
                 }
-            }
+            })
         except Exception as e:
             safe_err = _redact(str(e))
             logger.error(f"[GEMINI_INTERACTIONS] 未知错误: {safe_err}", exc_info=True)
-            yield {
+            yield continuation.with_usage({
                 "error": {
                     "message": f"Unexpected error: {safe_err}",
                     "type": "internal_error"
                 }
-            }
+            })
 
     def convert_gemini_response_to_openai(
         self,

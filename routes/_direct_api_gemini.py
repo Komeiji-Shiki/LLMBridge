@@ -653,114 +653,90 @@ async def handle_gemini_native_direct(
                 converter = InteractionsStreamConverter(display_name, request_id, completion_tokens_mode)
                 splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
 
+                chunks = iter_with_keepalive(gemini_generator, resolve_heartbeat_interval(endpoint_config))
+                first_event_seen = False
+
+                def account(usage):
+                    nonlocal input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, upstream_usage
+                    input_tokens = extract_prompt_tokens(usage)
+                    # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
+                    output_tokens = total_output_tokens(usage)
+                    reasoning_tokens = extract_reasoning_tokens(usage)
+                    cached_tokens = extract_cached_tokens(usage)
+                    total_tokens = resolve_usage_tokens(usage).total_tokens
+                    upstream_usage = converter.usage
+
+                def account_failure(metadata):
+                    """续传中途失败时，已经完成的各跳仍然要记账。"""
+                    nonlocal input_tokens, output_tokens, cached_tokens, upstream_usage
+                    if isinstance(metadata, dict) and metadata:
+                        input_tokens = int(metadata.get("promptTokenCount") or 0)
+                        output_tokens = (int(metadata.get("candidatesTokenCount") or 0)
+                                         + int(metadata.get("thoughtsTokenCount") or 0))
+                        cached_tokens = int(metadata.get("cachedContentTokenCount") or 0)
+                        upstream_usage = metadata
+
+                def consume(openai_chunk):
+                    """累积一个转换后的块，返回要转发的 SSE 文本（被思考分隔吞掉时为 None）。"""
+                    nonlocal finish_seen
+                    choices = openai_chunk.get("choices") or []
+                    finish_seen = finish_seen or bool(choices and choices[0].get("finish_reason"))
+                    delta = choices[0].get("delta", {}) if choices else {}
+                    suppress_chunk = splitter.process(delta)
+                    delta_content = delta.get("content", "")
+                    delta_reasoning = delta.get("reasoning_content", "")
+                    delta_tool_calls = delta.get("tool_calls")
+
+                    if delta_content:
+                        content_parts.append(delta_content)
+                    if delta_reasoning:
+                        reasoning_parts.append(delta_reasoning)
+                    if delta_tool_calls:
+                        append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
+                    if openai_chunk.get("usage"):
+                        account(openai_chunk["usage"])
+                    return None if suppress_chunk else f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+
                 try:
-                    api_task = asyncio.create_task(anext(gemini_generator))
-                    heartbeat_interval = resolve_heartbeat_interval(endpoint_config)
+                    yield f": keep-alive {int(time.time())}\n\n"
                     first_chunk_wait_start = time.time()
 
-                    while not api_task.done():
-                        yield f": keep-alive {int(time.time())}\n\n"
-                        if time.time() - first_chunk_wait_start > first_chunk_timeout:
-                            await cancel_and_wait(api_task)
-                            error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
-                            logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
-                            yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
-                            tail_suppressed = True
-                            return
-                        try:
-                            await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
-                        except asyncio.TimeoutError:
+                    async for event in chunks:
+                        if event is None:
+                            if not first_event_seen and time.time() - first_chunk_wait_start > first_chunk_timeout:
+                                error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
+                                logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
+                                yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
+                                tail_suppressed = True
+                                return
+                            # 长输出的检查点之间和续传跳之间模型可能长时间静默，心跳覆盖整条流
+                            yield f": keep-alive {int(time.time())}\n\n"
                             continue
 
-                    try:
-                        first_event = await api_task
-                    except StopAsyncIteration:
+                        openai_chunks = converter.feed(event)
+                        if openai_chunks and "error" in openai_chunks[0]:
+                            error_msg = str(openai_chunks[0].get("error"))
+                            account_failure(openai_chunks[0].get("usageMetadata"))
+                            yield f"data: {json.dumps({'error': openai_chunks[0]['error']}, ensure_ascii=False)}\n\n"
+                            if not first_event_seen:
+                                logger.error(f"[GEMINI_INTERACTIONS] 流式预读检测到错误: {event}")
+                                yield "data: [DONE]\n\n"
+                                tail_suppressed = True
+                                return
+                            break
+
+                        first_event_seen = True
+                        for openai_chunk in openai_chunks:
+                            sse_text = consume(openai_chunk)
+                            if sse_text:
+                                yield sse_text
+
+                    if not first_event_seen:
                         error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                         logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
                         yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'empty_response'}}, ensure_ascii=False)}\n\n"
                         tail_suppressed = True
                         return
-
-                    if "error" in first_event:
-                        error_msg = str(first_event.get("error"))
-                        logger.error(f"[GEMINI_INTERACTIONS] 流式预读检测到错误: {first_event}")
-                        yield f"data: {json.dumps({'error': first_event['error']}, ensure_ascii=False)}\n\n"
-                        yield "data: [DONE]\n\n"
-                        tail_suppressed = True
-                        return
-
-                    # 预读的第一个事件
-                    for openai_chunk in converter.feed(first_event):
-                        if "error" in openai_chunk:
-                            error_msg = str(openai_chunk.get("error"))
-                            yield f"data: {json.dumps({'error': openai_chunk['error']}, ensure_ascii=False)}\n\n"
-                            tail_suppressed = True
-                            return
-
-                        choices = openai_chunk.get("choices") or []
-                        finish_seen = finish_seen or bool(choices and choices[0].get("finish_reason"))
-                        delta = choices[0].get("delta", {}) if choices else {}
-                        suppress_chunk = splitter.process(delta)
-                        delta_content = delta.get("content", "")
-                        delta_reasoning = delta.get("reasoning_content", "")
-                        delta_tool_calls = delta.get("tool_calls")
-
-                        if delta_content:
-                            content_parts.append(delta_content)
-                        if delta_reasoning:
-                            reasoning_parts.append(delta_reasoning)
-                        if delta_tool_calls:
-                            append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
-
-                        if "usage" in openai_chunk and openai_chunk["usage"]:
-                            usage = openai_chunk["usage"]
-                            input_tokens = extract_prompt_tokens(usage)
-                            # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
-                            output_tokens = total_output_tokens(usage)
-                            reasoning_tokens = extract_reasoning_tokens(usage)
-                            cached_tokens = extract_cached_tokens(usage)
-                            total_tokens = resolve_usage_tokens(usage).total_tokens
-                            upstream_usage = converter.usage
-
-                        if not suppress_chunk:
-                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
-
-                    # 继续处理剩余事件流
-                    async for event in gemini_generator:
-                        openai_chunks = converter.feed(event)
-                        if openai_chunks and "error" in openai_chunks[0]:
-                            error_msg = str(openai_chunks[0].get("error"))
-                            yield f"data: {json.dumps({'error': openai_chunks[0]['error']}, ensure_ascii=False)}\n\n"
-                            break
-
-                        for openai_chunk in openai_chunks:
-                            choices = openai_chunk.get("choices") or []
-                            finish_seen = finish_seen or bool(choices and choices[0].get("finish_reason"))
-                            delta = choices[0].get("delta", {}) if choices else {}
-                            suppress_chunk = splitter.process(delta)
-                            delta_content = delta.get("content", "")
-                            delta_reasoning = delta.get("reasoning_content", "")
-                            delta_tool_calls = delta.get("tool_calls")
-
-                            if delta_content:
-                                content_parts.append(delta_content)
-                            if delta_reasoning:
-                                reasoning_parts.append(delta_reasoning)
-                            if delta_tool_calls:
-                                append_tool_call_delta(tool_call_accumulator, delta_tool_calls)
-
-                            if "usage" in openai_chunk and openai_chunk["usage"]:
-                                usage = openai_chunk["usage"]
-                                input_tokens = extract_prompt_tokens(usage)
-                                # 计费/监控按真实总输出（正文+思考），不受下游展示口径影响
-                                output_tokens = total_output_tokens(usage)
-                                reasoning_tokens = extract_reasoning_tokens(usage)
-                                cached_tokens = extract_cached_tokens(usage)
-                                total_tokens = resolve_usage_tokens(usage).total_tokens
-                                upstream_usage = converter.usage
-
-                            if not suppress_chunk:
-                                yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
                     if error_msg is None and not converter.completed:
                         # 没收到结束事件说明上游中途断了，不能按成功收尾。
@@ -823,10 +799,8 @@ async def handle_gemini_native_direct(
                         except Exception as token_error:
                             logger.error(f"[GEMINI_INTERACTIONS] Token计算失败: {token_error}")
 
-                    cost_info = direct_api_service.calculate_cost(
-                        input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=cached_tokens,
-                        pricing=pricing_config) if pricing_config else {}
+                    cost_info = _gemini_cost(
+                        direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage)
                     final_content = ''.join(content_parts)
                     final_reasoning = ''.join(reasoning_parts)
                     final_tool_calls = finalize_tool_calls(tool_call_accumulator)
@@ -854,6 +828,10 @@ async def handle_gemini_native_direct(
                     logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
                     if cost_info.get("total_cost"):
                         logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+
+                    # 客户端走了就不能再续传，及时释放上游连接
+                    await chunks.aclose()
+                    await gemini_generator.aclose()
 
                     if not client_gone and not tail_suppressed:
                         try:

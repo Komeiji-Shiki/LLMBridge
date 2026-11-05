@@ -115,3 +115,124 @@ class GeminiContinuation:
                       billedPromptTokenCount=totals['billed_prompt'], billedCachedTokenCount=totals['billed_cached'],
                       continuationHops=self.hops)
         return merged
+
+
+# 明细只描述单跳，合并后与总量对不上
+_INTERACTION_HOP_ONLY_FIELDS = ('input_tokens_by_modality', 'cached_tokens_by_modality', 'output_tokens_by_modality',
+                                'tool_use_tokens_by_modality')
+_INTERACTION_SUMMED_FIELDS = ('total_input_tokens', 'total_cached_tokens', 'total_output_tokens',
+                              'total_thought_tokens', 'total_tool_use_tokens', 'total_tokens')
+
+
+class InteractionsContinuation:
+    """Interactions 的续传状态。思路和 generateContent 相同，事件形状不同。
+
+    协议见 https://ai.google.dev/gemini-api/docs/long-decode
+    - store=false 时每跳重发原始请求，只在顶层加最新的 continuation_token；
+    - 每跳是独立的 Interaction，中间跳的 completed 不转发，下游看到的是一条连续的流；
+    - usage 在单跳内累计、跨跳相加；每一跳都按完整提示计费；
+    - status_update 带的 token 是检查点：断线前没有新内容才能用，否则会重复生成。
+    """
+
+    def __init__(self, max_hops):
+        self.max_hops = max_hops
+        self.hops = 0
+        self.step_open = False
+        self._token = None
+        self._last_token = None
+        self._pending = False
+        self._completed = False
+        self._hop_usage = None
+        self._totals = None
+        self._steps = []
+
+    def feed(self, event):
+        """处理一个流式事件，返回是否转发给下游。"""
+        if not isinstance(event, dict):
+            return True
+        kind = event.get('event_type')
+        if kind in ('step.start', 'step.delta'):
+            self._token = None
+            self.step_open = True
+        elif kind == 'step.stop':
+            self.step_open = False
+        elif kind == 'interaction.status_update':
+            self._token = event.get('continuation_token') or self._token
+            self._hop_usage = event.get('usage') or self._hop_usage
+        elif kind == 'interaction.completed' and isinstance(event.get('interaction'), dict):
+            interaction = event['interaction']
+            self._hop_usage = interaction.get('usage') or self._hop_usage
+            token = interaction.get('continuation_token') or event.get('continuation_token') or self._token
+            if interaction.get('status') == 'requires_continuation' and self._can_resume(token):
+                self._token, self._pending = token, True
+                return False
+            self._completed = True
+            if self._totals:
+                interaction['usage'] = self._merged(self._hop_usage or {})
+        return True
+
+    def merge_response(self, response):
+        """非流式：把此前各跳的步骤接到本跳前面，返回合并后的响应。"""
+        if not isinstance(response, dict):
+            return response
+        self._hop_usage = response.get('usage') or self._hop_usage
+        self._steps = [*self._steps, *(response.get('steps') or [])]
+        token = response.get('continuation_token')
+        if response.get('status') == 'requires_continuation' and self._can_resume(token):
+            self._token, self._pending = token, True
+            return response
+        self._completed = True
+        if not self._totals:
+            return response
+        return {**response, 'steps': self._steps, 'usage': self._merged(self._hop_usage or {})}
+
+    def next_hop(self):
+        """需要续传时返回下一跳的 token，否则返回 None。流断在检查点上也可以接着生成。"""
+        if not self._pending and (self._completed or not self._token or not self._can_resume(self._token)):
+            return None
+        self._pending = False
+        self.hops += 1
+        self._totals = self._add_hop(self._hop_usage or {})
+        self._hop_usage = None
+        self._last_token, self._token = self._token, None
+        return self._last_token
+
+    def with_usage(self, error):
+        """续传中途失败时带上此前已计费的用量，字段和 generateContent 的错误一致。"""
+        if not self._totals:
+            return error
+        totals = self._add_hop(self._hop_usage or {})
+        return {**error, 'usageMetadata': {
+            'promptTokenCount': totals['initial_input'],
+            'cachedContentTokenCount': totals['initial_cached'],
+            'candidatesTokenCount': totals['total_output_tokens'],
+            'thoughtsTokenCount': totals['total_thought_tokens'],
+            'billedPromptTokenCount': totals['total_input_tokens'] + totals['total_tool_use_tokens'],
+            'billedCachedTokenCount': totals['total_cached_tokens'],
+        }}
+
+    def _can_resume(self, token):
+        if self.hops >= self.max_hops:
+            logger.warning('[GEMINI_INTERACTIONS] 已达到续传跳数上限 %s，按输出截断结束', self.max_hops)
+            return False
+        if not token or token == self._last_token:
+            logger.warning('[GEMINI_INTERACTIONS] 上游要求续传但没有新的 token，按输出截断结束')
+            return False
+        return True
+
+    def _add_hop(self, usage):
+        totals = self._totals or {'initial_input': 0, 'initial_cached': 0, **{field: 0 for field in _INTERACTION_SUMMED_FIELDS}}
+        first = not self._totals
+        return {'initial_input': _count(usage, 'total_input_tokens') if first else totals['initial_input'],
+                'initial_cached': _count(usage, 'total_cached_tokens') if first else totals['initial_cached'],
+                **{field: totals[field] + _count(usage, field) for field in _INTERACTION_SUMMED_FIELDS}}
+
+    def _merged(self, usage):
+        # 客户端用提示量判断上下文大小，所以只报第一跳；重复计费的部分单独记录。
+        totals = self._add_hop(usage)
+        merged = {key: value for key, value in usage.items() if key not in _INTERACTION_HOP_ONLY_FIELDS}
+        merged.update({field: totals[field] for field in _INTERACTION_SUMMED_FIELDS})
+        merged.update(initial_input_tokens=totals['initial_input'], initial_cached_tokens=totals['initial_cached'],
+                      billedPromptTokenCount=totals['total_input_tokens'] + totals['total_tool_use_tokens'],
+                      billedCachedTokenCount=totals['total_cached_tokens'], continuationHops=self.hops)
+        return merged

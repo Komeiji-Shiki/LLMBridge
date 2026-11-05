@@ -59,6 +59,7 @@ _SERVER_TOOL_STEPS = frozenset({
     "google_maps_call", "google_maps_result", "file_search_call", "file_search_result",
     "processing_call", "processing_result", "mcp_server_tool_call", "mcp_server_tool_result",
 })
+_CONTINUATION_STOPPED = "续传跳数已达上限或上游没有给出新的 token，回复被截断"
 # 官方文档：这几个错误码表示内容被拦截，重试也没用。
 _BLOCKED_CODES = frozenset({"safety", "jailbreak", "prohibited_content", "blocklist"})
 
@@ -637,7 +638,7 @@ def _usage_fields(usage: dict) -> dict:
     thought = _usage_int(usage, "total_thought_tokens", "reasoning_tokens")
     return {
         "initial": initial, "tool_use": tool_use, "prompt": prompt, "output": output, "thought": thought,
-        "cached": min(_usage_int(usage, "total_cached_tokens", "cached_tokens"), prompt),
+        "cached": min(_usage_int(usage, "initial_cached_tokens", "total_cached_tokens", "cached_tokens"), prompt),
         "total": prompt + output + thought if initial != total_input else _usage_int(usage, "total_tokens"),
     }
 
@@ -670,10 +671,16 @@ def interaction_failure(interaction: Any) -> Optional[dict]:
              "type": "upstream_error", "code": 400 if upstream_code in _BLOCKED_CODES else 502}
     if upstream_code:
         error["upstream_code"] = upstream_code
-    fields = _usage_fields(interaction.get("usage") or {})
-    return {"error": error, "usageMetadata": {
+    usage = interaction.get("usage") or {}
+    fields = _usage_fields(usage)
+    metadata = {
         "promptTokenCount": fields["prompt"], "candidatesTokenCount": fields["output"],
-        "thoughtsTokenCount": fields["thought"], "cachedContentTokenCount": fields["cached"]}}
+        "thoughtsTokenCount": fields["thought"], "cachedContentTokenCount": fields["cached"]}
+    # 续传时每一跳都按完整提示计费，合并用量里带着实际计费量。
+    for field in ("billedPromptTokenCount", "billedCachedTokenCount"):
+        if field in usage:
+            metadata[field] = usage[field]
+    return {"error": error, "usageMetadata": metadata}
 
 
 def _chat_annotations(annotations: Any) -> List[dict]:
@@ -775,7 +782,7 @@ def convert_interactions_to_openai_response(
         if isinstance(error, dict):
             note_loss("errors", str(error.get("message") or error.get("code")))
     if interaction.get("status") == "requires_continuation":
-        note_loss("continuation", "上游单次请求到达输出上限，无状态模式无法续传，回复被截断")
+        note_loss("continuation", _CONTINUATION_STOPPED)
 
     message["provider_metadata"] = {"interactions_steps": copy.deepcopy(interaction.get("steps") or [])}
     if reasoning_parts:
@@ -979,10 +986,10 @@ class InteractionsStreamConverter:
         self.completed = True
         failure = interaction_failure({**interaction, "status": self.status})
         if failure:
-            return [{"error": failure["error"]}]
+            return [failure]
         self._save_turn()
         if self.status == "requires_continuation":
-            note_loss("continuation", "上游单次请求到达输出上限，无状态模式无法续传，回复被截断")
+            note_loss("continuation", _CONTINUATION_STOPPED)
         chunks: List[dict] = []
         if self.signatures:
             # 客户端保留元数据时可以原样回放；丢了也能按调用 ID 或思考文本找回。
@@ -1000,8 +1007,11 @@ class InteractionsStreamConverter:
             return []
         event_type = event.get("event_type")
         if event_type == "error" or (event_type is None and "error" in event):
-            # 没有 event_type 的是调用层产出的错误（如网络中断）
-            return [{"error": event.get("error") or {"message": "Unknown interactions error"}}]
+            # 没有 event_type 的是调用层产出的错误（如网络中断），续传中途还带着已计费的用量
+            chunk = {"error": event.get("error") or {"message": "Unknown interactions error"}}
+            if isinstance(event.get("usageMetadata"), dict):
+                chunk["usageMetadata"] = event["usageMetadata"]
+            return [chunk]
         interaction = event.get("interaction") if isinstance(event.get("interaction"), dict) else {}
         if event_type in ("interaction.created", "interaction.status_update", "interaction.requires_action"):
             self.status = event.get("status") or interaction.get("status") or self.status
@@ -1139,8 +1149,10 @@ def _interactions_block_to_gemini_part(block: Any, thought: bool = False) -> Opt
 
 def _interactions_to_gemini_finish_reason(status: Optional[str]) -> str:
     """Interaction.status → generateContent 的 FinishReason 枚举。"""
-    if status in ("incomplete", "requires_continuation"):
+    if status == "incomplete":
         return "MAX_TOKENS"
+    if status == "requires_continuation":
+        return "CONTINUATION"
     if status in ("failed", "cancelled"):
         return "OTHER"
     return "STOP"
@@ -1169,7 +1181,7 @@ _GC_SAFETY_THRESHOLDS = {
 }
 _GC_HANDLED_FIELDS = frozenset({
     "contents", "systemInstruction", "system_instruction", "generationConfig", "tools", "toolConfig",
-    "safetySettings", "labels", "store", "model",
+    "safetySettings", "labels", "store", "model", "continuationToken",
 })
 _GC_HANDLED_GENERATION_FIELDS = frozenset({
     "maxOutputTokens", "stopSequences", "seed", "thinkingConfig", "responseMimeType", "responseSchema",
@@ -1406,6 +1418,9 @@ def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
         body["safety_settings"] = safety
     if gc_req.get("labels"):
         body["labels"] = gc_req["labels"]
+    # 原生入口由客户端决定是否续传：每跳重发原请求，只多一个 token。
+    if gc_req.get("continuationToken"):
+        body["continuation_token"] = gc_req["continuationToken"]
     for field in gc_req.keys() - _GC_HANDLED_FIELDS:
         note_loss(field, "Interactions 没有对应字段，未发送")
 
@@ -1540,6 +1555,8 @@ def convert_interactions_to_gemini_gc(interaction: dict) -> dict:
     }
     if grounding.metadata():
         candidate["groundingMetadata"] = grounding.metadata()
+    if interaction.get("continuation_token"):
+        candidate["continuationToken"] = interaction["continuation_token"]
     response: dict = {"candidates": [candidate], "usageMetadata": metadata}
     response["usage"] = {
         "prompt_tokens": metadata["promptTokenCount"],
@@ -1702,6 +1719,8 @@ class InteractionsToGeminiGCConverter:
             candidate: dict = {"finishReason": _interactions_to_gemini_finish_reason(self.status)}
             if self.grounding.metadata():
                 candidate["groundingMetadata"] = self.grounding.metadata()
+            if interaction.get("continuation_token"):
+                candidate["continuationToken"] = interaction["continuation_token"]
             chunks.append({"candidates": [candidate]})
             chunks.append({"usageMetadata": _gc_usage_metadata(self.usage or {})})
 

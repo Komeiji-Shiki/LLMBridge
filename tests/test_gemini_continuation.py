@@ -372,3 +372,270 @@ def test_native_gemini_client_receives_token_untouched():
     assert status == 200
     assert body['candidates'][0]['continuationToken'] == 'token-1'
     assert body['candidates'][0]['finishReason'] == 'CONTINUATION'
+
+
+# ---- Interactions：网关替 Chat 中转的客户端跑续传循环 ----
+
+def hop_usage(inputs=100, cached=0, output=0, thought=0):
+    return {'total_input_tokens': inputs, 'total_cached_tokens': cached, 'total_output_tokens': output,
+            'total_thought_tokens': thought, 'total_tokens': inputs + output + thought}
+
+
+def hop_events(text, status='completed', token=None, usage_value=None, start=0):
+    interaction = {'id': 'hop', 'status': status, 'usage': usage_value or hop_usage()}
+    if token:
+        interaction['continuation_token'] = token
+    return [{'event_type': 'interaction.created', 'interaction': {'id': 'hop', 'status': 'in_progress'}},
+            {'event_type': 'step.start', 'index': start, 'step': {'type': 'model_output'}},
+            {'event_type': 'step.delta', 'index': start, 'delta': {'type': 'text', 'text': text}},
+            {'event_type': 'step.stop', 'index': start},
+            {'event_type': 'interaction.completed', 'interaction': interaction}]
+
+
+def hop_response(steps, status='completed', token=None, usage_value=None):
+    value = {'id': 'hop', 'status': status, 'steps': steps, 'usage': usage_value or hop_usage()}
+    if token:
+        value['continuation_token'] = token
+    return value
+
+
+def output_step(text):
+    return {'type': 'model_output', 'content': [{'type': 'text', 'text': text}]}
+
+
+def collect_interactions(session, stream=True, **kwargs):
+    async def run():
+        return [item async for item in DirectAPIService(session).call_gemini_interactions_api(
+            'test-key', 'gemini-4-argon', MESSAGES, stream=stream, max_tokens=262144, **kwargs)]
+    return asyncio.run(run())
+
+
+def to_chat(events):
+    from converters.gemini_interactions import InteractionsStreamConverter
+    converter = InteractionsStreamConverter('m', 'r')
+    return [chunk for event in events for chunk in converter.feed(event)]
+
+
+def chat_text(chunks):
+    return ''.join(chunk['choices'][0]['delta'].get('content') or '' for chunk in chunks if chunk.get('choices'))
+
+
+def finishes(chunks):
+    return [chunk['choices'][0]['finish_reason'] for chunk in chunks
+            if chunk.get('choices') and chunk['choices'][0].get('finish_reason')]
+
+
+def test_interactions_stream_hops_read_as_one_stream_and_resend_the_original_request():
+    session = session_with(hop_events('第一跳', 'requires_continuation', 'token-1'),
+                           hop_events('第二跳', 'requires_continuation', 'token-2'),
+                           hop_events('第三跳'))
+    events = collect_interactions(session)
+    sent = bodies(session)
+    assert [body.get('continuation_token') for body in sent] == [None, 'token-1', 'token-2']
+    # 无状态模式每跳都重发原始提示，除 token 外不变
+    assert all(body['store'] is False for body in sent)
+    assert {key: value for key, value in sent[2].items() if key != 'continuation_token'} == sent[0]
+    # 中间跳的结束事件不能让下游以为回答完了
+    assert [event['interaction']['status'] for event in events
+            if event.get('event_type') == 'interaction.completed'] == ['completed']
+    chunks = to_chat(events)
+    assert chat_text(chunks) == '第一跳第二跳第三跳'
+    assert finishes(chunks) == ['stop']
+
+
+def test_interactions_stream_usage_sums_hops_but_reports_first_prompt():
+    session = session_with(
+        hop_events('一', 'requires_continuation', 't1', hop_usage(100, 0, 50, 10)),
+        hop_events('二', 'completed', None, hop_usage(160, 100, 30, 5)))
+    events = collect_interactions(session)
+    usage_value = next(event['interaction']['usage'] for event in events
+                       if event.get('event_type') == 'interaction.completed')
+    assert usage_value['total_input_tokens'] == 260 and usage_value['billedPromptTokenCount'] == 260
+    assert usage_value['billedCachedTokenCount'] == 100
+    chat_usage = next(chunk['usage'] for chunk in to_chat(events) if chunk.get('usage'))
+    assert chat_usage['prompt_tokens'] == 100
+    assert chat_usage['completion_tokens'] == 95
+    assert chat_usage['total_tokens'] == 195
+
+
+def test_interactions_non_stream_merges_steps_from_all_hops():
+    from converters.gemini_interactions import convert_interactions_to_openai_response
+    session = session_with(
+        hop_response([{'type': 'thought', 'signature': 'sig-1', 'summary': [{'type': 'text', 'text': '想'}]},
+                      output_step('第一跳')], 'requires_continuation', 't1', hop_usage(100, 0, 50, 10)),
+        hop_response([output_step('第二跳'), {'type': 'function_call', 'id': 'c', 'name': 'f', 'arguments': {'a': 1}}],
+                     'requires_action', None, hop_usage(160, 100, 30, 5)))
+    result = collect_interactions(session, stream=False)
+    assert len(result) == 1
+    assert bodies(session)[1]['continuation_token'] == 't1'
+    response = convert_interactions_to_openai_response(result[0], 'm', 'r')
+    choice = response['choices'][0]
+    assert choice['message']['content'] == '第一跳第二跳'
+    assert choice['message']['reasoning_content'] == '想'
+    assert choice['finish_reason'] == 'tool_calls'
+    assert [step['type'] for step in choice['message']['provider_metadata']['interactions_steps']] == [
+        'thought', 'model_output', 'model_output', 'function_call']
+    assert response['usage']['prompt_tokens'] == 100 and response['usage']['completion_tokens'] == 95
+
+
+def test_single_hop_interaction_is_left_untouched():
+    value = hop_response([output_step('一次完成')], 'completed', None, hop_usage(10, 0, 5))
+    session = session_with(value)
+    assert collect_interactions(session, stream=False) == [value]
+    assert len(bodies(session)) == 1
+
+
+def test_interactions_without_a_token_is_reported_as_truncated():
+    from core.conversion_report import conversion_notes
+    token = current_request.set(RequestContext())
+    try:
+        chunks = to_chat(collect_interactions(session_with(hop_events('一', 'requires_continuation'))))
+        assert finishes(chunks) == ['length']
+        assert any(note['field'] == 'continuation' for note in conversion_notes())
+    finally:
+        current_request.reset(token)
+
+
+def test_interactions_repeated_token_stops_instead_of_looping():
+    session = session_with(hop_events('一', 'requires_continuation', 'same'),
+                           hop_events('二', 'requires_continuation', 'same'))
+    chunks = to_chat(collect_interactions(session))
+    assert len(bodies(session)) == 2 and finishes(chunks) == ['length']
+
+
+def test_interactions_hop_limit_stops_with_length():
+    session = session_with(hop_events('一', 'requires_continuation', 't1'),
+                           hop_events('二', 'requires_continuation', 't2'))
+    with patch.dict('services.direct_api_service.CONFIG', {'gemini_max_continuation_hops': 1}):
+        chunks = to_chat(collect_interactions(session))
+    assert len(bodies(session)) == 2 and finishes(chunks) == ['length']
+    assert chat_text(chunks) == '一二'
+
+
+def test_interactions_later_hop_failure_keeps_output_and_billed_usage():
+    session = session_with(hop_events('已输出', 'requires_continuation', 't1', hop_usage(100, 0, 50)),
+                           (503, json.dumps({'error': {'message': '过载', 'code': 503}})))
+    events = collect_interactions(session)
+    assert chat_text(to_chat(events[:-1])) == '已输出'
+    assert events[-1]['error']['message'] == '过载'
+    assert events[-1]['usageMetadata']['promptTokenCount'] == 100
+    assert events[-1]['usageMetadata']['billedPromptTokenCount'] == 100
+    assert events[-1]['usageMetadata']['candidatesTokenCount'] == 50
+
+
+def test_interactions_later_hop_failed_status_is_an_error_with_billed_usage():
+    session = session_with(hop_events('已输出', 'requires_continuation', 't1', hop_usage(100, 0, 50)),
+                           hop_events('', 'failed', None, hop_usage(150, 100, 0)))
+    chunks = to_chat(collect_interactions(session))
+    assert chunks[-1]['error']['code'] == 502
+    assert chunks[-1]['usageMetadata']['billedPromptTokenCount'] == 250
+    assert finishes(chunks) == []
+
+
+def test_interactions_non_stream_later_hop_failure_keeps_billed_usage():
+    session = session_with(hop_response([output_step('一')], 'requires_continuation', 't1', hop_usage(100, 0, 50)),
+                           (500, json.dumps({'error': {'message': '炸了', 'code': 500}})))
+    result = collect_interactions(session, stream=False)
+    assert result[0]['error']['message'] == '炸了'
+    assert result[0]['usageMetadata']['billedPromptTokenCount'] == 100
+
+
+def _dropping_session(*hops):
+    """每个 hop 是 (事件列表, 是否在发完后断线)，断线用 ClientPayloadError 模拟。"""
+    import aiohttp
+    responses = []
+    for events, drop in hops:
+        response = MagicMock(status=200)
+
+        async def stream(events=events, drop=drop):
+            for event in events:
+                yield ('data: ' + json.dumps(event) + '\n\n').encode()
+            if drop:
+                raise aiohttp.ClientPayloadError('连接中断')
+
+        response.content.iter_any = stream
+        responses.append(response)
+    session = MagicMock()
+    session.post.return_value.__aenter__ = AsyncMock(side_effect=responses)
+    session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+    return session
+
+
+def test_interactions_disconnect_at_checkpoint_resumes_without_duplicates():
+    first = [{'event_type': 'step.start', 'index': 0, 'step': {'type': 'model_output'}},
+             {'event_type': 'step.delta', 'index': 0, 'delta': {'type': 'text', 'text': '检查点之前'}},
+             {'event_type': 'interaction.status_update', 'status': 'in_progress', 'continuation_token': 'checkpoint',
+              'usage': hop_usage(100, 0, 40)}]
+    session = _dropping_session((first, True), (hop_events('接着写'), False))
+    chunks = to_chat(collect_interactions(session))
+    assert bodies(session)[1]['continuation_token'] == 'checkpoint'
+    assert chat_text(chunks) == '检查点之前接着写'
+    assert finishes(chunks) == ['stop']
+
+
+def test_interactions_disconnect_after_new_output_reports_error_instead_of_duplicating():
+    first = [{'event_type': 'step.start', 'index': 0, 'step': {'type': 'model_output'}},
+             {'event_type': 'interaction.status_update', 'status': 'in_progress', 'continuation_token': 'checkpoint'},
+             {'event_type': 'step.delta', 'index': 0, 'delta': {'type': 'text', 'text': '检查点之后的新内容'}}]
+    session = _dropping_session((first, True))
+    events = collect_interactions(session)
+    assert len(bodies(session)) == 1
+    assert 'error' in events[-1]
+
+
+def test_interactions_retry_executor_treats_resumed_hops_as_one_stream():
+    session = session_with(hop_events('一', 'requires_continuation', 't1'), hop_events('二'))
+    context = RequestContext(endpoint={'auto_retry': {'enabled': True, 'max_retries': 2, 'retry_on_other_errors': True}})
+    token = current_request.set(context)
+    try:
+        events = collect_interactions(session)
+    finally:
+        current_request.reset(token)
+    assert len(bodies(session)) == 2 and len(context.attempts) == 1
+    assert chat_text(to_chat(events)) == '一二'
+
+
+def test_interactions_thought_signatures_from_every_hop_survive_for_replay():
+    from converters.gemini_interactions import convert_oai_messages_to_interactions
+
+    def thought(text, signature):
+        return [{'event_type': 'step.start', 'index': 0, 'step': {'type': 'thought'}},
+                {'event_type': 'step.delta', 'index': 0,
+                 'delta': {'type': 'thought_summary', 'content': {'type': 'text', 'text': text}}},
+                {'event_type': 'step.delta', 'index': 0, 'delta': {'type': 'thought_signature', 'signature': signature}},
+                {'event_type': 'step.stop', 'index': 0}]
+
+    first = [*thought('甲', 's1'), {'event_type': 'interaction.completed', 'interaction': {
+        'status': 'requires_continuation', 'continuation_token': 't1', 'usage': hop_usage()}}]
+    second = [*thought('乙', 's2'), *hop_events('答', start=1)[1:]]
+    token = current_request.set(RequestContext(authenticated=True))
+    try:
+        chunks = to_chat(collect_interactions(session_with(first, second)))
+        reasoning = ''.join(chunk['choices'][0]['delta'].get('reasoning_content') or ''
+                            for chunk in chunks if chunk.get('choices'))
+        assert reasoning == '甲乙'
+        steps, _ = convert_oai_messages_to_interactions(
+            [{'role': 'assistant', 'content': '答', 'reasoning_content': reasoning}])
+        assert [step.get('signature') for step in steps if step['type'] == 'thought'] == ['s1', 's2']
+    finally:
+        current_request.reset(token)
+
+
+# ---- generateContent 客户端接 Interactions 上游：和原生入口一样由客户端决定是否续传 ----
+
+def test_generate_content_client_receives_continuation_and_can_send_it_back():
+    from converters.gemini_interactions import convert_gemini_gc_to_interactions, convert_interactions_to_gemini_gc
+    response = convert_interactions_to_gemini_gc(hop_response([output_step('一段')], 'requires_continuation', 'token-1'))
+    candidate = response['candidates'][0]
+    assert candidate['finishReason'] == 'CONTINUATION' and candidate['continuationToken'] == 'token-1'
+    body = convert_gemini_gc_to_interactions({'contents': 'hi', 'continuationToken': 'token-1'}, 'm')
+    assert body['continuation_token'] == 'token-1' and 'continuationToken' not in body
+
+
+def test_generate_content_stream_exposes_the_token_on_the_finish_chunk():
+    from converters.gemini_interactions import InteractionsToGeminiGCConverter
+    converter = InteractionsToGeminiGCConverter()
+    chunks = [item for event in hop_events('一段', 'requires_continuation', 'token-1') for item in converter.feed(event)]
+    finish = next(item for item in chunks if item.get('candidates') and item['candidates'][0].get('finishReason'))
+    assert finish['candidates'][0]['finishReason'] == 'CONTINUATION'
+    assert finish['candidates'][0]['continuationToken'] == 'token-1'
