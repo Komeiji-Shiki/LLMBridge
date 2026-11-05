@@ -32,6 +32,7 @@ from core.errors import BadRequestError
 from core.model_archive import is_model_archived
 from modules.monitoring import monitoring_service
 from services.error_translation import translate_openai_error
+from services.model_capabilities import drop_unsupported_sampling
 from utils.monitor_params import build_monitor_request_params, summarize_tools
 
 from . import api_routes as _chat_api
@@ -467,6 +468,10 @@ async def _handle_responses_native_passthrough(
     # ── 构造上游请求：仅替换 model，其余字段（含 reasoning item）原样保留 ──
     passthrough_body = copy.deepcopy(responses_request)
     passthrough_body["model"] = target_model_id
+    # 只去掉模型一定会拒绝的采样参数，放在配置的字段剔除之前，显式配置仍然优先
+    reasoning = passthrough_body.get("reasoning")
+    drop_unsupported_sampling(passthrough_body, target_model_id,
+                              reasoning.get("effort") if isinstance(reasoning, dict) else None)
     omit_configured_fields(passthrough_body, endpoint_config)
 
     # 工具 Schema、strict 与 required 保真转发。

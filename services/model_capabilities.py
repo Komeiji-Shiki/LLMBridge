@@ -162,10 +162,21 @@ def budget_to_effort(budget: Optional[int]) -> Optional[str]:
     return 'medium' if budget <= 16384 else 'high'
 
 
+def _text_only(message) -> bool:
+    content = message.get('content') if isinstance(message, dict) else None
+    return isinstance(content, str) or (isinstance(content, list) and all(
+        isinstance(block, dict) and block.get('type') == 'text' for block in content))
+
+
 def sanitize_anthropic_body(body: dict, model_id: str) -> dict:
     """就地修正 Anthropic 请求里模型一定会拒绝的字段。在合并端点自定义参数之前调用。"""
+    from converters.message_shape import rewrite_trailing_prefill
     limits = limits_for(model_id)
     drop_unsupported_sampling(body, model_id)
+    messages = body.get('messages')
+    # 带思考或工具块的末尾轮次不是预填充，改写会丢内容，交给上游判断
+    if not limits.prefill and isinstance(messages, list) and messages and _text_only(messages[-1]):
+        body['messages'] = rewrite_trailing_prefill(messages, False)
     thinking = body.get('thinking')
     if isinstance(thinking, dict):
         if thinking.get('type') == 'disabled' and not limits.thinking_disable:
