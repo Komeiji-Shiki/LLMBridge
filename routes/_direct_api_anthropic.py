@@ -32,7 +32,7 @@ from converters import is_content_parts
 from converters.anthropic_openai import extract_anthropic_usage_tokens
 from converters.media import FILE_PART_TYPES, file_to_anthropic
 from converters.message_shape import SYSTEM_ROLES, inline_mid_system, rewrite_trailing_prefill
-from core.conversion_report import note_loss, raise_if_strict
+from core.conversion_report import note_cache_diagnostics, note_loss, raise_if_strict
 from services.model_capabilities import ANTHROPIC_EFFORTS, limits_for, sanitize_anthropic_body, supported_effort
 from utils.upstream_fields import omit_configured_fields
 from ._direct_api_reasoning_cache import restore_anthropic_thinking, store_anthropic_thinking
@@ -453,7 +453,7 @@ def convert_openai_to_anthropic_request(openai_req: Dict[str, Any], target_model
             choice["disable_parallel_tool_use"] = not openai_req["parallel_tool_calls"]
 
     effort = openai_req.get("reasoning_effort")
-    if effort == "none" and limits.thinking_disable:
+    if effort == "none" and (limits.thinking_disable or limits.between_tools):
         anthropic_req["thinking"] = {"type": "disabled"}
     elif effort:
         set_output_effort(anthropic_req, supported_effort(target_model, "low" if effort == "none" else effort, ANTHROPIC_EFFORTS))
@@ -758,6 +758,7 @@ def extract_anthropic_response_content(response_json: dict) -> Tuple[str, str, L
 
     返回 (content_text, reasoning_text, tool_calls_list, input_tokens, output_tokens, cached_tokens)
     """
+    note_cache_diagnostics(response_json)
     content_text = ""
     reasoning_text = ""
     tool_calls: List[Dict[str, Any]] = []
@@ -1011,6 +1012,7 @@ def build_openai_stream_from_anthropic(
                     etype = event.get("_event_type") or event.get("type", "")
 
                     if etype == "message_start":
+                        note_cache_diagnostics(event.get("message"))
                         msg = event.get("message", {})
                         raw_usage = msg.get("usage")
                         if isinstance(raw_usage, dict) and raw_usage:

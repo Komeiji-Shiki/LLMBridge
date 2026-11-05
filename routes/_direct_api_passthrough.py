@@ -18,7 +18,14 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 from converters.media import adapt_chat_files
 from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from services.logprobs_collector import create_logprobs_collector
-from services.model_capabilities import drop_unsupported_sampling, supported_effort
+from core.conversion_report import note_loss
+from services.model_capabilities import (
+    CHAT_TOOLS_FREE,
+    CHAT_TOOLS_RESPONSES_ONLY,
+    drop_unsupported_sampling,
+    limits_for,
+    supported_effort,
+)
 from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
 from utils.upstream_fields import omit_configured_fields
@@ -174,10 +181,21 @@ async def handle_passthrough_direct(
 # 请求体准备
 # ============================================================
 
+def _note_chat_tool_limit(request, model_id):
+    """这些型号的工具调用走 Chat 一定失败，提前告诉管理员该改哪里。"""
+    limit = limits_for(model_id).chat_tools
+    if not request.get("tools") or limit == CHAT_TOOLS_FREE:
+        return
+    if limit == CHAT_TOOLS_RESPONSES_ONLY or request.get("reasoning_effort") != "none":
+        note_loss("tools", f"{model_id} 的工具调用需要走 Responses 协议，请把端点的 api_type 改为 responses_native")
+
+
 def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoint_config):
     """准备透传请求体：模型ID映射、空文本过滤、自定义参数、模式开关等"""
     passthrough_request = openai_req.copy()
     passthrough_request["model"] = target_model_id
+
+    _note_chat_tool_limit(passthrough_request, target_model_id)
 
     # 模型一定会拒绝的字段先去掉；放在自定义参数之前，显式配置仍然优先。
     effort = supported_effort(target_model_id, passthrough_request.get("reasoning_effort"))

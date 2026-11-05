@@ -22,6 +22,9 @@ def test_metadata_sqlite_all_read_paths_and_history(tmp_path):
               'caller_id': 'stable-key', 'caller_name': '用户', 'conversation_id': 'conversation',
               'gateway_request_id': 'wire-id', 'endpoint_model': 'demo_vertex',
               'safety_details': {'blocked': {'reason': 'SAFETY'}},
+              'conversion_notes': [{'field': 'top_k', 'applied': False, 'message': '未发送'}],
+              'model_replaced': {'from': 'old', 'to': 'new'},
+              'cache_miss_reason': {'type': 'system_changed'},
               'timings': {'total_ms': 123}, 'pricing_snapshot': {'input': 7}}
     logger.write_request(record)
     from core.request_metadata import COLUMNS

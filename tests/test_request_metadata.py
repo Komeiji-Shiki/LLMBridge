@@ -16,6 +16,9 @@ def test_migration_preserves_old_amounts_and_covers_every_field():
               'cache_write_cost': .2, 'cache_write_extra_cost': .05, 'cache_mode': 'explicit',
               'gateway_request_id': 'logical', 'endpoint_model': 'demo_vertex', 'timings': {'total_ms': 123},
               'safety_details': {'blocked': {'reason': 'SAFETY'}, 'response_ratings': {}},
+              'conversion_notes': [{'field': 'top_k', 'applied': False, 'message': '未发送'}],
+              'model_replaced': {'from': 'old', 'to': 'new'},
+              'cache_miss_reason': {'type': 'system_changed'},
               'pricing_snapshot': {'pricing': {'input': 1}, 'exchange_rate': {'USD_TO_CNY': 7.2}}}
     write_metadata(connection, 'old', record)
     row = connection.execute('SELECT * FROM requests').fetchone()

@@ -629,6 +629,24 @@ async function viewRequestDetails(requestId) {
                     <div class="detail-label">停止原因:</div>
                     <div class="detail-value">${formatStopReason(details.stop_reason || (details.cost_info && details.cost_info.stop_reason))}</div>
                 </div>
+                ${details.model_replaced ? `
+                <div class="detail-item">
+                    <div class="detail-label">型号已切换:</div>
+                    <div class="detail-value" style="color: #dc2626;">上游宣布 ${escapeHtml(details.model_replaced.from || '')} 已弃用，本次改用 ${escapeHtml(details.model_replaced.to || '')}，请更新端点的 model_id</div>
+                </div>
+                ` : ''}
+                ${details.conversion_notes && details.conversion_notes.length > 0 ? `
+                <div class="detail-item">
+                    <div class="detail-label">转换损失:</div>
+                    <div class="detail-value" style="color: #dc2626;">${details.conversion_notes.map(note => `${escapeHtml(note.field || '')}：${escapeHtml(note.message || '')}`).join('<br>')}</div>
+                </div>
+                ` : ''}
+                ${details.cache_miss_reason ? `
+                <details class="data-disclosure"><summary>缓存未命中原因 <span>${escapeHtml(details.cache_miss_reason.type || 'JSON')}</span></summary><pre>${formatJson(details.cache_miss_reason)}</pre></details>
+                ` : ''}
+                ${details.client_trace ? `
+                <details class="data-disclosure"><summary>客户端归属 <span>JSON</span></summary><pre>${formatJson(details.client_trace)}</pre></details>
+                ` : ''}
                 ${details.upstream_usage && Object.keys(details.upstream_usage).length > 0 ? `
                 <details class="data-disclosure"><summary>上游原始用量 <span>JSON</span></summary><pre>${formatJson(details.upstream_usage)}</pre></details>
                 ` : ''}

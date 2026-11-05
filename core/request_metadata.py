@@ -13,8 +13,12 @@ COLUMNS = {
     'endpoint_model': 'TEXT',
     # Gemini 过滤依据：被拦的来源和原因，以及各类别评分
     'safety_details': 'TEXT',
+    # 协议转换时没能保留的内容，以及上游要求换型号的记录
+    'conversion_notes': 'TEXT', 'model_replaced': 'TEXT',
+    # Claude 缓存诊断返回的未命中原因
+    'cache_miss_reason': 'TEXT',
 }
-JSON_COLUMNS = ('timings', 'pricing_snapshot', 'safety_details')
+JSON_COLUMNS = ('timings', 'pricing_snapshot', 'safety_details', 'conversion_notes', 'model_replaced', 'cache_miss_reason')
 
 
 def migrate_metadata(connection):

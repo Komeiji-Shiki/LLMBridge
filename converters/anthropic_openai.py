@@ -30,7 +30,7 @@ from converters.gemini_anthropic_signatures import (
     gemini_parts_from_anthropic,
     gemini_segments,
 )
-from core.conversion_report import note_loss
+from core.conversion_report import note_cache_diagnostics, note_loss
 from services.error_translation import translate_anthropic_error
 from services.model_capabilities import budget_to_effort
 from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
@@ -602,6 +602,7 @@ def extract_anthropic_response_content(response_json: dict) -> tuple:
 
     返回 (content_text, reasoning_text, tool_calls_list, input_tokens, output_tokens, cached_tokens)
     """
+    note_cache_diagnostics(response_json)
     content_text = ""
     reasoning_text = ""
     tool_calls = []
@@ -760,6 +761,7 @@ def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
             if cached:
                 state["cached_tokens"] = cached
         elif etype == "message_start":
+            note_cache_diagnostics(event.get("message"))
             msg = event.get("message")
             if isinstance(msg, dict):
                 raw_usage = msg.get("usage")

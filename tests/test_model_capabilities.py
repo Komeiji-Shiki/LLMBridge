@@ -11,7 +11,8 @@ from converters.message_shape import inline_mid_system, merge_assistant_items, r
 from core.conversion_report import ConversionRejected, conversion_notes, note_loss, raise_if_strict, warnings_header_value
 from core.request_context import RequestContext, current_request
 from services.model_capabilities import (
-    budget_to_effort, drop_unsupported_sampling, gemini_route_target, limits_for, supported_effort,
+    budget_to_effort, drop_unsupported_sampling, gemini_route_target, limits_for, sanitize_anthropic_body,
+    supported_effort,
     supported_thinking_level,
 )
 
@@ -191,6 +192,17 @@ def test_strict_mode_and_warning_header(context):
     assert b'tools[0]' in warnings_header_value()
     merged = warnings_header_value(b'[{"field":"metadata","applied":false,"message":"x"}]')
     assert merged.index(b'metadata') < merged.index(b'tools[0]')
+
+
+@pytest.mark.parametrize('model, effort, expected', [
+    ('claude-sonnet-5-5', 'high', {'type': 'between_tools'}),
+    ('claude-sonnet-5-5', 'max', None),
+    ('claude-opus-5-5', 'high', None),
+    ('claude-haiku-5-5', 'high', {'type': 'disabled'}),
+])
+def test_disabled_thinking_follows_model_table(context, model, effort, expected):
+    body = sanitize_anthropic_body({'thinking': {'type': 'disabled'}, 'output_config': {'effort': effort}}, model)
+    assert body.get('thinking') == expected
 
 
 @pytest.mark.parametrize('model, target', [

@@ -757,6 +757,7 @@ class MonitoringService:
         context = current_request.get()
         stop_reason = (context.outcome.get('stop_reason') if context else None) or (cost_info or {}).get('stop_reason')
         safety_details = context.outcome.get('safety') if context else None
+        outcome = context.outcome if context else {}
         if not stop_reason and isinstance(response_message, dict):
             stop_reason = response_message.get('finish_reason') or response_message.get('stop_reason')
         
@@ -850,7 +851,11 @@ class MonitoringService:
             'upstream_usage': upstream_usage,
             'system_fingerprint': system_fingerprint,
             'stop_reason': stop_reason,
-            'safety_details': safety_details
+            'safety_details': safety_details,
+            'conversion_notes': outcome.get('conversion_notes'),
+            'model_replaced': outcome.get('model_replaced'),
+            'cache_miss_reason': outcome.get('cache_miss_reason'),
+            'client_trace': outcome.get('client_trace'),
         }
         if isinstance(_request_params, dict):
             for param_key, param_value in _request_params.items():

@@ -42,6 +42,15 @@ def raise_if_strict(endpoint_config: dict) -> None:
         raise ConversionRejected(f'端点开启了严格转换，以下内容无法转换到上游：{detail}')
 
 
+def note_cache_diagnostics(message: dict) -> None:
+    """记下 Claude 缓存诊断给出的未命中原因，排查缓存断点时不用再比对请求。"""
+    context = current_request.get()
+    diagnostics = message.get('diagnostics') if isinstance(message, dict) else None
+    reason = diagnostics.get('cache_miss_reason') if isinstance(diagnostics, dict) else None
+    if context is not None and reason:
+        context.outcome['cache_miss_reason'] = reason
+
+
 def warnings_header_value(existing: bytes = None) -> bytes:
     """合并路由自己写的告警和转换记录；没有内容时返回 None。"""
     merged = []

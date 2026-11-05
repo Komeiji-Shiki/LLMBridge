@@ -37,6 +37,7 @@ class ModelLimits:
     thinking_budget: bool = True       # 接受手动思考预算
     thinking_disable: bool = True      # 可以关闭思考
     adaptive_thinking: bool = True     # Claude 接受 thinking.type=adaptive
+    between_tools: bool = False        # Claude 用 thinking.type=between_tools 关闭前置思考
     thinking_levels: Optional[Tuple[str, ...]] = None  # Gemini 支持的 thinking_level，None 表示未知
     efforts: Optional[Tuple[str, ...]] = None          # 支持的 effort，None 表示未知
     chat_tools: str = CHAT_TOOLS_FREE
@@ -60,6 +61,7 @@ def _claude_limits(name: str) -> Optional[ModelLimits]:
         thinking_budget=version < (4, 7),
         thinking_disable=not (version == (5, 5) and family in ('opus', 'sonnet')),
         adaptive_thinking=version >= (4, 6),
+        between_tools=version == (5, 5) and family == 'sonnet',
         efforts=ANTHROPIC_EFFORTS,
     )
 
@@ -167,8 +169,12 @@ def sanitize_anthropic_body(body: dict, model_id: str) -> dict:
     thinking = body.get('thinking')
     if isinstance(thinking, dict):
         if thinking.get('type') == 'disabled' and not limits.thinking_disable:
-            del body['thinking']
-            note_loss('thinking', f'{model_id} 不能关闭思考，已保持默认')
+            # between_tools 只在 high 及以下的强度可用。
+            if limits.between_tools and (body.get('output_config') or {}).get('effort') not in ('xhigh', 'max'):
+                body['thinking'] = {'type': 'between_tools'}
+            else:
+                del body['thinking']
+                note_loss('thinking', f'{model_id} 不能关闭思考，已保持默认')
         elif thinking.get('type') == 'enabled' and not limits.thinking_budget:
             # 新模型思考强度由 effort 决定，预算只能换算成最接近的档位。
             effort = budget_to_effort(thinking.get('budget_tokens'))
