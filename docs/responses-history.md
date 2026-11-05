@@ -40,9 +40,9 @@ instructions/tools 都参与隔离。有 `X-Bridge-Session-ID` 时继续按显�
 自定义参数直接覆盖 `input` 的模型不使用自动恢复，因为实际输入不再对应
 手机的 Chat 历史。该机制不负责从请求日志补建升级前的历史。
 
-如果某个反代在相同地址和相同 API Key 下更换其内部账号，Bridge 无法从
+如果某个反代在相同地址和相同 API Key 下更换其背后的上游凭据，Bridge 无法从
 现有接口识别这种变化。此时应更换 Bridge 的端点身份或清除对应推理缓存，
-不要将旧账号状态用于新账号。
+不要将旧凭据下的状态用于新凭据。
 
 测试：`python -m pytest tests/test_responses_history.py tests/test_responses_bridge.py tests/test_gateway_execution.py -q`。
 

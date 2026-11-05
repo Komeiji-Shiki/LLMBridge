@@ -383,7 +383,7 @@ async def _complete_responses_monitoring(
     upstream_usage: Optional[Dict[str, Any]] = None,
     estimate: bool = True,
 ) -> tuple:
-    """透传请求结束的统一监控落盘：token 缺失时估算，计算费用并广播。返回记账的 (输入, 输出)。
+    """透传请求结束的统一监控落盘：token 缺失时估算，计算费用并广播。返回计入统计的 (输入, 输出)。
 
     estimate=False 用于后台任务：用量要等任务结束才有，轮询到终态时再补记。
     """

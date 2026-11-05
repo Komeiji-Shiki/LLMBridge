@@ -4,7 +4,7 @@
 多密钥轮询时也必须用回原来的密钥，对象只在创建它的项目里可见。
 只存端点身份和密钥指纹，不存密钥原文；按调用方隔离，别人拿到 id 也取不到。
 
-后台任务创建时还没有用量：记下当时已经记账的部分，轮询到终态时补记差额，
+后台任务创建时还没有用量：记下当时已经计入统计的部分，轮询到终态时补记差额，
 并用数据库认领保证同一个对象只补记一次。
 """
 import copy
@@ -41,7 +41,7 @@ def stores_object(body: Any) -> bool:
 
 def remember(owner: str, kind: str, object_id: str, alias: str, config: dict, key: str,
              billed: tuple, status: Optional[str]) -> None:
-    """记下对象属于哪条线路；billed 是这次请求已经记账的 (输入, 输出, 缓存)。"""
+    """记下对象属于哪条线路；billed 是这次请求已经计入统计的 (输入, 输出, 缓存)。"""
     if not owner or not object_id:
         return
     payload = {'model': alias, 'endpoint': endpoint_identity(config), 'credential': credential_identity(key),

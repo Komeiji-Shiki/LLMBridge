@@ -684,7 +684,7 @@ async def handle_gemini_native_direct(
                     upstream_usage = converter.usage
 
                 def account_failure(metadata):
-                    """续传中途失败时，已经完成的各跳仍然要记账。"""
+                    """续传中途失败时，已经完成的各跳用量仍然计入统计。"""
                     nonlocal input_tokens, output_tokens, cached_tokens, upstream_usage
                     if isinstance(metadata, dict) and metadata:
                         input_tokens = int(metadata.get("promptTokenCount") or 0)

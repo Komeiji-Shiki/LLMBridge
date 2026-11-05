@@ -861,7 +861,7 @@ function showAddCustomTokenizerDialog() {
                         <li>首次添加HuggingFace分词器时会下载模型文件</li>
                         <li>某些模型可能需要较长时间下载</li>
                         <li>需要安装 <code>transformers</code> 库</li>
-                        <li>部分模型需要登录HuggingFace账号</li>
+                        <li>部分模型需要先登录 HuggingFace</li>
                     </ul>
                 </div>
                 

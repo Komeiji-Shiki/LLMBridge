@@ -65,7 +65,7 @@ def estimate_current_prices(path, model_config, start=None, end=None):
     items = {}
     for row in rows:
         row = dict(row)
-        # 旧账单不回写；有原始 usage 的旧记录可以在只读对比中恢复写入量。
+        # 旧记录的费用不回写；有原始 usage 的旧记录可以在只读对比中恢复写入量。
         if not row['cache_write_tokens'] and row['upstream_usage']:
             try:
                 row['cache_write_tokens'], row['cache_write_1h_tokens'] = cache_write_usage(json.loads(row['upstream_usage']))

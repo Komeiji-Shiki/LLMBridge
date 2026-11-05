@@ -154,7 +154,7 @@ def test_background_usage_is_recorded_once_when_the_result_arrives(gateway, upst
                created(upstream, 'bg_1', 'completed', USAGE[upstream]), created(upstream, 'bg_1', 'completed', USAGE[upstream])]
     run(gateway, upstream, replies, calls, pricing={'input': 1, 'output': 1, 'currency': 'USD'})
     ends = _ends(monitor)
-    # 创建时还没有用量，不能按估算记账；结果到达时补记一次，再轮询也不重复
+    # 创建时还没有用量，不能按估算值统计；结果到达时补记一次，再轮询也不重复
     assert ends[0]['input_tokens'] == 0 and ends[0]['output_tokens'] == 0
     assert len(ends) == 2
     assert (ends[1]['input_tokens'], ends[1]['output_tokens']) == (300, 50)

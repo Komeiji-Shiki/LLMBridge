@@ -122,7 +122,7 @@ HTTP 路由（认证、参数、响应状态）
 具体拆分：
 
 - `admin_routes.py` 拆为 models/config/stats/tokenizers/key_diagnostics 路由，但配置写入仍由同一个 repository 负责，不能每个模块重新造锁。
-- `direct_api_service.py` 提取 Gemini 请求构造与响应转换。网络传输不再知道前端展示名、账单显示策略或 tokenizer。
+- `direct_api_service.py` 提取 Gemini 请求构造与响应转换。网络传输不再知道前端展示名、费用显示策略或 tokenizer。
 - `api_routes.py` 的 Anthropic 原生链路与 `_direct_api_anthropic.py` 共享策略应用；保留原生透传和跨协议转换的差异，不用一个万能字典掩盖协议语义。
 - `monitoring.py` 分成 request_tracker、log_writer、statistics_reader，显式传递不可变完成记录，避免运行状态和历史数据在多个线程间互相修改。
 - `gemini_interactions.py` 拆成请求转换、事件累积、GenerateContent 适配。以同一个复杂工具往返 fixture 验证三个边界。
@@ -149,11 +149,11 @@ HTTP 路由（认证、参数、响应状态）
 
 ## 7. 供应商兼容性矩阵
 
-“原生透传可携带”指当前路由能够转发该协议请求，不意味着本网关实现了供应商资源管理，也不意味着所有模型都支持该功能。模型名、区域、账户能力和价格应由供应商当前文档/实际账户决定，不能根据名称猜测。
+“原生透传可携带”指当前路由能够转发该协议请求，不意味着本网关实现了供应商资源管理，也不意味着所有模型都支持该功能。模型名、区域、Key 的可用能力和价格应由供应商当前文档/实际 Key 决定，不能根据名称猜测。
 
 | 供应商 | 当前可用路径 | 本次补齐 / 主要缺口 | 添加方式 |
 |---|---|---|---|
-| OpenAI | Chat 兼容、Responses 原生；Responses 到 Chat 的无状态转换 | 原生可携带内置工具与 reasoning items；缺 response 查询/取消/删除/input_items、Conversations、Files、Batch、Embeddings、Audio、Images、Realtime 专用路由 | 原生工具优先走 responses_native；持久资源必须绑定调用方和实际上游 Key；新增路由不能把请求随意轮询到另一账号。[Responses 参考](https://developers.openai.com/api/reference/cli/resources/responses/methods/create) |
+| OpenAI | Chat 兼容、Responses 原生；Responses 到 Chat 的无状态转换 | 原生可携带内置工具与 reasoning items；缺 response 查询/取消/删除/input_items、Conversations、Files、Batch、Embeddings、Audio、Images、Realtime 专用路由 | 原生工具优先走 responses_native；持久资源必须绑定调用方和实际上游 Key；新增路由不能把请求随意轮询到另一把 Key。[Responses 参考](https://developers.openai.com/api/reference/cli/resources/responses/methods/create) |
 | Anthropic | `/v1/messages` 原生及 Chat 双向转换 | 本次增加结构化输出、strict、并行工具控制，并防止 thinking 设置删除格式；仍缺 count_tokens、Files、Message Batches 及服务端工具的跨协议映射 | 原生请求保留内容块和签名；非 function 的 server tools 不应降级为普通函数。扩展 count_tokens 最适合作为下一项小功能。[结构化输出](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)、[思考控制](https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost) |
 | Google Gemini | GenerateContent 原生、Chat 转换、配置选择 Interactions | 本次修复签名和工具分块，补结构化输出/stop；缺 Interactions 资源生命周期、Files、显式缓存、Live API 与完整音视频/图片输出桥接 | 文本工具调用保留 Part 签名；原生多模态不要压成文本。区分 GenerateContent 和 Interactions 字段。[GenerateContent](https://ai.google.dev/api/generate-content)、[签名规则](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures) |
 | DeepSeek | Chat 兼容；按上游协议配置 Responses/Anthropic | 参数大多已可通过透传发送；带 tools 时历史 reasoning_content 必须完整回传，现有清理/兼容策略需要特别检查 | 使用 provider profile 标记思考历史要求；保留原始 assistant 消息，不按“上一轮已结束”清掉 reasoning。温度等在思考模式下可能不起作用，应由能力说明告知。[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode/) |
@@ -219,7 +219,7 @@ if tool_call.get("_thought_signature"):
 
 1. **能力查询 / count_tokens**：先增加受认证的能力查询，只输出协议与已验证功能；再实现 Anthropic 原生 token 计数，复用消息转换但不要发送生成请求。模型原生 usage 与本地估算分别标注。
 2. **Embeddings**：增加专用路由，认证/白名单复用现有入口，input 原样转发，单独解析 usage.prompt_tokens，不伪造 choices 和 output_tokens；统计写入要贯穿数据库查询和导出。
-3. **Responses / Interactions 生命周期**：先建立下面的资源归属表，然后增加 GET/DELETE/cancel/input_items。选择上游 Key 后立即绑定，后续操作必须使用同一账号；不要根据客户端提供的 model 或 resource ID 重新轮询。
+3. **Responses / Interactions 生命周期**：先建立下面的资源归属表，然后增加 GET/DELETE/cancel/input_items。选择上游 Key 后立即绑定，后续操作必须使用同一把 Key；不要根据客户端提供的 model 或 resource ID 重新轮询。
 4. **Files / Batch / 显式缓存**：使用相同资源绑定模式，另加 multipart/二进制传输和大小限制。同步返回创建成功不等于后台任务完成。
 5. **Audio / Images / OCR**：每种独立路由、错误映射和计费结构，支持二进制、URL、base64 的真实返回类型。
 6. **Realtime / Live**：双向 WebSocket 代理，需要双向背压、关闭传播、会话限额、临时凭证与专门测试，不应包装成 SSE。
@@ -263,7 +263,7 @@ async def retrieve_response(gateway_id, principal, resource_store,
         return upstream.status, payload
 ```
 
-还需补充资源 ID 对外映射、账号撤销/轮换行为、过期清理、跨重启恢复和审计。它们决定能否安全上线，不能用一个只转发 URL 的通配路由代替。
+还需补充资源 ID 对外映射、Key 撤销/轮换行为、过期清理、跨重启恢复和审计。它们决定能否安全上线，不能用一个只转发 URL 的通配路由代替。
 
 ## 8. 新增实用功能与 LLM 工具
 
