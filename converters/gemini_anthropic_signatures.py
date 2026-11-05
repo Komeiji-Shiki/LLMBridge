@@ -7,6 +7,8 @@ Anthropic 客户端（Claude Code 等）会原样保存并回传 thinking 块的
 """
 from typing import Any, Dict, List, Optional, Tuple
 
+from converters.media import gemini_code_text
+
 PREFIX = "gemini.v1."
 THOUGHT, TEXT, CALL = "thought", "text", "call"
 
@@ -82,7 +84,10 @@ def gemini_segments(delta: Dict[str, Any]) -> Optional[List[Tuple[str, Any]]]:
         if not isinstance(part, dict):
             continue
         signature = part.get("thoughtSignature")
-        if "functionCall" in part:
+        code_text = gemini_code_text(part)
+        if code_text:
+            segments.append(("text", code_text))
+        elif "functionCall" in part:
             if signature:
                 segments.append(("signature", encode_signature(CALL, signature)))
             segments.append(("tool_calls", [next(calls)]))

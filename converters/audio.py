@@ -3,6 +3,8 @@ import mimetypes
 import re
 from typing import Any, Dict, Iterable, Iterator, Optional
 
+from converters.media import extract_file
+
 
 _AUDIO_ENVELOPE = re.compile(
     # 封装必须独占一行，避免把源码字符串里的标签当成音频；兼容 Read 的行号前缀。
@@ -98,8 +100,11 @@ def split_audio_text(text: str):
     return parts
 
 
-def separate_tool_audio(messages: Iterable[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
-    """先补齐一批工具结果，再把音频作为用户内容提交，避免非法 function_result。"""
+def separate_tool_audio(messages: Iterable[Dict[str, Any]], include_files: bool = False) -> Iterator[Dict[str, Any]]:
+    """先补齐一批工具结果，再把音频作为用户内容提交，避免非法 function_result。
+
+    include_files 同时移出文件：旧模型的函数结果只接受图片。
+    """
     pending_audio = []
     for message in messages:
         if message.get("role") != "tool":
@@ -117,6 +122,11 @@ def separate_tool_audio(messages: Iterable[Dict[str, Any]]) -> Iterator[Dict[str
             if extract_audio(block):
                 pending_audio.extend([
                     {"type": "text", "text": f"以下音频来自工具调用 {message.get('tool_call_id', '')}："},
+                    block,
+                ])
+            elif include_files and extract_file(block):
+                pending_audio.extend([
+                    {"type": "text", "text": f"以下文件来自工具调用 {message.get('tool_call_id', '')}："},
                     block,
                 ])
             else:

@@ -524,6 +524,7 @@ class GeminiGcInteractionsTests(unittest.TestCase):
 
 class _FakeInteractionsResponse:
     status = 200
+    headers = {}
 
     async def __aenter__(self):
         return self

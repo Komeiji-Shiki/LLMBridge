@@ -9,9 +9,12 @@
 import base64
 import binascii
 import mimetypes
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from core.conversion_report import note_loss
 
 FILE_PART_TYPES = ('file', 'input_file', 'document')
+_PROVIDERS_WITHOUT_FILES = ('deepseek',)
 _DEFAULT_EXTENSIONS = {'application/pdf': '.pdf', 'text/plain': '.txt', 'text/markdown': '.md', 'text/csv': '.csv'}
 _TEXT_MIME_TYPES = ('application/json', 'application/xml', 'application/javascript', 'application/x-yaml')
 
@@ -172,6 +175,72 @@ def file_to_gemini(part: Any) -> Optional[Dict[str, Any]]:
     if 'data' in found:
         return {'inlineData': {'mimeType': found['mime_type'], 'data': found['data']}}
     return {'fileData': {'mimeType': found['mime_type'], 'fileUri': found['uri']}}
+
+
+def adapt_chat_files(messages: list, provider: str) -> list:
+    """Chat 上游的文件兼容处理，不修改传入的消息。
+
+    文本类文件解码成文字，所有上游都能读，也不占文件额度；OpenAI 系之外不一定收 file 块，
+    已知不收的官方上游换成占位文字。工具结果只接受文字，文件要放到紧随其后的 user 消息里。
+    """
+    result: List[Dict[str, Any]] = []
+    pending: List[Dict[str, Any]] = []
+
+    def flush():
+        nonlocal pending
+        if pending:
+            result.append({"role": "user", "content": pending})
+            pending = []
+
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list) or not any(
+                isinstance(part, dict) and part.get("type") in FILE_PART_TYPES for part in content):
+            if not (isinstance(message, dict) and message.get("role") == "tool"):
+                flush()
+            result.append(message)
+            continue
+        kept = []
+        for part in content:
+            found = extract_file(part)
+            if found is None:
+                kept.append(part)
+                continue
+            text = file_text(found)
+            if text is not None:
+                converted = {"type": "text", "text": f"{found['filename']}\n{text}" if found.get("filename") else text}
+            elif provider in _PROVIDERS_WITHOUT_FILES:
+                note_loss("content.file", f"{provider} 不接受文件内容块，已用文字占位")
+                converted = {"type": "text", "text": f"[文件 {found.get('filename', '')} 未发送：当前上游不支持]"}
+            else:
+                converted = file_part(found)
+            if message.get("role") == "tool" and converted["type"] == "file":
+                pending.append(converted)
+            else:
+                kept.append(converted)
+        if message.get("role") != "tool":
+            flush()
+        result.append({**message, "content": kept or ""})
+    flush()
+    return result
+
+
+def gemini_code_text(part: Any) -> Optional[str]:
+    """Gemini 代码执行的代码和结果转成 Markdown，其他 part 返回 None。
+
+    显示给 Chat 客户端和计算历史指纹必须用同一份文本，否则客户端回传后对不上。
+    """
+    if not isinstance(part, dict):
+        return None
+    code = part.get("executableCode")
+    if isinstance(code, dict):
+        language = str(code.get("language") or "").lower()
+        language = "" if language == "language_unspecified" else language
+        return f"\n```{language}\n{code.get('code', '')}\n```\n"
+    result = part.get("codeExecutionResult")
+    if isinstance(result, dict):
+        return f"\n```\n{result.get('output', '')}\n```\n"
+    return None
 
 
 def file_to_interactions(part: Any) -> Optional[Dict[str, Any]]:

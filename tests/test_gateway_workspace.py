@@ -98,7 +98,7 @@ def test_responses_native_tools_reasoning_and_citations_round_trip():
     assert 'store' not in native and request == original
     builder = _ChatStreamBuilder('demo')
     assert b'reasoning_content' in builder.process({'type': 'response.reasoning_text.delta', 'delta': 'Thought'})[0]
-    assert b'provider_event' in builder.process({'type': 'response.web_search_call.searching'})[0]
+    assert builder.process({'type': 'response.web_search_call.searching'}) == []
 
 
 @pytest.mark.parametrize('stream', [False, True])

@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 
+from converters.media import gemini_code_text
 from core.conversation_store import conversation_store
 from core.request_context import endpoint_identity
 
@@ -97,6 +98,10 @@ def normalize_turn(item):
                    if key not in ('thoughtSignature', 'thought')}
         if not content:
             continue
+        # Chat 客户端看到的是代码块文本，回传的也是文本，按同一份内容比较才对得上。
+        code_text = gemini_code_text(content)
+        if code_text is not None:
+            content = {'text': code_text}
         if _text_part(content):
             text = _normalize_text(content['text'])
             if not text:

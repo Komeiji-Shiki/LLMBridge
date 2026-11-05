@@ -1,5 +1,6 @@
 """模型限制表、消息形状和文件内容块的基础行为。"""
 import base64
+from datetime import date
 
 import pytest
 
@@ -10,7 +11,8 @@ from converters.message_shape import inline_mid_system, merge_assistant_items, r
 from core.conversion_report import ConversionRejected, conversion_notes, note_loss, raise_if_strict, warnings_header_value
 from core.request_context import RequestContext, current_request
 from services.model_capabilities import (
-    budget_to_effort, drop_unsupported_sampling, limits_for, supported_effort, supported_thinking_level,
+    budget_to_effort, drop_unsupported_sampling, gemini_route_target, limits_for, supported_effort,
+    supported_thinking_level,
 )
 
 
@@ -189,3 +191,33 @@ def test_strict_mode_and_warning_header(context):
     assert b'tools[0]' in warnings_header_value()
     merged = warnings_header_value(b'[{"field":"metadata","applied":false,"message":"x"}]')
     assert merged.index(b'metadata') < merged.index(b'tools[0]')
+
+
+@pytest.mark.parametrize('model, target', [
+    ('gemini-2.5-pro', 'gemini-3.8-flash'),
+    ('gemini-2.5-flash', 'gemini-3.5-flash-lite'),
+    ('gemini-2.5-flash-lite', None),
+    ('gemini-2.5-flash-image', None),
+    ('gemini-3.8-flash', None),
+])
+def test_gemini_25_route_targets_follow_changelog(model, target):
+    assert gemini_route_target(model) == target
+
+
+def test_gemini_25_limits_switch_on_the_routing_date(monkeypatch):
+    class Before(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 11, 30)
+
+    class After(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 12, 1)
+
+    monkeypatch.setattr('services.model_capabilities.date', Before)
+    assert limits_for('gemini-2.5-pro').thinking_budget and limits_for('gemini-2.5-pro').prefill
+    monkeypatch.setattr('services.model_capabilities.date', After)
+    routed = limits_for('gemini-2.5-pro')
+    assert not routed.thinking_budget and not routed.prefill and not routed.sampling
+    assert routed.thinking_levels == ('low', 'medium', 'high')

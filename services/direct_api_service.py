@@ -10,9 +10,10 @@ Direct API 调用服务
 
 import asyncio
 import aiohttp
+from email.utils import parsedate_to_datetime
 import json
 import logging
-import mimetypes
+import math
 import re
 import time
 import uuid
@@ -28,8 +29,12 @@ from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
 from core.constants import GeminiDefaults, TimeoutDefaults
-from converters.audio import extract_audio, separate_tool_audio
+from converters.gemini_generate import GeminiRequestError, build_gemini_contents
 from converters.gemini_interactions import build_interactions_request_body
+from converters.media import gemini_code_text
+from services.model_capabilities import limits_for
+from services.provider_capabilities import provider_name
+from utils.upstream_fields import omit_configured_fields
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage, rough_token_count
 
 logger = logging.getLogger(__name__)
@@ -77,6 +82,7 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
     - {"error": "some string"}            → 包装为 {"error": {"message": "...", ...}}
     - {"message": "...", "code": ...}    → 包装
     """
+    _remember_retry_delay(error_json)
     if not isinstance(error_json, dict):
         return {
             "error": {
@@ -133,6 +139,56 @@ def _upstream_timeout() -> aiohttp.ClientTimeout:
         total=CONFIG.get("api_call_timeout_seconds", TimeoutDefaults.API_CALL_TIMEOUT),
         sock_read=CONFIG.get("stream_response_timeout_seconds", TimeoutDefaults.STREAM_RESPONSE_TIMEOUT),
         sock_connect=CONFIG.get("download_timeout", {}).get("connect", TimeoutDefaults.DOWNLOAD_CONNECT_TIMEOUT))
+
+
+_FORWARDED_RESPONSE_HEADERS = ('retry-after', 'x-should-retry')
+_FORWARDED_RESPONSE_PREFIXES = ('anthropic-ratelimit-', 'x-ratelimit-')
+
+
+def _retry_after_seconds(value: str) -> Optional[str]:
+    """客户端要整数秒：上游可能给小数或 HTTP 日期。"""
+    try:
+        return str(max(0, math.ceil(float(value))))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return str(max(0, math.ceil(when.timestamp() - time.time())))
+
+
+def _remember_response_headers(response) -> None:
+    """保存上游的限流和重试提示，由中间件转给客户端。每次尝试覆盖，重试成功后不留旧值。"""
+    context = current_request.get()
+    if context is None:
+        return
+    captured = {}
+    for name, value in response.headers.items():
+        lower = name.lower()
+        if lower in _FORWARDED_RESPONSE_HEADERS or lower.startswith(_FORWARDED_RESPONSE_PREFIXES):
+            captured[lower] = value
+    if 'retry-after' in captured:
+        seconds = _retry_after_seconds(captured.pop('retry-after'))
+        if seconds is not None:
+            captured['retry-after'] = seconds
+    context.upstream_response_headers = captured
+
+
+def _remember_retry_delay(error_json: Any) -> None:
+    """Gemini 把重试等待写在错误正文的 RetryInfo 里，转成客户端认识的响应头。"""
+    context = current_request.get()
+    error = error_json.get('error') if isinstance(error_json, dict) else None
+    details = error.get('details') if isinstance(error, dict) else None
+    if context is None or not isinstance(details, list):
+        return
+    for detail in details:
+        delay = detail.get('retryDelay') if isinstance(detail, dict) else None
+        if isinstance(delay, str) and delay.endswith('s'):
+            seconds = _retry_after_seconds(delay[:-1])
+            if seconds is not None:
+                context.upstream_response_headers.setdefault('retry-after', seconds)
+            return
 
 
 def _assign_function_call_ids(value: Any) -> None:
@@ -274,7 +330,15 @@ class DirectAPIService:
                 return {"functionCallingConfig": {"mode": "ANY"}}
             elif choice_type == "none":
                 return {"functionCallingConfig": {"mode": "NONE"}}
-        
+            elif choice_type == "allowed_tools":
+                allowed = tool_choice.get("allowed_tools") or {}
+                names = [(item.get("function") or {}).get("name") or item.get("name")
+                         for item in allowed.get("tools") or [] if isinstance(item, dict)]
+                config = {"mode": "ANY" if allowed.get("mode") == "required" else "AUTO"}
+                if config["mode"] == "ANY" and names:
+                    config["allowed_function_names"] = names
+                return {"functionCallingConfig": config}
+
         return {"functionCallingConfig": {"mode": "AUTO"}}
     
     @staticmethod
@@ -444,6 +508,7 @@ class DirectAPIService:
                 headers=headers,
                 timeout=_upstream_timeout()
             ) as response:
+                _remember_response_headers(response)
                 # 检查响应状态
                 if response.status != 200:
                     error_text = await response.text()
@@ -623,6 +688,7 @@ class DirectAPIService:
         response_format: Optional[Dict[str, Any]] = None,
         stop_sequences: Optional[List[str]] = None,
         api_key_auth_mode: Optional[str] = None,
+        generation_extras: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         调用Gemini原生API（非OpenAI兼容格式）
@@ -671,259 +737,13 @@ class DirectAPIService:
         endpoint = f"{configured_base}/models/{model}:{method}{sse_param}"
         
         # 转换OpenAI格式消息为Gemini格式
-        gemini_contents = []
-        system_instruction_parts = []
-        # tool_call id → 函数名映射（assistant 消息先于对应 tool 结果出现，单遍遍历即可建立）
-        tool_id_to_name: Dict[str, str] = {}
-        
-        for msg in separate_tool_audio(messages):
-            role = msg.get("role")
-            content = msg.get("content", "")
-            
-            # 处理 tool 角色消息（工具调用结果）
-            if role == "tool":
-                tool_call_id = msg.get("tool_call_id", "")
-                image_parts = []
-                
-                # functionResponse 必须带上与 functionCall 一致的函数名，id 里推不出来
-                func_name = tool_id_to_name.get(tool_call_id)
-                if not func_name:
-                    yield {"error": {
-                        "message": f"tool message references tool_call_id '{tool_call_id}' "
-                                   "which has no matching assistant tool_call",
-                        "type": "invalid_request_error"
-                    }}
-                    return
+        try:
+            gemini_contents, system_instruction_parts = await build_gemini_contents(
+                messages, self.session, limits_for(model).function_response_media)
+        except GeminiRequestError as exc:
+            yield {"error": {"message": str(exc), "type": "invalid_request_error"}}
+            return
 
-                # content 可能是 str / dict / list（OpenAI 允许 content parts 数组）
-                if isinstance(content, dict):
-                    response_payload = content
-                elif isinstance(content, list):
-                    # 文本写入 response，图片按 Gemini 协议嵌套在同一次调用的 parts 中。
-                    text_parts = []
-                    for item in content:
-                        if isinstance(item, dict):
-                            if item.get("type") in ("text", "input_text", "output_text") and item.get("text"):
-                                text_parts.append(item["text"])
-                            elif item.get("type") in ("image_url", "input_image"):
-                                image = item.get("image_url") or item.get("url") or ""
-                                url = image.get("url", "") if isinstance(image, dict) else image
-                                if url.startswith("data:"):
-                                    header, image_data = url.split(",", 1)
-                                    mime_type = header[5:].split(";", 1)[0]
-                                else:
-                                    # FunctionResponsePart 仅接受 inlineData，远程图片需先下载。
-                                    async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as image_response:
-                                        image_response.raise_for_status()
-                                        image_data = base64.b64encode(await image_response.read()).decode("ascii")
-                                        mime_type = image_response.headers.get("Content-Type", "").split(";", 1)[0]
-                                    if not mime_type.startswith("image/"):
-                                        mime_type = mimetypes.guess_type(url.split("?", 1)[0])[0] or "image/jpeg"
-                                image_parts.append({"inlineData": {"mimeType": mime_type, "data": image_data}})
-                        elif isinstance(item, str):
-                            text_parts.append(item)
-                    response_payload = {"content": "".join(text_parts)}
-                else:
-                    response_payload = {"content": content if isinstance(content, str) else str(content)}
-                
-                function_response_part = {
-                    "functionResponse": {
-                        "name": func_name,
-                        "response": response_payload
-                    }
-                }
-                # Gemini 3 系列要求携带 id 关联调用；为空时不携带，兼容旧版 API
-                if tool_call_id:
-                    function_response_part["functionResponse"]["id"] = tool_call_id
-                if image_parts:
-                    function_response_part["functionResponse"]["parts"] = image_parts
-
-                # 并行调用的结果必须同在一轮（数量与上一轮 functionCall 一致）
-                previous = gemini_contents[-1] if gemini_contents else None
-                if (previous and previous["role"] == "user"
-                        and all("functionResponse" in part for part in previous["parts"])):
-                    previous["parts"].append(function_response_part)
-                else:
-                    gemini_contents.append({
-                        "role": "user",  # Gemini 的工具结果使用 user 角色
-                        "parts": [function_response_part]
-                    })
-                continue
-            
-            if role == "system":
-                # 处理系统消息，确保提取纯文本
-                text_content = ""
-                if isinstance(content, str):
-                    text_content = content
-                elif isinstance(content, list):
-                    # 如果是列表（多模态格式），提取所有文本部分
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            text_content += item.get("text", "")
-                        elif isinstance(item, str):
-                            text_content += item
-                        else:
-                            # Gemini systemInstruction 仅支持文本，非文本块无法表达
-                            logger.debug("[GEMINI_NATIVE] systemInstruction 仅支持文本，已忽略非文本块")
-                
-                if text_content:
-                    system_instruction_parts.append({"text": text_content})
-            elif role == "user":
-                # 处理用户消息，支持多模态内容
-                parts = []
-                
-                # 检查content是否为列表（多模态格式）
-                if isinstance(content, list):
-                    for item in content:
-                        # content parts 允许裸字符串项
-                        if isinstance(item, str):
-                            if item:
-                                parts.append({"text": item})
-                            continue
-                        if not isinstance(item, dict):
-                            continue
-                        item_type = item.get("type")
-                        
-                        if item_type == "text":
-                            # 文本内容
-                            text = item.get("text", "")
-                            if text:
-                                parts.append({"text": text})
-                        
-                        elif item_type == "image_url":
-                            # 图片内容
-                            image_url_data = item.get("image_url", {})
-                            url = image_url_data.get("url", "")
-                            
-                            if url.startswith("data:"):
-                                # Base64格式图片
-                                try:
-                                    # 提取MIME类型和base64数据
-                                    header, base64_data = url.split(",", 1)
-                                    mime_type = header.split(";")[0].split(":")[1]
-                                    
-                                    parts.append({
-                                        "inline_data": {
-                                            "mime_type": mime_type,
-                                            "data": base64_data
-                                        }
-                                    })
-                                    logger.debug(f"[GEMINI_NATIVE] 添加base64图片: {mime_type}")
-                                except Exception as e:
-                                    logger.warning(f"[GEMINI_NATIVE] 解析base64图片失败: {e}")
-                            
-                            elif url.startswith("http://") or url.startswith("https://"):
-                                # HTTP URL格式图片
-                                # 🔧 按 URL 扩展名推断 MIME（旧版硬编码 image/jpeg，
-                                # PNG/WebP 图片会 mime 不匹配被上游拒收/误解析）
-                                guessed_mime, _ = mimetypes.guess_type(url.split("?", 1)[0])
-                                image_mime = guessed_mime if (guessed_mime or "").startswith("image/") else "image/jpeg"
-                                parts.append({
-                                    "fileData": {
-                                        "mimeType": image_mime,
-                                        "fileUri": url
-                                    }
-                                })
-                                logger.debug(f"[GEMINI_NATIVE] 添加URL图片: {url[:50]}... ({image_mime})")
-                        
-                        elif item_type in ("audio", "input_audio", "audio_url", "document"):
-                            audio = extract_audio(item)
-                            if audio and "data" in audio:
-                                parts.append({"inlineData": {
-                                    "mimeType": audio["mime_type"], "data": audio["data"],
-                                }})
-                            elif audio:
-                                parts.append({"fileData": {
-                                    "mimeType": audio["mime_type"], "fileUri": audio["uri"],
-                                }})
-
-                        else:
-                            # 未知类型块：能提取文本则保留，否则记录警告后丢弃
-                            # （旧版静默丢弃，排查无从下手）
-                            fallback_text = item.get("text")
-                            if isinstance(fallback_text, str) and fallback_text:
-                                parts.append({"text": fallback_text})
-                            else:
-                                logger.warning(f"[GEMINI_NATIVE] 跳过不支持的内容块类型: {item_type}")
-                
-                elif isinstance(content, str):
-                    # 纯文本格式
-                    if content:
-                        parts.append({"text": content})
-                
-                # 如果没有任何内容，添加空文本（避免空parts）
-                if not parts:
-                    parts.append({"text": " "})
-                
-                gemini_contents.append({
-                    "role": "user",
-                    "parts": parts
-                })
-            
-            elif role == "assistant":
-                # 处理助手消息
-                parts = []
-                metadata = msg.get('provider_metadata')
-                native_parts = metadata.get('gemini_parts') if isinstance(metadata, dict) else None
-                if isinstance(native_parts, list):
-                    gemini_contents.append({'role': 'model', 'parts': copy.deepcopy(native_parts)})
-                    for part in native_parts:
-                        call = part.get('functionCall') if isinstance(part, dict) else None
-                        if isinstance(call, dict) and call.get('id'):
-                            tool_id_to_name[call['id']] = call.get('name', '')
-                    continue
-                
-                if isinstance(content, str) and content:
-                    parts.append({"text": content})
-                elif isinstance(content, list):
-                    # 多模态列表：提取文本部分（旧版直接丢弃）
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
-                            parts.append({"text": item["text"]})
-                
-                # 🔧 tool_calls 历史 → functionCall parts
-                # （旧版完全不转换，多轮工具调用时 Gemini 看不到自己
-                # 之前调过什么工具，上下文丢失）
-                tool_calls = msg.get("tool_calls")
-                if isinstance(tool_calls, list):
-                    for tc in tool_calls:
-                        if not isinstance(tc, dict):
-                            continue
-                        func = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
-                        fc_name = func.get("name", "")
-                        args_raw = func.get("arguments", "{}")
-                        try:
-                            fc_args = (json.loads(args_raw) if args_raw.strip() else {}) if isinstance(args_raw, str) else args_raw
-                        except json.JSONDecodeError:
-                            fc_args = None
-                        if not isinstance(fc_args, dict):
-                            # 客户端回传的历史参数不是 JSON 对象（常见于上一轮被 max_tokens 截断），
-                            # Gemini 只接受对象，只能按空参数发送
-                            logger.warning(f"[GEMINI_NATIVE] 历史工具调用 '{fc_name}' 的 arguments 不是 JSON 对象，按空参数发送")
-                            fc_args = {}
-                        function_call: Dict[str, Any] = {
-                            "name": fc_name,
-                            "args": fc_args
-                        }
-                        tc_id = tc.get("id")
-                        if tc_id:
-                            function_call["id"] = tc_id
-                            if fc_name:
-                                tool_id_to_name[tc_id] = fc_name
-                        function_part = {"functionCall": function_call}
-                        signature = tc.get("_thought_signature")
-                        if signature:
-                            function_part["thoughtSignature"] = signature
-                        parts.append(function_part)
-                
-                if not parts:
-                    parts.append({"text": " "})
-                
-                gemini_contents.append({
-                    "role": "model",  # Gemini使用"model"而不是"assistant"
-                    "parts": parts
-                })
-        
         # 构建请求体
         request_body: Dict[str, Any] = {
             "contents": gemini_contents
@@ -971,10 +791,17 @@ class DirectAPIService:
                 schema = (response_format.get("json_schema") or {}).get("schema")
                 if isinstance(schema, dict):
                     generation_config["responseJsonSchema"] = schema
-        
+        generation_config.update(generation_extras or {})
+
         if generation_config:
             request_body["generationConfig"] = generation_config
-        
+
+        # 2026-10-26 起新建的付费项目默认保存请求。官方地址下默认不保存，需要时用自定义参数打开；
+        # 中转可能不认识这个字段，不主动发。
+        request_context = current_request.get()
+        if request_context and provider_name(request_context.endpoint) == 'gemini':
+            request_body["store"] = False
+
         # 合并额外的 Gemini 原生请求体字段（如 custom_params/extra_body_params）。
         # 🔧 安全性：以显式 extra_body 参数传入，避免配置键与命名形参碰撞导致 TypeError 500
         if extra_body:
@@ -998,6 +825,7 @@ class DirectAPIService:
             history = assembler = None
             if context:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'gemini')
+                omit_configured_fields(request_body, context.endpoint)
                 # 客户端回传的签名优先（已带签名的轮次不会被覆盖），缺失时按服务端历史补回
                 history = GeminiThoughtHistory(context, context.endpoint, request_body)
                 assembler = GeminiTurnAssembler()
@@ -1032,6 +860,7 @@ class DirectAPIService:
                     headers=headers,
                     timeout=_upstream_timeout()
                 ) as response:
+                    _remember_response_headers(response)
                     # 检查响应状态
                     if response.status != 200:
                         error_text = await response.text()
@@ -1224,6 +1053,7 @@ class DirectAPIService:
                 headers=headers,
                 timeout=_upstream_timeout()
             ) as response:
+                _remember_response_headers(response)
                 if response.status != 200:
                     error_text = await response.text()
                     logger.error(f"[GEMINI_INTERACTIONS] API调用失败: {response.status} - {error_text}")
@@ -1286,21 +1116,26 @@ class DirectAPIService:
         is_stream_chunk: bool = False,
         completion_tokens_mode: str = MODE_MERGE,
         tool_call_indices: Optional[Dict[str, int]] = None,
+        seen_sources: Optional[set] = None,
     ) -> Dict[str, Any]:
         """
         将Gemini原生响应转换为OpenAI格式（支持工具调用转换）
+
+        seen_sources：流式请求里已经发过的来源网址，分块的 groundingMetadata 是累积的。
         """
         # 检查错误
         if "error" in gemini_response:
             return gemini_response
-        
+
         # 提取内容
         content = ""
         reasoning_content = ""
         finish_reason = None
         usage = {}
         tool_calls = None  # 工具调用列表
-        
+        images = []
+        annotations = []
+
         if "candidates" in gemini_response and len(gemini_response["candidates"]) > 0:
             candidate = gemini_response["candidates"][0]
             
@@ -1332,11 +1167,28 @@ class DirectAPIService:
                             reasoning_content += text
                         else:
                             content += text
-            
+                    elif gemini_code_text(part):
+                        content += gemini_code_text(part)
+                    elif isinstance(part.get("inlineData"), dict) and not part.get("thought"):
+                        inline = part["inlineData"]
+                        if str(inline.get("mimeType", "")).startswith("image/") and inline.get("data"):
+                            images.append({"type": "image_url", "image_url": {
+                                "url": f"data:{inline['mimeType']};base64,{inline['data']}"}})
+
+            # 联网搜索的来源：Chat 的 annotations 没有正文位置也能表达出处
+            seen = seen_sources if seen_sources is not None else set()
+            grounding = candidate.get("groundingMetadata")
+            for chunk in (grounding.get("groundingChunks") or []) if isinstance(grounding, dict) else []:
+                web = chunk.get("web") if isinstance(chunk, dict) else None
+                if isinstance(web, dict) and web.get("uri") and web["uri"] not in seen:
+                    seen.add(web["uri"])
+                    annotations.append({"type": "url_citation", "url_citation": {
+                        "url": web["uri"], "title": web.get("title") or web["uri"]}})
+
             # 提取finish_reason
             if "finishReason" in candidate:
                 finish_reason = gemini_finish_to_openai(candidate["finishReason"])
-        
+
         # 提取usage信息
         if "usageMetadata" in gemini_response:
             metadata = gemini_response["usageMetadata"]
@@ -1352,7 +1204,8 @@ class DirectAPIService:
                 # 是增量，按增量估算会严重低估
                 thoughts_tokens = rough_token_count(reasoning_content)
             
-            prompt_tokens = metadata.get("promptTokenCount", 0)
+            # 联网和代码执行的工具提示按输入计费，但不算在 promptTokenCount 里。
+            prompt_tokens = metadata.get("promptTokenCount", 0) + metadata.get("toolUsePromptTokenCount", 0)
             candidates_tokens = metadata.get("candidatesTokenCount", 0)
 
             # Gemini 的 candidatesTokenCount 不含思考，相加才是真实总输出；
@@ -1395,7 +1248,11 @@ class DirectAPIService:
                 delta["content"] = content
             if tool_calls:
                 delta["tool_calls"] = tool_calls
-                
+            if images:
+                delta["images"] = images
+            if annotations:
+                delta["annotations"] = annotations
+
             return response
         else:
             message: Dict[str, Any] = {"role": "assistant"}
@@ -1413,7 +1270,11 @@ class DirectAPIService:
                 message["content"] = content or None
             else:
                 message["content"] = content
-            
+            if images:
+                message["images"] = images
+            if annotations:
+                message["annotations"] = annotations
+
             return {
                 "id": request_id,
                 "object": "chat.completion",
@@ -1529,6 +1390,7 @@ class DirectAPIService:
                 headers=request_headers,
                 timeout=_upstream_timeout()
             ) as response:
+                _remember_response_headers(response)
                 # 检查响应状态
                 if response.status != 200:
                     error_body = await response.read()

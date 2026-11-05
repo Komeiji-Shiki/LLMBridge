@@ -7,6 +7,7 @@
 - OpenAI: developers.openai.com/api/docs/guides/latest-model
 """
 from dataclasses import dataclass
+from datetime import date
 from functools import lru_cache
 import re
 from typing import Optional, Tuple
@@ -17,6 +18,11 @@ SAMPLING_FIELDS = ('temperature', 'top_p', 'top_k')
 _THINKING_LEVEL_ORDER = ('minimal', 'low', 'medium', 'high')
 _EFFORT_ORDER = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
+
+# 官方 changelog 2026-11-02：这天起 2.5 Pro 路由到 3.8 Flash，2.5 Flash 路由到 3.5 Flash-Lite，限制随之变化。
+GEMINI_25_ROUTED_ON = date(2026, 12, 1)
+_GEMINI_25_ROUTES = ((r'gemini-2\.5-pro(?![\w.-]*(image|tts))', 'gemini-3.8-flash'),
+                     (r'gemini-2\.5-flash(?![\w.-]*(lite|image|tts))', 'gemini-3.5-flash-lite'))
 
 # 工具调用走 Chat 的限制：不走 Responses 就只能在 reasoning_effort=none 时使用，或完全不可用。
 CHAT_TOOLS_FREE = 'free'
@@ -94,10 +100,21 @@ def _openai_limits(name: str) -> Optional[ModelLimits]:
     return None
 
 
-@lru_cache(maxsize=512)
-def limits_for(model_id: str) -> ModelLimits:
+def gemini_route_target(model_id: str) -> Optional[str]:
+    """官方会把这个型号路由到哪个新模型；不受影响返回 None。"""
     name = str(model_id or '').lower()
+    return next((target for pattern, target in _GEMINI_25_ROUTES if re.search(pattern, name)), None)
+
+
+@lru_cache(maxsize=512)
+def _limits(name: str, routed: bool) -> ModelLimits:
+    if routed:
+        name = gemini_route_target(name) or name
     return _claude_limits(name) or _gemini_limits(name) or _openai_limits(name) or ModelLimits()
+
+
+def limits_for(model_id: str) -> ModelLimits:
+    return _limits(str(model_id or '').lower(), date.today() >= GEMINI_25_ROUTED_ON)
 
 
 def _nearest(value: str, allowed, order) -> str:
@@ -120,9 +137,9 @@ def supported_thinking_level(model_id: str, level: Optional[str]) -> Optional[st
     return adjusted
 
 
-def supported_effort(model_id: str, effort: Optional[str]) -> Optional[str]:
-    """把 reasoning effort 调到模型支持的最近一档。"""
-    allowed = limits_for(model_id).efforts
+def supported_effort(model_id: str, effort: Optional[str], default_levels: Optional[Tuple[str, ...]] = None) -> Optional[str]:
+    """把 reasoning effort 调到模型支持的最近一档；型号未知时按 default_levels。"""
+    allowed = limits_for(model_id).efforts or default_levels
     if not effort or not allowed:
         return effort
     adjusted = _nearest(str(effort).lower(), allowed, _EFFORT_ORDER)
@@ -141,6 +158,28 @@ def budget_to_effort(budget: Optional[int]) -> Optional[str]:
     if budget <= 4096:
         return 'low'
     return 'medium' if budget <= 16384 else 'high'
+
+
+def sanitize_anthropic_body(body: dict, model_id: str) -> dict:
+    """就地修正 Anthropic 请求里模型一定会拒绝的字段。在合并端点自定义参数之前调用。"""
+    limits = limits_for(model_id)
+    drop_unsupported_sampling(body, model_id)
+    thinking = body.get('thinking')
+    if isinstance(thinking, dict):
+        if thinking.get('type') == 'disabled' and not limits.thinking_disable:
+            del body['thinking']
+            note_loss('thinking', f'{model_id} 不能关闭思考，已保持默认')
+        elif thinking.get('type') == 'enabled' and not limits.thinking_budget:
+            # 新模型思考强度由 effort 决定，预算只能换算成最接近的档位。
+            effort = budget_to_effort(thinking.get('budget_tokens'))
+            body['thinking'] = {key: value for key, value in thinking.items() if key != 'budget_tokens'}
+            body['thinking']['type'] = 'adaptive'
+            output = dict(body.get('output_config') or {})
+            if effort and effort != 'none':
+                output.setdefault('effort', effort)
+                body['output_config'] = output
+            note_loss('thinking.budget_tokens', f'{model_id} 不接受手动思考预算，已改用 adaptive')
+    return body
 
 
 def drop_unsupported_sampling(body: dict, model_id: str, effort: Optional[str] = None) -> dict:

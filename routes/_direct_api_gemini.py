@@ -26,6 +26,14 @@ from converters.gemini_interactions import (
     InteractionsStreamConverter,
     convert_interactions_to_openai_response,
 )
+from converters.message_shape import inline_mid_system, rewrite_trailing_prefill
+from core.conversion_report import note_loss, raise_if_strict
+from services.model_capabilities import (
+    budget_to_effort,
+    drop_unsupported_sampling,
+    limits_for,
+    supported_thinking_level,
+)
 from services.thinking_split_cache import (
     remember_split_original,
     restore_history_messages,
@@ -54,6 +62,29 @@ def _gemini_cost(direct_api_service, pricing_config, input_tokens, output_tokens
         input_tokens=billed.get("billedPromptTokenCount", input_tokens), output_tokens=output_tokens,
         cached_tokens=billed.get("billedCachedTokenCount", cached_tokens),
         pricing=pricing_config, tier_input_tokens=input_tokens)
+
+
+def _generation_extras(openai_req: dict, sampling: dict, accepts_sampling: bool) -> dict:
+    """Chat 字段里 generationConfig 也有对应项的部分。"""
+    extras = {}
+    if sampling.get("top_k") is not None:
+        extras["topK"] = sampling["top_k"]
+    if openai_req.get("seed") is not None:
+        extras["seed"] = openai_req["seed"]
+    # 很多客户端默认带 0，部分模型一见到 penalty 字段就 400，只转发真正想生效的值。
+    for field, name in (("presence_penalty", "presencePenalty"), ("frequency_penalty", "frequencyPenalty")):
+        if openai_req.get(field) and accepts_sampling:
+            extras[name] = openai_req[field]
+        elif openai_req.get(field):
+            note_loss(field, "此模型不再接受采样类参数，未发送到上游")
+    modalities = openai_req.get("modalities")
+    if isinstance(modalities, list) and modalities:
+        extras["responseModalities"] = [str(item).upper() for item in modalities]
+    if (openai_req.get("n") or 1) > 1:
+        note_loss("n", "Gemini 3 起不支持多候选，只返回一个")
+    if openai_req.get("logprobs"):
+        note_loss("logprobs", "Gemini 链路不返回 logprobs")
+    return extras
 
 
 def upstream_signatures(response: dict) -> list:
@@ -207,6 +238,7 @@ async def handle_gemini_native_direct(
             logger.info(f"  - {key}: {value}")
 
     thinking_config = None
+    limits = limits_for(target_model_id)
     client_reasoning_effort = openai_req.get("reasoning_effort")
     enable_thinking = endpoint_config.get("enable_thinking")
     if enable_thinking is None and client_reasoning_effort:
@@ -226,15 +258,27 @@ async def handle_gemini_native_direct(
                 "max": "HIGH",
             }
             effort = str(reasoning_effort).lower()
-            thinking_config["thinkingLevel"] = level_map.get(effort, effort.upper())
+            level = level_map.get(effort, effort.upper())
+            thinking_config["thinkingLevel"] = supported_thinking_level(target_model_id, level.lower()).upper()
+            if effort == "none":
+                # Gemini 没有“关闭”这一档：取最低档，并且不要思考摘要。
+                thinking_config["includeThoughts"] = False
             logger.info(
                 f"[GEMINI_NATIVE] reasoning_effort={reasoning_effort} "
                 f"映射为 thinkingLevel={thinking_config['thinkingLevel']}"
             )
         elif endpoint_config.get("thinking_level"):
-            thinking_config["thinkingLevel"] = str(endpoint_config["thinking_level"]).upper()
+            level = str(endpoint_config["thinking_level"]).lower()
+            thinking_config["thinkingLevel"] = supported_thinking_level(target_model_id, level).upper()
         elif endpoint_config.get("thinking_budget") is not None:
-            thinking_config["thinkingBudget"] = endpoint_config["thinking_budget"]
+            budget = endpoint_config["thinking_budget"]
+            if limits.thinking_budget:
+                thinking_config["thinkingBudget"] = budget
+            else:
+                # 3.6 起用等级取代预算，配置还没改时取最接近的一档，不让请求失败。
+                level = {"none": "minimal"}.get(budget_to_effort(budget), budget_to_effort(budget))
+                thinking_config["thinkingLevel"] = supported_thinking_level(target_model_id, level).upper()
+                note_loss("thinking_budget", f"{target_model_id} 不接受思考预算，已换成 {level} 等级")
         logger.info(
             f"[GEMINI_NATIVE] 已启用思维链模式 "
             f"(control={thinking_config.get('thinkingLevel', thinking_config.get('thinkingBudget'))})"
@@ -296,6 +340,15 @@ async def handle_gemini_native_direct(
         messages_for_upstream = await resolve_audio_references(
             messages_for_upstream, direct_api_service.session, api_key, api_base_url, endpoint_config)
 
+        # Gemini 没有中段系统角色：留在原位转成 user 文本，systemInstruction 才能保持稳定。
+        messages_for_upstream = rewrite_trailing_prefill(
+            inline_mid_system(messages_for_upstream, endpoint_config.get("mid_system_mode")), limits.prefill)
+        sampling = drop_unsupported_sampling(
+            {key: openai_req[key] for key in ("temperature", "top_p", "top_k") if openai_req.get(key) is not None},
+            target_model_id)
+        generation_extras = _generation_extras(openai_req, sampling, limits.sampling)
+        raise_if_strict(endpoint_config)
+
         # 🔧 上游协议选择：generate_content（默认，旧行为）或 interactions（新 API）
         upstream_protocol = endpoint_config.get("upstream_protocol", "generate_content")
         if upstream_protocol == "interactions":
@@ -305,8 +358,8 @@ async def handle_gemini_native_direct(
                 model=target_model_id,
                 messages=messages_for_upstream,
                 stream=is_stream,
-                temperature=openai_req.get("temperature"),
-                top_p=openai_req.get("top_p"),
+                temperature=sampling.get("temperature"),
+                top_p=sampling.get("top_p"),
                 max_tokens=(
                     openai_req.get("max_tokens")
                     or openai_req.get("max_completion_tokens")
@@ -329,8 +382,8 @@ async def handle_gemini_native_direct(
                 model=target_model_id,
                 messages=messages_for_upstream,
                 stream=is_stream,
-                temperature=openai_req.get("temperature"),
-                top_p=openai_req.get("top_p"),
+                temperature=sampling.get("temperature"),
+                top_p=sampling.get("top_p"),
                 max_tokens=(
                     openai_req.get("max_tokens")
                     or openai_req.get("max_completion_tokens")
@@ -342,6 +395,7 @@ async def handle_gemini_native_direct(
                 response_format=openai_req.get("response_format"),
                 stop_sequences=([openai_req["stop"]] if isinstance(openai_req.get("stop"), str) else openai_req.get("stop")),
                 extra_body=extra_kwargs if extra_kwargs else None,
+                generation_extras=generation_extras,
             )
 
         first_chunk_timeout = resolve_first_chunk_timeout(CONFIG, endpoint_config)
@@ -352,6 +406,7 @@ async def handle_gemini_native_direct(
                 reasoning_parts = []
                 tool_call_accumulator = {}
                 tool_call_indices = {}
+                seen_sources = set()
                 input_tokens = 0
                 output_tokens = 0
                 total_tokens = 0
@@ -383,7 +438,8 @@ async def handle_gemini_native_direct(
                     signatures.extend(upstream_signatures(gemini_chunk))
                     openai_chunk = direct_api_service.convert_gemini_response_to_openai(
                         gemini_chunk, display_name, request_id, is_stream_chunk=True,
-                        completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices)
+                        completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices,
+                        seen_sources=seen_sources)
 
                     choice = openai_chunk.get("choices", [{}])[0]
                     finish_seen = finish_seen or bool(choice.get("finish_reason"))
