@@ -1006,6 +1006,8 @@ class DirectAPIService:
                     logger.info(f"[GEMINI_NATIVE] 已按服务端历史补回 {restored} 个思考签名")
             compact_empty_text_parts(request_body.get("contents"))
             if context:
+                if context.gemini_signature_recovery is not None:
+                    request_body = context.gemini_signature_recovery.prepare(request_body)
                 context.upstream_request = await asyncio.to_thread(upstream_snapshot, request_body)
                 # 重试复用同一个上下文，上一次尝试的过滤依据不能算到这一次
                 context.outcome.pop('safety', None)

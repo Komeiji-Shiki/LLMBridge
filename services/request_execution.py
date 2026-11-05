@@ -10,8 +10,10 @@ import inspect
 import json
 import logging
 import time
-from core.request_context import current_request, credential_identity
+from core.request_context import current_request, credential_identity, endpoint_identity
+from services.gemini_signature_recovery import GeminiTextSignatureRecovery
 from services.protocol_events import payloads, error_status, is_business_event, is_terminal
+from services.provider_capabilities import apply_native_tool_defaults, protocol_name
 from core.constants import RetryDefaults
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,13 @@ logger = logging.getLogger(__name__)
 def _error_chunk(message, byte_mode):
     value = {'error': {'message': message, 'type': 'upstream_stream_error', 'code': 502}}
     return ('data: ' + json.dumps(value) + '\n\n').encode() if byte_mode else value
+
+
+def _is_gemini_signature_rejection(value):
+    if not isinstance(value, dict) or value.get('_http_status') != 400:
+        return False
+    error = value.get('error')
+    return isinstance(error, dict) and 'corrupted thought signature' in str(error.get('message', '')).lower()
 
 
 def retry_before_output(method=None, *, output_bytes=False):
@@ -39,7 +48,6 @@ def retry_before_output(method=None, *, output_bytes=False):
         bound.apply_defaults()
         body = bound.arguments.get('request_body') or {}
         if 'request_body' in bound.arguments:
-            from services.provider_capabilities import apply_native_tool_defaults
             body = apply_native_tool_defaults(body, context.endpoint)
             bound.arguments['request_body'] = body
         stream = bound.arguments.get('stream_override')
@@ -55,10 +63,17 @@ def retry_before_output(method=None, *, output_bytes=False):
             attempts = max(attempts, len(_get_valid_keys(keys)) + 1)
         # Server-side stored response references are bound to their original account.
         pinned = bool(context.request_body.get('previous_response_id'))
+        signature_recovery = None
+        if protocol_name(config) == 'gemini':
+            scope = endpoint_identity({**config, 'model_id': config.get('model_id') or context.model})
+            signature_recovery = GeminiTextSignatureRecovery(scope)
+        context.gemini_signature_recovery = signature_recovery
+        select_key = strategy == 'sticky'
+        retries_remaining = attempts - 1
         context.transport_depth += 1
         try:
-            for attempt in range(attempts):
-                if (attempt or strategy == 'sticky') and not pinned and 'api_key' in bound.arguments:
+            while True:
+                if select_key and not pinned and 'api_key' in bound.arguments:
                     bound.arguments['api_key'] = await get_api_key(context.model, keys, strategy=strategy, cooldown_seconds=cooldown)
                 key = bound.arguments.get('api_key') or ''
                 context.credential_fingerprint = credential_identity(key)
@@ -74,8 +89,11 @@ def retry_before_output(method=None, *, output_bytes=False):
                         prepared = copy.deepcopy(body)
                         prepared['input'] = await context.responses_history.restore_input()
                         bound.arguments['request_body'] = prepared
+                    elif signature_recovery is not None:
+                        bound.arguments['request_body'] = signature_recovery.prepare(body)
                     context.upstream_request = copy.deepcopy(bound.arguments['request_body'])
-                info = {'attempt': attempt + 1, 'started_ms': round((time.perf_counter() - context.started) * 1000, 2)}
+                info = {'attempt': len(context.attempts) + 1,
+                        'started_ms': round((time.perf_counter() - context.started) * 1000, 2)}
                 context.attempts.append(info)
                 context.mark('upstream_start')
                 prefix, total, committed, terminal = [], 0, False, False
@@ -101,12 +119,15 @@ def retry_before_output(method=None, *, output_bytes=False):
                         if not committed:
                             prefix.append(chunk)
                             total += len(chunk) if isinstance(chunk, (bytes, str)) else len(json.dumps(chunk))
-                            if total > 1024 * 1024 and not any(is_business_event(value) for value in values):
+                            business = any(is_business_event(value) for value in values)
+                            if total > 1024 * 1024 and not business:
                                 failed, error_text = 502, '上游未产生业务事件且前导事件超过缓冲上限'
                                 prefix = [_error_chunk(error_text, byte_mode)]
                                 break
-                            if any(is_business_event(value) for value in values) or terminal:
+                            if business or terminal:
                                 committed = True
+                                if business and signature_recovery is not None:
+                                    signature_recovery.confirm()
                                 context.mark('first_business')
                                 for saved in prefix:
                                     yield saved
@@ -118,6 +139,8 @@ def retry_before_output(method=None, *, output_bytes=False):
                         values = payloads(raw) if raw is not None else prefix
                         failed = next((error_status(value) for value in values if error_status(value) is not None), None)
                         error_text = str(values) if failed else ''
+                        if not failed and signature_recovery is not None and any(is_business_event(value) for value in values):
+                            signature_recovery.confirm()
                     if stream and failed is None and not terminal:
                         failed = 502
                         error_text = '上游流在终态事件之前中断'
@@ -133,6 +156,16 @@ def retry_before_output(method=None, *, output_bytes=False):
                     await iterator.aclose()
                     info['duration_ms'] = round((time.perf_counter() - context.started) * 1000 - info['started_ms'], 2)
                 info['status'] = failed or 200
+                if signature_recovery is not None and signature_recovery.omitted:
+                    info['omitted_thought_signatures'] = len(signature_recovery.omitted)
+                if (signature_recovery is not None and failed == 400 and not committed
+                        and any(_is_gemini_signature_rejection(value) for value in values)):
+                    removed = signature_recovery.plan_retry()
+                    if removed:
+                        # 签名校验失败发生在生成前；沿用本次凭据，只重试一次。
+                        select_key = False
+                        logger.info('[RETRY] Gemini 拒绝思考签名，移除 %d 个文本签名后重试', removed)
+                        continue
                 quota = bool(failed and strategy == 'sticky' and is_quota_exceeded(failed, error_text))
                 if quota:
                     await mark_sticky_key_cooldown(context.model, keys, key, cooldown)
@@ -141,8 +174,10 @@ def retry_before_output(method=None, *, output_bytes=False):
                     or (failed is not None and failed >= 500 and retry.get('retry_on_other_errors'))))
                 if pinned and quota:
                     retryable = False
-                if failed and not committed and retryable and attempt + 1 < attempts:
+                if failed and not committed and retryable and retries_remaining:
                     await asyncio.sleep(float(retry.get('retry_delay_seconds') or 0))
+                    retries_remaining -= 1
+                    select_key = True
                     continue
                 if not committed:
                     if not failed:
@@ -151,5 +186,6 @@ def retry_before_output(method=None, *, output_bytes=False):
                         yield chunk
                 return
         finally:
+            context.gemini_signature_recovery = None
             context.transport_depth -= 1
     return execute
