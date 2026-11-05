@@ -97,6 +97,23 @@ async def playground_run(request: Request):
         raise HTTPException(400, str(error)) from error
 
 
+@router.post('/playground/preview')
+async def playground_preview(request: Request):
+    from routes.admin_routes import _read_admin_json
+    from services.conversion_preview import CLIENT_PROTOCOLS, preview_conversion
+    data = await _read_admin_json(request)
+    alias, body, protocol = data.get('model'), data.get('request'), data.get('client_protocol', 'chat')
+    if not isinstance(alias, str) or not isinstance(body, dict):
+        raise HTTPException(400, 'model 和 request 对象为必填项')
+    if protocol not in CLIENT_PROTOCOLS:
+        raise HTTPException(400, 'client_protocol 只能是 ' + '、'.join(CLIENT_PROTOCOLS))
+    config = model_config(alias, data.get('endpoint', 0))
+    try:
+        return await preview_conversion(protocol, body, alias, config)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @router.get('/playground/runs/{request_id}')
 async def playground_result(request_id: str):
     context = _playground_runs.get(request_id)

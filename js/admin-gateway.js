@@ -19,7 +19,7 @@
         <label><input type="checkbox" id="gw-stream" checked> 流式响应</label>
         <label for="gw-body">原生 JSON 请求，可编辑所有供应商字段</label>
         <textarea id="gw-body" class="form-textarea gateway-json" spellcheck="false" rows="14"></textarea>
-        <div class="gateway-actions"><button class="btn" id="gw-template">恢复协议示例</button><button class="btn" id="gw-format">格式化 JSON</button><button class="btn" id="gw-insert-tools">把选中工具写入请求</button><button class="btn btn-primary" id="gw-run">发送请求</button><button class="btn" id="gw-cancel" disabled>中断请求</button><button class="btn" id="gw-download" disabled>下载完整响应</button><a id="gw-log" target="_blank" rel="noopener noreferrer" hidden>在监控中查看请求</a></div>
+        <div class="gateway-actions"><label>客户端协议 <select id="gw-client-protocol" class="form-select"><option value="chat">Chat Completions</option><option value="anthropic">Anthropic Messages</option><option value="responses">Responses</option></select></label><button class="btn" id="gw-preview">预览转换（不发送）</button><button class="btn" id="gw-template">恢复协议示例</button><button class="btn" id="gw-format">格式化 JSON</button><button class="btn" id="gw-insert-tools">把选中工具写入请求</button><button class="btn btn-primary" id="gw-run">发送请求</button><button class="btn" id="gw-cancel" disabled>中断请求</button><button class="btn" id="gw-download" disabled>下载完整响应</button><a id="gw-log" target="_blank" rel="noopener noreferrer" hidden>在监控中查看请求</a></div>
         <p id="gw-draft-state">切换端点时保留本页草稿；关闭或刷新页面后清除。Ctrl / ⌘ + Enter 发送请求。</p>
         <p id="gw-state" role="status">发送会调用真实上游，并按供应商规则产生费用。</p>
         <div id="gw-timing" class="gateway-metrics"></div>
@@ -190,6 +190,21 @@
             }
         }
     }
+    async function previewConversion() {
+        const model = selected(); if (!model) return;
+        let body;
+        try { body = JSON.parse(el('body').value); } catch (error) { el('state').textContent = 'JSON 无效：' + error.message; return; }
+        el('state').textContent = '正在生成转换预览，不会发送到上游…';
+        try {
+            const result = await json('/api/admin/playground/preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({model: model.model, endpoint: model.endpoint, request: body, client_protocol: el('client-protocol').value})});
+            raw = JSON.stringify(result, null, 2); renderOutput(true);
+            const losses = result.losses?.length ? `，有 ${result.losses.length} 处转换损失` : '，没有转换损失';
+            el('state').textContent = result.rejected ? '网关在发送前拒绝了这个请求：' + result.rejected
+                : (result.mode === 'passthrough' ? '同协议透传' : '已转换') + losses + '。未向上游发送任何内容。';
+        } catch (error) { el('state').textContent = '预览失败：' + error.message; }
+    }
+    el('preview').addEventListener('click', previewConversion);
     async function analysis(prices) {
         const version = ++analysisVersion;
         try {

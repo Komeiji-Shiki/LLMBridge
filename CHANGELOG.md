@@ -14,6 +14,7 @@
 - 上游的 `retry-after`、`x-should-retry` 和限流响应头转给客户端，Gemini 的 `RetryInfo` 转成 `retry-after`。
 - 官方 Gemini 地址的 generateContent 请求默认带 `store: false`，需要保存时用自定义参数打开。
 - 新增 `scripts/check_upstream_schema.py`，列出官方 schema 里代码尚未提到的类型。
+- Playground 新增“预览转换”：选择客户端协议后，查看实际发往上游的地址、正文和转换损失，不会发送任何请求。
 
 ### 2026-11-04：WorkBuddy 思维链回传
 
