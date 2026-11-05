@@ -31,6 +31,7 @@ from core.constants import resolve_first_chunk_timeout
 from core.errors import BadRequestError
 from core.model_archive import is_model_archived
 from modules.monitoring import monitoring_service
+from services.error_translation import translate_openai_error
 from utils.monitor_params import build_monitor_request_params, summarize_tools
 
 from . import api_routes as _chat_api
@@ -71,6 +72,9 @@ async def _read_error_response(response: Response) -> JSONResponse:
     except (UnicodeDecodeError, json.JSONDecodeError):
         payload = {"message": body.decode("utf-8", errors="replace")}
     if isinstance(payload, dict) and payload.get("error") is not None:
+        if isinstance(payload["error"], dict):
+            # Codex 这类客户端靠 error.code 判断要不要压缩上下文。
+            payload["error"] = translate_openai_error(payload["error"], response.status_code)
         return JSONResponse(status_code=response.status_code, content=payload)
     return build_responses_error_response(response.status_code, payload)
 

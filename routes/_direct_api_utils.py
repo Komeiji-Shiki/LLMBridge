@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 
 from core.config_loader import MODEL_ROUND_ROBIN_LOCK
-from core.constants import RetryDefaults
+from core.constants import RetryDefaults, TimeoutDefaults
 
 logger = logging.getLogger(__name__)
 
@@ -843,14 +843,19 @@ async def record_request_failure(monitoring_service, direct_api_service, request
 # SSE 行处理
 # ============================================================
 
-async def iter_with_keepalive(iterator, interval: float):
-    """转发异步迭代器；上游空闲超过 interval 秒时产出 None，调用方借此发送心跳。"""
+async def iter_with_keepalive(iterator, interval: float, first_interval: Optional[float] = None):
+    """转发异步迭代器；上游空闲超过 interval 秒时产出 None，调用方借此发送心跳。
+
+    first_interval 单独指定第一次等待的时长。
+    """
     pending = None
+    wait = first_interval or interval
     try:
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(anext(iterator))
-            done, _ = await asyncio.wait({pending}, timeout=interval)
+            done, _ = await asyncio.wait({pending}, timeout=wait)
+            wait = interval
             if not done:
                 yield None
                 continue
@@ -864,6 +869,31 @@ async def iter_with_keepalive(iterator, interval: float):
         if pending is not None:
             pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
+
+
+async def peek_stream(iterator, interval: float, wait: float = TimeoutDefaults.UPSTREAM_ERROR_WAIT):
+    """等上游第一块一小会儿，上游立刻报错时响应还没开始，能用真实状态码回给客户端。
+
+    返回 (first, chunks)：first 为 None 表示还没有数据；chunks 从头迭代（含 first），
+    空闲时产出 None。迭代异常延后到 chunks 上抛出，由流式生成器的收尾逻辑统一处理。
+    """
+    source = iter_with_keepalive(iterator, interval, first_interval=wait)
+    failure = None
+    try:
+        first = await anext(source, None)
+    except Exception as error:
+        first, failure = None, error
+
+    async def chunks():
+        if failure is not None:
+            raise failure
+        try:
+            yield first
+            async for item in source:
+                yield item
+        finally:
+            await source.aclose()
+    return first, chunks()
 
 
 async def close_quietly(iterator):

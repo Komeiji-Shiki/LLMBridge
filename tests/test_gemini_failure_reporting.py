@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 from converters.anthropic_openai import build_anthropic_streaming_response
 from routes._direct_api_gemini import handle_gemini_native_direct
-from routes._direct_api_utils import iter_with_keepalive
+from routes._direct_api_utils import iter_with_keepalive, peek_stream
 from services.direct_api_service import DirectAPIService
 
 
@@ -92,8 +92,8 @@ def test_first_chunk_timeout_records_once_with_reason():
     async def run():
         call, monitor = route(upstream, config={'first_chunk_timeout_seconds': 0.01},
                               endpoint={'client_disconnect_probe_interval': 0.01})
-        with patch('routes._direct_api_gemini.iter_with_keepalive',
-                   lambda iterator, interval: iter_with_keepalive(iterator, 0.02)):
+        with patch('routes._direct_api_gemini.peek_stream',
+                   lambda iterator, interval: peek_stream(iterator, 0.02, wait=0.02)):
             return await drain(await call), monitor
 
     output, monitor = asyncio.run(run())
@@ -123,11 +123,30 @@ def test_first_chunk_upstream_error_records_once_with_reason():
 
     async def run():
         call, monitor = route(upstream)
-        return await drain(await call), monitor
+        return await call, monitor
+
+    response, monitor = asyncio.run(run())
+    # 响应还没开始：客户端要拿到真实状态码，靠它和 retry-after 决定是否重试
+    assert response.status_code == 429
+    assert json.loads(response.body)['error']['message'] == '额度用尽'
+    end = only_end(monitor)
+    assert end['success'] is False and '额度用尽' in end['error']
+
+
+def test_upstream_error_after_the_wait_window_stays_in_the_stream():
+    async def upstream(**kwargs):
+        await asyncio.sleep(0.05)
+        yield {'error': {'message': '额度用尽', 'code': 429}}
+
+    async def run():
+        call, monitor = route(upstream)
+        with patch('routes._direct_api_gemini.peek_stream',
+                   lambda iterator, interval: peek_stream(iterator, 0.01, wait=0.01)):
+            return await drain(await call), monitor
 
     output, monitor = asyncio.run(run())
+    assert events(output)[-1]['error']['message'] == '额度用尽'
     assert '额度用尽' in only_end(monitor)['error']
-    assert output[-1] == 'data: [DONE]\n\n'
 
 
 def run_until_closed(upstream, chunks_before_close):
@@ -337,8 +356,8 @@ def test_keepalive_reaches_anthropic_client_during_silence():
 
     async def run():
         call, _ = route(upstream)
-        with patch('routes._direct_api_gemini.iter_with_keepalive',
-                   lambda iterator, interval: iter_with_keepalive(iterator, 0.01)):
+        with patch('routes._direct_api_gemini.peek_stream',
+                   lambda iterator, interval: peek_stream(iterator, 0.01, wait=0.01)):
             wrapped = build_anthropic_streaming_response(await call, 'demo')
             return [item async for item in wrapped.body_iterator]
 

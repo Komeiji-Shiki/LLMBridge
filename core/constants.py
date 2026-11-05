@@ -31,6 +31,9 @@ class TimeoutDefaults:
 
     # 流式心跳间隔：要短于常见反向代理和隧道的空闲断连时间
     STREAM_HEARTBEAT_INTERVAL = 30
+
+    # 流式响应开始前等上游这么久：限流、超长这类错误通常立刻返回，还能用真实状态码回给客户端
+    UPSTREAM_ERROR_WAIT = 10
     
     # 首个数据块等待超时
     FIRST_CHUNK_TIMEOUT = 600  # 10分钟

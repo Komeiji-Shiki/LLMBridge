@@ -32,11 +32,15 @@ from .direct_api_handler import handle_direct_api_request
 from .lmarena_handler import handle_lmarena_request
 from ._direct_api_anthropic import apply_auto_cache_control
 from converters.cache_warnings import anthropic_cache_warnings
+from core.constants import resolve_heartbeat_interval
+from services.error_translation import translate_openai_error
 from services.model_capabilities import sanitize_anthropic_body
 from utils.upstream_fields import omission_warnings, omit_configured_fields
 from ._direct_api_utils import (
     get_round_robin_api_key,
     is_error_json,
+    map_upstream_error_to_status_code,
+    peek_stream,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
 )
@@ -850,6 +854,30 @@ async def _handle_anthropic_passthrough(
         f"endpoint_path={endpoint_path}, stream={is_stream}")
 
     if is_stream:
+        first_upstream_chunk, upstream_chunks = await peek_stream(
+            direct_api_service.call_api_passthrough(
+                base_url=api_base_url,
+                api_key=upstream_api_key,
+                request_body=passthrough_body,
+                endpoint_path=endpoint_path
+            ),
+            resolve_heartbeat_interval(endpoint_config))
+        early_error = _extract_upstream_stream_error(first_upstream_chunk) if first_upstream_chunk else None
+        if early_error is not None:
+            # 响应还没开始：用真实状态码回给客户端，它靠状态码和 retry-after 决定是否重试
+            error_text = json.dumps(early_error, ensure_ascii=False)
+            logger.warning(f"[ANTHROPIC_COMPAT] 流式请求上游返回错误: {error_text[:300]}")
+            status_code = map_upstream_error_to_status_code(early_error, default_status_code=502)
+            early_error_obj = early_error.get("error")
+            monitoring_service.request_end(
+                request_id=request_id, success=False, error=error_text, response_content=error_text,
+                input_tokens=0, output_tokens=0, cached_tokens=0, full_messages=full_messages)
+            spawn(monitoring_service.broadcast_to_monitors({
+                "type": "request_end", "request_id": request_id, "success": False}),
+                name="anthropic-stream-broadcast")
+            return JSONResponse(status_code=status_code, content=build_anthropic_error_payload(
+                early_error_obj if isinstance(early_error_obj, dict) else early_error, status_code))
+
         async def _monitored_anthropic_stream():
             success = True
             error_msg = None
@@ -868,13 +896,11 @@ async def _handle_anthropic_passthrough(
                 "upstream_usage": {},
             }
             try:
-                api_iter = direct_api_service.call_api_passthrough(
-                    base_url=api_base_url,
-                    api_key=upstream_api_key,
-                    request_body=passthrough_body,
-                    endpoint_path=endpoint_path
-                )
-                async for chunk in api_iter:
+                async for chunk in upstream_chunks:
+                    if chunk is None:
+                        # 上游长时间静默时保持连接，SSE 注释不影响客户端解析
+                        yield b": keep-alive\n\n"
+                        continue
                     if first_chunk:
                         first_chunk = False
                         # 检测首块是否为上游错误：裸 JSON 错误体，或
@@ -1021,11 +1047,10 @@ async def _handle_anthropic_passthrough(
                     f"[ANTHROPIC_COMPAT] 非流式请求上游返回错误: {error_msg[:300]}")
                 # 转为 Anthropic 错误格式并保留上游状态码，客户端才能正确识别失败
                 err_obj = response_json.get("error")
-                code = err_obj.get("code") if isinstance(err_obj, dict) else None
-                if isinstance(code, int) and 400 <= code <= 599:
-                    error_status_code = code
+                # Anthropic 的错误体没有数字 code，状态码要从上游响应取，否则 429 会变成 502
+                error_status_code = map_upstream_error_to_status_code(response_json, default_status_code=error_status_code)
                 error_response_payload = build_anthropic_error_payload(
-                    err_obj if isinstance(err_obj, dict) else response_json)
+                    err_obj if isinstance(err_obj, dict) else response_json, error_status_code)
             elif isinstance(response_json, dict):
                 # 工具名改写：别名恢复为原名后重新序列化，监控与客户端看到同一份数据
                 if restore_tool_names_in_response(response_json, tool_name_restore):
@@ -1100,10 +1125,25 @@ async def _handle_anthropic_passthrough(
 # 端点注册
 # ============================================================================
 
+def _translate_chat_error(response):
+    """OpenAI 系客户端靠 error.code 判断超长和限流，非 OpenAI 上游的错误要补上这些字段。"""
+    if not isinstance(response, JSONResponse) or response.status_code < 400:
+        return response
+    try:
+        payload = json.loads(response.body)
+    except ValueError:
+        return response
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        payload["error"] = translate_openai_error(payload["error"], response.status_code)
+        response.body = response.render(payload)
+        response.headers["content-length"] = str(len(response.body))
+    return response
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions_endpoint(request: Request):
     """处理聊天补全请求"""
-    return await chat_completions(request)
+    return _translate_chat_error(await chat_completions(request))
 
 
 @router.post("/v1/messages")

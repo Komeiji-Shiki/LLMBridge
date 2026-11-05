@@ -40,6 +40,14 @@ from ._direct_api_utils import (
 logger = logging.getLogger(__name__)
 
 
+class _UpstreamRejected(HTTPException):
+    """上游在输出之前就报错，先走监控收尾，再把错误结构原样回给客户端。"""
+
+    def __init__(self, status_code, detail, payload):
+        super().__init__(status_code=status_code, detail=detail)
+        self.payload = payload
+
+
 async def _remember_response(response):
     context = current_request.get()
     if context is not None and context.responses_history is not None:
@@ -275,7 +283,7 @@ async def _handle_stream(
         status_code = map_upstream_error_to_status_code(error_json, default_status_code=502)
         error_obj = error_json.get("error", {})
         error_message = error_obj.get("message", "上游 Responses 请求失败") if isinstance(error_obj, dict) else str(error_obj)
-        raise HTTPException(status_code=status_code, detail=error_message)
+        raise _UpstreamRejected(status_code, error_message, normalize_to_openai_error(error_json))
 
     async def prefixed_source():
         yield first_chunk
@@ -523,6 +531,9 @@ async def handle_responses_native_direct(
             full_messages=full_messages,
             error=str(exc.detail),
         )
+        if isinstance(exc, _UpstreamRejected):
+            # 和非流式一样返回上游的错误结构，客户端的自动恢复靠它判断
+            return JSONResponse(status_code=exc.status_code, content=exc.payload)
         raise
     except Exception as exc:
         await _complete_monitoring(

@@ -45,7 +45,7 @@ from ._direct_api_utils import (
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     finalize_tool_calls,
-    iter_with_keepalive,
+    peek_stream,
     map_upstream_error_to_status_code,
     record_request_failure,
 )
@@ -403,6 +403,25 @@ async def handle_gemini_native_direct(
 
         first_chunk_timeout = resolve_first_chunk_timeout(CONFIG, endpoint_config)
 
+        async def upstream_error_response(payload):
+            """上游在输出之前就报错：用真实状态码回给客户端，限流和超长的自动恢复才能触发。"""
+            # 生成被上游终止（安全拦截等）时响应里仍有已计费的 usageMetadata
+            usage_meta = payload.get("usageMetadata")
+            usage_meta = usage_meta if isinstance(usage_meta, dict) else {}
+            partial_input_tokens = int(usage_meta.get("promptTokenCount") or 0)
+            partial_output_tokens = (int(usage_meta.get("candidatesTokenCount") or 0)
+                                     + int(usage_meta.get("thoughtsTokenCount") or 0))
+            await record_request_failure(
+                monitoring_service, direct_api_service, request_id, str(payload.get("error")),
+                **failure_context, input_tokens=partial_input_tokens, output_tokens=partial_output_tokens,
+                cost_info=_gemini_cost(direct_api_service, pricing_config, partial_input_tokens,
+                                       partial_output_tokens, int(usage_meta.get("cachedContentTokenCount") or 0),
+                                       usage_meta) if partial_input_tokens else None,
+                upstream_usage=usage_meta or None)
+            return JSONResponse(
+                status_code=map_upstream_error_to_status_code(payload, default_status_code=500), content=payload)
+
+
         if is_stream:
             async def gemini_stream_generator():
                 content_parts = []
@@ -429,7 +448,6 @@ async def handle_gemini_native_direct(
                 tail_suppressed = False
                 first_chunk_seen = False
                 splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
-                chunks = iter_with_keepalive(gemini_generator, resolve_heartbeat_interval(endpoint_config))
 
                 def consume(gemini_chunk):
                     """累积一个上游块，返回要转发的 SSE 文本（被思考分隔吞掉时为 None）。"""
@@ -653,7 +671,6 @@ async def handle_gemini_native_direct(
                 converter = InteractionsStreamConverter(display_name, request_id, completion_tokens_mode)
                 splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
 
-                chunks = iter_with_keepalive(gemini_generator, resolve_heartbeat_interval(endpoint_config))
                 first_event_seen = False
 
                 def account(usage):
@@ -856,6 +873,11 @@ async def handle_gemini_native_direct(
                         except Exception as yield_err:
                             logger.debug(f"[GEMINI_INTERACTIONS] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
 
+            first_event, chunks = await peek_stream(gemini_generator, resolve_heartbeat_interval(endpoint_config))
+            if isinstance(first_event, dict) and "error" in first_event:
+                await gemini_generator.aclose()
+                return await upstream_error_response(first_event)
+
             return StreamingResponse(
                 interactions_stream_generator() if upstream_protocol == "interactions" else gemini_stream_generator(),
                 media_type="text/event-stream",
@@ -871,24 +893,7 @@ async def handle_gemini_native_direct(
             gemini_response = await anext(gemini_generator)
 
             if "error" in gemini_response:
-                error_msg = str(gemini_response.get("error"))
-
-                # 生成被上游终止（安全拦截等）时响应里仍有已计费的 usageMetadata
-                usage_meta = gemini_response.get("usageMetadata")
-                usage_meta = usage_meta if isinstance(usage_meta, dict) else {}
-                partial_input_tokens = int(usage_meta.get("promptTokenCount") or 0)
-                partial_output_tokens = (int(usage_meta.get("candidatesTokenCount") or 0)
-                                         + int(usage_meta.get("thoughtsTokenCount") or 0))
-                await record_request_failure(
-                    monitoring_service, direct_api_service, request_id, error_msg,
-                    **failure_context, input_tokens=partial_input_tokens, output_tokens=partial_output_tokens,
-                    cost_info=_gemini_cost(direct_api_service, pricing_config, partial_input_tokens,
-                                           partial_output_tokens, int(usage_meta.get("cachedContentTokenCount") or 0),
-                                           usage_meta) if partial_input_tokens else None,
-                    upstream_usage=usage_meta or None)
-
-                mapped_status_code = map_upstream_error_to_status_code(gemini_response, default_status_code=500)
-                return JSONResponse(status_code=mapped_status_code, content=gemini_response)
+                return await upstream_error_response(gemini_response)
 
             if upstream_protocol == "interactions":
                 openai_response = convert_interactions_to_openai_response(
