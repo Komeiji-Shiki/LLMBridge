@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 # PRAGMA user_version 记录的库结构版本。
 # 1：清除旧版写入的 last_exchange / response:<id>。它们从未被读取，
 #    同样的完整交换永久保存在 logs/exchanges。
-_SCHEMA_VERSION = 1
+# 2：新增 stored_objects，记录上游保存的对象属于哪条线路。
+_SCHEMA_VERSION = 2
+# 上游保存的对象可以在几周后被查询或续接，记录比会话缓存保留得久。
+_OBJECT_RETENTION_SECONDS = 30 * 86400
 # 每批回收的页数（每页 4KB，4096 页约 16MB）。批次之间释放写锁，
 # 其他写入可以穿插执行；单次清理最多回收 _RECLAIM_MAX_BATCHES 批。
 _RECLAIM_PAGES_PER_BATCH = 4096
@@ -60,6 +63,11 @@ class ConversationStore:
                 payload BLOB, digest TEXT NOT NULL, touched REAL NOT NULL,
                 PRIMARY KEY(owner, scope, prefix));
             CREATE INDEX IF NOT EXISTS idx_response_prefixes_idle ON response_prefixes(touched);
+            CREATE TABLE IF NOT EXISTS stored_objects (
+                owner TEXT NOT NULL, kind TEXT NOT NULL, object_id TEXT NOT NULL,
+                payload TEXT NOT NULL, settled INTEGER NOT NULL, touched REAL NOT NULL,
+                PRIMARY KEY(owner, kind, object_id));
+            CREATE INDEX IF NOT EXISTS idx_stored_objects_idle ON stored_objects(touched);
         ''')
         version = connection.execute('PRAGMA user_version').fetchone()[0]
         if version < 1:
@@ -120,6 +128,7 @@ class ConversationStore:
         cutoff = time.time() - self.idle_seconds
         with self.connection() as connection:
             connection.execute('DELETE FROM response_prefixes WHERE touched<=?', (cutoff,))
+            connection.execute('DELETE FROM stored_objects WHERE touched<=?', (time.time() - _OBJECT_RETENTION_SECONDS,))
             deleted = connection.execute('DELETE FROM conversations WHERE touched<=?', (cutoff,)).rowcount
         self.reclaim()
         return deleted
@@ -228,6 +237,35 @@ class ConversationStore:
                     touched=excluded.touched''',
                 [(owner, scope, prefix, payload, digest, now, now - self.idle_seconds, now - self.idle_seconds)
                  for prefix in dict.fromkeys(prefixes)])
+
+    def remember_object(self, owner, kind, object_id, payload, settled):
+        """记下上游对象属于哪条线路。同一个 id 再次出现时覆盖。"""
+        with self.connection() as connection:
+            connection.execute('''INSERT INTO stored_objects VALUES(?,?,?,?,?,?)
+                ON CONFLICT(owner,kind,object_id) DO UPDATE SET payload=excluded.payload,
+                    settled=excluded.settled, touched=excluded.touched''',
+                (owner, kind, object_id, json.dumps(payload, ensure_ascii=False), int(bool(settled)), time.time()))
+
+    def stored_object(self, owner, kind, object_id):
+        now = time.time()
+        with self.connection() as connection:
+            row = connection.execute('SELECT payload FROM stored_objects WHERE owner=? AND kind=? AND object_id=? AND touched>?',
+                                     (owner, kind, object_id, now - _OBJECT_RETENTION_SECONDS)).fetchone()
+            if row is None:
+                return None
+            connection.execute('UPDATE stored_objects SET touched=? WHERE owner=? AND kind=? AND object_id=?',
+                               (now, owner, kind, object_id))
+            return json.loads(row['payload'])
+
+    def claim_settlement(self, owner, kind, object_id):
+        """原子地认领补记用量；并发的两次轮询只有一次返回 True。"""
+        with self.connection() as connection:
+            return connection.execute('UPDATE stored_objects SET settled=1 WHERE owner=? AND kind=? AND object_id=? AND settled=0',
+                                      (owner, kind, object_id)).rowcount == 1
+
+    def forget_object(self, owner, kind, object_id):
+        with self.connection() as connection:
+            connection.execute('DELETE FROM stored_objects WHERE owner=? AND kind=? AND object_id=?', (owner, kind, object_id))
 
     def response_prefixes(self, owner, scope, prefixes):
         """Fetch exact assistant boundaries in one transaction, without scanning logs."""

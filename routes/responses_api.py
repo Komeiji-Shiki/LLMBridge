@@ -31,11 +31,14 @@ from core.constants import resolve_first_chunk_timeout
 from core.errors import BadRequestError
 from core.model_archive import is_model_archived
 from modules.monitoring import monitoring_service
+from core.request_context import current_request
+from services import stored_objects
 from services.error_translation import translate_openai_error
 from services.model_capabilities import drop_unsupported_sampling
 from utils.monitor_params import build_monitor_request_params, summarize_tools
 
 from . import api_routes as _chat_api
+from .stored_objects_api import bound_for_request
 from ._direct_api_utils import (
     build_response_message,
     close_quietly,
@@ -295,6 +298,10 @@ def _apply_responses_sse_event(event: Any, stats: Dict[str, Any]) -> None:
     if not isinstance(event, dict):
         return
     event_type = event.get("type") or event.get("_event_type") or ""
+    response_object = event.get("response")
+    if isinstance(response_object, dict) and response_object.get("id"):
+        stats["response_id"] = response_object["id"]
+        stats["status"] = response_object.get("status") or stats.get("status")
     if event_type == "response.output_text.delta":
         delta = event.get("delta")
         if isinstance(delta, str) and delta:
@@ -374,9 +381,13 @@ async def _complete_responses_monitoring(
     cached_tokens: int = 0,
     error: Optional[str] = None,
     upstream_usage: Optional[Dict[str, Any]] = None,
-) -> None:
-    """透传请求结束的统一监控落盘：token 缺失时估算，计算费用并广播。"""
-    if input_tokens <= 0:
+    estimate: bool = True,
+) -> tuple:
+    """透传请求结束的统一监控落盘：token 缺失时估算，计算费用并广播。返回记账的 (输入, 输出)。
+
+    estimate=False 用于后台任务：用量要等任务结束才有，轮询到终态时再补记。
+    """
+    if input_tokens <= 0 and estimate:
         try:
             input_tokens = await estimate_message_tokens_non_blocking(
                 estimate_message_tokens_func,
@@ -385,7 +396,7 @@ async def _complete_responses_monitoring(
             )
         except Exception as exc:
             logger.warning("[RESPONSES_NATIVE] 输入 token 估算失败: %s", exc)
-    if output_tokens <= 0 and (content or reasoning):
+    if output_tokens <= 0 and estimate and (content or reasoning):
         try:
             output_tokens = await estimate_text_tokens_non_blocking(
                 estimate_tokens_func,
@@ -422,6 +433,14 @@ async def _complete_responses_monitoring(
         "request_id": request_id,
         "success": success,
     })
+    return input_tokens, output_tokens
+
+
+def _remember_response_object(responses_request, model, endpoint_config, api_key, response_id, status, billed):
+    context = current_request.get()
+    if response_id and context and context.authenticated and stored_objects.stores_object(responses_request):
+        stored_objects.remember(context.owner_id, stored_objects.RESPONSES, response_id, model, endpoint_config,
+                                api_key, billed, status)
 
 
 @observe_endpoint
@@ -431,6 +450,7 @@ async def _handle_responses_native_passthrough(
     model: str,
     endpoint_config: Dict[str, Any],
     request: Request,
+    api_key: Optional[str] = None,
 ):
     """responses_native 配置：/v1/responses 请求原样透传到上游 Responses API。
 
@@ -456,7 +476,8 @@ async def _handle_responses_native_passthrough(
 
     # 单 key 或 api_keys 列表轮询
     raw_api_key = endpoint_config.get("api_keys") or endpoint_config.get("api_key")
-    upstream_api_key = await get_round_robin_api_key(model, raw_api_key)
+    # 续接上一轮的请求固定用创建它的密钥
+    upstream_api_key = api_key or await get_round_robin_api_key(model, raw_api_key)
 
     # 兼容 target_model_id（新）/ model_id（现有配置）两种字段名
     target_model_id = endpoint_config.get("target_model_id") or endpoint_config.get("model_id") or model
@@ -592,6 +613,8 @@ async def _handle_responses_native_passthrough(
                 "error_message": None,
                 "stream_complete": False,
                 "saw_completed": False,
+                "response_id": None,
+                "status": None,
             }
             monitoring_done = False
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -608,7 +631,7 @@ async def _handle_responses_native_passthrough(
                 success = (stats["stream_complete"] or stats.get("saw_completed")) and stats["error_message"] is None
                 if not success and stats["error_message"] is None:
                     stats["error_message"] = "Client disconnected"
-                await _complete_responses_monitoring(
+                billed = await _complete_responses_monitoring(
                     monitoring_service=monitoring_service,
                     direct_api_service=direct_api_service,
                     request_id=request_id,
@@ -626,6 +649,9 @@ async def _handle_responses_native_passthrough(
                     error=stats["error_message"],
                     upstream_usage=stats["upstream_usage"],
                 )
+                await asyncio.to_thread(
+                    _remember_response_object, responses_request, model, endpoint_config, upstream_api_key,
+                    stats["response_id"], stats["status"], (*billed, stats["cached_tokens"]))
 
             try:
                 # 首块已预取：先统计再转发（不遗漏 response.created 等事件）
@@ -770,7 +796,8 @@ async def _handle_responses_native_passthrough(
     tool_calls = message.get("tool_calls")
     usage = responses_json.get("usage")
     input_tokens, output_tokens, cached_tokens = _extract_responses_usage_tokens(usage)
-    await _complete_responses_monitoring(
+    status = responses_json.get("status")
+    billed = await _complete_responses_monitoring(
         monitoring_service=monitoring_service,
         direct_api_service=direct_api_service,
         request_id=request_id,
@@ -787,7 +814,10 @@ async def _handle_responses_native_passthrough(
         output_tokens=output_tokens,
         cached_tokens=cached_tokens,
         upstream_usage=usage if isinstance(usage, dict) else None,
+        estimate=status in stored_objects.TERMINAL_STATUSES[stored_objects.RESPONSES] or status is None,
     )
+    await asyncio.to_thread(_remember_response_object, responses_request, model, endpoint_config, upstream_api_key,
+                            responses_json.get("id"), status, (*billed, cached_tokens))
     return JSONResponse(status_code=200, content=responses_json)
 
 
@@ -817,19 +847,27 @@ async def responses_endpoint(request: Request):
     # summary）不做任何解析/转换，原样转发，保证思维链签名等密文载体完整回传。
     passthrough_model = responses_request.get("model")
     endpoint_config = None
+    bound = None
     if isinstance(passthrough_model, str):
         raw_config = _chat_api.MODEL_ENDPOINT_MAP.get(passthrough_model)
         if raw_config is not None and is_model_archived(raw_config):
             return build_responses_error_response(
                 404, f"模型 '{passthrough_model}' 不存在"
             )
-        endpoint_config = await _chat_api._select_endpoint_config_for_model(passthrough_model)
+        try:
+            # 续接上一轮时必须回到创建它的线路和密钥，上一轮只在那个项目里可见
+            bound = await bound_for_request(request, stored_objects.RESPONSES,
+                                            responses_request.get("previous_response_id"), passthrough_model)
+        except HTTPException as exc:
+            return build_responses_error_response(exc.status_code, exc.detail)
+        endpoint_config = bound.config if bound else await _chat_api._select_endpoint_config_for_model(passthrough_model)
     if isinstance(endpoint_config, dict) and endpoint_config.get("api_type") == "responses_native":
         response = await _handle_responses_native_passthrough(
             responses_request=responses_request,
             model=passthrough_model,
             endpoint_config=endpoint_config,
             request=request,
+            api_key=bound.key if bound else None,
         )
         response.headers.update(warning_headers(omission_warnings(responses_request, endpoint_config)))
         return response

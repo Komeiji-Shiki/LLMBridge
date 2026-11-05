@@ -255,8 +255,8 @@ class FakeUpstream:
 
     async def handle(self, request):
         body = await request.read()
-        self.requests.append({'path': request.path, 'headers': dict(request.headers),
-                              'body': json.loads(body) if body else None})
+        self.requests.append({'method': request.method, 'path': request.path, 'query': dict(request.query),
+                              'headers': dict(request.headers), 'body': json.loads(body) if body else None})
         reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
         if reply.events is None:
             return web.json_response(reply.body, status=reply.status, headers=reply.headers)
@@ -278,7 +278,7 @@ class FakeUpstream:
 
 def build_gateway(monkeypatch):
     from core.request_middleware import GatewayRequestMiddleware
-    from routes import api_routes, responses_api, token_count_api
+    from routes import api_routes, responses_api, stored_objects_api, token_count_api
     monitor = MagicMock()
     monitor.broadcast_to_monitors = AsyncMock()
     monkeypatch.setattr(api_routes, 'CONFIG', {})
@@ -291,13 +291,14 @@ def build_gateway(monkeypatch):
     app.include_router(api_routes.router)
     app.include_router(responses_api.router)
     app.include_router(token_count_api.router)
+    app.include_router(stored_objects_api.router)
     return app, monitor
 
 
 CLIENT_PATHS = {'chat': '/v1/chat/completions', 'anthropic': '/v1/messages', 'responses': '/v1/responses'}
 
 
-async def _exchange(app, monkeypatch, upstream_name, replies, path, body, overrides, headers):
+async def _exchange(app, monkeypatch, upstream_name, replies, calls, overrides):
     from services.direct_api_service import DirectAPIService
     from routes import api_routes
     fake = FakeUpstream(replies)
@@ -312,9 +313,11 @@ async def _exchange(app, monkeypatch, upstream_name, replies, path, body, overri
         monkeypatch.setitem(api_routes.MODEL_ENDPOINT_MAP, MODEL, config)
         monkeypatch.setattr(api_routes._app_state.server, 'direct_api_service', DirectAPIService(session))
         transport = httpx.ASGITransport(app=app)
+        responses = []
         async with httpx.AsyncClient(transport=transport, base_url='http://gateway', timeout=30) as client:
-            response = await client.post(path, json=body, headers=headers or {})
-        return response, fake
+            for method, path, body, headers in calls:
+                responses.append(await client.request(method, path, json=body, headers=headers or {}))
+        return responses, fake
     finally:
         await session.close()
         await server.close()
@@ -322,7 +325,14 @@ async def _exchange(app, monkeypatch, upstream_name, replies, path, body, overri
 
 def exchange(app, monkeypatch, upstream, replies, path, body, overrides=None, headers=None):
     """跑一次完整请求，返回 (客户端响应, 假上游)。"""
-    return asyncio.run(_exchange(app, monkeypatch, upstream, replies, path, body, overrides or {}, headers))
+    responses, fake = asyncio.run(_exchange(app, monkeypatch, upstream, replies, [('POST', path, body, headers)],
+                                            overrides or {}))
+    return responses[0], fake
+
+
+def exchange_many(app, monkeypatch, upstream, replies, calls, overrides=None):
+    """同一个假上游上依次跑多个请求，calls 是 (方法, 路径, 正文, 请求头)；返回 (响应列表, 假上游)。"""
+    return asyncio.run(_exchange(app, monkeypatch, upstream, replies, calls, overrides or {}))
 
 
 # ---- 客户端读回 ----

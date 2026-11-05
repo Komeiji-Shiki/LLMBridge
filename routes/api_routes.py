@@ -1189,8 +1189,12 @@ async def gemini_interactions_endpoint(request: Request):
     if not isinstance(model, str) or not model:
         raise HTTPException(400, 'model 为必填项')
     _validate_request_api_key(request, model, allow_gemini_style=True)
-    config = await select_gemini_endpoint(model, MODEL_ENDPOINT_MAP)
+    from routes.stored_objects_api import bound_for_request
+    # 续接上一轮时必须回到创建它的线路和密钥，上一轮只在那个项目里可见
+    bound = await bound_for_request(request, 'interactions', body.get('previous_interaction_id'), model)
+    config = bound.config if bound else await select_gemini_endpoint(model, MODEL_ENDPOINT_MAP)
     if config.get('upstream_protocol') != 'interactions':
         raise HTTPException(400, '该模型未配置 Interactions 上游协议')
     return await forward_native_exchange(body, config, model, _app_state.server.direct_api_service,
-                                         monitoring_service, stream=body.get('stream', False))
+                                         monitoring_service, stream=body.get('stream', False),
+                                         api_key=bound.key if bound else None)

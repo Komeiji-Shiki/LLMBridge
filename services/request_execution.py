@@ -63,7 +63,7 @@ def retry_before_output(method=None, *, output_bytes=False):
         if strategy == 'sticky':
             attempts = max(attempts, len(_get_valid_keys(keys)) + 1)
         # Server-side stored response references are bound to their original account.
-        pinned = bool(context.request_body.get('previous_response_id'))
+        pinned = bool(context.request_body.get('previous_response_id') or context.request_body.get('previous_interaction_id'))
         signature_recovery = None
         if protocol_name(config) == 'gemini':
             scope = endpoint_identity({**config, 'model_id': config.get('model_id') or context.model})

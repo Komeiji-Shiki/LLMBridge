@@ -10,7 +10,9 @@ from core.config_loader import CONFIG
 from core.conversion_report import ConversionRejected, raise_if_strict
 from core.request_context import RequestContext, current_request, credential_identity
 from services.protocol_events import payloads, error_status, gemini_termination, merge_gemini_safety
+from services import stored_objects
 from services.provider_capabilities import protocol_name, apply_native_tool_defaults
+from services.stored_objects import INTERACTIONS, RESPONSES
 from utils.usage_tokens import resolve_usage_tokens
 from core.constants import GeminiDefaults, RetryDefaults, resolve_first_chunk_timeout
 
@@ -293,7 +295,9 @@ def display_messages_for(body, protocol):
     return [{'role': 'user', 'content': copy.deepcopy(body)}]
 
 
-async def forward_native_exchange(body, config, model, service, monitor, *, stream=False, context=None, gemini_response=False):
+async def forward_native_exchange(body, config, model, service, monitor, *, stream=False, context=None, gemini_response=False,
+                                  api_key=None):
+    """api_key 不为空时固定用这把密钥：续接上游保存的对象必须回到创建它的项目。"""
     from routes._direct_api_utils import get_api_key
     from converters.gemini_interactions import convert_gemini_gc_to_interactions, convert_interactions_to_gemini_gc, interaction_failure, InteractionsToGeminiGCConverter
     from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler
@@ -313,6 +317,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
     generation_error = None
     incomplete = False
     observed_tools = set()
+    object_id = object_status = key = None
     protocol = protocol_name(config)
     assembler = GeminiTurnAssembler() if protocol == 'gemini' and context.authenticated else None
     params = {'protocol': protocol, 'streaming': stream, 'model_alias': model,
@@ -322,6 +327,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
 
     def observe(value):
         nonlocal input_tokens, output_tokens, cached_tokens, upstream_usage, failure, incomplete, generation_error
+        nonlocal object_id, object_status
         if not isinstance(value, dict):
             return
         if error_status(value):
@@ -329,6 +335,8 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         if value.get('type') == 'response.incomplete' or value.get('status') == 'incomplete':
             incomplete = True
         native = value.get('response') or value.get('interaction') or value
+        if isinstance(native.get('id'), str) and native.get('status'):
+            object_id, object_status = native['id'], native['status']
         if protocol == 'interactions':
             if native.get('status') in ('incomplete', 'requires_continuation'):
                 incomplete = True
@@ -389,6 +397,10 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                             cost_info=cost, response_content=''.join(text_parts), full_messages=original_messages,
                             upstream_usage=upstream_usage)
         await monitor.broadcast_to_monitors({'type': 'request_end', 'request_id': request_id, 'success': failure is None})
+        if (object_id and protocol in (INTERACTIONS, RESPONSES) and not gemini_response and context.authenticated
+                and stored_objects.stores_object(body)):
+            await asyncio.to_thread(stored_objects.remember, context.owner_id, protocol, object_id, model, config, key,
+                                    (input_tokens, output_tokens, cached_tokens), object_status)
         if assembler is not None and failure is None and not incomplete and assembler.has_signatures():
             try:
                 contents = body.get('contents') if isinstance(body, dict) else None
@@ -397,8 +409,9 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                 logger.warning('Gemini 思考签名记录失败；不影响本次响应')
 
     try:
-        key = await get_api_key(model, config.get('api_keys') or config.get('api_key'), strategy=config.get('api_key_strategy', 'round_robin'),
-                                cooldown_seconds=int(config.get('api_key_cooldown_seconds') or RetryDefaults.API_KEY_COOLDOWN_SECONDS))
+        key = api_key or await get_api_key(
+            model, config.get('api_keys') or config.get('api_key'), strategy=config.get('api_key_strategy', 'round_robin'),
+            cooldown_seconds=int(config.get('api_key_cooldown_seconds') or RetryDefaults.API_KEY_COOLDOWN_SECONDS))
         context.credential_fingerprint = credential_identity(key)
         upstream = copy.deepcopy(body)
         target = config.get('model_id') or model

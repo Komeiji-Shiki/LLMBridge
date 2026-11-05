@@ -1342,6 +1342,45 @@ class DirectAPIService:
         else:
             return error_json_str.encode('utf-8')
 
+    def _passthrough_headers(self, endpoint_path: str, api_key: str,
+                             headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        request_headers = {
+            "Content-Type": "application/json"
+        }
+
+        # API Key 可选：本地反代场景可能无需认证
+        if api_key:
+            # 默认 OpenAI Bearer 方式
+            request_headers["Authorization"] = f"Bearer {api_key}"
+
+            # Anthropic /messages 兼容：自动附加 x-api-key 和版本头
+            endpoint_lower = endpoint_path.lower()
+            if endpoint_lower.endswith(("/messages", "/messages/count_tokens")):
+                request_headers["x-api-key"] = api_key
+                request_headers.setdefault("anthropic-version", "2023-06-01")
+
+        self._apply_context_upstream_headers(request_headers)
+
+        # 合并额外的请求头
+        if headers:
+            request_headers.update(headers)
+            if 'x-goog-api-key' in headers:
+                request_headers['x-goog-api-key'] = api_key
+                request_headers.pop('Authorization', None)
+
+        apply_api_key_auth(request_headers, api_key)
+        return request_headers
+
+    async def open_passthrough(self, method: str, base_url: str, api_key: str, endpoint_path: str,
+                               headers: Optional[Dict[str, str]] = None):
+        """转发没有请求体的原生请求（查询、取消、删除），返回尚未读取的上游响应，调用方负责 release。"""
+        request_headers = self._passthrough_headers(endpoint_path, api_key, headers)
+        request_headers.pop("Content-Type", None)
+        response = await self.session.request(method, f"{base_url.rstrip('/')}{endpoint_path}",
+                                              headers=request_headers, timeout=_upstream_timeout())
+        _remember_response_headers(response)
+        return response
+
     @retry_before_output(output_bytes=True)
     async def call_api_passthrough(
         self,
@@ -1370,32 +1409,7 @@ class DirectAPIService:
             endpoint_path = "/" + endpoint_path
         endpoint = f"{base_url.rstrip('/')}{endpoint_path}"
 
-        # 构建请求头
-        request_headers = {
-            "Content-Type": "application/json"
-        }
-
-        # API Key 可选：本地反代场景可能无需认证
-        if api_key:
-            # 默认 OpenAI Bearer 方式
-            request_headers["Authorization"] = f"Bearer {api_key}"
-
-            # Anthropic /messages 兼容：自动附加 x-api-key 和版本头
-            endpoint_lower = endpoint_path.lower()
-            if endpoint_lower.endswith(("/messages", "/messages/count_tokens")):
-                request_headers["x-api-key"] = api_key
-                request_headers.setdefault("anthropic-version", "2023-06-01")
-
-        self._apply_context_upstream_headers(request_headers)
-        
-        # 合并额外的请求头
-        if headers:
-            request_headers.update(headers)
-            if 'x-goog-api-key' in headers:
-                request_headers['x-goog-api-key'] = api_key
-                request_headers.pop('Authorization', None)
-
-        apply_api_key_auth(request_headers, api_key)
+        request_headers = self._passthrough_headers(endpoint_path, api_key, headers)
         
         is_stream = request_body.get("stream", False) if stream_override is None else stream_override
         

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-11-06：上游保存对象的查询、取消和删除
+
+- 新增 `GET`/`DELETE /v1beta/interactions/{id}`、`POST /v1beta/interactions/{id}/cancel`，以及 `GET`/`DELETE /v1/responses/{id}`、`POST /v1/responses/{id}/cancel`、`GET /v1/responses/{id}/input_items`。查询参数原样转发（网关自己的 `?key=` 除外），`stream=true` 加 `last_event_id` 或 `starting_after` 可以重连流。
+- 创建对象时记下它属于哪条线路和哪把密钥，查询、取消、删除和带 `previous_interaction_id` / `previous_response_id` 的续接都用回原来的密钥。此前多密钥轮询时续接会落到别的项目上，上游找不到上一轮。记录只存端点身份和密钥指纹，按调用方隔离，保留 30 天；`store: false` 的请求不记录。
+- 后台任务（`background: true`）创建时没有用量，不再按估算记账；轮询到终态时补记一次用量，流中途断开后再查询也只补记差额。
+
 ### 2026-11-06：Interactions 长输出续传与错误状态码
 
 - Interactions 上游返回 `requires_continuation` 时，网关替 Chat、Anthropic、Responses 客户端续传，客户端看到一条完整的回答。`store: false` 下每跳重发原始请求并带上 `continuation_token`；跳数上限沿用 `gemini_max_continuation_hops`。此前的提示说无状态模式不能续传，是错的。

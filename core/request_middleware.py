@@ -15,6 +15,7 @@ from core.conversation_store import conversation_store
 from services.protocol_events import payloads, is_business_event
 
 logger = logging.getLogger(__name__)
+_STORED_OBJECT_PATH = re.compile(r'^/(v1/responses|v1beta/interactions)/[^/]+(/input_items)?$')
 
 def _should_capture_upstream_header(name: str) -> bool:
     """保留端到端请求头，只过滤代理控制和不可复用的传输头。"""
@@ -29,7 +30,10 @@ class GatewayRequestMiddleware:
         path = scope.get('path', '')
         if path.startswith('/v1/bridge/audio/'):
             return await self.app(scope, receive, send)
-        if scope['type'] != 'http' or scope.get('method') != 'POST' or not (path.startswith(('/v1/', '/v1beta/')) or path == '/api/admin/playground/run'):
+        method = scope.get('method')
+        # 上游保存对象的查询和删除也要识别调用方，记录按调用方隔离
+        tracked = method == 'POST' or (method in ('GET', 'DELETE') and _STORED_OBJECT_PATH.match(path))
+        if scope['type'] != 'http' or not tracked or not (path.startswith(('/v1/', '/v1beta/')) or path == '/api/admin/playground/run'):
             return await self.app(scope, receive, send)
         headers = dict(scope.get('headers', []))
         session = headers.get(b'x-bridge-session-id', b'').decode('ascii', errors='replace')
