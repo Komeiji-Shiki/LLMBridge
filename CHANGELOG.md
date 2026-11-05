@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### 2026-11-06：格式转换修复和新路由
+
+- 中段 `role:system` 留在原位，不再搬到顶层破坏缓存前缀。端点配置 `mid_system_mode: "hoist"` 可恢复旧行为。
+- Anthropic、Responses、Chat、generateContent 之间的转换不再静默丢内容：拒答、引用、图片、代码执行结果、文件块、并行工具调用和停止原因都能正确传递。
+- 新增 `services/model_capabilities.py` 模型限制表：采样参数、预填充、思考预算和等级按模型调整。2026-12-01 起 `gemini-2.5-pro`、`gemini-2.5-flash` 按路由后的新模型处理。
+- Interactions 全链路修复，详见提交记录。现行 schema 没有采样字段，`temperature`、`top_p` 不再发送。
+- 新增路由 `/v1/messages/count_tokens`、`/v1/responses/input_tokens`、`/v1/responses/compact`。
+- 上游宣布模型已弃用并点名替代型号时自动切换，监控详情标红提示；端点配置 `auto_model_replacement: false` 可关闭。切换只在内存里，配置文件请自行更新。
+- 转换损失写入响应头 `X-Bridge-Warnings` 和监控详情；端点配置 `strict_conversion: true` 时请求侧有损失直接返回 400。
+- 上游的 `retry-after`、`x-should-retry` 和限流响应头转给客户端，Gemini 的 `RetryInfo` 转成 `retry-after`。
+- 官方 Gemini 地址的 generateContent 请求默认带 `store: false`，需要保存时用自定义参数打开。
+- 新增 `scripts/check_upstream_schema.py`，列出官方 schema 里代码尚未提到的类型。
+
 ### 2026-11-04：WorkBuddy 思维链回传
 
 - 修复 WorkBuddy 渠道的历史思考进不了模型：上游静默丢弃 assistant 的 `reasoning_content`，只读 `reasoning`。转发时改用 `reasoning`，DeepSeek 的空白占位保持不变。
