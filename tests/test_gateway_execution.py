@@ -11,6 +11,61 @@ from services.request_execution import retry_before_output
 from services.protocol_events import payloads
 
 
+DEPRECATED = {'type': 'error', 'error': {'type': 'ModelDeprecated',
+                                         'message': 'Model old-model has been deprecated. Use new-model instead.'},
+              'metadata': {'model': 'old-model', 'replacement': 'new-model'}}
+
+
+@pytest.fixture
+def replacement_table(monkeypatch):
+    monkeypatch.setattr('services.model_replacements._replacements', {})
+
+
+def _run_replacement(endpoint):
+    seen = []
+
+    @retry_before_output
+    async def upstream(api_key='', request_body=None):
+        seen.append(request_body['model'])
+        if request_body['model'] == 'old-model':
+            yield {**DEPRECATED, '_http_status': 404}
+            return
+        yield {'status': 'ok'}
+
+    context = RequestContext(endpoint=endpoint, model='alias', authenticated=False)
+    token = current_request.set(context)
+    try:
+        async def collect():
+            return [item async for item in upstream(request_body={'model': 'old-model'})]
+        return seen, asyncio.run(collect()), context
+    finally:
+        current_request.reset(token)
+
+
+def test_deprecated_model_switches_once_and_later_requests_skip_the_failure(replacement_table):
+    endpoint = {'api_base_url': 'https://u.test', 'model_id': 'old-model'}
+    seen, output, context = _run_replacement(endpoint)
+    assert seen == ['old-model', 'new-model']
+    assert output == [{'status': 'ok'}]
+    assert context.outcome['model_replaced'] == {'from': 'old-model', 'to': 'new-model'}
+    assert _run_replacement(endpoint)[0] == ['new-model']
+
+
+def test_model_replacement_can_be_turned_off(replacement_table):
+    seen, output, context = _run_replacement({'api_base_url': 'https://u.test', 'auto_model_replacement': False})
+    assert seen == ['old-model']
+    assert 'model_replaced' not in context.outcome
+
+
+def test_replacement_is_only_read_from_deprecation_errors():
+    from services.model_replacements import replacement_from_error
+    assert replacement_from_error([DEPRECATED]) == 'new-model'
+    assert replacement_from_error([{'error': {'type': 'not_found_error',
+                                              'message': 'The model x has been retired. Use y instead.'}}]) == 'y'
+    assert replacement_from_error([{'error': {'message': 'Rate limited. Use y instead.', 'code': 429}}]) is None
+    assert replacement_from_error([{'error': {'message': 'model has been deprecated'}}]) is None
+
+
 def test_auth_observer_does_not_turn_failure_into_success():
     def denied(*args, **kwargs):
         raise PermissionError('denied')

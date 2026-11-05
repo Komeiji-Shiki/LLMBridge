@@ -12,6 +12,7 @@ import logging
 import time
 from core.request_context import current_request, credential_identity, endpoint_identity
 from services.gemini_signature_recovery import GeminiTextSignatureRecovery
+from services.model_replacements import apply_known_replacement, learn_replacement
 from services.protocol_events import payloads, error_status, is_business_event, is_terminal
 from services.provider_capabilities import apply_native_tool_defaults, protocol_name
 from core.constants import RetryDefaults
@@ -69,6 +70,7 @@ def retry_before_output(method=None, *, output_bytes=False):
             signature_recovery = GeminiTextSignatureRecovery(scope)
         context.gemini_signature_recovery = signature_recovery
         select_key = strategy == 'sticky'
+        model_switched = False
         retries_remaining = attempts - 1
         context.transport_depth += 1
         try:
@@ -92,11 +94,13 @@ def retry_before_output(method=None, *, output_bytes=False):
                     elif signature_recovery is not None:
                         bound.arguments['request_body'] = signature_recovery.prepare(body)
                     context.upstream_request = copy.deepcopy(bound.arguments['request_body'])
+                apply_known_replacement(bound.arguments, config)
                 info = {'attempt': len(context.attempts) + 1,
                         'started_ms': round((time.perf_counter() - context.started) * 1000, 2)}
                 context.attempts.append(info)
                 context.mark('upstream_start')
                 prefix, total, committed, terminal = [], 0, False, False
+                values = []
                 # 空响应没有首块可用于判断类型，沿用入口声明的输出格式。
                 failed, error_text, byte_mode = None, '', output_bytes
                 iterator = method(*bound.args, **bound.kwargs)
@@ -166,6 +170,11 @@ def retry_before_output(method=None, *, output_bytes=False):
                         select_key = False
                         logger.info('[RETRY] Gemini 拒绝思考签名，移除 %d 个文本签名后重试', removed)
                         continue
+                if failed and not committed and not model_switched and learn_replacement(values, bound.arguments, config):
+                    # 弃用错误发生在生成前，换型号不算一次失败的重试；同一请求只切一次。
+                    model_switched = True
+                    select_key = False
+                    continue
                 quota = bool(failed and strategy == 'sticky' and is_quota_exceeded(failed, error_text))
                 if quota:
                     await mark_sticky_key_cooldown(context.model, keys, key, cooldown)
