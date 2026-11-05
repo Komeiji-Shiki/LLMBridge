@@ -124,3 +124,6 @@ deepseek_v3_tokenizer/tokenizer_config.json
 data/deepseek-logprobs/
 data/
 *.jsonl.gz
+
+# 本地整包备份（可能含配置和日志，且超过 GitHub 单文件上限）
+/*.7z
