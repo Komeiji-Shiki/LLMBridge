@@ -20,6 +20,17 @@ UPSTREAM_HEADER_EXCLUSIONS = frozenset({
     'x-web-access-key', 'x-bridge-request-id', 'x-bridge-session-id',
 })
 
+# Claude Code 随请求带的归属信息，只进监控，不改变路由。
+CLIENT_TRACE_HEADERS = {
+    'x-claude-code-agent-id': 'agent_id',
+    'x-claude-code-parent-agent-id': 'parent_agent_id',
+    'x-claude-code-agent-type': 'agent_type',
+    'x-claude-code-request-class': 'request_class',
+    'x-claude-code-prompt-id': 'prompt_id',
+    'x-claude-code-compaction': 'compaction',
+    'x-claude-code-context-compacted': 'context_compacted',
+}
+
 
 @dataclass
 class RequestContext:
@@ -40,6 +51,7 @@ class RequestContext:
     credential_fingerprint: str = ''
     artifacts: dict = field(default_factory=dict)
     upstream_headers: dict = field(default_factory=dict)
+    upstream_response_headers: dict = field(default_factory=dict)
     upstream_request: dict = field(default_factory=dict)
     outcome: dict = field(default_factory=dict)
     responses_history: object | None = None
@@ -47,7 +59,10 @@ class RequestContext:
     def cache_session(self):
         # Never use an artifact to choose a route. Each selected upstream has
         # its own cache namespace even when the external conversation ID matches.
-        value = [self.session_id, self.model, endpoint_identity(self.endpoint), self.credential_fingerprint]
+        # 没带会话 ID 时 session_id 每个请求都不同，用它做键下一轮永远读不到，这里退到
+        # “调用方 + 线路”这一级；签名按原文精确匹配，共用命名空间不会串到别的对话。
+        session = self.session_id if self.explicit_session else None
+        value = [session, self.model, endpoint_identity(self.endpoint), self.credential_fingerprint]
         return hashlib.sha256(json.dumps(value).encode()).hexdigest()
 
     def mark(self, name):

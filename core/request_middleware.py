@@ -9,7 +9,8 @@ import logging
 import re
 from starlette.responses import JSONResponse
 from core.config_loader import get_setting
-from core.request_context import RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request, endpoint_identity
+from core.conversion_report import WARNINGS_HEADER, warnings_header_value
+from core.request_context import CLIENT_TRACE_HEADERS, RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request, endpoint_identity
 from core.conversation_store import conversation_store
 from services.protocol_events import payloads, is_business_event
 
@@ -40,8 +41,16 @@ class GatewayRequestMiddleware:
             for name, value in headers.items()
             if _should_capture_upstream_header(name.decode('ascii'))
         }
+        if not session:
+            # 客户端自带的会话 ID 格式不对时不算错误，只是不用它做隔离。
+            client_session = headers.get(b'x-claude-code-session-id', b'').decode('ascii', errors='replace')
+            session = client_session if re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', client_session) else ''
         if session:
             context.session_id, context.explicit_session = session, True
+        trace = {field: context.upstream_headers[name] for name, field in CLIENT_TRACE_HEADERS.items()
+                 if name in context.upstream_headers}
+        if trace:
+            context.outcome['client_trace'] = trace
         token = current_request.set(context)
         archive = io.BytesIO()
         compressor = gzip.GzipFile(fileobj=archive, mode='wb', compresslevel=6, mtime=0)
@@ -68,7 +77,18 @@ class GatewayRequestMiddleware:
                 status = message['status']
                 response_headers = list(message.get('headers', []))
                 streaming = b'text/event-stream' in dict(response_headers).get(b'content-type', b'')
-                response_headers = [(name, value) for name, value in response_headers if name.lower() not in (b'x-bridge-session-id', b'x-bridge-request-id')]
+                warnings_name = WARNINGS_HEADER.encode()
+                existing_warnings = next((value for name, value in response_headers if name.lower() == warnings_name), None)
+                response_headers = [(name, value) for name, value in response_headers
+                                    if name.lower() not in (b'x-bridge-session-id', b'x-bridge-request-id', warnings_name)]
+                warnings_value = warnings_header_value(existing_warnings)
+                if warnings_value:
+                    response_headers.append((warnings_name, warnings_value))
+                # 限流和重试提示是上游对客户端说的话，转换协议也不能吞掉。
+                present = {name.lower() for name, _ in response_headers}
+                response_headers.extend((name.encode(), value.encode('latin-1', 'replace'))
+                                        for name, value in context.upstream_response_headers.items()
+                                        if name.encode() not in present)
                 response_headers.extend([(b'x-bridge-session-id', context.session_id.encode()),
                                          (b'x-bridge-request-id', context.request_id.encode())])
                 message = {**message, 'headers': response_headers}
