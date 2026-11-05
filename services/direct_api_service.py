@@ -1340,7 +1340,7 @@ class DirectAPIService:
 
             # Anthropic /messages 兼容：自动附加 x-api-key 和版本头
             endpoint_lower = endpoint_path.lower()
-            if endpoint_lower.endswith("/messages") or endpoint_lower == "/messages":
+            if endpoint_lower.endswith(("/messages", "/messages/count_tokens")):
                 request_headers["x-api-key"] = api_key
                 request_headers.setdefault("anthropic-version", "2023-06-01")
 
