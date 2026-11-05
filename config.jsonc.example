@@ -72,6 +72,11 @@
     "days": 30,
     "run_on_startup": false
   },
+  // 旧日志压缩：超过 compress_after_days 天的日目录打包进 logs/archive（校验通过后才删原文件），0 为关闭。
+  // 打包后的数据同样受日志保留期和 exchange_archive.retention_days 管理。
+  "log_archive": {
+    "compress_after_days": 14
+  },
   // 完整交换归档（logs/exchanges/YYYYMMDD）：retention_days 为 0 时永久保留；
   // 大于 0 时每日删除早于该天数的日期目录。重度使用每天可达数百 MB
   "exchange_archive": {

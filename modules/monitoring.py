@@ -1252,12 +1252,17 @@ class MonitoringService:
                                 continue
                 except OSError:
                     continue
-            
-            return None
-            
+
+            return self._find_request_in_log_pack(request_id)
+
         except Exception as e:
             logger.error(f"从分层日志查找请求详情失败: {e}", exc_info=True)
             return None
+
+    def _find_request_in_log_pack(self, request_id: str, date_str: Optional[str] = None) -> Optional[dict]:
+        """散文件里没有时，到旧日志压缩归档中读取。"""
+        from core.log_pack import find_packed_request
+        return find_packed_request(MonitorConfig.LOG_DIR, request_id, date_str)
 
     def _find_request_in_hierarchical_logs_fast(self, request_id: str, timestamp: float) -> Optional[dict]:
         """用 timestamp 精确定位分层日志文件，O(1) 目录查找，只扫描单个小时目录"""
@@ -1269,8 +1274,8 @@ class MonitoringService:
             hour_dir = MonitorConfig.LOG_DIR / date_str / hour_str
             
             if not hour_dir.exists():
-                return None
-            
+                return self._find_request_in_log_pack(request_id, date_str)
+
             ext = ".json*"
             pattern = f"*_{req_id_short}{ext}"
             
@@ -1288,7 +1293,7 @@ class MonitoringService:
                 except Exception as e:
                     logger.warning(f"读取日志文件失败 {log_file}: {e}")
                     continue
-            return None
+            return self._find_request_in_log_pack(request_id, date_str)
         except Exception as e:
             logger.error(f"快速查找分层日志失败: {e}")
             return None

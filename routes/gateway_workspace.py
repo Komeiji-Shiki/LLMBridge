@@ -117,14 +117,15 @@ async def download_exchange(request_id: str):
     from pathlib import Path
     from fastapi.responses import Response
     from core.exchange_archive import load_exchange
+    from core.log_pack import load_packed_exchange
     if not re.fullmatch(r'[a-f0-9]{32}', request_id):
         raise HTTPException(400, '请求 ID 格式无效')
     def build():
         path = next(Path('logs/exchanges').glob('*/*/' + request_id + '.json.gz'), None)
-        if path is None:
-            return None
         # 归档内 upstream_request 的共享字段是占位，下载时还原为完整记录
-        record = load_exchange(path)
+        record = load_exchange(path) if path is not None else load_packed_exchange('logs', request_id)
+        if record is None:
+            return None
         return gzip.compress(json.dumps(record, ensure_ascii=False, separators=(',', ':')).encode(), compresslevel=6)
     content = await asyncio.to_thread(build)
     if content is None:

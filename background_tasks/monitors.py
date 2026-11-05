@@ -9,6 +9,8 @@ import os
 import psutil
 import re
 import shutil
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,10 +50,14 @@ def _purge_expired_logs(monitoring_service) -> None:
     """
     from core.config_loader import CONFIG
     from core.exchange_archive import purge_expired_exchanges
+    from core.log_pack import KIND_EXCHANGES, KIND_LOGS, purge_packed_before
     from modules.monitoring import MonitorConfig
 
     archive_days = (CONFIG.get('exchange_archive') or {}).get('retention_days', 0)
     removed_archives = purge_expired_exchanges(archive_days)
+    if int(archive_days or 0) > 0:
+        purge_packed_before(MonitorConfig.LOG_DIR, KIND_EXCHANGES,
+                            (datetime.now() - timedelta(days=int(archive_days))).strftime("%Y%m%d"))
     if removed_archives:
         logger.info(f"[LOG_CLEANER] 🧹 删除 {removed_archives} 个超过 {archive_days} 天的完整交换归档日期目录")
 
@@ -68,6 +74,8 @@ def _purge_expired_logs(monitoring_service) -> None:
             if MonitorConfig.MAX_LOG_DAYS > 0 and entry.is_dir() and re.fullmatch(r"\d{8}", entry.name) and entry.name < cutoff_str:
                 shutil.rmtree(entry, ignore_errors=True)
                 removed_dirs += 1
+        if MonitorConfig.MAX_LOG_DAYS > 0:
+            removed_dirs += purge_packed_before(log_dir, KIND_LOGS, cutoff_str)
 
     deleted_rows = 0
     sqlite_logger = getattr(monitoring_service.log_manager, "sqlite_logger", None)
@@ -99,7 +107,34 @@ async def log_retention_cleaner(monitoring_service):
             await asyncio.to_thread(_purge_expired_logs, monitoring_service)
         except Exception as e:
             logger.error(f"[LOG_CLEANER] 错误: {e}", exc_info=True)
+        try:
+            await _pack_old_logs()
+        except Exception as e:
+            logger.error(f"[LOG_PACK] 错误: {e}", exc_info=True)
         await asyncio.sleep(24 * 3600)
+
+
+async def _pack_old_logs() -> None:
+    """在低优先级子进程里压缩旧日志，压缩的 CPU 和内存开销不进网关进程。"""
+    from core.config_loader import CONFIG
+    from core.log_pack import DEFAULT_COMPRESS_AFTER_DAYS
+    from modules.monitoring import MonitorConfig
+
+    days = (CONFIG.get('log_archive') or {}).get('compress_after_days', DEFAULT_COMPRESS_AFTER_DAYS)
+    if int(days or 0) <= 0:
+        return
+    script = Path(__file__).resolve().parent.parent / 'scripts' / 'pack_old_logs.py'
+    flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == 'win32' else 0
+    # 网关在 Windows 上使用 SelectorEventLoop，不支持 asyncio 子进程，这里放进线程运行。
+    process = await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, str(script), '--root', str(MonitorConfig.LOG_DIR), '--older-than', str(int(days))],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags)
+    text = process.stdout.decode('utf-8', 'replace').strip()[-2000:]
+    if process.returncode:
+        logger.error(f"[LOG_PACK] 打包失败（退出码 {process.returncode}）: {text}")
+    else:
+        logger.info(f"[LOG_PACK] 打包完成: {text}")
 
 
 async def api_key_stats_saver(interval_seconds: int = 300):
