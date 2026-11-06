@@ -5,7 +5,7 @@ import pytest
 
 from protocol_harness import (
     CLIENT_PATHS, CLIENTS, MODEL, READERS, REPLY_BUILDERS, UPSTREAMS, Reply, Turn, build_gateway, exchange,
-    interactions_reply,
+    gemini_partial_args_reply, interactions_reply,
 )
 
 STREAMS = (False, True)
@@ -60,6 +60,17 @@ def test_parallel_tool_calls_stay_separate_and_stop_as_tool(gateway, cell):
     assert seen.text == '查一下'
     assert seen.calls == calls
     assert seen.stop == 'tool'
+
+
+@pytest.mark.parametrize('client', CLIENTS)
+def test_vertex_argument_fragments_reach_clients_as_whole_calls(gateway, client):
+    calls = [('call_a', 'write', {'path': 'poem.txt', 'lines': 12}), ('call_b', 'flag', {'on': True, 'note': None})]
+    app, _, monkeypatch = gateway
+    reply = gemini_partial_args_reply(Turn(text='写文件', calls=calls, stop='tool'))
+    response, _ = exchange(app, monkeypatch, 'gemini', [reply], CLIENT_PATHS[client], request_for(client, True))
+    seen = READERS[client](response, True)
+    assert seen.error is None
+    assert (seen.text, seen.calls, seen.stop) == ('写文件', calls, 'tool')
 
 
 @pytest.mark.parametrize('cell', CELLS, ids=cell_id)

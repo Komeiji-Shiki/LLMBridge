@@ -32,6 +32,7 @@ from core.constants import GeminiDefaults, TimeoutDefaults
 from core.conversion_report import ConversionRejected, raise_if_strict
 from converters.gemini_generate import GeminiRequestError, build_gemini_contents
 from converters.gemini_interactions import build_interactions_request_body, interaction_failure
+from converters.gemini_partial_args import PartialCallMerger
 from converters.media import gemini_code_text
 from services.model_capabilities import limits_for
 from services.provider_capabilities import provider_name
@@ -820,6 +821,8 @@ class DirectAPIService:
 
         continuation = GeminiContinuation(
             CONFIG.get("gemini_max_continuation_hops", GeminiDefaults.MAX_CONTINUATION_HOPS))
+        # Vertex 流式参数分片在这里拼回完整调用，转换链路只处理完整的 functionCall
+        partial_calls = PartialCallMerger()
 
         try:
             context = current_request.get()
@@ -888,6 +891,7 @@ class DirectAPIService:
                             # 终止块本身可能带有最后一段内容和 usageMetadata：先原样交给
                             # 调用方转换计费，再单独发出错误事件
                             error = _termination_error(chunk)
+                            chunk = partial_calls.merge_chunk(chunk)
                             _assign_function_call_ids(chunk)
                             if assembler is not None:
                                 assembler.feed(chunk)

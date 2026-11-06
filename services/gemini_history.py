@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 
+from converters.gemini_partial_args import PartialCallMerger
 from converters.media import gemini_code_text
 from core.conversation_store import conversation_store
 from core.request_context import endpoint_identity
@@ -216,8 +217,10 @@ class GeminiTurnAssembler:
 
     def __init__(self):
         self.candidates = {}
+        self.calls = PartialCallMerger()
 
     def feed(self, value):
+        value = self.calls.merge_chunk(value)
         candidates = value.get('candidates') if isinstance(value, dict) else None
         if not isinstance(candidates, list):
             return

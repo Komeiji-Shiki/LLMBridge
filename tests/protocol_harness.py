@@ -188,6 +188,40 @@ def gemini_reply(turn, stream):
     return Reply(events=events)
 
 
+def _partial_args(args):
+    """Vertex 的 partialArgs：字符串拆成两段再用只有 jsonPath 的项收尾，其他值一次给出。"""
+    items = []
+    for key, value in args.items():
+        path = f'$.{key}'
+        if isinstance(value, str) and len(value) > 1:
+            middle = len(value) // 2
+            items += [{'jsonPath': path, 'stringValue': value[:middle], 'willContinue': True},
+                      {'jsonPath': path, 'stringValue': value[middle:], 'willContinue': True},
+                      {'jsonPath': path}]
+        elif value is None:
+            items.append({'jsonPath': path, 'nullValue': 'NULL_VALUE'})
+        else:
+            kind = {bool: 'boolValue', str: 'stringValue'}.get(type(value), 'numberValue')
+            items.append({'jsonPath': path, kind: value})
+    return items
+
+
+def gemini_partial_args_reply(turn):
+    """开启 streamFunctionCallArguments 的 Vertex 流：每个调用拆成首片、参数分片和空的收尾片。"""
+    events = []
+    for event in gemini_reply(turn, True).events:
+        parts = (event['candidates'][0].get('content') or {}).get('parts') or []
+        if not parts or 'functionCall' not in parts[0]:
+            events.append(event)
+            continue
+        call = parts[0]['functionCall']
+        pieces = [{**parts[0], 'functionCall': {'id': call['id'], 'name': call['name'], 'willContinue': True}}]
+        pieces += [{'functionCall': {'partialArgs': [item], 'willContinue': True}} for item in _partial_args(call['args'])]
+        pieces.append({'functionCall': {}})
+        events.extend({'candidates': [{'content': {'role': 'model', 'parts': [piece]}}]} for piece in pieces)
+    return Reply(events=events)
+
+
 def _interaction_steps(turn):
     steps = []
     if turn.reasoning:
