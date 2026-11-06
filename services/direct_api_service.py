@@ -133,7 +133,13 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
 
 from services.sse import iter_sse_json_events as _iter_sse_json_events
 from services.request_execution import retry_before_output
-from core.upstream_auth import apply_api_key_auth
+from core.google_oauth import GoogleOAuthError
+from core.upstream_auth import apply_upstream_auth
+
+
+def _auth_error(error: GoogleOAuthError) -> Dict[str, Any]:
+    logger.error(f"[UPSTREAM_AUTH] {error}")
+    return {"error": {"message": str(error), "type": "authentication_error", "code": 401}}
 
 
 def _upstream_timeout() -> aiohttp.ClientTimeout:
@@ -488,12 +494,12 @@ class DirectAPIService:
             "Content-Type": "application/json"
         }
         self._apply_context_upstream_headers(headers)
-        apply_api_key_auth(headers, api_key)
         
         logger.info(f"[DIRECT_API] 调用API: {endpoint}")
         logger.info(f"[DIRECT_API] 模型: {model}, 流式: {stream}")
         
         try:
+            await apply_upstream_auth(headers, api_key)
             context = current_request.get()
             if context:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'chat')
@@ -548,6 +554,8 @@ class DirectAPIService:
                     "type": "timeout_error"
                 }
             }
+        except GoogleOAuthError as e:
+            yield _auth_error(e)
         except aiohttp.ClientError as e:
             logger.error(f"[DIRECT_API] 网络请求失败: {e}")
             yield {
@@ -855,7 +863,7 @@ class DirectAPIService:
                 headers["x-goog-api-key"] = api_key
             # 转换协议后仍保留客户端的会话标识和其他端到端请求头。
             self._apply_context_upstream_headers(headers)
-            apply_api_key_auth(headers, api_key, api_key_auth_mode)
+            await apply_upstream_auth(headers, api_key, api_key_auth_mode)
             response_data = None
             while True:
                 async with self.session.post(
@@ -935,6 +943,8 @@ class DirectAPIService:
                     "type": "timeout_error"
                 }
             })
+        except GoogleOAuthError as e:
+            yield _auth_error(e)
         except aiohttp.ClientError as e:
             # 网络异常可能包含请求信息，统一清除密钥后再返回。
             safe_err = _redact(str(e))
@@ -1061,7 +1071,7 @@ class DirectAPIService:
             if api_key:
                 headers["x-goog-api-key"] = api_key
             self._apply_context_upstream_headers(headers)
-            apply_api_key_auth(headers, api_key, api_key_auth_mode)
+            await apply_upstream_auth(headers, api_key, api_key_auth_mode)
             response_data = None
             while True:
                 interrupted = None
@@ -1135,6 +1145,8 @@ class DirectAPIService:
                     "type": "timeout_error"
                 }
             })
+        except GoogleOAuthError as e:
+            yield _auth_error(e)
         except aiohttp.ClientError as e:
             safe_err = _redact(str(e))
             logger.error(f"[GEMINI_INTERACTIONS] 网络请求失败: {safe_err}")
@@ -1346,8 +1358,8 @@ class DirectAPIService:
         else:
             return error_json_str.encode('utf-8')
 
-    def _passthrough_headers(self, endpoint_path: str, api_key: str,
-                             headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    async def _passthrough_headers(self, endpoint_path: str, api_key: str,
+                                   headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         request_headers = {
             "Content-Type": "application/json"
         }
@@ -1372,13 +1384,13 @@ class DirectAPIService:
                 request_headers['x-goog-api-key'] = api_key
                 request_headers.pop('Authorization', None)
 
-        apply_api_key_auth(request_headers, api_key)
+        await apply_upstream_auth(request_headers, api_key)
         return request_headers
 
     async def open_passthrough(self, method: str, base_url: str, api_key: str, endpoint_path: str,
                                headers: Optional[Dict[str, str]] = None):
         """转发没有请求体的原生请求（查询、取消、删除），返回尚未读取的上游响应，调用方负责 release。"""
-        request_headers = self._passthrough_headers(endpoint_path, api_key, headers)
+        request_headers = await self._passthrough_headers(endpoint_path, api_key, headers)
         request_headers.pop("Content-Type", None)
         response = await self.session.request(method, f"{base_url.rstrip('/')}{endpoint_path}",
                                               headers=request_headers, timeout=_upstream_timeout())
@@ -1413,9 +1425,12 @@ class DirectAPIService:
             endpoint_path = "/" + endpoint_path
         endpoint = f"{base_url.rstrip('/')}{endpoint_path}"
 
-        request_headers = self._passthrough_headers(endpoint_path, api_key, headers)
-        
         is_stream = request_body.get("stream", False) if stream_override is None else stream_override
+        try:
+            request_headers = await self._passthrough_headers(endpoint_path, api_key, headers)
+        except GoogleOAuthError as e:
+            yield self._format_error_bytes(_auth_error(e), is_stream)
+            return
         
         logger.info(f"[DIRECT_API_PASSTHROUGH] 透传模式调用API: {endpoint}")
         logger.info(f"[DIRECT_API_PASSTHROUGH] 模型: {request_body.get('model')}, 流式: {is_stream}")

@@ -23,7 +23,7 @@
 - **LMArena 集成（已弃用）**：兼容 LMArena 协议的会话管理和 Battle 模式（新版本不再依赖 LMArena）
 - **OpenAI Responses API 兼容**：`/v1/responses` 支持文本、图片、function tools、reasoning、usage 及 Responses SSE。Chat 转换分支为无状态；`responses_native` 可透传原生请求与内置工具，但本网关尚未提供 response 的查询、取消、删除等资源路由。
 - **多 API Key 轮询**：支持配置多个 API Key 并轮询调用，提升并发上限
-- **可选鉴权请求头**：在模型编辑页的“API Key 鉴权方式”中选择 `Authorization: Bearer`、`api-key`、`x-api-key` 或 `x-goog-api-key`。对应配置字段 `api_key_auth_mode` 的值分别为 `bearer`、`api-key`、`x-api-key`、`x-goog-api-key`；留空或设为 `auto` 时沿用协议默认方式。该选项同时用于推理请求、获取模型列表和测试 Key。
+- **可选鉴权请求头**：在模型编辑页的“API Key 鉴权方式”中选择 `Authorization: Bearer`、`api-key`、`x-api-key`、`x-goog-api-key` 或 Google OAuth。对应配置字段 `api_key_auth_mode` 的值分别为 `bearer`、`api-key`、`x-api-key`、`x-goog-api-key`、`google-oauth`；留空或设为 `auto` 时沿用协议默认方式。该选项同时用于推理请求、获取模型列表和测试 Key。
 
 ### 请求增强
 - **自动重试**：支持 429/503 错误自动重试，可配置重试次数和延迟
@@ -297,6 +297,28 @@ total_cost = (uncached_input × input_price + cached_input × cached_input_price
 ```
 
 `api_base_url` 可以填写主机根地址，也可以填写已经带 `/v1beta` 的地址。上游认证通过 `x-goog-api-key` 请求头发送，不需要把 key 拼进 URL。桥接默认使用 `store: false`，每次请求携带完整 steps；Gemini thought 的摘要和签名会在原生 Gemini 请求中保留，OpenAI 兼容请求则通过 `reasoning_content` 和签名缓存维持多轮连续性。Interactions 工具定义会自动从 OpenAI 的嵌套 `function` 格式转换为 Google 要求的扁平格式。
+
+### Vertex AI 与 Google OAuth
+
+Vertex AI 的项目接口用 OAuth 访问令牌鉴权。把 `api_key_auth_mode` 设为 `google-oauth`，API Key 填凭据文件路径（推荐）或单行 JSON，网关会换取访问令牌、在过期前自动刷新，多个凭据照常轮询。支持服务账号密钥（`service_account`）和 `gcloud auth application-default login` 生成的 ADC 文件（`authorized_user`）；ADC 里设置了配额项目时会带上 `x-goog-user-project`。
+
+```json
+{
+  "gemini-4-argon_vertex_interactions": {
+    "api_type": "gemini_native",
+    "upstream_protocol": "interactions",
+    "api_base_url": "https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global",
+    "api_key_auth_mode": "google-oauth",
+    "api_key": "C:/secrets/vertex-sa.json",
+    "model_id": "gemini-4-argon"
+  }
+}
+```
+
+- Interactions 只支持全球端点 `locations/global` 和 `us`、`eu` 多区域端点（`https://aiplatform.eu.rep.googleapis.com/v1/projects/PROJECT_ID/locations/eu`），不支持 `europe-west2` 这类单区域。
+- generateContent 的地址要带上 `/publishers/google`，例如 `https://aiplatform.googleapis.com/v1/projects/PROJECT_ID/locations/global/publishers/google`。
+- Express mode 的 API Key 也能调用 Interactions：地址同上，鉴权方式选 `x-goog-api-key`。
+- 浏览器端的“获取模型列表”拿不到令牌，OAuth 模式下请直接填写模型 ID；“测试 Key”由网关发请求，按配置的上游协议测试。
 
 ### Responses API 兼容范围
 

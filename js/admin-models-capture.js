@@ -187,6 +187,12 @@ async function fetchModelsFromAPI(event) {
         alert('请先填写API Base URL');
         return;
     }
+
+    // 浏览器拿不到 OAuth 令牌，凭据也不能直接发给上游
+    if (document.getElementById('api-key-auth-mode').value === 'google-oauth') {
+        alert('Google OAuth 凭据只能由网关换取令牌，请直接填写模型 ID');
+        return;
+    }
     
     // 🔧 API Key变为可选（支持本地反代等无需认证的场景）
     const hasApiKey = apiKey.length > 0;
@@ -449,6 +455,7 @@ async function testCurrentModelKeys() {
                 model_id: modelId,
                 api_type: apiType,
                 api_key_auth_mode: document.getElementById('api-key-auth-mode').value,
+                upstream_protocol: document.getElementById('upstream-protocol').value,
                 endpoint_path: endpointPath,
             })
         });

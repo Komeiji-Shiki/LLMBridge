@@ -19,7 +19,7 @@ from core.model_archive import (
     find_inactive_models, build_last_used_map,
 )
 from core.app_state import get_app_state
-from core.upstream_auth import apply_api_key_auth
+from core.upstream_auth import apply_upstream_auth
 from core.db_stats import stats_db, get_exchange_rates
 from .admin_usage import selected_usage, usage_csv
 from utils.async_singleflight import AsyncSingleFlight
@@ -1205,7 +1205,11 @@ async def test_model_keys(
             started_at = time.time()
 
             if is_gemini:
-                generator = direct_api_service.call_gemini_native_api(
+                # Vertex 的 Interactions 地址只有 /interactions，按配置的协议测
+                interactions = data.get("upstream_protocol") == "interactions"
+                call = (direct_api_service.call_gemini_interactions_api if interactions
+                        else direct_api_service.call_gemini_native_api)
+                generator = call(
                     api_key=key,
                     model=model_id,
                     messages=[{"role": "user", "content": "Hi"}],
@@ -1256,7 +1260,7 @@ async def test_model_keys(
                 headers = {"Content-Type": "application/json"}
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
-                apply_api_key_auth(headers, key, data.get("api_key_auth_mode", "auto"))
+                await apply_upstream_auth(headers, key, data.get("api_key_auth_mode", "auto"))
 
                 async with shared_session.post(
                     url,

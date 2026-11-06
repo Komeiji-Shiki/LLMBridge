@@ -23,6 +23,9 @@ apscheduler>=3.8,<4.0
 # Cache management
 cachetools>=4.0,<7.0
 
+# Vertex AI 的 Google OAuth：用服务账号或 ADC 凭据换取访问令牌
+google-auth>=2.30,<3.0
+
 # Token counter dependencies (optional)
 tiktoken>=0.4,<1.0
 anthropic>=0.18,<1.0
