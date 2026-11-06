@@ -135,6 +135,22 @@ function syncModelSettingsType() {
     selectModelSettings(direct ? modelEditor.page : 'connection');
 }
 
+// 紧凑列表开关，状态记在浏览器里
+const MODELS_COMPACT_KEY = 'llmbridge.models.compact';
+
+function setModelsCompact(compact) {
+    document.getElementById('models-list').classList.toggle('models-compact', compact);
+    const button = document.getElementById('models-density');
+    button.setAttribute('aria-pressed', String(compact));
+    button.classList.toggle('btn-primary', compact);
+}
+
+function toggleModelsCompact() {
+    const compact = !document.getElementById('models-list').classList.contains('models-compact');
+    setModelsCompact(compact);
+    localStorage.setItem(MODELS_COMPACT_KEY, compact ? '1' : '0');
+}
+
 function checkModelJsonField(input) {
     const text = input.value.trim();
     let message = '';
@@ -204,6 +220,7 @@ function validateModelEditor() {
 document.addEventListener('DOMContentLoaded', () => {
     const modal = document.getElementById('model-modal');
     modal.addEventListener('input', updateModelSaveStatus);
+    setModelsCompact(localStorage.getItem(MODELS_COMPACT_KEY) === '1');
     MODEL_JSON_FIELDS.forEach(id => {
         const input = document.getElementById(id);
         input.addEventListener('input', () => checkModelJsonField(input));

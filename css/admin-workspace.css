@@ -42,6 +42,19 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .badge { border-radius: 0; padding: 2px 7px; font-size: .72rem; }
 .model-checkbox { width: 16px; height: 16px; accent-color: #529de9; }
 .model-row-archived { opacity: .7; }
+/* 紧凑列表：名称、说明和标记排在同一行，连接信息也并成一行 */
+#models-list.models-compact .table td { padding: 7px 10px; }
+#models-list.models-compact .model-identity > *, #models-list.models-compact .model-connection > * { display: inline-flex; vertical-align: middle; margin: 0 8px 0 0; }
+#models-list.models-compact .model-connection { max-width: 520px; }
+/* 地址过长时截断（悬停看全称），端点和 Key 数量收起，打开设置能看到 */
+#models-list.models-compact .model-connection .model-subtitle { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+#models-list.models-compact .model-connection .model-subtitle + .model-subtitle { display: none; }
+#models-list.models-compact .model-actions .btn-sm { padding-top: 3px; padding-bottom: 3px; }
+/* 配置搜索固定在表单顶部，命中的字段高亮 */
+.config-form-search { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; padding-bottom: 12px; background: var(--surface); }
+.config-form-search input { flex: 1; }
+#config-form-search-status { color: var(--text-dim); font-size: .8rem; white-space: nowrap; }
+.config-match { outline: 1px solid var(--accent-soft); outline-offset: 3px; background: var(--accent-faint); }
 .archive-header { width: 100%; border: 0; color: var(--text-main); text-align: left; font: inherit; }
 .model-editor-open { overflow: hidden; }
 #model-modal { background: #050b16ba; padding: 24px; backdrop-filter: blur(5px); }

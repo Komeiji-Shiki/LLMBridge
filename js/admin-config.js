@@ -89,6 +89,40 @@ function buildConfigForm() {
     html += buildOtherConfig();
     
     container.innerHTML = html;
+    filterConfigForm();
+}
+
+// 按名称、说明或配置键搜索：只留下命中的分区并展开，命中的字段高亮；清空后恢复原来的折叠状态
+function filterConfigForm() {
+    const query = document.getElementById('config-form-search').value.trim().toLocaleLowerCase();
+    let matched = 0;
+    document.querySelectorAll('#config-form-content .collapsible-section').forEach(section => {
+        if (section.dataset.collapsedBeforeSearch === undefined) {
+            section.dataset.collapsedBeforeSearch = String(section.classList.contains('collapsed'));
+        }
+        // 表单项是 .form-group，或者不在 .form-group 里的复选框 label
+        const items = [...section.querySelectorAll('.collapsible-content .form-group, .collapsible-content label')]
+            .filter(item => item.matches('.form-group') || !item.closest('.form-group'));
+        let hits = 0;
+        for (const item of items) {
+            const keys = [...item.querySelectorAll('[id^="form-"]')].map(input => input.id.slice(5)).join(' ');
+            const hit = Boolean(query) && `${item.textContent} ${keys}`.toLocaleLowerCase().includes(query);
+            item.classList.toggle('config-match', hit);
+            hits += hit;
+        }
+        const titleHit = section.querySelector('.collapsible-header').textContent.toLocaleLowerCase().includes(query);
+        const show = !query || hits > 0 || titleHit;
+        section.hidden = !show;
+        if (!query) {
+            section.classList.toggle('collapsed', section.dataset.collapsedBeforeSearch === 'true');
+            delete section.dataset.collapsedBeforeSearch;
+        } else if (show) {
+            section.classList.remove('collapsed');
+            matched++;
+        }
+    });
+    document.getElementById('config-form-search-status').textContent =
+        query ? (matched ? `${matched} 个分区命中` : '没有匹配的配置项') : '';
 }
 
 // ==================== 配置卡片构建函数 ====================

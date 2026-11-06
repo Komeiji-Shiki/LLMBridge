@@ -545,6 +545,57 @@ def test_slash_focuses_model_search_and_escape_clears_it(ui):
     assert page.locator('.model-row:visible').count() > 1
 
 
+def test_copy_keeps_the_name_for_manual_rename(ui):
+    page, _, writes, _ = ui
+    page.evaluate("openModelFromList('Alpha', true)")
+    page.wait_for_function("document.activeElement.id === 'model-name'")
+    assert page.locator('#model-name').input_value() == 'Alpha'
+    assert page.evaluate("document.getElementById('model-name').selectionStart") == len('Alpha')
+    page.locator('#model-save-btn').click()
+    assert page.locator('#model-modal').is_visible() and writes == []
+    page.locator('#model-name').fill('Alpha_interactions')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    assert writes[-1]['model_name'] == 'Alpha_interactions'
+
+
+def test_compact_model_list_is_remembered(ui):
+    page, _, _, _ = ui
+    row = page.locator('.model-row').first
+    normal = row.bounding_box()['height']
+    page.locator('#models-density').click()
+    assert page.locator('#models-density').get_attribute('aria-pressed') == 'true'
+    assert row.bounding_box()['height'] < normal * 0.75
+    page.reload()
+    page.locator('[data-page="models"]').click()
+    page.wait_for_selector('.model-row')
+    assert 'models-compact' in page.locator('#models-list').get_attribute('class')
+
+
+def test_config_form_search_filters_sections_and_restores_them(ui):
+    page, _, _, _ = ui
+    page.locator('[data-page="config"]').click()
+    page.wait_for_selector('#config-form-content .collapsible-section')
+    collapsed = "[...document.querySelectorAll('#config-form-content .collapsible-section')].map(s => s.classList.contains('collapsed'))"
+    before = page.evaluate(collapsed)
+    sections = page.locator('#config-form-content .collapsible-section')
+    visible = page.locator('#config-form-content .collapsible-section:visible')
+    status = page.locator('#config-form-search-status')
+    search = page.locator('#config-form-search')
+    search.fill('retry_timeout')
+    assert 0 < visible.count() < sections.count()
+    assert 'collapsed' not in visible.first.get_attribute('class')
+    assert page.locator('.config-match').first.is_visible()
+    assert '命中' in status.inner_text()
+    search.fill('完全不存在的配置')
+    assert visible.count() == 0 and status.inner_text() == '没有匹配的配置项'
+    search.press('Escape')
+    assert search.input_value() == ''
+    assert visible.count() == sections.count()
+    assert page.evaluate(collapsed) == before
+    assert page.locator('.config-match').count() == 0
+
+
 def test_balance_rows_skip_empty_keys_and_escape_currency(ui):
     page, _, _, _ = ui
     page.locator('.model-name', has_text='Alpha').click()

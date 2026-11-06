@@ -88,7 +88,8 @@ function copyModel(name, config) {
     currentEditingModel = null;  // 设为null表示新建模式
     currentEditingArchived = false;  // 复制出的新模型保持活跃，不带归档状态
     document.getElementById('modal-title').textContent = `复制模型 · ${name}`;
-    document.getElementById('model-name').value = name + '_copy';  // 默认添加_copy后缀
+    // 名称保持原样，由用户自己改；不改名直接保存会被重名检查拦下
+    document.getElementById('model-name').value = name;
     document.getElementById('model-name').disabled = false;  // 允许修改名称
     
     // 复用editModel的配置填充逻辑
@@ -96,11 +97,11 @@ function copyModel(name, config) {
     
     beginModelEditing();
     
-    // 聚焦到模型名称输入框，方便用户修改
+    // 光标放在名称末尾，方便直接接着输入后缀
     setTimeout(() => {
         const nameInput = document.getElementById('model-name');
         nameInput.focus();
-        nameInput.select();
+        nameInput.setSelectionRange(nameInput.value.length, nameInput.value.length);
     }, 100);
 }
 

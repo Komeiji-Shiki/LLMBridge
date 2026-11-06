@@ -91,7 +91,7 @@ function buildModelsRow(name, cfg, isArchived) {
             <div class="model-subtitle">${escapeHtml(cfg.display_name && cfg.display_name !== name ? cfg.display_name : cfg.model_id || name)}</div>
             <div class="model-flags"><span class="badge ${isArchived ? 'badge-info' : 'badge-success'}">${isArchived ? '已归档' : '可用'}</span>${flags.map(flag => `<span class="badge badge-info">${flag}</span>`).join('')}</div></td>
         <td class="model-connection"><span class="badge badge-info">${labels[protocol]}</span>
-            <div class="model-subtitle">${escapeHtml(modelService(cfg))}</div><div class="model-subtitle">${escapeHtml(endpoint)} · ${keyCount ? keyCount + ' 个 Key' : '无需认证'}</div></td>
+            <div class="model-subtitle" title="${escapeHtml(modelService(cfg))}">${escapeHtml(modelService(cfg))}</div><div class="model-subtitle">${escapeHtml(endpoint)} · ${keyCount ? keyCount + ' 个 Key' : '无需认证'}</div></td>
         <td><div class="model-actions"><button class="btn btn-primary btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">设置</button>
             <details class="model-more"><summary class="btn btn-sm" aria-label="${attr} 的更多操作">更多</summary>
                 <button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName, true)">复制模型</button>

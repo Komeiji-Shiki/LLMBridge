@@ -317,6 +317,7 @@
                         <label>服务地址<select id="models-provider" class="form-select" onchange="applyModelFilters()"><option value="">全部服务地址</option></select></label>
                         <button class="btn" onclick="resetModelFilters()">清除筛选</button>
                         <button class="btn" onclick="loadModels()">刷新列表</button>
+                        <button class="btn" id="models-density" aria-pressed="false" onclick="toggleModelsCompact()" title="一个模型一行，同屏能看到更多模型">紧凑</button>
                     </div>
                     <div id="models-summary" class="models-summary" role="status"></div>
                     <div id="models-list" aria-label="模型列表"></div>
@@ -538,6 +539,10 @@
                     
                     <!-- 表单编辑器 -->
                     <div id="config-form-editor" style="display: block; max-height: 70vh; overflow-y: auto;">
+                        <div class="config-form-search">
+                            <input id="config-form-search" class="form-input" type="search" aria-label="搜索配置项" placeholder="搜索配置项：名称、说明或配置键（如 retry_timeout）" oninput="filterConfigForm()" onkeydown="if (event.key === 'Escape' && this.value) { this.value = ''; filterConfigForm(); }">
+                            <span id="config-form-search-status" role="status"></span>
+                        </div>
                         <div id="config-form-content"><p style="color: var(--text-dim); text-align: center; padding: 40px;">正在加载配置...</p></div>
                     </div>
                     
