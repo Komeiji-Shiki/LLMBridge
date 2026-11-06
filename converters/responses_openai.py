@@ -1247,7 +1247,8 @@ class _ResponsesStreamBuilder:
                 if function.get("name") and not self.output[index].get("name"):
                     self.output[index]["name"] = function["name"]
                 arguments = function.get("arguments")
-                if arguments is not None:
+                # 调用头通常带空参数，官方流不会发空的 delta
+                if arguments not in (None, ""):
                     arguments = str(arguments)
                     self._tool_arguments[index] += arguments
                     if self.output[index]["type"] != "custom_tool_call":

@@ -95,3 +95,20 @@ def test_clients_see_the_failure_instead_of_a_blank_success():
     responses = _sse_payloads(build_responses_streaming_response(_chat_stream(failed), {'model': 'm', 'input': 'q'}, 'm'))
     assert any(event.get('type') == 'response.failed' for event in responses)
     assert not any(event.get('type') == 'response.completed' for event in responses)
+
+
+def test_split_arguments_are_forwarded_piece_by_piece():
+    pieces = ['{"path": "a', '.txt", "body": "', '很长的内容"}']
+    events = [{'event_type': 'step.start', 'index': 0, 'step': {'type': 'function_call', 'id': 'a', 'name': 'write'}}]
+    events += [{'event_type': 'step.delta', 'index': 0, 'delta': {'type': 'arguments_delta', 'arguments': piece}}
+               for piece in pieces]
+    events += [{'event_type': 'step.stop', 'index': 0},
+               {'event_type': 'interaction.completed', 'interaction': {'status': 'requires_action', 'usage': {}}}]
+    anthropic = _sse_payloads(build_anthropic_streaming_response(_chat_stream(events), 'm'))
+    partial = [event['delta']['partial_json'] for event in anthropic
+               if event.get('type') == 'content_block_delta' and event['delta'].get('type') == 'input_json_delta']
+    assert partial == pieces
+    request = {'model': 'm', 'input': 'q', 'stream': True}
+    responses = _sse_payloads(build_responses_streaming_response(_chat_stream(events), request, 'm'))
+    assert [event['delta'] for event in responses
+            if event.get('type') == 'response.function_call_arguments.delta'] == pieces

@@ -384,12 +384,12 @@ class InteractionsStreamConverterTests(unittest.TestCase):
         reasoning = [c["choices"][0]["delta"].get("reasoning_content", "") for c in chunks
                      if c.get("choices") and c["choices"][0]["delta"].get("reasoning_content")]
         self.assertEqual("".join(reasoning), "Reasoning...")
-        tool_chunks = [c for c in chunks if c.get("choices") and c["choices"][0]["delta"].get("tool_calls")]
-        self.assertEqual(len(tool_chunks), 1)
-        tc = tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0]
-        self.assertEqual(tc["function"]["name"], "get_weather")
-        args = json.loads(tc["function"]["arguments"])
-        self.assertEqual(args["city"], "Paris")
+        # 调用头在 step.start 发出，参数片段按原文逐段转发
+        pieces = [delta["tool_calls"][0] for delta in _deltas(chunks) if delta.get("tool_calls")]
+        self.assertEqual([(tc.get("id"), tc["function"].get("name")) for tc in pieces],
+                         [("fc2", "get_weather"), (None, None), (None, None)])
+        self.assertEqual([tc["function"]["arguments"] for tc in pieces], ["", "{\"city\":", " \"Paris\"}"])
+        self.assertEqual(_tool_calls(chunks), [{"id": "fc2", "name": "get_weather", "arguments": {"city": "Paris"}}])
         finish = [c for c in chunks if c.get("choices") and c["choices"][0].get("finish_reason")]
         self.assertEqual(finish[0]["choices"][0]["finish_reason"], "tool_calls")
         # 流式路径也应捕获思考签名
@@ -550,6 +550,22 @@ class GeminiGcInteractionsTests(unittest.TestCase):
         self.assertEqual(fc["args"], {"x": 1})
         self.assertEqual(fc["id"], "fc7")
 
+    def test_gc_stream_keeps_call_signature_like_the_json_response(self):
+        events = [
+            {"event_type": "step.start", "index": 0, "step": {"type": "function_call", "id": "fc7", "name": "f"}},
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "arguments_delta", "arguments": "{\"x\":"}},
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "arguments_delta", "arguments": " 1}"}},
+            {"event_type": "step.delta", "index": 0, "delta": {"type": "thought_signature", "signature": "call_sig"}},
+            {"event_type": "step.stop", "index": 0},
+        ]
+        chunks = _feed_all(InteractionsToGeminiGCConverter(), events)
+        self.assertEqual(chunks, [{"candidates": [{"content": {"role": "model", "parts": [
+            {"functionCall": {"name": "f", "args": {"x": 1}, "id": "fc7"}, "thoughtSignature": "call_sig"}]}}]}])
+        stored = {"steps": [{"type": "function_call", "id": "fc7", "name": "f", "arguments": {"x": 1},
+                             "signature": "call_sig"}]}
+        self.assertEqual(convert_interactions_to_gemini_gc(stored)["candidates"][0]["content"]["parts"],
+                         chunks[0]["candidates"][0]["content"]["parts"])
+
 
 
 
@@ -562,6 +578,18 @@ def _feed_all(converter, events):
 
 def _deltas(chunks):
     return [chunk["choices"][0]["delta"] for chunk in chunks if chunk.get("choices")]
+
+
+def _tool_calls(chunks):
+    """按 index 拼起流式 tool_calls，参数解析成对象。"""
+    calls = {}
+    for delta in _deltas(chunks):
+        for piece in delta.get("tool_calls") or []:
+            call = calls.setdefault(piece["index"], {"id": None, "name": None, "arguments": ""})
+            call["id"] = piece.get("id") or call["id"]
+            call["name"] = piece.get("function", {}).get("name") or call["name"]
+            call["arguments"] += piece.get("function", {}).get("arguments") or ""
+    return [{**call, "arguments": json.loads(call["arguments"])} for _, call in sorted(calls.items())]
 
 
 class InteractionsAuditRegressionTests(unittest.TestCase):
@@ -586,8 +614,21 @@ class InteractionsAuditRegressionTests(unittest.TestCase):
     def test_parallel_stream_calls_get_their_own_index(self):
         chunks = _feed_all(InteractionsStreamConverter("m", "r"), self.PARALLEL)
         calls = [delta["tool_calls"][0] for delta in _deltas(chunks) if delta.get("tool_calls")]
-        self.assertEqual([call["index"] for call in calls], [0, 1])
-        self.assertEqual([json.loads(call["function"]["arguments"]) for call in calls], [{"x": 1}, {"y": 2}])
+        self.assertEqual([call["index"] for call in calls], [0, 0, 1, 1])
+        self.assertEqual(_tool_calls(chunks), [{"id": "a", "name": "f", "arguments": {"x": 1}},
+                                               {"id": "b", "name": "g", "arguments": {"y": 2}}])
+
+    def test_stream_call_header_precedes_arguments_and_gets_an_id(self):
+        converter = InteractionsStreamConverter("m", "r")
+        header = converter.feed({"event_type": "step.start", "index": 0, "step": {
+            "type": "function_call", "name": "f", "arguments": {"a": 1}}})
+        call = _deltas(header)[0]["tool_calls"][0]
+        self.assertTrue(call["id"].startswith("call_"))
+        # 起始事件里已有的参数随调用头一起发出，不会丢
+        self.assertEqual(call["function"], {"name": "f", "arguments": '{"a": 1}'})
+        self.assertEqual(converter.feed({"event_type": "step.stop", "index": 0}), [])
+        # 历史里保存的是同一个编号，客户端回传结果时才能对上
+        self.assertEqual(converter.assembler.steps[0]["id"], call["id"])
 
     def test_tool_calls_force_tool_finish_even_when_status_is_completed(self):
         events = self.PARALLEL[:-1] + [{"event_type": "interaction.completed",

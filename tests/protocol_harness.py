@@ -221,8 +221,11 @@ def interactions_reply(turn, stream, status=None, token=None, errors=None):
         else:
             events.append({'event_type': 'step.start', 'index': index, 'step': {
                 'type': 'function_call', 'id': step['id'], 'name': step['name'], 'arguments': {}}})
-            events.append({'event_type': 'step.delta', 'index': index, 'delta': {
-                'type': 'arguments_delta', 'arguments': json.dumps(step['arguments'])}})
+            # 参数分两段到达，网关要逐段转发、客户端拼回
+            arguments = json.dumps(step['arguments'])
+            middle = len(arguments) // 2
+            events.extend({'event_type': 'step.delta', 'index': index, 'delta': {
+                'type': 'arguments_delta', 'arguments': piece}} for piece in (arguments[:middle], arguments[middle:]))
         events.append({'event_type': 'step.stop', 'index': index})
     events.append({'event_type': 'interaction.completed', 'interaction': {'id': 'int_up', 'status': status, 'usage': usage, **extra}})
     return Reply(events=events)

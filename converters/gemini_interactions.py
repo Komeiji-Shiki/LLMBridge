@@ -905,6 +905,8 @@ class InteractionsStreamConverter:
         self.completion_tokens_mode = completion_tokens_mode
         self.assembler = _StepAssembler()
         self.tool_calls = 0
+        # 正在输出参数的工具调用序号
+        self.call_index: Optional[int] = None
         # 本次响应签发的全部签名，按 step 顺序供监控展示
         self.signatures: List[str] = []
         self.usage: Optional[dict] = None
@@ -938,11 +940,26 @@ class InteractionsStreamConverter:
                 delta = _block_delta(block)
                 if delta:
                     chunks.append(self._chunk(delta))
+        elif started.get("type") == "function_call":
+            # 调用头先发，参数随后逐段转发，客户端不用等整个调用生成完
+            started.setdefault("id", f"call_{uuid.uuid4().hex[:24]}")
+            self.call_index, self.tool_calls = self.tool_calls, self.tool_calls + 1
+            chunks.append(self._chunk({"tool_calls": [{
+                "index": self.call_index,
+                "id": started["id"],
+                "type": "function",
+                "function": {"name": started.get("name", ""), "arguments": self.assembler.arguments},
+            }]}))
         return chunks
 
     def _on_step_delta(self, delta: dict) -> List[dict]:
         self.assembler.delta(delta)
         kind = delta.get("type")
+        if kind in ("arguments_delta", "arguments"):
+            piece = _argument_piece(delta)
+            if piece and self.call_index is not None:
+                return [self._chunk({"tool_calls": [{"index": self.call_index, "function": {"arguments": piece}}]})]
+            return []
         if kind == "text":
             return [self._chunk({"content": delta["text"]})] if delta.get("text") else []
         if kind == "text_annotation_delta":
@@ -957,23 +974,10 @@ class InteractionsStreamConverter:
         return []
 
     def _on_step_stop(self) -> List[dict]:
-        raw_arguments = self.assembler.arguments
         step = self.assembler.stop()
-        if step is None:
+        self.call_index = None
+        if step is None or step.get("type") == "function_call":
             return []
-        if step.get("type") == "function_call":
-            step.setdefault("id", f"call_{uuid.uuid4().hex[:24]}")
-            arguments = step["arguments"]
-            index, self.tool_calls = self.tool_calls, self.tool_calls + 1
-            return [self._chunk({"tool_calls": [{
-                "index": index,
-                "id": step["id"],
-                "type": "function",
-                "function": {
-                    "name": step.get("name", ""),
-                    "arguments": json.dumps(arguments, ensure_ascii=False) if arguments else raw_arguments,
-                },
-            }]})]
         code = _code_step_text(step)
         if code:
             return [self._chunk({"content": code})]
@@ -1570,14 +1574,11 @@ class InteractionsToGeminiGCConverter:
     """interactions 流式事件 → Gemini generateContent SSE chunk 流。"""
 
     def __init__(self):
-        self.current_step_type: Optional[str] = None
-        self.current_func: Optional[dict] = None
-        self.current_thought_blocks: List[dict] = []
-        self.current_thought_signature: Optional[str] = None
         self.completed: bool = False
         self.status: Optional[str] = None
         self.usage: Optional[dict] = None
         self.grounding = _Grounding()
+        # 步骤类型、签名和工具参数都由组装器累积，generateContent 没有参数分片，调用收齐才发
         self.assembler = _StepAssembler()
 
     @staticmethod
@@ -1588,21 +1589,26 @@ class InteractionsToGeminiGCConverter:
             }]
         }
 
-    @staticmethod
-    def _argument_piece(delta: dict) -> str:
-        piece = delta.get("arguments")
-        if piece is None:
-            piece = delta.get("partial_arguments")
-        if piece is None:
-            return ""
-        if isinstance(piece, (dict, list)):
-            return json.dumps(piece, ensure_ascii=False)
-        return str(piece)
-
-    def _flush_thought(self) -> List[dict]:
-        # 摘要已经逐段发出，这里只补签名。
-        signature, self.current_thought_signature = self.current_thought_signature, None
-        return [self._chunk([{"thought": True, "thoughtSignature": signature}])] if signature else []
+    def _on_step_stop(self) -> List[dict]:
+        step = self.assembler.stop()
+        if step is None:
+            return []
+        if step.get("type") == "function_call":
+            fc: dict = {"name": step.get("name", ""), "args": step["arguments"]}
+            if step.get("id"):
+                fc["id"] = step["id"]
+            part = {"functionCall": fc}
+            # 签名属于 part，不属于 functionCall 对象。
+            if step.get("signature"):
+                part["thoughtSignature"] = step["signature"]
+            return [self._chunk([part])]
+        if step.get("type") == "thought":
+            # 摘要已经逐段发出，这里只补签名。
+            signature = step.get("signature")
+            return [self._chunk([{"thought": True, "thoughtSignature": signature}])] if signature else []
+        self.grounding.add_step(step)
+        parts = _server_step_parts(step)
+        return [self._chunk(parts)] if parts else []
 
     def feed(self, event: dict) -> List[dict]:
         if not isinstance(event, dict):
@@ -1620,29 +1626,15 @@ class InteractionsToGeminiGCConverter:
             step = event.get("step") or {}
             if not isinstance(step, dict):
                 return []
-            self.current_step_type = step.get("type")
             self.assembler.start(step)
-            if self.current_step_type == "function_call":
-                initial_arguments = step.get("arguments")
-                if isinstance(initial_arguments, (dict, list)):
-                    initial_arguments = (
-                        json.dumps(initial_arguments, ensure_ascii=False)
-                        if initial_arguments else ""
-                    )
-                self.current_func = {
-                    "name": step.get("name", ""),
-                    "arguments": str(initial_arguments or ""),
-                    "id": step.get("id"),
-                }
-            elif self.current_step_type == "thought":
+            if step.get("type") == "thought":
                 summary = step.get("summary")
                 blocks = summary if isinstance(summary, list) else ([summary] if summary else [])
-                self.current_thought_signature = step.get("signature") or None
                 parts = [_interactions_block_to_gemini_part(block, thought=True)
                          for block in blocks if isinstance(block, dict)]
                 if any(parts):
                     chunks.append(self._chunk([part for part in parts if part]))
-            elif self.current_step_type == "model_output":
+            elif step.get("type") == "model_output":
                 for block in step.get("content", []) or []:
                     if isinstance(block, dict):
                         part = _interactions_block_to_gemini_part(block)
@@ -1672,38 +1664,9 @@ class InteractionsToGeminiGCConverter:
                 part = _interactions_block_to_gemini_part(block, thought=True)
                 if part:
                     chunks.append(self._chunk([part]))
-            elif delta_type == "thought_signature":
-                if delta.get("signature"):
-                    self.current_thought_signature = str(delta["signature"])
-            elif delta_type in ("arguments_delta", "arguments"):
-                if self.current_func:
-                    self.current_func["arguments"] += self._argument_piece(delta)
 
         elif event_type == "step.stop":
-            if self.current_step_type == "function_call" and self.current_func:
-                args_value: Any = self.current_func["arguments"]
-                try:
-                    args_value = json.loads(args_value) if args_value else {}
-                except json.JSONDecodeError:
-                    args_value = {}
-                fc: dict = {
-                    "name": self.current_func["name"],
-                    "args": args_value if isinstance(args_value, dict) else {},
-                }
-                if self.current_func.get("id"):
-                    fc["id"] = self.current_func["id"]
-                chunks.append(self._chunk([{"functionCall": fc}]))
-                self.current_func = None
-            elif self.current_step_type == "thought":
-                chunks.extend(self._flush_thought())
-            else:
-                step = self.assembler.current or {}
-                self.grounding.add_step(step)
-                parts = _server_step_parts(step)
-                if parts:
-                    chunks.append(self._chunk(parts))
-            self.assembler.stop()
-            self.current_step_type = None
+            chunks.extend(self._on_step_stop())
 
         elif event_type == "interaction.completed":
             interaction = event.get("interaction") or {}
