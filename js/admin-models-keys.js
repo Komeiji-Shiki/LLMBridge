@@ -38,7 +38,19 @@ function addApiKeyRow(value = '') {
         </button>
     `;
     container.appendChild(row);
+    updateApiKeyInputHints();
     console.log(`[API-Key] 行已添加到 DOM`);
+}
+
+// Google OAuth 模式下这一栏填的是凭据，提示跟着鉴权方式切换
+function updateApiKeyInputHints() {
+    const oauth = document.getElementById('api-key-auth-mode').value === 'google-oauth';
+    document.querySelectorAll('#model-api-keys-list .api-key-input').forEach(input => {
+        input.placeholder = oauth
+            ? '凭据文件路径（如 C:/secrets/vertex-sa.json）或单行凭据 JSON'
+            : 'sk-...（留空表示不使用此Key）';
+        input.setAttribute('aria-label', oauth ? 'Google 凭据' : '上游 API Key');
+    });
 }
 
 /**

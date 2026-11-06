@@ -812,7 +812,7 @@
 <option value="interactions">Interactions API（新版，gemini-3 系列推荐）</option>
 </select>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            Gemini 上游协议。<code>generateContent</code> 在基础地址后追加 <code>/models/模型ID:generateContent</code>（流式使用 <code>:streamGenerateContent</code>）；Interactions API 追加 <code>/interactions</code>。版本路径均以 API Base URL 为准，请按上游支持情况选择协议。仅 <code>gemini_native</code> 生效。
+                            Gemini 上游协议。<code>generateContent</code> 在基础地址后追加 <code>/models/模型ID:generateContent</code>（流式使用 <code>:streamGenerateContent</code>）；Interactions API 追加 <code>/interactions</code>。版本路径均以 API Base URL 为准，请按上游支持情况选择协议。仅 <code>gemini_native</code> 生效。<br/>Vertex AI：Interactions 填 <code>https://aiplatform.googleapis.com/v1/projects/项目ID/locations/global</code>，只支持 <code>global</code> 和 <code>us</code>、<code>eu</code> 多区域（地址见 README），不支持 <code>europe-west2</code> 这类单区域；generateContent 在 <code>locations/区域</code> 后面再加 <code>/publishers/google</code>。
                         </small>
 </div><div class="form-group" data-direct-setting="">
 <label class="form-label" for="endpoint-path">模型端点（可选）</label>
@@ -842,7 +842,7 @@
                         </small>
 </div><div class="form-group" data-direct-setting="">
 <label class="form-label" for="api-key-auth-mode">API Key 鉴权方式</label>
-<select class="form-select" id="api-key-auth-mode">
+<select class="form-select" id="api-key-auth-mode" onchange="updateApiKeyInputHints()">
 <option value="auto">自动（沿用协议默认方式）</option>
 <option value="bearer">Authorization: Bearer</option>
 <option value="api-key">api-key</option>

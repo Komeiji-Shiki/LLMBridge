@@ -450,6 +450,42 @@ def test_protocol_defaults_custom_endpoint_and_archived_save(ui):
     assert writes[-1]['config']['endpoint_path'] == '/custom/endpoint'
 
 
+def test_google_oauth_vertex_interactions_configuration(ui):
+    page, _, writes, _ = ui
+    dialogs, requested = [], []
+    page.on('dialog', lambda dialog: (dialogs.append(dialog.message), dialog.accept()))
+    page.on('request', lambda request: requested.append(request.url))
+    page.evaluate("openModelFromList('Alpha')")
+    page.locator('#api-type').select_option('gemini_native')
+    page.locator('#upstream-protocol').select_option('interactions')
+    page.locator('#api-key-auth-mode').select_option('google-oauth')
+    key = page.locator('#model-api-keys-list .api-key-input').first
+    assert key.get_attribute('aria-label') == 'Google 凭据'
+    key.fill('C:/secrets/vertex-sa.json')
+    page.locator('#api-base-url').fill('https://aiplatform.googleapis.com/v1/projects/demo/locations/global')
+    # 新加的行也提示填凭据
+    page.locator('button[onclick="addApiKeyRow()"]').click()
+    assert 'vertex-sa.json' in page.locator('#model-api-keys-list .api-key-input').last.get_attribute('placeholder')
+    # 浏览器不能拿凭据去请求上游
+    page.locator('button[onclick="fetchModelsFromAPI(event)"]').click()
+    assert any('Google OAuth' in message for message in dialogs)
+    assert not any('aiplatform' in url for url in requested)
+    with page.expect_request('**/api/admin/test_model_keys') as test_request:
+        page.locator('#test-keys-btn').click()
+    sent = test_request.value.post_data_json
+    assert (sent['api_key_auth_mode'], sent['upstream_protocol']) == ('google-oauth', 'interactions')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    config = writes[-1]['config']
+    assert (config['api_key_auth_mode'], config['upstream_protocol'], config['api_key']) == (
+        'google-oauth', 'interactions', 'C:/secrets/vertex-sa.json')
+    page.evaluate("openModelFromList('Alpha')")
+    assert page.locator('#api-key-auth-mode').input_value() == 'google-oauth'
+    assert page.locator('#model-api-keys-list .api-key-input').first.get_attribute('aria-label') == 'Google 凭据'
+    page.locator('#api-key-auth-mode').select_option('x-goog-api-key')
+    assert page.locator('#model-api-keys-list .api-key-input').first.get_attribute('aria-label') == '上游 API Key'
+
+
 def test_balance_rows_skip_empty_keys_and_escape_currency(ui):
     page, _, _, _ = ui
     page.locator('.model-name', has_text='Alpha').click()
