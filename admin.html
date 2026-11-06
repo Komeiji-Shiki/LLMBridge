@@ -312,7 +312,7 @@
                         </div>
                     </div>
                     <div class="models-toolbar">
-                        <label class="model-search-label">搜索模型<input id="models-query" class="form-input" type="search" placeholder="名称、模型 ID 或服务地址" oninput="applyModelFilters()"></label>
+                        <label class="model-search-label">搜索模型<input id="models-query" class="form-input" type="search" placeholder="名称、模型 ID 或服务地址（按 / 搜索）" oninput="applyModelFilters()"></label>
                         <label>接口协议<select id="models-protocol" class="form-select" onchange="applyModelFilters()"><option value="">全部协议</option><option value="direct_api">OpenAI 兼容</option><option value="responses_native">Responses</option><option value="anthropic_native">Anthropic</option><option value="gemini_native">Gemini</option><option value="legacy">LMArena（兼容）</option></select></label>
                         <label>服务地址<select id="models-provider" class="form-select" onchange="applyModelFilters()"><option value="">全部服务地址</option></select></label>
                         <button class="btn" onclick="resetModelFilters()">清除筛选</button>

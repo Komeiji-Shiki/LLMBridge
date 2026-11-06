@@ -527,6 +527,43 @@ textarea.form-input {
     border-color: var(--accent-soft);
 }
 
+/* 通知：顶部居中堆叠，不挡弹窗右上角的关闭和右下角的保存 */
+.toast-stack {
+    position: fixed;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100vw - 32px);
+    pointer-events: none;
+}
+
+.toast-stack .alert {
+    margin: 0;
+    min-width: 300px;
+    max-width: 720px;
+    border-radius: 0;
+    background: var(--surface);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+    pointer-events: auto;
+}
+
+.toast-count {
+    margin-left: auto;
+    font-size: 0.8rem;
+    opacity: 0.8;
+}
+
+/* JSON 输入框格式不对时立即标红，保存时会跳到所在页 */
+.json-invalid {
+    border-color: #ef4444 !important;
+}
+
 /* 空状态 */
 .empty-state {
     text-align: center;

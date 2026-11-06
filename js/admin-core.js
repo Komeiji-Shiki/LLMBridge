@@ -157,7 +157,8 @@ function generateColors(count) {
 }
 
 // ==================== 消息提示 ====================
-let _messageCount = 0; // 消息计数器，避免重叠
+// 同样的消息再出现时只累加次数；点击关闭，鼠标停留时不消失，错误多留一会
+const _toasts = new Map();
 
 // HTML转义（防止错误消息/服务端回显内容注入HTML）
 function escapeHtml(unsafe) {
@@ -184,17 +185,40 @@ function escapeHtmlForAttr(str) {
 }
 
 function showMessage(type, message) {
-    _messageCount++;
-    const offset = (_messageCount - 1) * 70; // 每条消息偏移 70px
-    const notification = document.createElement('div');
-    notification.className = `alert alert-${type}`;
-    notification.style.cssText = `position: fixed; top: ${20 + offset}px; right: 20px; z-index: 2000; min-width: 300px;`;
-    notification.innerHTML = `
+    let stack = document.getElementById('toast-stack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'toast-stack';
+        stack.className = 'toast-stack';
+        stack.setAttribute('role', 'status');
+        stack.setAttribute('aria-live', 'polite');
+        document.body.appendChild(stack);
+    }
+    const key = `${type}\n${message}`;
+    let toast = _toasts.get(key);
+    if (toast) {
+        toast.count++;
+        toast.element.querySelector('.toast-count').textContent = `×${toast.count}`;
+        stack.appendChild(toast.element);
+    } else {
+        const element = document.createElement('div');
+        element.className = `alert alert-${type}`;
+        element.title = '点击关闭';
+        element.innerHTML = `
         <span>${type === 'success' ? '✅' : '❌'}</span>
         <div>${escapeHtml(message)}</div>
+        <span class="toast-count"></span>
     `;
-    document.body.appendChild(notification);
-    setTimeout(() => { notification.remove(); _messageCount = Math.max(0, _messageCount - 1); }, 5000);
+        const dismiss = () => { clearTimeout(toast.timer); element.remove(); _toasts.delete(key); };
+        toast = { element, count: 1, dismiss };
+        element.addEventListener('click', dismiss);
+        element.addEventListener('mouseenter', () => clearTimeout(toast.timer));
+        element.addEventListener('mouseleave', () => { toast.timer = setTimeout(dismiss, 2000); });
+        _toasts.set(key, toast);
+        stack.appendChild(element);
+    }
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(toast.dismiss, type === 'success' ? 4000 : 8000);
 }
 
 function showQuietMessage(type, message) {

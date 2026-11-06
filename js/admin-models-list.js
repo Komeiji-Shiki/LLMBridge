@@ -64,6 +64,7 @@ async function loadModels() {
             : '<div class="empty-state"><div class="empty-state-icon">🤖</div><p>还没有配置任何模型<br/>点击"添加模型"开始配置</p></div>';
         
         document.getElementById('models-list').innerHTML = modelsHtml;
+        setArchiveSectionOpen(modelWorkspace.archiveOpen);
         initModelsSortable();
         applyModelFilters();
         
@@ -168,15 +169,28 @@ function buildModelsTable(modelEndpointMap) {
 
 // ==================== 归档区折叠 ====================
 
-function toggleArchiveSection() {
+// 展开状态记在 modelWorkspace 里，保存模型后重新加载列表也不会收起
+function setArchiveSectionOpen(open) {
     const body = document.getElementById('archive-section-body');
     const icon = document.getElementById('archive-toggle-icon');
     if (!body || !icon) return;
-    const collapsed = body.style.display === 'none';
-    body.style.display = collapsed ? 'block' : 'none';
-    icon.textContent = collapsed ? '▼' : '▶';
-    document.querySelector('.archive-header').setAttribute('aria-expanded', String(collapsed));
+    modelWorkspace.archiveOpen = open;
+    body.style.display = open ? 'block' : 'none';
+    icon.textContent = open ? '▼' : '▶';
+    document.querySelector('.archive-header').setAttribute('aria-expanded', String(open));
 }
+
+function toggleArchiveSection() {
+    setArchiveSectionOpen(!modelWorkspace.archiveOpen);
+}
+
+// “更多”菜单同时只开一个，点别处或按 Esc 收起
+document.addEventListener('click', event => {
+    document.querySelectorAll('details.model-more[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; });
+});
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') document.querySelectorAll('details.model-more[open]').forEach(menu => { menu.open = false; });
+});
 
 function toggleSelectAll(checkbox, tbodyId) {
     const tbody = document.getElementById(tbodyId);

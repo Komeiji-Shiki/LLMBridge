@@ -486,6 +486,65 @@ def test_google_oauth_vertex_interactions_configuration(ui):
     assert page.locator('#model-api-keys-list .api-key-input').first.get_attribute('aria-label') == '上游 API Key'
 
 
+def test_repeated_messages_stack_once_and_click_to_dismiss(ui):
+    page, _, _, _ = ui
+    page.evaluate("showMessage('danger', '上游连接失败'); showMessage('danger', '上游连接失败'); showMessage('success', '已保存')")
+    toasts = page.locator('#toast-stack .alert')
+    assert toasts.count() == 2
+    assert page.locator('#toast-stack .alert-danger .toast-count').inner_text() == '×2'
+    page.locator('#toast-stack .alert-danger').click()
+    assert toasts.count() == 1
+
+
+def test_invalid_json_blocks_save_on_its_own_page_and_title_names_the_model(ui):
+    page, _, writes, _ = ui
+    page.evaluate("openModelFromList('Alpha')")
+    assert page.locator('#modal-title').inner_text() == '编辑模型 · Alpha'
+    saved = len(writes)
+    for page_name, field in (('advanced', '#custom-params'), ('messages', '#model-native-tool-options')):
+        page.locator(f'[data-settings-page="{page_name}"]').click()
+        page.locator(field).fill('{"broken": ')
+        assert 'json-invalid' in page.locator(field).get_attribute('class')
+        page.locator('[data-settings-page="connection"]').click()
+        page.locator('#model-save-btn').click()
+        assert len(writes) == saved
+        assert page.locator(f'#settings-{page_name}').is_visible()
+        page.locator(field).fill('{"ok": true}')
+        assert 'json-invalid' not in page.locator(field).get_attribute('class')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    assert writes[-1]['config']['custom_params'] == {'ok': True}
+    assert writes[-1]['config']['native_tool_options'] == {'ok': True}
+
+
+def test_archive_section_stays_open_and_more_menus_close_each_other(ui):
+    page, _, _, _ = ui
+    page.locator('.archive-header').click()
+    page.evaluate("openModelFromList('Alpha')")
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    page.wait_for_selector('.model-row')
+    assert page.locator('#archive-section-body').is_visible()
+    menus = page.locator('details.model-more')
+    menus.nth(0).locator('summary').click()
+    menus.nth(1).locator('summary').click()
+    assert [menus.nth(0).get_attribute('open'), menus.nth(1).get_attribute('open')] == [None, '']
+    page.keyboard.press('Escape')
+    assert page.locator('details.model-more[open]').count() == 0
+
+
+def test_slash_focuses_model_search_and_escape_clears_it(ui):
+    page, _, _, _ = ui
+    page.locator('body').click(position={'x': 5, 'y': 5})
+    page.keyboard.press('/')
+    assert page.evaluate('document.activeElement.id') == 'models-query'
+    page.keyboard.type('Beta')
+    assert page.locator('.model-row:visible').count() == 1
+    page.keyboard.press('Escape')
+    assert page.locator('#models-query').input_value() == ''
+    assert page.locator('.model-row:visible').count() > 1
+
+
 def test_balance_rows_skip_empty_keys_and_escape_currency(ui):
     page, _, _, _ = ui
     page.locator('.model-name', has_text='Alpha').click()

@@ -87,7 +87,7 @@ function showAddModelModal() {
 function copyModel(name, config) {
     currentEditingModel = null;  // 设为null表示新建模式
     currentEditingArchived = false;  // 复制出的新模型保持活跃，不带归档状态
-    document.getElementById('modal-title').textContent = '复制模型';
+    document.getElementById('modal-title').textContent = `复制模型 · ${name}`;
     document.getElementById('model-name').value = name + '_copy';  // 默认添加_copy后缀
     document.getElementById('model-name').disabled = false;  // 允许修改名称
     
@@ -108,7 +108,7 @@ function editModel(name, config) {
     currentEditingModel = name;
     // 编辑保存时保留归档状态（表单里没有归档选项，归档/恢复走列表页按钮）
     currentEditingArchived = !!((Array.isArray(config) ? config[0] : config) || {}).archived;
-    document.getElementById('modal-title').textContent = '编辑模型';
+    document.getElementById('modal-title').textContent = `编辑模型 · ${name}`;
     document.getElementById('model-name').value = name;
     // 允许在编辑时修改模型名称（重命名）
     document.getElementById('model-name').disabled = false;
@@ -508,25 +508,13 @@ async function saveModel() {
         // 处理自定义参数
         const customParamsStr = document.getElementById('custom-params').value.trim();
         if (customParamsStr) {
-            try {
-                const customParams = JSON.parse(customParamsStr);
-                config.custom_params = customParams;
-            } catch (e) {
-                alert('自定义参数格式错误，请输入有效的JSON格式\n错误: ' + e.message);
-                return;
-            }
+            config.custom_params = JSON.parse(customParamsStr);
         }
         
         // 处理附加主体参数
         const extraBodyParamsStr = document.getElementById('extra-body-params').value.trim();
         if (extraBodyParamsStr) {
-            try {
-                const extraBodyParams = JSON.parse(extraBodyParamsStr);
-                config.extra_body_params = extraBodyParams;
-            } catch (e) {
-                alert('附加主体参数格式错误，请输入有效的JSON格式\n错误: ' + e.message);
-                return;
-            }
+            config.extra_body_params = JSON.parse(extraBodyParamsStr);
         }
         
         const pricingInput = document.getElementById('pricing-input').value;
