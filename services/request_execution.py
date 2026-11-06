@@ -25,6 +25,18 @@ def _error_chunk(message, byte_mode):
     return ('data: ' + json.dumps(value) + '\n\n').encode() if byte_mode else value
 
 
+def _credential_error_chunk(values, status, fallback, byte_mode, stream):
+    """上游拒绝网关凭据按 502 返回；原样给 401 会让客户端以为自己的 Key 失效而不再重试。"""
+    error = next((value.get('error') for value in values if isinstance(value, dict) and value.get('error')), None)
+    message = (error.get('message') if isinstance(error, dict) else error) or fallback
+    value = {'error': {'message': f'上游鉴权失败（HTTP {status}），与客户端 Key 无关：{message}',
+                       'type': 'api_error', 'code': 502, 'upstream_status': status}}
+    if not byte_mode:
+        return value
+    data = json.dumps(value, ensure_ascii=False).encode()
+    return b'data: ' + data + b'\n\n' if stream else data
+
+
 def _is_gemini_signature_rejection(value):
     if not isinstance(value, dict) or value.get('_http_status') != 400:
         return False
@@ -44,7 +56,8 @@ def retry_before_output(method=None, *, output_bytes=False):
             async for chunk in method(*args, **kwargs):
                 yield chunk
             return
-        from routes._direct_api_utils import normalize_auto_retry_config, get_api_key, mark_sticky_key_cooldown, is_quota_exceeded, _get_valid_keys
+        from routes._direct_api_utils import (normalize_auto_retry_config, get_api_key, mark_sticky_key_cooldown, is_quota_exceeded,
+                                              _get_valid_keys, is_retryable_other_status, UPSTREAM_CREDENTIAL_STATUSES)
         bound = signature.bind(*args, **kwargs)
         bound.apply_defaults()
         body = bound.arguments.get('request_body') or {}
@@ -180,7 +193,7 @@ def retry_before_output(method=None, *, output_bytes=False):
                     await mark_sticky_key_cooldown(context.model, keys, key, cooldown)
                 retryable = quota or (retry.get('enabled') and (
                     retry.get('retry_on_' + str(failed), False)
-                    or (failed is not None and failed >= 500 and retry.get('retry_on_other_errors'))))
+                    or (failed is not None and is_retryable_other_status(failed) and retry.get('retry_on_other_errors'))))
                 if pinned and quota:
                     retryable = False
                 if failed and not committed and retryable and retries_remaining:
@@ -188,6 +201,8 @@ def retry_before_output(method=None, *, output_bytes=False):
                     retries_remaining -= 1
                     select_key = True
                     continue
+                if failed in UPSTREAM_CREDENTIAL_STATUSES and not committed:
+                    prefix = [_credential_error_chunk(values, failed, error_text, byte_mode, stream)]
                 if not committed:
                     if not failed:
                         context.mark('first_business')

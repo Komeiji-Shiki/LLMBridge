@@ -121,11 +121,12 @@ def test_converted_and_native_interactions_send_the_token_not_the_credential(gat
 
 
 @pytest.mark.parametrize('path', ('/v1/chat/completions', '/v1beta/interactions'))
-def test_bad_credential_reaches_the_client_as_401_without_calling_upstream(gateway, refreshes, tmp_path, path):
+def test_bad_credential_reaches_the_client_as_502_without_calling_upstream(gateway, refreshes, tmp_path, path):
+    """网关自己的上游凭据坏了不是客户端的错，按 502 返回，客户端不会误以为自己的 Key 失效。"""
     app, monkeypatch = gateway
     body = {'model': MODEL, 'messages': [{'role': 'user', 'content': 'q'}], 'input': 'q'}
     response, fake = exchange(app, monkeypatch, 'interactions', [interactions_reply(Turn(text='答'), False)], path, body,
                               _oauth(str(tmp_path / 'missing.json')))
-    assert response.status_code == 401
+    assert response.status_code == 502
     assert '凭据无法读取' in response.text
     assert fake.requests == []

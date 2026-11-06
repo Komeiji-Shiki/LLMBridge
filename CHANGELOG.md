@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-11-07：上游鉴权失败可重试，并按 502 返回
+
+- 自动重试的“其他错误”现在覆盖 401、403、408、409 和全部 5xx，和后台选项说明一致。此前 transport 层只重试 5xx，选项写的却是 4xx/5xx；400、404、413、422 这类请求本身的问题仍不重试。路由层和 transport 层共用 `is_retryable_other_status` 一套判断。
+- 上游的 401/403 重试用完后按 502 `api_error` 返回，消息里保留上游原话，监控里仍记原始状态。客户端 Key 只用于网关鉴权，上游 401/403 一定是网关自己的上游凭据出了问题；原样返回 401 时 Claude Code 会以为自己的 Key 失效而不再重试，改成 502 后它会自己退避重试。11-06 让 Anthropic 透传保留 401 的做法就此撤回，429、529 仍保留原状态码。Vertex 凭据读不到时同样返回 502。
+
 ### 2026-11-06：上游保存对象的查询、取消和删除
 
 - 新增 `GET`/`DELETE /v1beta/interactions/{id}`、`POST /v1beta/interactions/{id}/cancel`，以及 `GET`/`DELETE /v1/responses/{id}`、`POST /v1/responses/{id}/cancel`、`GET /v1/responses/{id}/input_items`。查询参数原样转发（网关自己的 `?key=` 除外），`stream=true` 加 `last_event_id` 或 `starting_after` 可以重连流。

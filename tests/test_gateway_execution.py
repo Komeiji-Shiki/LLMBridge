@@ -221,6 +221,74 @@ def test_empty_stream_preserves_output_type(output_bytes, retry_enabled):
     assert error['message'] == '上游流在终态事件之前中断'
 
 
+@pytest.mark.parametrize('status, retried', [(401, True), (403, True), (408, True), (400, False), (404, False)])
+def test_other_errors_retry_credential_rejections_but_not_bad_requests(status, retried):
+    from routes._direct_api_utils import normalize_auto_retry_config, should_retry_from_status_codes
+    calls = []
+    endpoint = {'auto_retry': {'enabled': True, 'max_retries': 1, 'retry_on_other_errors': True, 'retry_delay_seconds': 0}}
+
+    @retry_before_output(output_bytes=True)
+    async def upstream(api_key='', request_body=None):
+        calls.append(api_key)
+        if len(calls) == 1:
+            yield ('data: ' + json.dumps({'error': {'message': 'rejected', 'code': status}}) + '\n\n').encode()
+        else:
+            yield b'data: {"type":"response.completed","response":{"id":"end"}}\n\n'
+
+    async def run():
+        token = current_request.set(RequestContext(model='test', endpoint=endpoint))
+        try:
+            return b''.join([chunk async for chunk in upstream(request_body={'stream': True})])
+        finally:
+            current_request.reset(token)
+
+    result = asyncio.run(run())
+    assert len(calls) == (2 if retried else 1)
+    assert (b'response.completed' in result) == retried
+    # 路由层和 transport 层共用同一套判断
+    assert should_retry_from_status_codes({status}, normalize_auto_retry_config(endpoint))[0] == retried
+
+
+@pytest.mark.parametrize('output_bytes, stream', [(False, True), (True, True), (True, False)])
+def test_exhausted_upstream_credential_rejection_reaches_client_as_502(output_bytes, stream):
+    from converters.anthropic_openai import build_anthropic_error_payload
+    from routes._direct_api_utils import map_upstream_error_to_status_code
+    message = 'Request had invalid authentication credentials.'
+    rejection = {'error': {'message': message, 'type': 'authentication_error', 'status': 'UNAUTHENTICATED', 'code': 401},
+                 '_http_status': 401}
+
+    @retry_before_output(output_bytes=output_bytes)
+    async def upstream(api_key='', request_body=None):
+        if not output_bytes:
+            yield rejection
+        elif stream:
+            yield b'data: {"type":"response.created","response":{"id":"start"}}\n\n'
+            yield b'data: ' + json.dumps(rejection).encode() + b'\n\n'
+        else:
+            yield json.dumps(rejection).encode()
+
+    async def run():
+        context = RequestContext(model='test', endpoint={'auto_retry': {
+            'enabled': True, 'max_retries': 1, 'retry_on_other_errors': True, 'retry_delay_seconds': 0}})
+        token = current_request.set(context)
+        try:
+            result = [chunk async for chunk in upstream(request_body={'stream': stream})]
+            # 监控里保留上游原始状态，便于区分是哪一层拒绝
+            assert [attempt['status'] for attempt in context.attempts] == [401, 401]
+            return result
+        finally:
+            current_request.reset(token)
+
+    result = asyncio.run(run())
+    assert len(result) == 1
+    assert isinstance(result[0], bytes if output_bytes else dict)
+    payload = payloads(result[0])[0]
+    assert payload['error']['code'] == 502 and payload['error']['upstream_status'] == 401
+    assert message in payload['error']['message']
+    assert map_upstream_error_to_status_code(payload) == 502
+    assert build_anthropic_error_payload(payload, 502)['error']['type'] == 'api_error'
+
+
 def test_request_cache_requires_auth_and_excludes_auth_headers(tmp_path, monkeypatch):
     import base64
     import gzip

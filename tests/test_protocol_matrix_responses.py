@@ -148,7 +148,7 @@ def test_overflow_error_triggers_anthropic_client_recovery(gateway, upstream, st
 
 
 @pytest.mark.parametrize('stream', STREAMS)
-@pytest.mark.parametrize('status, kind', [(429, 'rate_limit_error'), (529, 'overloaded_error'), (401, 'authentication_error')])
+@pytest.mark.parametrize('status, kind', [(429, 'rate_limit_error'), (529, 'overloaded_error')])
 def test_anthropic_passthrough_keeps_the_upstream_status(gateway, stream, status, kind):
     """Claude Code 按状态码决定是否重试，这条路径此前会把它们全变成 502 或 200。"""
     app, _, monkeypatch = gateway
@@ -156,6 +156,17 @@ def test_anthropic_passthrough_keeps_the_upstream_status(gateway, stream, status
     response, _ = exchange(app, monkeypatch, 'anthropic', [reply], CLIENT_PATHS['anthropic'], request_for('anthropic', stream))
     assert response.status_code == status
     assert response.json()['error'] == {'type': kind, 'message': '上游原话'}
+
+
+@pytest.mark.parametrize('stream', STREAMS)
+def test_anthropic_passthrough_reports_upstream_auth_failure_as_502(gateway, stream):
+    """上游 401 是网关凭据的问题；原样返回 401 时 Claude Code 会当作自己的 Key 失效，直接放弃重试。"""
+    app, _, monkeypatch = gateway
+    reply = Reply(status=401, body={'type': 'error', 'error': {'type': 'authentication_error', 'message': '上游原话'}})
+    response, _ = exchange(app, monkeypatch, 'anthropic', [reply], CLIENT_PATHS['anthropic'], request_for('anthropic', stream))
+    assert response.status_code == 502
+    error = response.json()['error']
+    assert error['type'] == 'api_error' and '上游原话' in error['message']
 
 
 def test_streaming_error_after_the_wait_window_still_reaches_the_client(gateway):

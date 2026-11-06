@@ -579,6 +579,17 @@ def extract_json_from_response(response: Response) -> Optional[dict]:
 # 重试判断
 # ============================================================
 
+# 客户端 Key 只用于网关鉴权，上游 401/403 是网关自己的上游凭据被拒，常见于中转站账号池偶发失效。
+# 400/404/413/422 这类请求本身的问题换几次也一样，不在“其他错误”里重试。
+UPSTREAM_CREDENTIAL_STATUSES = frozenset({401, 403})
+_RETRYABLE_CLIENT_STATUSES = UPSTREAM_CREDENTIAL_STATUSES | {408, 409}
+
+
+def is_retryable_other_status(status_code: int) -> bool:
+    """retry_on_other_errors 覆盖的状态码：上游凭据被拒、超时冲突和全部 5xx"""
+    return status_code in _RETRYABLE_CLIENT_STATUSES or status_code >= 500
+
+
 def should_retry_from_status_codes(status_codes: set, retry_config: dict) -> tuple:
     """根据状态码集合和重试配置判断是否应重试"""
     if not status_codes:
@@ -594,7 +605,8 @@ def should_retry_from_status_codes(status_codes: set, retry_config: dict) -> tup
         return True, "503 Service Unavailable"
 
     if retry_config.get("retry_on_other_errors", False):
-        other_codes = sorted(code for code in status_codes if code not in (402, 429, 503))
+        other_codes = sorted(code for code in status_codes
+                             if code not in (402, 429, 503) and is_retryable_other_status(code))
         if other_codes:
             return True, f"HTTP {other_codes[0]}"
 
