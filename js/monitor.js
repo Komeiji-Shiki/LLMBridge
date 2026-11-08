@@ -492,6 +492,14 @@ function formatStopReason(reason) {
     return reason ? escapeHtml(reason) : '-';
 }
 
+// 上游过滤后 HTTP 仍是 200，状态只会显示 success，过滤要靠停止原因单独标出来。
+const FILTERED_STOP_REASONS = new Set(['content_filter', 'refusal']);
+function renderFilteredBadge(reason) {
+    return FILTERED_STOP_REASONS.has(reason)
+        ? ` <span class="status-badge filtered" title="上游内容过滤：${escapeHtml(reason)}">已过滤</span>`
+        : '';
+}
+
 // 🔧 修复：截断长内容到指定字符数，添加"展开"按钮
 // 旧版全量渲染导致包含大量内容的模态框渲染卡顿甚至页面崩溃
 let _expandCounter = 0;
@@ -607,7 +615,7 @@ async function viewRequestDetails(requestId) {
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">状态:</div>
-                    <div class="detail-value"><span class="status-badge ${details.status === 'success' ? 'success' : 'failed'}">${escapeHtml(details.status)}</span></div>
+                    <div class="detail-value"><span class="status-badge ${details.status === 'success' ? 'success' : 'failed'}">${escapeHtml(details.status)}</span>${renderFilteredBadge(details.stop_reason || (details.cost_info && details.cost_info.stop_reason))}</div>
                 </div>
                 <div class="detail-item">
                     <div class="detail-label">耗时:</div>

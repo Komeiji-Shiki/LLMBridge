@@ -187,6 +187,7 @@ function refreshRequestLogs() {
         tbody.innerHTML = logs.map(log => {
             const time = new Date(log.timestamp * 1000).toLocaleString();
             const statusClass = log.status === 'success' ? 'success' : 'failed';
+            const stopReason = log.stop_reason || (log.cost_info && log.cost_info.stop_reason);
             const duration = log.duration ? formatDuration(log.duration) : '-';
             const inTokens = renderInputTokens(log);
             const outTokens = log.output_tokens ? log.output_tokens.toLocaleString() : '-';
@@ -218,11 +219,11 @@ function refreshRequestLogs() {
                     <td>${time}</td>
                     <td style="font-family: monospace; font-size: 12px;">${escapeHtml(log.request_id?.substring(0, 8) || 'N/A')}...</td>
                     <td>${escapeHtml(log.model)}${featureBadges ? ' ' + featureBadges : ''}<div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div></td>
-                    <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span></td>
+                    <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span>${renderFilteredBadge(stopReason)}</td>
                     <td title="${escapeHtml(renderPhaseTimings(log.timings))}">${duration}${log.timings?.first_business_ms != null ? `<div style="font-size:11px;opacity:.7">首事件 ${(Number(log.timings.first_business_ms) / 1000).toFixed(2)}s</div>` : ""}</td>
                     <td>${inTokens}</td>
                     <td>${outTokens}</td>
-                    <td style="white-space: nowrap;">${formatStopReason(log.stop_reason || (log.cost_info && log.cost_info.stop_reason))}</td>
+                    <td style="white-space: nowrap;">${formatStopReason(stopReason)}</td>
                     <td style="font-family: monospace; font-size: 11px;" title="${escapeHtml(costTitle)}">${escapeHtml(costDisplay)}</td>
                     <td>
                         <button class="detail-btn" data-request-id="${escapeHtml(log.request_id || '')}" onclick="viewRequestDetails(this.dataset.requestId)">查看详细</button>
