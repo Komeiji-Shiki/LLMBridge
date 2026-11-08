@@ -88,8 +88,37 @@ REFUSAL_CELLS = [cell for cell in CELLS if cell[1] in ('chat', 'anthropic', 'res
 def test_refusal_is_never_a_blank_success(gateway, cell):
     seen, _, _ = run(gateway, cell, Turn(text='不能回答', stop='refusal'))
     assert seen.error is None
-    assert seen.stop == 'refusal'
     assert '不能回答' in seen.text
+    # Anthropic 客户端收到 refusal 会判整个会话违规，转换出来的回答有内容时按正常结束交付。
+    converted_for_anthropic = cell[0] == 'anthropic' and cell[1] != 'anthropic'
+    assert seen.stop == ('end' if converted_for_anthropic else 'refusal')
+
+
+FILTERED_CHAT_CELLS = [('anthropic', 'chat', stream) for stream in STREAMS]
+
+
+@pytest.mark.parametrize('cell', FILTERED_CHAT_CELLS, ids=cell_id)
+def test_anthropic_client_gets_refusal_only_when_nothing_survives(gateway, cell):
+    seen, _, _ = run(gateway, cell, Turn(text='', stop='refusal'))
+    assert seen.error is None
+    assert seen.stop == 'refusal'
+
+
+@pytest.mark.parametrize('cell', FILTERED_CHAT_CELLS, ids=cell_id)
+def test_filtered_tool_call_still_reaches_anthropic_client(gateway, cell):
+    seen, _, _ = run(gateway, cell, Turn(calls=[('call_1', 'lookup', {'q': 1})], stop='refusal'))
+    assert seen.error is None
+    assert seen.stop == 'tool'
+    assert seen.calls == [('call_1', 'lookup', {'q': 1})]
+
+
+@pytest.mark.parametrize('cell', [('chat', 'chat', stream) for stream in STREAMS] + FILTERED_CHAT_CELLS, ids=cell_id)
+def test_chat_upstream_filter_reaches_monitor(gateway, cell):
+    _, monitor, _ = gateway
+    run(gateway, cell, Turn(text='半截', stop='refusal'))
+    ended = monitor.request_end.call_args.kwargs
+    assert ended['success'] is True
+    assert ended['response_message']['finish_reason'] == 'content_filter'
 
 
 @pytest.mark.parametrize('cell', [cell for cell in CELLS if cell[1] == 'gemini'], ids=cell_id)

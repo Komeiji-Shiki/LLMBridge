@@ -113,9 +113,11 @@ def extract_tool_calls_from_message(message: dict):
     return None
 
 
-def build_response_message(content, reasoning_content=None, tool_calls=None, signatures=None):
-    """构建用于监控面板展示的 assistant 响应消息。"""
+def build_response_message(content, reasoning_content=None, tool_calls=None, signatures=None, finish_reason=None):
+    """构建用于监控面板展示的 assistant 响应消息。finish_reason 是上游原值，监控在没有其他来源时从这里取停止原因。"""
     message: Dict[str, Any] = {"role": "assistant"}
+    if finish_reason:
+        message["finish_reason"] = finish_reason
 
     if reasoning_content:
         message["reasoning_content"] = reasoning_content

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-11-08：上游过滤不再让 Claude Code 判死会话
+
+- Chat 和 Responses 上游返回 `content_filter` 或 `refusal` 字段时，Anthropic 客户端只有在既没有正文也没有工具调用的情况下才收到 `stop_reason: "refusal"`；已有产出时按 `end_turn` 结束，有工具调用时按 `tool_use` 结束。Claude Code 收到 refusal 会把整轮标成违规、要求开新会话，而触发过滤的内容还留在上下文里，之后每一轮都会再被拦，已经执行过的工具调用也一起被标掉。此前流式和非流式都无条件报 refusal，refusal 还会盖掉 `tool_use`。
+- OpenAI 格式上游的原始 `finish_reason` 现在会记进监控的停止原因，流式和非流式都记。此前这条路径完全不记，过滤后 HTTP 仍是 200，记录里只有 success，看不出被过滤过。
+
 ### 2026-11-07：上游鉴权失败可重试，并按 502 返回
 
 - 自动重试的“其他错误”现在覆盖 401、403、408、409 和全部 5xx，和后台选项说明一致。此前 transport 层只重试 5xx，选项写的却是 4xx/5xx；400、404、413、422 这类请求本身的问题仍不重试。路由层和 transport 层共用 `is_retryable_other_status` 一套判断。

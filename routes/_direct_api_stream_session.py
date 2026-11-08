@@ -103,6 +103,7 @@ class PassthroughStreamSession:
         # 思考 token 是否并入下发给下游的 completion_tokens（模型级配置）
         self.completion_mode = get_completion_tokens_mode(endpoint_config)
         self.system_fingerprint = None  # 上游返回的 system_fingerprint（OpenAI 兼容顶层字段）
+        self.finish_reason = None  # 上游原始停止原因，content_filter 这类过滤 HTTP 仍是 200，只能靠它看出来
         self.separator_found = False
         self.repetition_detected = False  # 预留：回放检测
         self.request_end_called = False
@@ -150,7 +151,8 @@ class PassthroughStreamSession:
             cached_tokens=self.cached_tokens, error=self.error_msg,
             response_content=partial_content, reasoning_content=partial_reasoning,
             full_messages=self.full_messages,
-            response_message=build_response_message(partial_content, partial_reasoning, partial_tool_calls),
+            response_message=build_response_message(partial_content, partial_reasoning, partial_tool_calls,
+                                                    finish_reason=self.finish_reason),
             response_tool_calls=partial_tool_calls,
             upstream_usage=self.upstream_usage,
             system_fingerprint=self.system_fingerprint)
@@ -305,6 +307,7 @@ class PassthroughStreamSession:
             delta = {}
 
             if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
+                self.finish_reason = chunk_json['choices'][0].get('finish_reason') or self.finish_reason
                 delta_modified, skip_event, delta = self._process_choices(chunk_json)
                 if delta_modified:
                     event_modified = True
@@ -708,7 +711,8 @@ class PassthroughStreamSession:
             response_content=final_content,
             reasoning_content=final_reasoning,
             cost_info=cost_info, full_messages=self.full_messages,
-            response_message=build_response_message(final_content, final_reasoning, final_tool_calls),
+            response_message=build_response_message(final_content, final_reasoning, final_tool_calls,
+                                                    finish_reason=self.finish_reason),
             response_tool_calls=final_tool_calls,
             upstream_usage=self.upstream_usage,
             system_fingerprint=self.system_fingerprint)

@@ -77,9 +77,16 @@ def map_openai_finish_reason_to_anthropic(reason: Optional[str]) -> str:
     return mapping.get(reason or "stop", "end_turn")
 
 
-def _stop_reason(finish_reason: Optional[str], has_tool_use: bool) -> str:
-    """有工具调用就是 tool_use：部分上游和中转在调用后仍报 stop，靠它判断的 Agent 循环会提前结束。"""
+def _stop_reason(finish_reason: Optional[str], has_tool_use: bool, has_output: bool) -> str:
+    """有工具调用就是 tool_use：部分上游和中转在调用后仍报 stop，靠它判断的 Agent 循环会提前结束。
+
+    上游过滤只在既没有正文也没有工具调用时才报 refusal。Claude Code 收到 refusal 会把整轮标成违规、
+    要求开新会话，而触发过滤的内容留在上下文里，之后每一轮都会再被拦，已经产出的回答也跟着作废。
+    过滤照常记在监控的停止原因里。
+    """
     reason = map_openai_finish_reason_to_anthropic(finish_reason)
+    if reason == "refusal" and has_output:
+        reason = "end_turn"
     return "tool_use" if has_tool_use and reason == "end_turn" else reason
 
 
@@ -1023,8 +1030,9 @@ async def convert_openai_non_stream_response_to_anthropic(
     if not content_blocks:
         content_blocks = [{"type": "text", "text": ""}]
 
-    stop_reason = "refusal" if message.get("refusal") else _stop_reason(
-        finish_reason, any(block["type"] == "tool_use" for block in content_blocks))
+    has_tool_use = any(block["type"] == "tool_use" for block in content_blocks)
+    stop_reason = _stop_reason("content_filter" if message.get("refusal") else finish_reason, has_tool_use,
+                               has_tool_use or any(block["type"] == "text" and block["text"] for block in content_blocks))
     anthropic_response = {
         "id": data.get("id") or f"msg_{uuid.uuid4().hex}",
         "type": "message",
@@ -1215,6 +1223,7 @@ def build_anthropic_streaming_response(
         sent_message_start = False
         finish_reason: Optional[str] = None
         refusal_parts: List[str] = []
+        has_text = False
         annotations: List[Dict[str, Any]] = []
         saw_images = False
         # 累积上游 usage（OpenAI 流式 usage 为最终累计值而非增量，合并覆盖即可）
@@ -1409,6 +1418,7 @@ def build_anthropic_streaming_response(
                         next_block_idx += 1
                         yield _emit_block_start(active_text_idx, "text")
                     yield _emit_block_delta(active_text_idx, "text_delta", value)
+                    has_text = has_text or bool(value)
 
                 else:
                     for tc in value:
@@ -1432,12 +1442,14 @@ def build_anthropic_streaming_response(
                 active_text_idx = _allocate_block_index()
                 yield _emit_block_start(active_text_idx, "text")
             yield _emit_block_delta(active_text_idx, "text_delta", trailing)
+            has_text = True
 
         # ── 关闭所有剩余 block ──
         for ev in _close_current_blocks():
             yield ev
 
-        stop_reason = "refusal" if refusal_parts else _stop_reason(finish_reason, tool_blocks.seen)
+        stop_reason = _stop_reason("content_filter" if refusal_parts else finish_reason, tool_blocks.seen,
+                                   has_text or tool_blocks.seen)
 
         # ── 消息收尾事件 ──
         if not sent_message_start:

@@ -841,7 +841,9 @@ def _extract_and_split_content(response_json, thinking_separator, direct_api_ser
     reasoning_content = ""
     tool_calls = None
     response_message = None
+    finish_reason = None
     if "choices" in response_json and len(response_json["choices"]) > 0:
+        finish_reason = response_json["choices"][0].get("finish_reason")
         message = response_json["choices"][0].get("message", {})
         content = message.get("content", "")
         reasoning_content = message.get("reasoning_content", "") or message.get("reasoning", "")
@@ -867,5 +869,5 @@ def _extract_and_split_content(response_json, thinking_separator, direct_api_ser
                 reasoning_content = reasoning_part
                 logger.info(f"[THINKING_SPLIT] 非流式响应已应用思考分隔")
 
-    response_message = build_response_message(content, reasoning_content, tool_calls)
+    response_message = build_response_message(content, reasoning_content, tool_calls, finish_reason=finish_reason)
     return content, reasoning_content, tool_calls, response_message, response_json
