@@ -4,7 +4,7 @@
     const nav = document.createElement('li');
     nav.className = 'nav-item';
     nav.dataset.page = 'gateway-workspace';
-    nav.textContent = '🧪 能力与 Playground';
+    nav.innerHTML = '<svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#code"/></svg> 能力与 Playground';
     document.querySelector('.nav-menu').append(nav);
     const page = document.createElement('section');
     page.id = 'gateway-workspace';

@@ -66,7 +66,7 @@ async function refreshTokenizerInfo() {
             if (!isAvailable && tokenizer.install_cmd) {
                 statusHTML += `
                     <div style="margin-top: 8px;">
-                        <code style="font-size: 0.75rem; background: var(--surface); padding: 4px 8px; border-radius: 4px; color: #f59e0b;">
+                        <code style="font-size: 0.75rem; background: var(--surface); padding: 4px 8px; border-radius: 4px; color: var(--warn);">
                             ${tokenizer.install_cmd}
                         </code>
                     </div>
@@ -91,7 +91,7 @@ async function refreshTokenizerInfo() {
             <div style="margin-top: 20px; padding: 20px; background: var(--surface-2); border: 1px solid var(--line-weak); border-radius: 6px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                     <div>
-                        <strong style="color: var(--text-main); font-size: 1.1rem;">📦 安装分词器</strong>
+                        <strong style="color: var(--text-main); font-size: 1.1rem;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#archive"/></svg> 安装分词器</strong>
                         <p style="font-size: 0.8rem; color: var(--text-dim); margin-top: 5px;">
                             点击按钮直接安装所需的分词器库（需要Python环境和pip）
                         </p>
@@ -105,10 +105,10 @@ async function refreshTokenizerInfo() {
                     ${buildInstallCard('google-generativeai', 'Google AI', 'Gemini API', status.google_generativeai?.available)}
                 </div>
                 
-                <div style="margin-top: 15px; padding: 12px; background: rgba(42, 168, 255, 0.1); border: 1px solid var(--accent-soft); border-radius: 6px;">
+                <div style="margin-top: 15px; padding: 12px; background: rgb(var(--accent-rgb) / 0.1); border: 1px solid var(--accent-soft); border-radius: 6px;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <div>
-                            <strong style="color: var(--accent);">🚀 一键安装全部</strong>
+                            <strong style="color: var(--accent);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#bolt"/></svg> 一键安装全部</strong>
                             <p style="font-size: 0.75rem; color: var(--text-dim); margin-top: 3px;">
                                 安装所有未安装的分词器库
                             </p>
@@ -128,8 +128,8 @@ async function refreshTokenizerInfo() {
                 
                 <div id="install-result" style="display: none; margin-top: 15px;"></div>
                 
-                <div style="margin-top: 15px; padding: 10px; background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; border-radius: 0 4px 4px 0;">
-                    <strong style="color: #f59e0b; font-size: 0.85rem;">📁 本地Tokenizer文件</strong>
+                <div style="margin-top: 15px; padding: 10px; background: rgb(var(--warn-rgb) / 0.1); border-left: 3px solid var(--warn); border-radius: 0 4px 4px 0;">
+                    <strong style="color: var(--warn); font-size: 0.85rem;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#folder"/></svg> 本地Tokenizer文件</strong>
                     <p style="font-size: 0.8rem; color: var(--text-dim); margin-top: 5px;">
                         Gemma和DeepSeek的本地tokenizer需要手动下载文件放到对应目录：
                     </p>
@@ -143,10 +143,10 @@ async function refreshTokenizerInfo() {
         
         // 添加Token计算器入口
         statusHTML += `
-            <div style="margin-top: 20px; padding: 15px; background: rgba(42, 168, 255, 0.1); border: 1px solid var(--accent-soft); border-radius: 6px;">
+            <div style="margin-top: 20px; padding: 15px; background: rgb(var(--accent-rgb) / 0.1); border: 1px solid var(--accent-soft); border-radius: 6px;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div>
-                        <strong style="color: var(--accent);">🧮 Token 计算器</strong>
+                        <strong style="color: var(--accent);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calculator"/></svg> Token 计算器</strong>
                         <p style="font-size: 0.875rem; color: var(--text-dim); margin-top: 5px;">
                             计算文本的token数量，对比不同分词器的结果
                         </p>
@@ -257,8 +257,8 @@ async function installTokenizer(packageName) {
         if (result.success) {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
-                <div style="padding: 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; color: #10b981;">
-                    ✅ ${packageName} 安装成功！
+                <div style="padding: 12px; background: rgb(var(--ok-rgb) / 0.1); border: 1px solid rgb(var(--ok-rgb) / 0.3); border-radius: 6px; color: var(--ok);">
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> ${packageName} 安装成功！
                 </div>
             `;
             showMessage('success', `${packageName} 安装成功！`);
@@ -270,8 +270,8 @@ async function installTokenizer(packageName) {
         } else {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
-                <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                    ❌ 安装失败: ${escapeHtml(result.error || '未知错误')}
+                <div style="padding: 12px; background: rgb(var(--danger-rgb) / 0.1); border: 1px solid rgb(var(--danger-rgb) / 0.3); border-radius: 6px; color: var(--danger);">
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 安装失败: ${escapeHtml(result.error || '未知错误')}
                 </div>
             `;
             showMessage('danger', `安装失败: ${result.error}`);
@@ -286,8 +286,8 @@ async function installTokenizer(packageName) {
         progressDiv.style.display = 'none';
         resultDiv.style.display = 'block';
         resultDiv.innerHTML = `
-            <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                ❌ 网络错误: ${escapeHtml(error.message)}
+            <div style="padding: 12px; background: rgb(var(--danger-rgb) / 0.1); border: 1px solid rgb(var(--danger-rgb) / 0.3); border-radius: 6px; color: var(--danger);">
+                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 网络错误: ${escapeHtml(error.message)}
             </div>
         `;
         showMessage('danger', `网络错误: ${error.message}`);
@@ -376,22 +376,22 @@ async function installAllTokenizers() {
     
     let resultHtml = '<div style="padding: 12px; border-radius: 6px;';
     if (failCount === 0) {
-        resultHtml += ' background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3);">';
-        resultHtml += `<div style="color: #10b981; margin-bottom: 10px;">✅ 全部安装成功！(${successCount}/${packagesToInstall.length})</div>`;
+        resultHtml += ' background: rgb(var(--ok-rgb) / 0.1); border: 1px solid rgb(var(--ok-rgb) / 0.3);">';
+        resultHtml += `<div style="color: var(--ok); margin-bottom: 10px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 全部安装成功！(${successCount}/${packagesToInstall.length})</div>`;
     } else if (successCount === 0) {
-        resultHtml += ' background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);">';
-        resultHtml += `<div style="color: #ef4444; margin-bottom: 10px;">❌ 全部安装失败</div>`;
+        resultHtml += ' background: rgb(var(--danger-rgb) / 0.1); border: 1px solid rgb(var(--danger-rgb) / 0.3);">';
+        resultHtml += `<div style="color: var(--danger); margin-bottom: 10px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 全部安装失败</div>`;
     } else {
-        resultHtml += ' background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3);">';
-        resultHtml += `<div style="color: #f59e0b; margin-bottom: 10px;">⚠️ 部分安装成功 (${successCount}/${packagesToInstall.length})</div>`;
+        resultHtml += ' background: rgb(var(--warn-rgb) / 0.1); border: 1px solid rgb(var(--warn-rgb) / 0.3);">';
+        resultHtml += `<div style="color: var(--warn); margin-bottom: 10px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 部分安装成功 (${successCount}/${packagesToInstall.length})</div>`;
     }
     
     resultHtml += '<ul style="margin: 0; padding-left: 20px; font-size: 0.85rem;">';
     for (const r of results) {
         if (r.success) {
-            resultHtml += `<li style="color: #10b981;">${r.package}: 成功</li>`;
+            resultHtml += `<li style="color: var(--ok);">${r.package}: 成功</li>`;
         } else {
-            resultHtml += `<li style="color: #ef4444;">${r.package}: 失败 - ${escapeHtml(r.error)}</li>`;
+            resultHtml += `<li style="color: var(--danger);">${r.package}: 失败 - ${escapeHtml(r.error)}</li>`;
         }
     }
     resultHtml += '</ul></div>';
@@ -480,14 +480,14 @@ async function loadTokenizerMappings() {
         const modelEndpointMap = modelsData.model_endpoint_map;
         
         if (!modelEndpointMap || Object.keys(modelEndpointMap).length === 0) {
-            container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🤖</div><p>还没有配置任何模型<br/>请先在"模型端点"页面添加模型</p></div>';
+            container.innerHTML = '<div class="empty-state"><div class="empty-state-icon"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#layers"/></svg></div><p>还没有配置任何模型<br/>请先在"模型端点"页面添加模型</p></div>';
             return;
         }
         
         // 构建自定义分词器的选项HTML
         const customTokenizerOptions = customTokenizers
             .filter(t => t.available)
-            .map(t => `<option value="custom_${escapeHtml(t.name)}">🔧 ${escapeHtml(t.display_name || t.name)}</option>`)
+            .map(t => `<option value="custom_${escapeHtml(t.name)}">${escapeHtml(t.display_name || t.name)}</option>`)
             .join('');
         
         // 构建自定义分词器选项组（如果有可用的自定义分词器）
@@ -517,7 +517,7 @@ async function loadTokenizerMappings() {
                             const customName = currentTokenizer.replace('custom_', '');
                             const customTok = customTokenizers.find(t => t.name === customName);
                             if (customTok) {
-                                tokenizerDisplayName = `🔧 ${customTok.display_name || customName}`;
+                                tokenizerDisplayName = customTok.display_name || customName;
                             }
                         }
                         
@@ -552,7 +552,7 @@ async function loadTokenizerMappings() {
                                 </td>
                                 <td>
                                     ${hasCustomConfig ?
-                                        `<button class="btn btn-danger btn-sm" data-model="${escapeHtml(modelName)}" onclick="deleteTokenizerConfig(this.dataset.model)">🗑️ 删除</button>` :
+                                        `<button class="btn btn-danger btn-sm" data-model="${escapeHtml(modelName)}" onclick="deleteTokenizerConfig(this.dataset.model)"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg> 删除</button>` :
                                         `<span style="color: var(--text-dim); font-size: 0.875rem;">使用默认</span>`
                                     }
                                 </td>
@@ -562,8 +562,8 @@ async function loadTokenizerMappings() {
                 </tbody>
             </table>
             ${customTokenizers.length === 0 ? `
-                <div style="margin-top: 15px; padding: 12px; background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; border-radius: 0 4px 4px 0;">
-                    <strong style="color: #f59e0b; font-size: 0.85rem;">💡 提示</strong>
+                <div style="margin-top: 15px; padding: 12px; background: rgb(var(--warn-rgb) / 0.1); border-left: 3px solid var(--warn); border-radius: 0 4px 4px 0;">
+                    <strong style="color: var(--warn); font-size: 0.85rem;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg> 提示</strong>
                     <p style="font-size: 0.8rem; color: var(--text-dim); margin-top: 5px;">
                         还没有自定义分词器。可以在上方"自定义分词器管理"中添加GLM-4、Qwen、Kimi K2等模型的分词器。
                     </p>
@@ -615,7 +615,7 @@ async function saveAllTokenizerSettings() {
             throw new Error(`API错误 (${response.status}): ${errorDetail}`);
         }
         
-        showMessage('success', '✅ 所有分词器设置已保存');
+        showMessage('success', '所有分词器设置已保存');
         loadTokenizerMappings();
         refreshTokenizerInfo();
         
@@ -702,7 +702,7 @@ function renderCustomTokenizersList(data) {
     if (!data.tokenizers || data.tokenizers.length === 0) {
         container.innerHTML = `
             <div style="padding: 20px; text-align: center; color: var(--text-dim);">
-                <div style="font-size: 2rem; margin-bottom: 10px;">📦</div>
+                <div style="font-size: 2rem; margin-bottom: 10px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#archive"/></svg></div>
                 <p>还没有添加自定义分词器</p>
                 <p style="font-size: 0.85rem;">点击上方"添加自定义分词器"按钮来添加</p>
             </div>
@@ -729,7 +729,7 @@ function renderCustomTokenizersList(data) {
             ? '<span class="badge badge-success">✓ 可用</span>'
             : '<span class="badge badge-danger">✗ 不可用</span>';
         
-        const sourceTypeText = tokenizer.source_type === 'huggingface' ? '🤗 HuggingFace' : '📁 本地';
+        const sourceTypeText = tokenizer.source_type === 'huggingface' ? 'HuggingFace' : '本地';
         
         html += `
             <tr>
@@ -747,7 +747,7 @@ function renderCustomTokenizersList(data) {
                 </td>
                 <td>
                     <button class="btn btn-danger btn-sm" data-name="${escapeHtml(tokenizer.name)}" onclick="deleteCustomTokenizer(this.dataset.name)">
-                        🗑️ 删除
+                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg> 删除
                     </button>
                 </td>
             </tr>
@@ -784,7 +784,7 @@ function showAddCustomTokenizerDialog() {
         <div style="background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; width: 90%; max-width: 600px; max-height: 90vh; overflow-y: auto;">
             <div style="padding: 20px; border-bottom: 1px solid var(--line-weak);">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h3 style="margin: 0; color: var(--text-main);">➕ 添加自定义分词器</h3>
+                    <h3 style="margin: 0; color: var(--text-main);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 添加自定义分词器</h3>
                     <button onclick="closeCustomTokenizerDialog()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-dim);">×</button>
                 </div>
             </div>
@@ -792,7 +792,7 @@ function showAddCustomTokenizerDialog() {
             <div style="padding: 20px;">
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; margin-bottom: 8px; color: var(--text-main); font-weight: 500;">
-                        分词器名称 <span style="color: #ef4444;">*</span>
+                        分词器名称 <span style="color: var(--danger);">*</span>
                     </label>
                     <input type="text" id="custom-tokenizer-name" class="form-input"
                            placeholder="例如: glm4, kimi-k2, qwen2"
@@ -813,18 +813,18 @@ function showAddCustomTokenizerDialog() {
                 
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; margin-bottom: 8px; color: var(--text-main); font-weight: 500;">
-                        来源类型 <span style="color: #ef4444;">*</span>
+                        来源类型 <span style="color: var(--danger);">*</span>
                     </label>
                     <select id="custom-tokenizer-source-type" class="form-select" style="width: 100%; padding: 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-2); color: var(--text-main);" onchange="toggleSourceHelp()">
-                        <option value="huggingface">🤗 HuggingFace 模型</option>
-                        <option value="local">📁 本地路径 (transformers格式)</option>
-                        <option value="tiktoken_model">🔤 Tiktoken Model (如Kimi K2)</option>
+                        <option value="huggingface">HuggingFace 模型</option>
+                        <option value="local">本地路径 (transformers格式)</option>
+                        <option value="tiktoken_model">Tiktoken Model (如Kimi K2)</option>
                     </select>
                 </div>
                 
                 <div style="margin-bottom: 20px;">
                     <label style="display: block; margin-bottom: 8px; color: var(--text-main); font-weight: 500;">
-                        来源地址 <span style="color: #ef4444;">*</span>
+                        来源地址 <span style="color: var(--danger);">*</span>
                     </label>
                     <input type="text" id="custom-tokenizer-source" class="form-input"
                            placeholder="例如: THUDM/glm-4-9b-chat"
@@ -855,8 +855,8 @@ function showAddCustomTokenizerDialog() {
                     </div>
                 </div>
                 
-                <div style="padding: 15px; background: rgba(245, 158, 11, 0.1); border-left: 3px solid #f59e0b; border-radius: 0 4px 4px 0; margin-bottom: 20px;">
-                    <strong style="color: #f59e0b; font-size: 0.85rem;">⚠️ 注意事项</strong>
+                <div style="padding: 15px; background: rgb(var(--warn-rgb) / 0.1); border-left: 3px solid var(--warn); border-radius: 0 4px 4px 0; margin-bottom: 20px;">
+                    <strong style="color: var(--warn); font-size: 0.85rem;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 注意事项</strong>
                     <ul style="font-size: 0.8rem; color: var(--text-dim); margin: 8px 0 0 0; padding-left: 20px;">
                         <li>首次添加HuggingFace分词器时会下载模型文件</li>
                         <li>某些模型可能需要较长时间下载</li>
@@ -907,7 +907,7 @@ function toggleSourceHelp() {
         sourceInput.placeholder = '例如: ./tokenizers/kimi-k2';
         helpDiv.innerHTML = `
             输入包含<code style="background: var(--surface); padding: 2px 6px; border-radius: 3px;">tiktoken.model</code>文件的目录路径<br>
-            <span style="color: #f59e0b;">适用于Kimi K2等使用tiktoken格式的模型</span>
+            <span style="color: var(--warn);">适用于Kimi K2等使用tiktoken格式的模型</span>
         `;
     } else {
         sourceInput.placeholder = '例如: ./tokenizers/my-tokenizer';
@@ -993,8 +993,8 @@ async function submitCustomTokenizer() {
         if (result.success) {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
-                <div style="padding: 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; color: #10b981;">
-                    ✅ ${escapeHtml(result.message)}
+                <div style="padding: 12px; background: rgb(var(--ok-rgb) / 0.1); border: 1px solid rgb(var(--ok-rgb) / 0.3); border-radius: 6px; color: var(--ok);">
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> ${escapeHtml(result.message)}
                     <div style="font-size: 0.85rem; margin-top: 5px; color: var(--text-dim);">
                         ${escapeHtml(result.test_result || '')}
                     </div>
@@ -1012,8 +1012,8 @@ async function submitCustomTokenizer() {
         } else {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
-                <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                    ❌ 添加失败: ${escapeHtml(result.error || '未知错误')}
+                <div style="padding: 12px; background: rgb(var(--danger-rgb) / 0.1); border: 1px solid rgb(var(--danger-rgb) / 0.3); border-radius: 6px; color: var(--danger);">
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 添加失败: ${escapeHtml(result.error || '未知错误')}
                 </div>
             `;
             submitBtn.disabled = false;
@@ -1024,8 +1024,8 @@ async function submitCustomTokenizer() {
         progressDiv.style.display = 'none';
         resultDiv.style.display = 'block';
         resultDiv.innerHTML = `
-            <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                ❌ 网络错误: ${escapeHtml(error.message)}
+            <div style="padding: 12px; background: rgb(var(--danger-rgb) / 0.1); border: 1px solid rgb(var(--danger-rgb) / 0.3); border-radius: 6px; color: var(--danger);">
+                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 网络错误: ${escapeHtml(error.message)}
             </div>
         `;
         submitBtn.disabled = false;
@@ -1130,7 +1130,7 @@ function showQuickAddTokenizerDialog() {
     
     let cardsHtml = '';
     for (const tok of POPULAR_TOKENIZERS) {
-        const sourceTypeLabel = tok.source_type === 'tiktoken_model' ? '🔤 tiktoken' :
+        const sourceTypeLabel = tok.source_type === 'tiktoken_model' ? 'tiktoken' :
                                 tok.source_type === 'local' ? '📁 本地' : '🤗 HuggingFace';
         cardsHtml += `
             <div style="padding: 15px; background: var(--surface-2); border: 1px solid var(--line-weak); border-radius: 8px;">
@@ -1158,7 +1158,7 @@ function showQuickAddTokenizerDialog() {
         <div style="background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto;">
             <div style="padding: 20px; border-bottom: 1px solid var(--line-weak);">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <h3 style="margin: 0; color: var(--text-main);">⚡ 快速添加常用分词器</h3>
+                    <h3 style="margin: 0; color: var(--text-main);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#bolt"/></svg> 快速添加常用分词器</h3>
                     <button onclick="closeQuickAddDialog()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-dim);">×</button>
                 </div>
                 <p style="margin: 10px 0 0 0; font-size: 0.85rem; color: var(--text-dim);">
@@ -1236,8 +1236,8 @@ async function quickAddTokenizer(name, displayName, source, description, modelsS
         if (result.success) {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
-                <div style="padding: 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; color: #10b981;">
-                    ✅ ${escapeHtml(displayName)} 添加成功！${result.test_result ? '<br><small>' + escapeHtml(result.test_result) + '</small>' : ''}
+                <div style="padding: 12px; background: rgb(var(--ok-rgb) / 0.1); border: 1px solid rgb(var(--ok-rgb) / 0.3); border-radius: 6px; color: var(--ok);">
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> ${escapeHtml(displayName)} 添加成功！${result.test_result ? '<br><small>' + escapeHtml(result.test_result) + '</small>' : ''}
                 </div>
             `;
             showMessage('success', `${displayName} 添加成功！`);
@@ -1251,8 +1251,8 @@ async function quickAddTokenizer(name, displayName, source, description, modelsS
         } else {
             resultDiv.style.display = 'block';
             resultDiv.innerHTML = `
-                <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                    ❌ 添加失败: ${escapeHtml(result.error || '未知错误')}
+                <div style="padding: 12px; background: rgb(var(--danger-rgb) / 0.1); border: 1px solid rgb(var(--danger-rgb) / 0.3); border-radius: 6px; color: var(--danger);">
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 添加失败: ${escapeHtml(result.error || '未知错误')}
                 </div>
             `;
         }
@@ -1261,8 +1261,8 @@ async function quickAddTokenizer(name, displayName, source, description, modelsS
         progressDiv.style.display = 'none';
         resultDiv.style.display = 'block';
         resultDiv.innerHTML = `
-            <div style="padding: 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; color: #ef4444;">
-                ❌ 网络错误: ${escapeHtml(error.message)}
+            <div style="padding: 12px; background: rgb(var(--danger-rgb) / 0.1); border: 1px solid rgb(var(--danger-rgb) / 0.3); border-radius: 6px; color: var(--danger);">
+                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 网络错误: ${escapeHtml(error.message)}
             </div>
         `;
     }

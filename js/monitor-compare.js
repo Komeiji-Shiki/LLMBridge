@@ -36,7 +36,7 @@ const MonitorCompare = (() => {
         if (tps.ttftS != null) meta.push(`首业务事件 ${tps.ttftS.toFixed(2)}s`);
         let html = parts.join(' · ') + `<span style="font-size:12px;opacity:.7;">（${escapeHtml(meta.join(' / '))}）</span>`;
         html += '<div class="tps-note">输出阶段平均速度包含业务事件及传输耗时；首业务事件可能是推理或工具事件。</div>';
-        if (tps.caveat) html += `<div style="font-size:12px;color:#fbbf24;margin-top:4px;">⚠️ ${escapeHtml(tps.caveat)}</div>`;
+        if (tps.caveat) html += `<div style="font-size:12px;color:var(--warn);margin-top:4px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> ${escapeHtml(tps.caveat)}</div>`;
         return html;
     }
 
@@ -194,19 +194,19 @@ const MonitorCompare = (() => {
         const delta = summary.cached_delta || 0;
 
         const modelWarn = data.models_match ? '' :
-            '<div class="compare-warn">⚠️ 两条请求的模型不一致，对比仅供参考（不同模型的缓存空间通常不共享）。</div>';
+            '<div class="compare-warn"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 两条请求的模型不一致，对比仅供参考（不同模型的缓存空间通常不共享）。</div>';
 
         const first = messages.first_difference;
         let messagesHtml;
         if (messages.available === false) {
             messagesHtml = '<div class="compare-warn">至少一条日志没有完整请求消息，无法判断共享前缀。</div>';
         } else if (!first) {
-            messagesHtml = `<div class="compare-ok">✅ 公共部分的 ${escapeHtml(String(messages.common_count ?? 0))} 条消息序列化内容一致。` +
+            messagesHtml = `<div class="compare-ok"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 公共部分的 ${escapeHtml(String(messages.common_count ?? 0))} 条消息序列化内容一致。` +
                 (messages.strict_append
                     ? `新请求保留旧请求的完整消息前缀（多出 ${escapeHtml(String((messages.appended || []).length))} 条）。`
                     : '新请求的消息历史比旧请求更短。') + '</div>';
         } else {
-            messagesHtml = `<div class="compare-bad">💥 首个差异：<strong>message[${escapeHtml(String(first.index))}]</strong>（旧 ${escapeHtml(String(messages.old_count))} 条 / 新 ${escapeHtml(String(messages.new_count))} 条）` +
+            messagesHtml = `<div class="compare-bad"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 首个差异：<strong>message[${escapeHtml(String(first.index))}]</strong>（旧 ${escapeHtml(String(messages.old_count))} 条 / 新 ${escapeHtml(String(messages.new_count))} 条）` +
                 '。此处可能影响共享前缀，实际缓存行为取决于上游。</div>' +
                 `<div class="detail-item"><div class="detail-label">角色:</div><div class="detail-value">旧 <code>${escapeHtml(first.old_role ?? '—')}</code> → 新 <code>${escapeHtml(first.new_role ?? '—')}</code></div></div>` +
                 `<div class="detail-item"><div class="detail-label">SHA:</div><div class="detail-value" style="font-family:monospace;font-size:12px;">旧 ${escapeHtml(first.old_sha256 ?? '')} → 新 ${escapeHtml(first.new_sha256 ?? '')}</div></div>` +
@@ -223,7 +223,7 @@ const MonitorCompare = (() => {
 
         let toolsHtml;
         if (tools.status === 'identical') {
-            toolsHtml = `<div class="compare-ok">✅ 工具定义一致（${escapeHtml(String(tools.old_count ?? 0))} 个，sha ${escapeHtml(tools.old_sha256 ?? '')}）。</div>`;
+            toolsHtml = `<div class="compare-ok"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 工具定义一致（${escapeHtml(String(tools.old_count ?? 0))} 个，sha ${escapeHtml(tools.old_sha256 ?? '')}）。</div>`;
         } else if (tools.status === 'different') {
             toolsHtml = '<div class="compare-bad">工具定义发生变化，可能影响上游构建的共享前缀。</div>' +
                 `<div class="detail-item"><div class="detail-label">数量:</div><div class="detail-value">旧 ${escapeHtml(String(tools.old_count ?? '—'))} → 新 ${escapeHtml(String(tools.new_count ?? '—'))}</div></div>`;
@@ -239,9 +239,9 @@ const MonitorCompare = (() => {
 
         let paramsHtml;
         if (params.same) {
-            paramsHtml = '<div class="compare-ok">✅ 其余已记录的请求参数一致。</div>';
+            paramsHtml = '<div class="compare-ok"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 其余已记录的请求参数一致。</div>';
         } else {
-            paramsHtml = '<div class="compare-bad">💥 以下已记录的请求参数发生变化：</div><div class="table-container"><table class="compare-table"><thead><tr><th>参数</th><th>旧 (A)</th><th>新 (B)</th></tr></thead><tbody>' +
+            paramsHtml = '<div class="compare-bad"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 以下已记录的请求参数发生变化：</div><div class="table-container"><table class="compare-table"><thead><tr><th>参数</th><th>旧 (A)</th><th>新 (B)</th></tr></thead><tbody>' +
                 (params.differences || []).map(d =>
                     `<tr><td style="font-family:monospace;">${escapeHtml(d.key)}</td><td><pre>${escapeHtml(d.old ?? '')}</pre></td><td><pre>${escapeHtml(d.new ?? '')}</pre></td></tr>`
                 ).join('') + '</tbody></table></div>';
@@ -256,7 +256,7 @@ const MonitorCompare = (() => {
         if (!identityFields.length) {
             identityHtml = '<div class="compare-warn">两条日志均未记录会话/调用方归属字段。</div>';
         } else if (identity.same) {
-            identityHtml = `<div class="compare-ok">✅ 同一归属（${escapeHtml(identityFields.map(f => `${f.key}=${f.old}`).join(' · ') || '—')}）。归属相同不能证明上游缓存空间相同。</div>`;
+            identityHtml = `<div class="compare-ok"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 同一归属（${escapeHtml(identityFields.map(f => `${f.key}=${f.old}`).join(' · ') || '—')}）。归属相同不能证明上游缓存空间相同。</div>`;
         } else {
             identityHtml = '<div class="compare-warn">归属字段不同。网关归属与上游缓存路由并不等同，需结合上游配置判断。</div><div class="table-container"><table class="compare-table"><thead><tr><th>归属字段</th><th>旧 (A)</th><th>新 (B)</th></tr></thead><tbody>' +
                 identityFields.map(f =>

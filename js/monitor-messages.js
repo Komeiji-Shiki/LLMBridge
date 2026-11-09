@@ -206,21 +206,21 @@ function renderMessageBox(msg) {
     }
 
     if (reasoning) {
-        extraBadges += '<span class="status-badge" style="background:rgba(42,168,255,0.15);color:#7dd3fc;font-size:10px;margin-left:4px;">含思维链</span>';
+        extraBadges += '<span class="status-badge" style="background:rgb(var(--accent-rgb) / 0.15);color:var(--accent-hover);font-size:10px;margin-left:4px;">含思维链</span>';
     }
     if (reasoningSignature) {
-        extraBadges += '<span class="status-badge" style="background:rgba(139,92,246,0.15);color:#c4b5fd;font-size:10px;margin-left:4px;">含思维链签名</span>';
+        extraBadges += '<span class="status-badge" style="background:rgb(var(--info-rgb) / 0.15);color:var(--info);font-size:10px;margin-left:4px;">含思维链签名</span>';
     }
     if (toolCalls) {
-        extraBadges += '<span class="status-badge" style="background:rgba(245,158,11,0.15);color:#fcd34d;font-size:10px;margin-left:4px;">含工具调用</span>';
+        extraBadges += '<span class="status-badge" style="background:rgb(var(--warn-rgb) / 0.15);color:var(--warn);font-size:10px;margin-left:4px;">含工具调用</span>';
     }
 
     let reasoningHtml = '';
     if (reasoning) {
         const rc = typeof reasoning === 'string' ? reasoning : JSON.stringify(reasoning, null, 2);
         reasoningHtml = `
-            <div style="margin-top:6px;padding:8px 10px;background:rgba(42,168,255,0.06);border:1px solid rgba(42,168,255,0.2);border-radius:6px;font-size:12px;">
-                <div style="color:#7dd3fc;font-weight:600;margin-bottom:4px;">💭 思维链 (Reasoning):</div>
+            <div style="margin-top:6px;padding:8px 10px;background:rgb(var(--accent-rgb) / 0.06);border:1px solid rgb(var(--accent-rgb) / 0.2);border-radius:6px;font-size:12px;">
+                <div style="color:var(--accent-hover);font-weight:600;margin-bottom:4px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#message"/></svg> 思维链 (Reasoning):</div>
                 <div style="white-space:pre-wrap;word-break:break-word;color:#bae6fd;">${escapeHtml(rc.substring(0, 2000))}${rc.length > 2000 ? '... (截断)' : ''}</div>
             </div>`;
     }
@@ -229,8 +229,8 @@ function renderMessageBox(msg) {
     if (reasoningSignature) {
         const sig = typeof reasoningSignature === 'string' ? reasoningSignature : JSON.stringify(reasoningSignature, null, 2);
         signatureHtml = `
-            <div style="margin-top:6px;padding:8px 10px;background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.2);border-radius:6px;font-size:12px;">
-                <div style="color:#c4b5fd;font-weight:600;margin-bottom:4px;">🔏 思维链签名 (Signature):</div>
+            <div style="margin-top:6px;padding:8px 10px;background:rgb(var(--info-rgb) / 0.06);border:1px solid rgb(var(--info-rgb) / 0.2);border-radius:6px;font-size:12px;">
+                <div style="color:var(--info);font-weight:600;margin-bottom:4px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#lock"/></svg> 思维链签名 (Signature):</div>
                 <div style="white-space:pre-wrap;word-break:break-word;color:#ddd6fe;">${escapeHtml(sig.substring(0, 500))}${sig.length > 500 ? '... (截断)' : ''}</div>
             </div>`;
     }
@@ -238,8 +238,8 @@ function renderMessageBox(msg) {
     let toolCallsHtml = '';
     if (toolCalls) {
         toolCallsHtml = `
-            <div style="margin-top:6px;padding:8px 10px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:6px;font-size:12px;">
-                <div style="color:#fcd34d;font-weight:600;margin-bottom:4px;">🔧 工具调用:</div>
+            <div style="margin-top:6px;padding:8px 10px;background:rgb(var(--warn-rgb) / 0.06);border:1px solid rgb(var(--warn-rgb) / 0.2);border-radius:6px;font-size:12px;">
+                <div style="color:var(--warn);font-weight:600;margin-bottom:4px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 工具调用:</div>
                 <pre style="white-space:pre-wrap;word-break:break-word;color:#fde68a;margin:0;font-size:11px;">${escapeHtml(JSON.stringify(toolCalls, null, 2))}</pre>
             </div>`;
     }

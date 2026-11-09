@@ -29,7 +29,7 @@ async function loadApiKeys() {
         if (keys.length === 0) {
             container.innerHTML = `
                 <div class="empty-state">
-                    <div class="empty-state-icon">🔑</div>
+                    <div class="empty-state-icon"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg></div>
                     <p>尚未创建任何 API Key</p>
                     <p style="font-size: 0.875rem; margin-top: 10px;">点击上方"创建 API Key"按钮开始</p>
                 </div>`;
@@ -47,7 +47,7 @@ async function loadApiKeys() {
 
             const rpmDisplay = key.rpm_limit > 0 ? key.rpm_limit : '<span style="color: var(--text-dim);">不限</span>';
             const currentRpm = key.current_rpm || 0;
-            const rpmColor = key.rpm_limit > 0 && currentRpm >= key.rpm_limit * 0.8 ? '#ef4444' : '#10b981';
+            const rpmColor = key.rpm_limit > 0 && currentRpm >= key.rpm_limit * 0.8 ? 'var(--danger)' : 'var(--ok)';
 
             const statusBadge = key.enabled
                 ? '<span class="badge badge-success">启用</span>'
@@ -71,9 +71,15 @@ async function loadApiKeys() {
                 <td>${statusBadge}</td>
                 <td>
                     <div style="display: flex; gap: 6px;">
-                        <button class="btn btn-sm btn-primary" onclick="editApiKey('${key.id}')">✏️</button>
-                        <button class="btn btn-sm" onclick="toggleApiKeyEnabled('${key.id}', ${!key.enabled})">${key.enabled ? '⏸️' : '▶️'}</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteApiKey('${key.id}', this.closest('tr').dataset.keyName)">🗑️</button>
+                        <button class="btn btn-sm" aria-label="编辑 API Key" title="编辑 API Key" onclick="editApiKey('${key.id}')">
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#edit"/></svg>
+                        </button>
+                        <button class="btn btn-sm" aria-label="${key.enabled ? '停用' : '启用'} API Key" onclick="toggleApiKeyEnabled('${key.id}', ${!key.enabled})">
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${key.enabled ? 'pause' : 'play'}"/></svg>
+                        </button>
+                        <button class="btn btn-sm btn-danger" aria-label="删除 API Key" title="删除 API Key" onclick="deleteApiKey('${key.id}', this.closest('tr').dataset.keyName)">
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg>
+                        </button>
                     </div>
                 </td>
             </tr>`;
@@ -176,7 +182,7 @@ async function loadModelsForApiKeyModal(selectedModels) {
 
         renderApiKeyModelChecklist();
     } catch (err) {
-        container.innerHTML = `<div style="color: #ef4444; padding: 10px;">加载模型列表失败: ${escapeHtml(err.message)}</div>`;
+        container.innerHTML = `<div style="color: var(--danger); padding: 10px;">加载模型列表失败: ${escapeHtml(err.message)}</div>`;
     }
 }
 

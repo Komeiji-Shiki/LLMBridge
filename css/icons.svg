@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+    <symbol id="dashboard" viewBox="0 0 24 24">
+        <path d="M4 5h16M4 12h16M4 19h10"/>
+    </symbol>
+    <symbol id="layers" viewBox="0 0 24 24">
+        <path d="m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/>
+    </symbol>
+    <symbol id="type" viewBox="0 0 24 24">
+        <path d="M4 8V5h16v3M12 5v14m-4 0h8"/>
+    </symbol>
+    <symbol id="calculator" viewBox="0 0 24 24">
+        <rect x="5" y="3" width="14" height="18" rx="2"/>
+        <path d="M8 7h8m-8 5h1m6 0h1m-8 4h1m6 0h1"/>
+    </symbol>
+    <symbol id="target" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="7"/>
+        <path d="M12 2v5m0 10v5M2 12h5m10 0h5"/>
+    </symbol>
+    <symbol id="key" viewBox="0 0 24 24">
+        <circle cx="8" cy="9" r="4"/>
+        <path d="m11 12 8 8 2-2-2-2m-2 2 2-2"/>
+    </symbol>
+    <symbol id="sliders" viewBox="0 0 24 24">
+        <path d="M4 6h16M4 12h16M4 18h16M8 4v4m8 2v4m-5 2v4"/>
+    </symbol>
+    <symbol id="activity" viewBox="0 0 24 24">
+        <path d="M3 12h4l3-7 4 14 3-7h4"/>
+    </symbol>
+    <symbol id="chip" viewBox="0 0 24 24">
+        <rect x="6" y="6" width="12" height="12" rx="2"/>
+        <path d="M9 3v3m6-3v3M9 18v3m6-3v3M3 9h3m-3 6h3m12-6h3m-3 6h3"/>
+    </symbol>
+    <symbol id="refresh" viewBox="0 0 24 24">
+        <path d="M20 10a8 8 0 1 0-1 7m1-13v6h-6"/>
+    </symbol>
+    <symbol id="trash" viewBox="0 0 24 24">
+        <path d="M4 6h16M9 6V3h6v3m3 0-1 14H7L6 6m4 4v6m4-6v6"/>
+    </symbol>
+    <symbol id="archive" viewBox="0 0 24 24">
+        <path d="M5 9v11h14V9M3 4h18v5H3zm6 9h6"/>
+    </symbol>
+    <symbol id="plus" viewBox="0 0 24 24">
+        <path d="M5 12h14M12 5v14"/>
+    </symbol>
+    <symbol id="x" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M18 6 6 18"/>
+    </symbol>
+    <symbol id="calendar" viewBox="0 0 24 24">
+        <rect x="4" y="5" width="16" height="15" rx="2"/>
+        <path d="M8 3v4m8-4v4M4 10h16"/>
+    </symbol>
+    <symbol id="clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 7v5l3 2"/>
+    </symbol>
+    <symbol id="download" viewBox="0 0 24 24">
+        <path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>
+    </symbol>
+    <symbol id="check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6"/>
+    </symbol>
+    <symbol id="info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 11v5m0-8v.1"/>
+    </symbol>
+    <symbol id="warning" viewBox="0 0 24 24">
+        <path d="M10.5 4.8a1.7 1.7 0 0 1 3 0L21 18a1.3 1.3 0 0 1-1.1 2H4.1A1.3 1.3 0 0 1 3 18zM12 9v4m0 3v.1"/>
+    </symbol>
+    <symbol id="file" viewBox="0 0 24 24">
+        <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6"/>
+    </symbol>
+    <symbol id="folder" viewBox="0 0 24 24">
+        <path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+    </symbol>
+    <symbol id="copy" viewBox="0 0 24 24">
+        <rect x="8" y="8" width="12" height="12" rx="2"/>
+        <path d="M16 5a1 1 0 0 0-1-1H6a2 2 0 0 0-2 2v9a1 1 0 0 0 1 1"/>
+    </symbol>
+    <symbol id="bolt" viewBox="0 0 24 24">
+        <path d="m13 2-9 12h7l-1 8 10-12h-7z"/>
+    </symbol>
+    <symbol id="lock" viewBox="0 0 24 24">
+        <rect x="5" y="10" width="14" height="11" rx="2"/>
+        <path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/>
+    </symbol>
+    <symbol id="edit" viewBox="0 0 24 24">
+        <path d="m4 16 12-12a2 2 0 0 1 3 3L7 19l-4 1zm10-10 4 4"/>
+    </symbol>
+    <symbol id="play" viewBox="0 0 24 24">
+        <path d="m8 4 12 8-12 8z"/>
+    </symbol>
+    <symbol id="pause" viewBox="0 0 24 24">
+        <path d="M8 5v14m8-14v14"/>
+    </symbol>
+    <symbol id="compare" viewBox="0 0 24 24">
+        <path d="M5 7h14m-4-4 4 4-4 4M19 17H5m4-4-4 4 4 4"/>
+    </symbol>
+    <symbol id="message" viewBox="0 0 24 24">
+        <path d="M20 14a2 2 0 0 1-2 2H9l-5 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2zM8 8h8m-8 4h6"/>
+    </symbol>
+    <symbol id="link" viewBox="0 0 24 24">
+        <path d="m10 14 4-4m-5 6-1 1a3 3 0 0 1-4-4l4-4a3 3 0 0 1 4 0m0 6a3 3 0 0 0 4 0l4-4a3 3 0 0 0-4-4l-1 1"/>
+    </symbol>
+    <symbol id="code" viewBox="0 0 24 24">
+        <path d="m7 7-5 5 5 5m10-10 5 5-5 5m-3-13-4 16"/>
+    </symbol>
+    <symbol id="grip" viewBox="0 0 24 24">
+        <path stroke-width="3" d="M9 5h.1m6 0h.1M9 12h.1m6 0h.1M9 19h.1m6 0h.1"/>
+    </symbol>
+</svg>

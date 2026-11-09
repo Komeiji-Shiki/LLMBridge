@@ -6,6 +6,7 @@
     <title>LMArena Bridge 管理面板</title>
     <script defer src="js/vendor/chart.umd.min.js"></script>
     <script defer src="js/vendor/Sortable.min.js"></script>
+    <link rel="stylesheet" href="css/tokens.css">
     <link rel="stylesheet" href="css/admin.css">
     <link rel="stylesheet" href="css/admin-workspace.css">
     <link rel="stylesheet" href="css/admin-overview.css">
@@ -33,23 +34,23 @@
         <!-- 侧边栏 -->
         <div class="sidebar">
             <div class="sidebar-header">
-                <h1>🎯 LMArena</h1>
+                <h1><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#target"/></svg> LMArena</h1>
                 <p>Bridge 管理面板</p>
             </div>
             
             <!-- 顶部导航链接 -->
             <div class="top-nav">
-                <a href="/admin">📊 管理</a>
-                <a href="/monitor" target="_blank">📈 监控</a>
+                <a href="/admin"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg> 管理</a>
+                <a href="/monitor" target="_blank"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg> 监控</a>
             </div>
             
             <!-- 内存监控小框 -->
             <div id="memory-widget" style="margin: 10px 20px; padding: 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <span style="font-size: 0.75rem; color: var(--text-dim);">💾 内存占用</span>
-                    <button onclick="refreshMemoryInfo()" style="background: none; border: none; cursor: pointer; color: var(--text-dim); font-size: 0.7rem;" title="刷新">🔄</button>
+                    <span style="font-size: 0.75rem; color: var(--text-dim);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#chip"/></svg> 内存占用</span>
+                    <button onclick="refreshMemoryInfo()" style="background: none; border: none; cursor: pointer; color: var(--text-dim); font-size: 0.85rem;" title="刷新内存信息" aria-label="刷新内存信息"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg></button>
                 </div>
-                <div id="memory-value" style="font-size: 1.3rem; font-weight: bold; color: var(--accent);">--</div>
+                <div id="memory-value" style="font-size: 1.3rem; font-weight: bold;">--</div>
                 <div style="margin-top: 6px;">
                     <div id="memory-bar" style="height: 4px; background: var(--line-strong); border-radius: 2px; overflow: hidden;">
                         <div id="memory-bar-fill" style="height: 100%; width: 0%; background: var(--accent); transition: width 0.3s;"></div>
@@ -60,35 +61,35 @@
                 </div>
                 <div id="tokenizer-info" style="font-size: 0.65rem; color: var(--text-dim); margin-top: 4px; display: none;">
                 </div>
-                <button id="clear-cache-btn" onclick="clearTokenizerCache()" style="display: none; margin-top: 8px; padding: 4px 8px; font-size: 0.7rem; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; border-radius: 4px; cursor: pointer; width: 100%;">
-                    🧹 清理Tokenizer缓存
+                <button id="clear-cache-btn" onclick="clearTokenizerCache()" style="display: none; margin-top: 8px; padding: 4px 8px; font-size: 0.7rem; background: rgb(var(--danger-rgb) / 0.2); border: 1px solid rgb(var(--danger-rgb) / 0.3); color: var(--danger); border-radius: 4px; cursor: pointer; width: 100%;">
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg> 清理Tokenizer缓存
                 </button>
             </div>
             
             <ul class="nav-menu">
                 <li class="nav-item active" data-page="overview">
-                    <i>📊</i> 概览
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg> 概览
                 </li>
                 <li class="nav-item" data-page="models">
-                    <i>🤖</i> 模型端点
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#layers"/></svg> 模型端点
                 </li>
                 <li class="nav-item" data-page="tokenizer">
-                        <i>🔤</i> Tokenizer配置
+                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#type"/></svg> Tokenizer配置
                     </li>
                     <li class="nav-item" data-page="token-calculator">
-                        <i>🧮</i> Token计算器
+                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calculator"/></svg> Token计算器
                     </li>
                     <li class="nav-item" data-page="id-capture">
-                    <i>🎯</i> ID 捕获
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#target"/></svg> ID 捕获
                 </li>
                 <li class="nav-item" data-page="api-keys">
-                    <i>🔑</i> API Key 管理
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg> API Key 管理
                 </li>
                 <li class="nav-item" data-page="config">
-                    <i>⚙️</i> 配置编辑
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 配置编辑
                 </li>
                 <li class="nav-item" data-page="monitor">
-                    <i>📈</i> 监控面板
+                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg> 监控面板
                 </li>
             </ul>
         </div>
@@ -134,22 +135,22 @@
 <h3>网关速率</h3>
 <div style="display: flex; gap: 10px; align-items: center;">
 <button class="btn btn-primary btn-sm" id="rate-period-day" onclick="switchRatePeriod('day')">
-                                📅 一天
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calendar"/></svg> 一天
                             </button>
 <button class="btn btn-sm" id="rate-period-hour" onclick="switchRatePeriod('hour')">
-                                ⏰ 一小时
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#clock"/></svg> 一小时
                             </button>
 </div>
 </div>
 <div class="metric-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; padding: 20px;">
 <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
 <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 RPM</div>
-<div id="overall-rpm-value" style="font-size: 1.8rem; font-weight: bold; color: #10b981;">-</div>
+<div id="overall-rpm-value" style="font-size: 1.8rem; font-weight: bold; color: var(--ok);">-</div>
 <div id="overall-rpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">请求/分钟</div>
 </div>
 <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
 <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">总体 TPM</div>
-<div id="overall-tpm-value" style="font-size: 1.8rem; font-weight: bold; color: #3b82f6;">-</div>
+<div id="overall-tpm-value" style="font-size: 1.8rem; font-weight: bold; color: var(--accent);">-</div>
 <div id="overall-tpm-detail" style="font-size: 0.75rem; color: var(--text-dim);">Token/分钟</div>
 </div>
 <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
@@ -184,16 +185,16 @@
 <span style="color: var(--text-dim);">至</span>
 <input class="form-input" id="token-end-date" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" type="date"/>
 <button class="btn btn-primary btn-sm" onclick="applyDateFilter()">
-                                📅 应用
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calendar"/></svg> 应用
                             </button>
 <button class="btn btn-sm" onclick="clearDateFilter()">
-                                ✖️ 清除
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 清除
                             </button>
 <button class="btn btn-sm" id="usage-refresh" onclick="refreshOverview({ force: true })">
-                                🔄 刷新
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 刷新
                             </button>
-<button class="btn btn-sm" id="usage-export" onclick="exportTokenReport()" style="background: #166534; border-color: #22c55e; color: #bbf7d0;" title="导出CSV报告">
-                                📥 导出CSV
+<button class="btn btn-sm" id="usage-export" onclick="exportTokenReport()" style="background: #166534; border-color: var(--ok); color: #bbf7d0;" title="导出CSV报告">
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#download"/></svg> 导出CSV
                             </button>
 </div>
 </div>
@@ -218,11 +219,11 @@
 </div>
 <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
 <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">普通输入金额</div>
-<div id="input-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #2aa8ff;">-</div>
+<div id="input-cost-value" style="font-size: 1.5rem; font-weight: bold; color: var(--accent);">-</div>
 </div><div><div>缓存输入金额</div><div class="cost-value" id="cached-cost-value">-</div></div><div><div>缓存写入金额</div><div class="cost-value" id="cache-write-cost-value">-</div><small>其中额外费用 <span id="cache-write-extra-cost-value">-</span></small></div>
 <div style="padding: 15px; background: var(--surface-2); border-radius: 6px; border: 1px solid var(--line-weak);">
 <div style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 5px;">输出成本</div>
-<div id="output-cost-value" style="font-size: 1.5rem; font-weight: bold; color: #10b981;">-</div>
+<div id="output-cost-value" style="font-size: 1.5rem; font-weight: bold; color: var(--ok);">-</div>
 </div>
 </div>
 </div>
@@ -255,13 +256,13 @@
 <span style="color: var(--text-dim);">至</span>
 <input class="form-input" id="request-end-date" style="width: auto; padding: 6px 12px; font-size: 0.875rem;" type="date"/>
 <button class="btn btn-primary btn-sm" onclick="applyRequestDateFilter()">
-                                📅 应用
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calendar"/></svg> 应用
                             </button>
 <button class="btn btn-sm" onclick="clearRequestDateFilter()">
-                                ✖️ 清除
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 清除
                             </button>
 <button class="btn btn-sm" onclick="refreshRequestStats()">
-                                🔄 刷新
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 刷新
                             </button>
 </div>
 </div>
@@ -298,16 +299,16 @@
                         <h3>模型列表</h3>
                         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                             <button class="btn btn-sm" onclick="archiveSelectedModels()" id="archive-selected-btn" disabled title="归档勾选的模型（归档后不可请求、列表折叠）">
-                                🗄️ 归档所选
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#archive"/></svg> 归档所选
                             </button>
                             <button class="btn btn-sm" onclick="runAutoArchive()" title="按最后调用时间自动归档闲置模型">
-                                🤖 自动归档
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#clock"/></svg> 自动归档
                             </button>
                             <button class="btn btn-sm" onclick="showArchiveSettings()" title="自动归档设置">
-                                ⚙️ 自动归档设置
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 自动归档设置
                             </button>
-                            <button class="btn btn-primary" onclick="showAddModelModal()">
-                                ➕ 添加模型
+                            <button class="btn btn-accent" onclick="showAddModelModal()">
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 添加模型
                             </button>
                         </div>
                     </div>
@@ -336,7 +337,7 @@
                     <div class="card-header">
                         <h3>分词器状态</h3>
                         <button class="btn btn-primary btn-sm" onclick="refreshTokenizerInfo()">
-                            🔄 刷新
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 刷新
                         </button>
                     </div>
                     <div id="tokenizer-status"></div>
@@ -345,21 +346,21 @@
                 <!-- 自定义分词器管理 -->
                 <div class="card">
                     <div class="card-header">
-                        <h3>🔧 自定义分词器管理</h3>
+                        <h3><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 自定义分词器管理</h3>
                         <div style="display: flex; gap: 10px;">
                             <button class="btn btn-primary" onclick="showAddCustomTokenizerDialog()">
-                                ➕ 添加自定义分词器
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 添加自定义分词器
                             </button>
                             <button class="btn" onclick="showQuickAddTokenizerDialog()">
-                                ⚡ 快速添加
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#bolt"/></svg> 快速添加
                             </button>
                             <button class="btn" onclick="loadCustomTokenizers()">
-                                🔄 刷新
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 刷新
                             </button>
                         </div>
                     </div>
                     <div class="alert alert-info" style="margin-bottom: 0;">
-                        <span>ℹ️</span>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
                         <div>
                             <strong>自定义分词器：</strong>添加GLM、Kimi K2、Qwen、Llama等模型的分词器，用于精确计算Token
                             <ul style="margin-top: 8px; padding-left: 20px; color: var(--text-dim);">
@@ -381,15 +382,15 @@
                         <h3>模型分词器配置</h3>
                         <div style="display: flex; gap: 10px;">
                             <button class="btn btn-success" onclick="saveAllTokenizerSettings()">
-                                💾 保存所有设置
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 保存所有设置
                             </button>
                             <button class="btn" onclick="loadTokenizerMappings()">
-                                🔄 刷新
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 刷新
                             </button>
                         </div>
                     </div>
                     <div class="alert alert-info">
-                        <span>ℹ️</span>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
                         <div>
                             <strong>分词器类型说明：</strong>
                             <ul style="margin-top: 10px; padding-left: 20px; color: var(--text-dim);">
@@ -404,7 +405,7 @@
                     
                     <!-- 🔧 新增：Token计数来源配置 -->
                     <div class="alert alert-info" style="margin-top: 15px;">
-                        <span>⚙️</span>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg></span>
                         <div>
                             <strong>Token计数来源配置：</strong>
                             <div style="margin-top: 10px;">
@@ -435,7 +436,7 @@
 
                 <div class="card">
                     <div class="alert alert-info">
-                        <span>ℹ️</span>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
                         <div>
                             <strong>使用说明（仅 LMArena 兼容模式）：</strong>
                             <ol style="margin-top: 10px; padding-left: 20px; color: var(--text-dim);">
@@ -446,8 +447,8 @@
                                 <li><strong style="color: var(--accent);">在LMArena页面找到已有对话，点击Retry按钮（刷新按钮）</strong></li>
                                 <li>捕获到的ID将自动显示配置窗口</li>
                             </ol>
-                            <div style="margin-top: 10px; padding: 10px; background: rgba(255, 165, 0, 0.1); border-left: 3px solid orange; border-radius: 4px;">
-                                <strong style="color: orange;">⚠️ 重要：</strong>必须点击<strong>Retry按钮</strong>（对话右侧的刷新图标），而不是发送新消息！
+                            <div style="margin-top: 10px; padding: 10px; background: rgb(var(--warn-rgb) / 0.1); border-left: 3px solid orange; border-radius: 4px;">
+                                <strong style="color: var(--warn);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 重要：</strong>必须点击<strong>Retry按钮</strong>（对话右侧的刷新图标），而不是发送新消息！
                             </div>
                         </div>
                     </div>
@@ -494,7 +495,7 @@
 
                     <div style="text-align: center; padding: 40px 0;">
                         <button class="btn btn-primary" onclick="startIdCapture()" style="font-size: 1.1rem; padding: 15px 40px;">
-                            🎯 开始捕获
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#target"/></svg> 开始捕获
                         </button>
                         <div id="capture-status" style="margin-top: 20px;"></div>
                     </div>
@@ -515,17 +516,17 @@
                             <!-- 模式切换按钮 -->
                             <div style="display: flex; gap: 5px; margin-right: 20px;">
                                 <button id="mode-jsonc-btn" class="btn" onclick="switchConfigMode('jsonc')">
-                                    📝 JSONC 模式
+                                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#file"/></svg> JSONC 模式
                                 </button>
                                 <button id="mode-form-btn" class="btn btn-primary" onclick="switchConfigMode('form')">
-                                    📋 表单模式
+                                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#file"/></svg> 表单模式
                                 </button>
                             </div>
                             <button class="btn" onclick="loadConfig()">
-                                🔄 重新加载
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 重新加载
                             </button>
                             <button class="btn btn-success" onclick="saveConfig()">
-                                💾 保存配置
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 保存配置
                             </button>
                         </div>
                     </div>
@@ -570,16 +571,16 @@
                     <div class="card-header">
                         <h3>API Key 列表</h3>
                         <div style="display: flex; gap: 10px;">
-                            <button class="btn btn-primary" onclick="showCreateApiKeyModal()">
-                                ➕ 创建 API Key
+                            <button class="btn btn-accent" onclick="showCreateApiKeyModal()">
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 创建 API Key
                             </button>
                             <button class="btn" onclick="loadApiKeys()">
-                                🔄 刷新
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 刷新
                             </button>
                         </div>
                     </div>
                     <div class="alert alert-info">
-                        <span>ℹ️</span>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
                         <div>
                             <strong>访客 Key 说明：</strong>这些 Key 只能调用 API（聊天补全、模型列表），无法访问管理面板。
                             每个 Key 可以限制允许使用的模型和每分钟请求数(RPM)。
@@ -587,7 +588,7 @@
                     </div>
                     <div id="api-keys-list">
                         <div class="empty-state">
-                            <div class="empty-state-icon">🔑</div>
+                            <div class="empty-state-icon"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg></div>
                             <p>尚未创建任何 API Key</p>
                             <p style="font-size: 0.875rem; margin-top: 10px;">点击上方"创建 API Key"按钮开始</p>
                         </div>
@@ -632,7 +633,7 @@
                             <div style="margin-bottom: 10px; display: flex; gap: 8px;">
                                 <button class="btn btn-sm" onclick="apiKeySelectAllModels()">全选</button>
                                 <button class="btn btn-sm" onclick="apiKeyDeselectAllModels()">全不选</button>
-                                <input type="text" id="apikey-model-search" class="form-input" placeholder="🔍 搜索模型..."
+                                <input type="text" id="apikey-model-search" class="form-input" placeholder="搜索模型..."
                                     style="flex: 1; padding: 6px 10px; font-size: 0.8rem;" oninput="filterApiKeyModels()">
                             </div>
                             <div id="apikey-models-checklist" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 6px; padding: 10px; background: var(--surface-2);">
@@ -642,7 +643,7 @@
                     </div>
                     <div class="modal-footer">
                         <button class="btn" onclick="closeApiKeyModal()">取消</button>
-                        <button class="btn btn-primary" id="apikey-save-btn" onclick="saveApiKey()">创建</button>
+                        <button class="btn btn-accent" id="apikey-save-btn" onclick="saveApiKey()">创建</button>
                     </div>
                 </div>
             </div>
@@ -651,16 +652,16 @@
             <div id="apikey-secret-modal" class="modal">
                 <div class="modal-content" style="max-width: 550px;">
                     <div class="modal-header">
-                        <h3>🔑 API Key 创建成功</h3>
+                        <h3><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg> API Key 创建成功</h3>
                         <button class="close-btn" onclick="closeApiKeySecretModal()">×</button>
                     </div>
                     <div class="modal-body">
                         <div class="alert alert-success" style="margin-bottom: 15px;">
-                            <span>✅</span>
+                            <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg></span>
                             <div><strong>API Key 已创建成功！</strong></div>
                         </div>
                         <div class="alert alert-danger">
-                            <span>⚠️</span>
+                            <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg></span>
                             <div><strong>请立即复制保存以下密钥，它只会显示这一次！</strong></div>
                         </div>
                         <div style="margin-top: 15px;">
@@ -669,12 +670,12 @@
                                 <input type="text" id="apikey-secret-display" class="form-input" readonly
                                     style="font-family: monospace; font-size: 0.9rem; background: var(--surface-3);">
                                 <button class="btn btn-primary" onclick="copyApiKeySecret()" style="white-space: nowrap;">
-                                    📋 复制
+                                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#copy"/></svg> 复制
                                 </button>
                             </div>
                         </div>
-                        <div id="apikey-copy-success" style="display: none; margin-top: 10px; color: #10b981; font-size: 0.875rem;">
-                            ✅ 已复制到剪贴板
+                        <div id="apikey-copy-success" style="display: none; margin-top: 10px; color: var(--ok); font-size: 0.875rem;">
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 已复制到剪贴板
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -719,10 +720,10 @@
                     </small>
                 </div>
                 <div class="form-group" style="margin-bottom: 0;">
-                    <button class="btn btn-primary" style="width: 100%;" onclick="saveArchiveSettings()">💾 保存设置</button>
+                    <button class="btn btn-primary" style="width: 100%;" onclick="saveArchiveSettings()"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 保存设置</button>
                 </div>
                 <div style="margin-top: 10px; text-align: center;">
-                    <button class="btn btn-sm" style="width: 100%;" onclick="runAutoArchive(parseInt(document.getElementById('archive-auto-days')?.value || '30', 10) || 30)">🤖 不保存，立即扫描一次</button>
+                    <button class="btn btn-sm" style="width: 100%;" onclick="runAutoArchive(parseInt(document.getElementById('archive-auto-days')?.value || '30', 10) || 30)"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#play"/></svg> 不保存，立即扫描一次</button>
                 </div>
             </div>
         </div>
@@ -795,12 +796,12 @@
 <div style="display: flex; gap: 10px; margin-bottom: 5px;">
 <input class="form-input" id="model-id" placeholder="留空则使用模型名称" type="text"/>
 <button class="btn btn-primary" onclick="fetchModelsFromAPI(event)" style="white-space: nowrap; flex-shrink: 0;" type="button">
-                                📋 从API获取
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#download"/></svg> 从API获取
                             </button>
 </div>
 <div id="model-select-container" style="display: none; margin-top: 10px;">
 <div style="position: relative; margin-bottom: 8px;">
-<input class="form-input" id="model-search" oninput="filterModelList()" placeholder="🔍 搜索模型..." style="padding-left: 10px;" type="text"/>
+<input class="form-input" id="model-search" oninput="filterModelList()" placeholder="搜索模型..." style="padding-left: 10px;" type="text"/>
 <span id="model-search-count" style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; color: var(--text-dim);"></span>
 </div>
 <select class="form-select" id="model-select" onchange="selectModelFromList()" size="8" style="height: auto; max-height: 240px;">
@@ -832,13 +833,13 @@
 </div>
 <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
 <button class="btn btn-sm" onclick="addApiKeyRow()" type="button">
-                                ➕ 添加 API Key
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 添加 API Key
                             </button>
 <button class="btn btn-sm btn-success" id="test-keys-btn" onclick="testCurrentModelKeys()" type="button">
-                                🔑 测试所有 Key
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg> 测试所有 Key
                             </button>
-<button class="btn btn-sm" id="query-balance-btn" onclick="queryKeyBalances()" style="background: var(--accent); color: #fff;" type="button">
-                                💰 查余额
+<button class="btn btn-sm" id="query-balance-btn" onclick="queryKeyBalances()" type="button">
+                                查余额
                             </button>
 </div>
 <div id="key-test-results" style="display: none; margin-top: 10px;"></div>
@@ -877,7 +878,7 @@
                         </small>
 </div><div id="lmarena-config" style="display: block;">
 <div class="alert alert-info" style="margin-bottom: 15px;">
-<span>⚠️</span>
+<span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg></span>
 <div>
 <strong>LMArena 模式已弃用：</strong>该模式仅为兼容旧配置而保留，新增模型请优先使用 Direct API 模式。
                         </div>
@@ -972,7 +973,7 @@
                         </small>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>🧠 思维链配置</h4>
+<h4><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#message"/></svg> 思维链配置</h4>
 </div>
 <div class="collapsible-content">
 <div class="form-group">
@@ -1053,7 +1054,7 @@
 </input></div>
 <!-- OAI 兼容 Anthropic thinking 参数（仅 OpenAI 兼容上游显示） -->
 <div class="form-group" id="oai-thinking-type-config" style="margin-bottom: 0;">
-<label class="form-label" for="oai-thinking-type">🧩 OAI 兼容 thinking.type（Anthropic 格式）</label>
+<label class="form-label" for="oai-thinking-type">OAI 兼容 thinking.type（Anthropic 格式）</label>
 <select class="form-input" id="oai-thinking-type">
 <option value="">不注入</option>
 <option value="enabled">enabled（启用思考 + budget_tokens）</option>
@@ -1065,7 +1066,7 @@
                                         </small>
 </div>
 <div class="form-group" id="oai-thinking-effort-config" style="margin-bottom: 0;">
-<label class="form-label" for="oai-thinking-effort">🧩 OAI 兼容 output_config.effort</label>
+<label class="form-label" for="oai-thinking-effort">OAI 兼容 output_config.effort</label>
 <select class="form-input" id="oai-thinking-effort">
 <option value="">不注入</option>
 <option value="minimal">minimal</option>
@@ -1084,7 +1085,7 @@
 </div>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>⚙️ 参数限制</h4>
+<h4><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 参数限制</h4>
 </div>
 <div class="collapsible-content">
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
@@ -1186,7 +1187,7 @@
                         </small>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 15px;">
 <div class="settings-block-title">
-<h4>🔄 消息转换</h4>
+<h4><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 消息转换</h4>
 </div>
 <div class="collapsible-content">
 <div class="form-group" style="margin-bottom: 0;">
@@ -1202,7 +1203,7 @@
 </div>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>📝 预填充/续写模式</h4>
+<h4><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#file"/></svg> 预填充/续写模式</h4>
 </div>
 <div class="collapsible-content">
 <div class="form-group">
@@ -1247,11 +1248,11 @@
 </div>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>🎭 系统提示词注入（伪装身份）</h4>
+<h4><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#message"/></svg> 系统提示词注入（伪装身份）</h4>
 </div>
 <div class="collapsible-content">
 <div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
-<span>💡</span>
+<span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
 <div>
 <strong>用途说明：</strong>通过在 system 消息中注入特定提示词，可以伪装成官方客户端（如 Antigravity），
                                     从而绕过某些 API 的身份验证检测。
@@ -1291,7 +1292,7 @@
                                     </small>
 </div>
 <div class="form-group" style="margin-bottom: 0;">
-<label class="form-label">🃏 伪造对话历史（整轮/多轮 + 思维链）</label>
+<label class="form-label"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#message"/></svg> 伪造对话历史（整轮/多轮 + 思维链）</label>
 <small style="color: var(--text-dim); display: block; margin-bottom: 8px;">
                                         在上游请求中插入伪造的历史对话，可携带 <code>reasoning_content</code> 伪造思维链（DeepSeek 等思考模型）。
                                         伪造消息会插入到 system 消息之后、真实对话之前。
@@ -1301,18 +1302,18 @@
 <div style="display: flex; gap: 8px; flex-wrap: wrap;">
 <button class="btn btn-sm" onclick="addFakeConvRow()" type="button">＋ 添加消息</button>
 <button class="btn btn-sm" onclick="addFakeConvTurn()" type="button">＋ 添加一轮对话</button>
-<button class="btn btn-sm" onclick="importFakeConversationFromJson()" type="button">📥 从 JSON 导入</button>
+<button class="btn btn-sm" onclick="importFakeConversationFromJson()" type="button"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#download"/></svg> 从 JSON 导入</button>
 </div>
 </div>
 </div>
 </div>
 </div></section><section class="model-settings-panel" id="settings-reliability"><h4>重试与图片</h4><p class="settings-description">管理失败重试和图片压缩。</p><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>🔁 自动重试配置</h4>
+<h4><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 自动重试配置</h4>
 </div>
 <div class="collapsible-content">
 <div class="alert alert-info" style="margin-bottom: 15px; padding: 10px; font-size: 0.85rem;">
-<span>ℹ️</span>
+<span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
 <div>
                                     遇到 <code>429/503</code> 或其他错误时自动重试。<strong>注意：仅对非流式请求生效；流式请求已返回 200 后无法触发重试。</strong>
 </div>
@@ -1321,7 +1322,7 @@
 <label style="display: flex; align-items: center;">
 <input id="auto-retry-enabled" onchange="toggleAutoRetryOptions()" style="margin-right: 8px;" type="checkbox"/>
 <span>启用模型级自动重试</span>
-<small style="color: var(--text-dim); display: block; margin-top: 2px; font-size: 0.75rem;">⚠️ 仅对非流式（stream=false）请求生效</small>
+<small style="color: var(--text-dim); display: block; margin-top: 2px; font-size: 0.75rem;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 仅对非流式（stream=false）请求生效</small>
 </label>
 </div>
 <div id="auto-retry-options" style="display: none;">
@@ -1353,7 +1354,7 @@
 </div>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>🖼️ 图片压缩配置</h4>
+<h4>图片压缩配置</h4>
 </div>
 <div class="collapsible-content">
 <div style="margin-bottom: 15px;">
@@ -1405,7 +1406,7 @@
 </div>
 </div></section><section class="model-settings-panel" id="settings-pricing"><h4>计费与统计</h4><p class="settings-description">设置价格及 Token 统计口径。</p><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>💰 计费配置</h4>
+<h4>计费配置</h4>
 </div>
 <div class="collapsible-content">
 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 10px;">
@@ -1439,7 +1440,7 @@
 </div>
 </div></section><section class="model-settings-panel" id="settings-advanced"><h4>自定义参数</h4><p class="settings-description">按需配置传递给上游的 JSON 参数。</p><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">
 <div class="settings-block-title">
-<h4>🔧 自定义参数</h4>
+<h4><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 自定义参数</h4>
 </div>
 <div class="collapsible-content">
 <div class="form-group" style="margin-bottom: 0;">
@@ -1460,7 +1461,7 @@
 </div></section></div>
 <div class="modal-footer"><span id="model-save-status" role="status"></span>
 <button class="btn" onclick="closeModelModal()">取消</button>
-<button class="btn btn-primary" id="model-save-btn" onclick="saveModel()">保存模型</button>
+<button class="btn btn-accent" id="model-save-btn" onclick="saveModel()">保存模型</button>
 </div>
 </div>
 </div>
@@ -1474,7 +1475,7 @@
             </div>
             <div class="modal-body">
                 <div class="alert alert-success" style="margin-bottom: 20px;">
-                    <span>✅</span>
+                    <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg></span>
                     <div>
                         <strong>ID捕获成功！</strong><br>
                         <span id="captured-ids-display"></span>

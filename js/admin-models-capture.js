@@ -20,7 +20,7 @@ function selectBattleTarget(target, element) {
 
 async function startIdCapture() {
     const statusEl = document.getElementById('capture-status');
-    statusEl.innerHTML = '<div style="color: var(--accent);">⏳ 正在启动捕获...</div>';
+    statusEl.innerHTML = '<div style="color: var(--accent);">正在启动捕获...</div>';
     
     try {
         const response = await fetch('/internal/start_id_capture', {
@@ -37,13 +37,13 @@ async function startIdCapture() {
         if (response.ok) {
             statusEl.innerHTML = `
                 <div class="alert alert-info">
-                    <span>⏳</span>
+                    <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#clock"/></svg></span>
                     <div>
                         <strong>捕获已启动，等待浏览器响应...</strong><br>
                         模式: ${result.mode === 'battle' ? 'Battle' : 'Direct Chat'}<br>
                         ${result.mode === 'battle' ? `目标: ${escapeHtml(result.battle_target)}<br>` : ''}
                         <small style="opacity: 0.8; color: var(--accent);">
-                            ⚠️ 请在LMArena页面找到已有对话，点击<strong>Retry按钮</strong>（刷新图标）
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#warning"/></svg> 请在LMArena页面找到已有对话，点击<strong>Retry按钮</strong>（刷新图标）
                         </small>
                     </div>
                 </div>
@@ -58,7 +58,7 @@ async function startIdCapture() {
         console.error('启动捕获失败:', error);
         statusEl.innerHTML = `
             <div class="alert alert-danger">
-                <span>❌</span>
+                <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg></span>
                 <div>启动失败: ${escapeHtml(error.message)}</div>
             </div>
         `;
@@ -83,7 +83,7 @@ function startCapturePolling(statusEl) {
                 
                 statusEl.innerHTML = `
                     <div class="alert alert-success">
-                        <span>🎉</span>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg></span>
                         <div>
                             <strong>ID捕获成功！</strong><br>
                             正在打开配置窗口...
@@ -96,7 +96,7 @@ function startCapturePolling(statusEl) {
                 clearInterval(capturePollingInterval);
                 statusEl.innerHTML = `
                     <div class="alert alert-danger">
-                        <span>⏱️</span>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#clock"/></svg></span>
                         <div>
                             <strong>捕获超时</strong><br>
                             未在60秒内收到响应，请重试
@@ -200,13 +200,12 @@ async function fetchModelsFromAPI(event) {
         console.log('⚠️ 未提供API Key，将尝试无认证请求（适用于本地反代）');
     }
     
-    // 🔧 关键修复：在函数开始就保存按钮引用
-    const button = event.target;
-    const originalText = button.innerHTML;
+    const button = event.currentTarget;
+    const originalContent = button.innerHTML;
     
     try {
         // 显示加载状态
-        button.innerHTML = '⏳ 加载中...';
+        button.textContent = '加载中...';
         button.disabled = true;
         
         // 智能构建/models端点URL
@@ -312,8 +311,6 @@ async function fetchModelsFromAPI(event) {
         
         if (models.length === 0) {
             alert('未获取到任何模型，请检查API是否返回了模型列表');
-            button.innerHTML = originalText;
-            button.disabled = false;
             return;
         }
         
@@ -342,20 +339,14 @@ async function fetchModelsFromAPI(event) {
         // 显示下拉框
         selectContainer.style.display = 'block';
         
-        // 恢复按钮状态
-        button.innerHTML = originalText;
-        button.disabled = false;
-        
         // 显示成功消息
-        showMessage('success', `✅ 成功从 ${successfulUrl} 获取 ${models.length} 个模型`);
+        showMessage('success', `成功从 ${successfulUrl} 获取 ${models.length} 个模型`);
         
     } catch (error) {
         console.error('获取模型列表失败:', error);
         alert(error.message);
-        
-        // 恢复按钮状态
-        const button = event.target;
-        button.innerHTML = '📋 从API获取';
+    } finally {
+        button.innerHTML = originalContent;
         button.disabled = false;
     }
 }
@@ -440,10 +431,11 @@ async function testCurrentModelKeys() {
     }
     
     // 显示加载状态
+    const originalContent = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '⏳ 测试中...';
+    btn.textContent = '测试中...';
     resultsDiv.style.display = 'block';
-    resultsDiv.innerHTML = `<div style="text-align: center; padding: 10px; color: var(--text-dim);">⏳ 正在并行测试 ${apiKeys.length} 个 Key...</div>`;
+    resultsDiv.innerHTML = `<div style="text-align: center; padding: 10px; color: var(--text-dim);">正在并行测试 ${apiKeys.length} 个 Key...</div>`;
     
     try {
         const response = await fetch('/api/admin/test_model_keys', {
@@ -471,13 +463,13 @@ async function testCurrentModelKeys() {
         html += '<div style="display: flex; flex-direction: column; gap: 6px;">';
         
         for (const r of data.results) {
-            let icon, color, bg;
+            let iconName, color, bg;
             if (r.status === 'ok') {
-                icon = '✅'; color = '#10b981'; bg = 'rgba(16,185,129,0.1)';
+                iconName = 'check'; color = 'var(--ok)'; bg = 'rgb(var(--ok-rgb) / 0.1)';
             } else if (r.status === 'timeout') {
-                icon = '⏱️'; color = '#f59e0b'; bg = 'rgba(245,158,11,0.1)';
+                iconName = 'clock'; color = 'var(--warn)'; bg = 'rgb(var(--warn-rgb) / 0.1)';
             } else {
-                icon = '❌'; color = '#ef4444'; bg = 'rgba(239,68,68,0.1)';
+                iconName = 'x'; color = 'var(--danger)'; bg = 'rgb(var(--danger-rgb) / 0.1)';
             }
             
             const timeStr = r.response_time_ms ? `${r.response_time_ms}ms` : '';
@@ -485,7 +477,7 @@ async function testCurrentModelKeys() {
             
             html += `
                 <div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: ${bg}; border-radius: 4px; font-size: 0.8rem;">
-                    <span>${icon}</span>
+                    <span style="color: ${color};"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${iconName}"/></svg></span>
                     <code style="color: ${color}; font-family: monospace;">${escapeHtml(r.key_preview)}</code>
                     <span style="color: var(--text-dim);">${timeStr}</span>
                     <span style="color: ${color}; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${errStr}</span>
@@ -496,9 +488,9 @@ async function testCurrentModelKeys() {
         resultsDiv.innerHTML = html;
         
     } catch (error) {
-        resultsDiv.innerHTML = `<div style="color: #ef4444; font-size: 0.85rem;">❌ 测试失败: ${escapeHtml(error.message)}</div>`;
+        resultsDiv.innerHTML = `<div style="color: var(--danger); font-size: 0.85rem;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 测试失败: ${escapeHtml(error.message)}</div>`;
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '🔑 测试所有 Key';
+        btn.innerHTML = originalContent;
     }
 }

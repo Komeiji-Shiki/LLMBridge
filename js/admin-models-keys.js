@@ -33,8 +33,8 @@ function addApiKeyRow(value = '') {
         <button type="button" class="btn btn-sm" aria-label="显示 API Key" onclick="const input = this.parentElement.querySelector('.api-key-input'); input.type = input.type === 'password' ? 'text' : 'password'; this.textContent = input.type === 'password' ? '显示' : '隐藏'; this.setAttribute('aria-label', this.textContent + ' API Key');">显示</button>
         <span class="key-balance-info" style="display: none; font-size: 0.8rem; white-space: nowrap; min-width: 100px; text-align: right;"></span>
         <button type="button" class="btn btn-sm btn-danger" onclick="removeApiKeyRow('${rowId}')"
-            title="删除此 API Key">
-            🗑️
+            title="删除此 API Key" aria-label="删除此 API Key">
+            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg>
         </button>
     `;
     container.appendChild(row);
@@ -112,7 +112,7 @@ async function queryKeyBalances() {
 
     const btn = document.getElementById('query-balance-btn');
     const origText = btn ? btn.textContent : '';
-    if (btn) { btn.textContent = '⏳ 查询中...'; btn.disabled = true; }
+    if (btn) { btn.textContent = '查询中...'; btn.disabled = true; }
 
     try {
         const resp = await fetch('/api/admin/query_key_balance', {
@@ -152,17 +152,16 @@ async function queryKeyBalances() {
                 if (infos.length > 0) {
                     const main = infos[0];
                     const total = parseFloat(main.total).toFixed(2);
-                    const color = avail ? '#34d399' : '#f87171';
-                    const icon = avail ? '💰' : '⚠️';
-                    infoEl.innerHTML = `<span style="color:${color}">${icon} ${escapeHtml(main.currency)} ${total}</span>`;
+                    const color = avail ? 'var(--ok)' : 'var(--danger)';
+                    infoEl.innerHTML = `<span style="color:${color}">${escapeHtml(main.currency)} ${total}</span>`;
                 } else {
-                    infoEl.innerHTML = `<span style="color:#f87171">⚠️ 无余额数据</span>`;
+                    infoEl.innerHTML = '<span style="color:var(--danger)">无余额数据</span>';
                 }
             } else if (result.status === 'timeout') {
-                infoEl.innerHTML = '<span style="color:#fbbf24">⏱️ 超时</span>';
+                infoEl.innerHTML = '<span style="color:var(--warn)">超时</span>';
             } else {
                 const err = result.error || '查询失败';
-                infoEl.innerHTML = `<span style="color:#f87171" title="${escapeHtmlForAttr(err)}">❌ 失败</span>`;
+                infoEl.innerHTML = `<span style="color:var(--danger)" title="${escapeHtmlForAttr(err)}">失败</span>`;
             }
             infoEl.style.display = 'inline';
         }
@@ -235,7 +234,7 @@ async function autoStickyToBestBalanceKey(keys, results, rows) {
             const infoEl = row && row.querySelector('.key-balance-info');
             if (infoEl && !infoEl.querySelector('.sticky-marker')) {
                 infoEl.insertAdjacentHTML('beforeend',
-                    `<span class="sticky-marker" style="color:#fbbf24; margin-left:6px;" title="已自动粘性到余额最高的 Key">⭐ 已粘性</span>`);
+                    `<span class="sticky-marker" style="color:var(--warn); margin-left:6px;" title="已自动粘性到余额最高的 Key">已粘性</span>`);
             }
             console.log(`[API-Key] 🎯 已自动粘性到余额最高的 Key: ${preview}（余额 ${bestTotal}）`);
         } else {

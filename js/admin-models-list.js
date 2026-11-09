@@ -61,7 +61,7 @@ async function loadModels() {
         
         const modelsHtml = Object.keys(data.model_endpoint_map).length > 0
             ? buildModelsTable(data.model_endpoint_map)
-            : '<div class="empty-state"><div class="empty-state-icon">🤖</div><p>还没有配置任何模型<br/>点击"添加模型"开始配置</p></div>';
+            : '<div class="empty-state"><div class="empty-state-icon"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#layers"/></svg></div><p>还没有配置任何模型<br/>点击"添加模型"开始配置</p></div>';
         
         document.getElementById('models-list').innerHTML = modelsHtml;
         setArchiveSectionOpen(modelWorkspace.archiveOpen);
@@ -86,13 +86,13 @@ function buildModelsRow(name, cfg, isArchived) {
     const flags = [cfg.auto_retry?.enabled ? '自动重试' : '', cfg.image_compression?.enabled ? '图片压缩' : '', cfg.enable_thinking ? '思考配置' : '', cfg.passthrough && protocol === 'direct_api' ? '透传' : ''].filter(Boolean);
     return `<tr class="model-row${isArchived ? ' model-row-archived' : ''}" data-model-name="${attr}">
         <td><input type="checkbox" class="model-checkbox" onchange="updateArchiveButtons()" aria-label="选择 ${attr}"></td>
-        <td class="drag-handle" title="拖动调整模型顺序">⠿</td>
+        <td class="drag-handle" title="拖动调整模型顺序"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#grip"/></svg></td>
         <td class="model-identity"><button class="model-name" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">${attr}</button>
             <div class="model-subtitle">${escapeHtml(cfg.display_name && cfg.display_name !== name ? cfg.display_name : cfg.model_id || name)}</div>
             <div class="model-flags"><span class="badge ${isArchived ? 'badge-info' : 'badge-success'}">${isArchived ? '已归档' : '可用'}</span>${flags.map(flag => `<span class="badge badge-info">${flag}</span>`).join('')}</div></td>
         <td class="model-connection"><span class="badge badge-info">${labels[protocol]}</span>
             <div class="model-subtitle" title="${escapeHtml(modelService(cfg))}">${escapeHtml(modelService(cfg))}</div><div class="model-subtitle">${escapeHtml(endpoint)} · ${keyCount ? keyCount + ' 个 Key' : '无需认证'}</div></td>
-        <td><div class="model-actions"><button class="btn btn-primary btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">设置</button>
+        <td><div class="model-actions"><button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">设置</button>
             <details class="model-more"><summary class="btn btn-sm" aria-label="${attr} 的更多操作">更多</summary>
                 <button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName, true)">复制模型</button>
                 <button class="btn btn-sm" data-model-name="${attr}" onclick="toggleModelArchive(this.dataset.modelName)">${isArchived ? '恢复模型' : '归档模型'}</button>
@@ -138,12 +138,12 @@ function buildModelsTable(modelEndpointMap) {
         <div class="archive-section" style="margin-top: 18px; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden;">
             <button type="button" aria-expanded="false" class="archive-header" onclick="toggleArchiveSection()" style="display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; background: var(--surface-2); user-select: none;">
                 <span id="archive-toggle-icon">▶</span>
-                <strong>📦 已归档模型（${archivedEntries.length}）</strong>
+                <strong><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#archive"/></svg> 已归档模型（${archivedEntries.length}）</strong>
                 <span style="color: var(--text-dim); font-size: 0.8rem;">点击展开/折叠 · 归档模型无法请求、不出现在模型列表</span>
             </button>
             <div id="archive-section-body" style="display: none; border-top: 1px solid var(--line-strong);">
                 <div style="padding: 8px 14px; display: flex; gap: 10px; align-items: center; background: var(--surface-2);">
-                    <button class="btn btn-sm" id="restore-selected-btn" disabled onclick="restoreSelectedModels()" title="恢复勾选的归档模型">♻️ 恢复所选</button>
+                    <button class="btn btn-sm" id="restore-selected-btn" disabled onclick="restoreSelectedModels()" title="恢复勾选的归档模型"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 恢复所选</button>
                     <span style="color: var(--text-dim); font-size: 0.8rem;">勾选后点击恢复，模型重新可请求</span>
                 </div>
                 <table class="table">

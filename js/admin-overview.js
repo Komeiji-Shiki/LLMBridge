@@ -197,7 +197,7 @@ async function refreshOverview(options = {}) {
         if (serial !== overviewRefresh.serial) return;
         
         document.querySelector('#browser-stat .stat-card-value').textContent =
-            data.browser_connected ? '✅ 已连接' : '❌ 未连接';
+            data.browser_connected ? '已连接' : '未连接';
         document.querySelector('#browser-stat .stat-card-detail').textContent =
             `${data.total_tabs} 个标签页`;
         
@@ -417,7 +417,7 @@ function exportTokenReport() {
     a.click();
     document.body.removeChild(a);
     
-    showMessage('success', '📥 报告下载已开始...');
+    showMessage('success', '报告下载已开始...');
 }
 
 
@@ -498,15 +498,15 @@ function renderRequestStatsSummary(data) {
         </div>
         <div style="text-align: center;">
             <div style="font-size: 0.75rem; color: var(--text-dim); margin-bottom: 5px;">成功请求</div>
-            <div style="font-size: 1.5rem; font-weight: bold; color: #10b981;">${successRequests}</div>
+            <div style="font-size: 1.5rem; font-weight: bold; color: var(--ok);">${successRequests}</div>
         </div>
         <div style="text-align: center;">
             <div style="font-size: 0.75rem; color: var(--text-dim); margin-bottom: 5px;">失败请求</div>
-            <div style="font-size: 1.5rem; font-weight: bold; color: #ef4444;">${failedRequests}</div>
+            <div style="font-size: 1.5rem; font-weight: bold; color: var(--danger);">${failedRequests}</div>
         </div>
         <div style="text-align: center;">
             <div style="font-size: 0.75rem; color: var(--text-dim); margin-bottom: 5px;">成功率</div>
-            <div style="font-size: 1.5rem; font-weight: bold; color: ${successRate >= 90 ? '#10b981' : successRate >= 70 ? '#f59e0b' : '#ef4444'};">${successRate}%</div>
+            <div style="font-size: 1.5rem; font-weight: bold; color: ${successRate >= 90 ? 'var(--ok)' : successRate >= 70 ? 'var(--warn)' : 'var(--danger)'};">${successRate}%</div>
         </div>
     `;
 }
@@ -573,7 +573,7 @@ async function mergeSelectedModelStats() {
         const result = await response.json();
         
         if (response.ok) {
-            showMessage('success', `✅ 成功合并 ${selectedModels.length} 个模型到 "${targetName.trim()}"`);
+            showMessage('success', `成功合并 ${selectedModels.length} 个模型到 "${targetName.trim()}"`);
             refreshTokenStats();
         } else {
             throw new Error(result.detail || '合并失败');
@@ -607,7 +607,7 @@ async function deleteSelectedModelStats() {
         const result = await response.json();
         
         if (response.ok) {
-            showMessage('success', `✅ 成功删除 ${selectedModels.length} 个模型的统计数据`);
+            showMessage('success', `成功删除 ${selectedModels.length} 个模型的统计数据`);
             refreshTokenStats();
         } else {
             throw new Error(result.detail || '删除失败');
@@ -633,7 +633,7 @@ async function deleteModelStats(modelName) {
         const result = await response.json();
         
         if (response.ok) {
-            showMessage('success', `✅ 成功删除模型 "${modelName}" 的统计数据`);
+            showMessage('success', `成功删除模型 "${modelName}" 的统计数据`);
             refreshTokenStats();
         } else {
             throw new Error(result.detail || '删除失败');

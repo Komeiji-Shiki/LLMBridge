@@ -36,10 +36,10 @@ async function apiGet(url, options) {
                 const statusEl = document.getElementById('ws-status-text');
                 if (statusEl) {
                     statusEl.textContent = '会话已失效';
-                    statusEl.style.color = '#ef4444';
+                    statusEl.style.color = 'var(--danger)';
                 }
                 const banner = document.createElement('div');
-                banner.style.cssText = 'background:#7f1d1d;color:#fca5a5;padding:10px 20px;text-align:center;font-size:0.85rem;';
+                banner.style.cssText = 'background:rgb(var(--danger-rgb) / .18);color:var(--danger);padding:10px 20px;text-align:center;font-size:0.85rem;';
                 banner.innerHTML = `会话已失效，<a href="/login?next=/monitor" style="color:#fff;text-decoration:underline;">点此重新登录</a>`;
                 const header = document.querySelector('header') || document.body;
                 header.insertAdjacentElement('afterend', banner);
@@ -93,9 +93,9 @@ function connectWebSocket() {
             fetch('/auth/check').then(function(r) { return r.json(); }).then(function(d) {
                 if (!d.authenticated) {
                     const text = document.getElementById('ws-status-text');
-                    if (text) { text.textContent = '需要登录'; text.style.color = '#ef4444'; }
+                    if (text) { text.textContent = '需要登录'; text.style.color = 'var(--danger)'; }
                     const banner = document.createElement('div');
-                    banner.style.cssText = 'background:#7f1d1d;color:#fca5a5;padding:10px 20px;text-align:center;font-size:0.85rem;';
+                    banner.style.cssText = 'background:rgb(var(--danger-rgb) / .18);color:var(--danger);padding:10px 20px;text-align:center;font-size:0.85rem;';
                     banner.innerHTML = `会话已失效，<a href="/login?next=/monitor" style="color:#fff;text-decoration:underline;">点此重新登录</a>`;
                     var header = document.querySelector('header') || document.body;
                     header.insertAdjacentElement('afterend', banner);
@@ -640,13 +640,13 @@ async function viewRequestDetails(requestId) {
                 ${details.model_replaced ? `
                 <div class="detail-item">
                     <div class="detail-label">型号已切换:</div>
-                    <div class="detail-value" style="color: #dc2626;">上游宣布 ${escapeHtml(details.model_replaced.from || '')} 已弃用，本次改用 ${escapeHtml(details.model_replaced.to || '')}，请更新端点的 model_id</div>
+                    <div class="detail-value" style="color: var(--danger);">上游宣布 ${escapeHtml(details.model_replaced.from || '')} 已弃用，本次改用 ${escapeHtml(details.model_replaced.to || '')}，请更新端点的 model_id</div>
                 </div>
                 ` : ''}
                 ${details.conversion_notes && details.conversion_notes.length > 0 ? `
                 <div class="detail-item">
                     <div class="detail-label">转换损失:</div>
-                    <div class="detail-value" style="color: #dc2626;">${details.conversion_notes.map(note => `${escapeHtml(note.field || '')}：${escapeHtml(note.message || '')}`).join('<br>')}</div>
+                    <div class="detail-value" style="color: var(--danger);">${details.conversion_notes.map(note => `${escapeHtml(note.field || '')}：${escapeHtml(note.message || '')}`).join('<br>')}</div>
                 </div>
                 ` : ''}
                 ${details.cache_miss_reason ? `
@@ -661,7 +661,7 @@ async function viewRequestDetails(requestId) {
                 ${details.error ? `
                 <div class="detail-item">
                     <div class="detail-label">错误:</div>
-                    <div class="detail-value" style="color: #dc2626;">${escapeHtml(details.error)}</div>
+                    <div class="detail-value" style="color: var(--danger);">${escapeHtml(details.error)}</div>
                 </div>
                 ` : ''}
             </div>
@@ -696,8 +696,8 @@ async function viewRequestDetails(requestId) {
 
             ${!responseMsg && details.reasoning_content ? `
             <div class="detail-section">
-                <h3>💭 思维链 (Reasoning)</h3>
-                <div class="response-content" style="background: rgba(42,168,255,0.06); border: 1px solid rgba(42,168,255,0.2);">
+                <h3><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#message"/></svg> 思维链 (Reasoning)</h3>
+                <div class="response-content" style="background: rgb(var(--accent-rgb) / 0.06); border: 1px solid rgb(var(--accent-rgb) / 0.2);">
                     ${renderTruncatable(details.reasoning_content, 4000)}
                 </div>
             </div>
@@ -896,9 +896,9 @@ function updateTabConnectionsUI(data) {
     }
 
     grid.innerHTML = data.tabs.map((tab, index) => {
-        const statusColor = tab.status === 'busy' ? '#f87171' : '#34d399';
+        const statusColor = tab.status === 'busy' ? 'var(--danger)' : 'var(--ok)';
         const statusText = tab.status === 'busy' ? '繁忙' : '空闲';
-        const statusBg = tab.status === 'busy' ? 'rgba(220,38,38,0.18)' : 'rgba(16,185,129,0.15)';
+        const statusBg = tab.status === 'busy' ? 'rgb(var(--danger-rgb) / 0.18)' : 'rgb(var(--ok-rgb) / 0.15)';
 
         // 生成一个简短的显示ID
         const shortId = tab.tab_id.split('_').pop().substring(0, 6);
@@ -931,7 +931,7 @@ function updateTabConnectionsUI(data) {
                         <span style="font-weight: 600; color: var(--text-main);">${tab.active_requests}/${tab.max_concurrent}</span>
                     </div>
                     <div style="height: 8px; background: rgba(255,255,255,0.08); border-radius: 4px; overflow: hidden;">
-                        <div style="height: 100%; background: ${tab.load_percentage >= 100 ? '#dc2626' : tab.load_percentage >= 66 ? '#f59e0b' : '#10b981'}; width: ${tab.load_percentage}%; transition: width 0.3s;"></div>
+                        <div style="height: 100%; background: ${tab.load_percentage >= 100 ? 'var(--danger)' : tab.load_percentage >= 66 ? 'var(--warn)' : 'var(--ok)'}; width: ${tab.load_percentage}%; transition: width 0.3s;"></div>
                     </div>
                     <div style="font-size: 11px; color: var(--text-dim); margin-top: 4px;">
                         ${tab.load_percentage.toFixed(0)}% 已使用
@@ -949,8 +949,8 @@ function updateTabConnectionsUI(data) {
                     </div>
                 </div>
 
-                <div style="padding: 6px 10px; background: ${tab.load_percentage >= 80 ? 'rgba(245,158,11,0.15)' : 'rgba(16,185,129,0.12)'}; border-radius: 4px; font-size: 11px; color: ${tab.load_percentage >= 80 ? '#fbbf24' : '#34d399'}; text-align: center;">
-                    ${tab.load_percentage >= 80 ? '⚠️ 负载较高' : '✅ 运行良好'}
+                <div style="padding: 6px 10px; background: ${tab.load_percentage >= 80 ? 'rgb(var(--warn-rgb) / 0.15)' : 'rgb(var(--ok-rgb) / 0.12)'}; border-radius: 4px; font-size: 11px; color: ${tab.load_percentage >= 80 ? 'var(--warn)' : 'var(--ok)'}; text-align: center;">
+                    ${tab.load_percentage >= 80 ? '负载较高' : '运行良好'}
                 </div>
             </div>
         `;

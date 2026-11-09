@@ -110,10 +110,10 @@ function _renderPagination() {
 const CACHE_COLOR_MIN_INPUT = 10000;
 function cacheRateColor(rate, input) {
     if (input < CACHE_COLOR_MIN_INPUT) return 'var(--text-dim)';
-    if (rate < 50) return '#ef4444';
+    if (rate < 50) return 'var(--danger)';
     if (rate < 80) return '#facc15';
     if (rate < 90) return '#f97316';
-    return '#22c55e';
+    return 'var(--ok)';
 }
 
 // 输入 token 单元格：主行是上游口径的输入量，副行是其中的缓存命中量与命中率。
@@ -203,14 +203,14 @@ function refreshRequestLogs() {
             // 🔧 显示思维链/工具调用标记
             let featureBadges = '';
             if (log.has_reasoning || log.reasoning_content) {
-                featureBadges += '<span style="display:inline-block;padding:1px 5px;background:rgba(42,168,255,0.15);color:#7dd3fc;border-radius:0;font-size:10px;margin-right:3px;" title="含思维链内容">🧠</span>';
+                featureBadges += '<span style="display:inline-block;padding:1px 5px;background:rgb(var(--accent-rgb) / 0.15);color:var(--accent-hover);border-radius:0;font-size:10px;margin-right:3px;" title="含思维链内容" role="img" aria-label="含思维链内容"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#message"/></svg></span>';
             }
             const hasRequestToolCalls = log.request_messages && log.request_messages.some(m => m.tool_calls?.length);
             const hasResponseToolCalls = Boolean(
                 log.has_tool_calls || log.response_tool_calls?.length || log.response_message?.tool_calls?.length
             );
             if (hasRequestToolCalls || hasResponseToolCalls) {
-                featureBadges += '<span style="display:inline-block;padding:1px 5px;background:rgba(245,158,11,0.15);color:#fcd34d;border-radius:0;font-size:10px;" title="含工具调用">🔧</span>';
+                featureBadges += '<span style="display:inline-block;padding:1px 5px;background:rgb(var(--warn-rgb) / 0.15);color:var(--warn);border-radius:0;font-size:10px;" title="含工具调用" role="img" aria-label="含工具调用"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg></span>';
             }
 
             return `

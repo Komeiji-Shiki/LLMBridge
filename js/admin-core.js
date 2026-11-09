@@ -17,7 +17,7 @@
             }
             const banner = document.createElement('div');
             banner.id = 'admin-session-banner';
-            banner.style.cssText = 'background:#7f1d1d;color:#fca5a5;padding:10px 20px;text-align:center;font-size:0.85rem;position:sticky;top:0;z-index:9999;';
+            banner.style.cssText = 'background:rgb(var(--danger-rgb) / .18);color:var(--danger);padding:10px 20px;text-align:center;font-size:0.85rem;position:sticky;top:0;z-index:9999;';
             banner.innerHTML = '会话已失效，<a href="/login?next=/admin" style="color:#fff;text-decoration:underline;">点此重新登录</a>';
             const header = document.querySelector('.container') || document.body;
             header.insertAdjacentElement('beforebegin', banner);
@@ -205,7 +205,7 @@ function showMessage(type, message) {
         element.className = `alert alert-${type}`;
         element.title = '点击关闭';
         element.innerHTML = `
-        <span>${type === 'success' ? '✅' : '❌'}</span>
+        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${type === 'success' ? 'check' : 'x'}"/></svg>
         <div>${escapeHtml(message)}</div>
         <span class="toast-count"></span>
     `;
@@ -229,7 +229,7 @@ function showQuietMessage(type, message) {
         right: 20px;
         z-index: 2000;
         padding: 10px 20px;
-        background: ${type === 'success' ? 'rgba(16, 185, 129, 0.9)' : 'rgba(239, 68, 68, 0.9)'};
+        background: ${type === 'success' ? 'rgb(var(--ok-rgb) / 0.9)' : 'rgb(var(--danger-rgb) / 0.9)'};
         color: white;
         border-radius: 6px;
         font-size: 0.875rem;
@@ -251,7 +251,7 @@ function showConfigMessage(type, message) {
     const msgEl = document.getElementById('config-message');
     msgEl.innerHTML = `
         <div class="alert alert-${type}">
-            <span>${type === 'success' ? '✅' : '❌'}</span>
+            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${type === 'success' ? 'check' : 'x'}"/></svg>
             <div>${escapeHtml(message)}</div>
         </div>
     `;
@@ -276,7 +276,7 @@ async function refreshMemoryInfo() {
         if (data.error) {
             console.error('获取内存信息错误:', data.error);
             if (memoryValueEl) memoryValueEl.textContent = '错误';
-            if (memoryDetailsEl) memoryDetailsEl.innerHTML = `<span style="color: #f87171;">${escapeHtml(data.error)}</span>`;
+            if (memoryDetailsEl) memoryDetailsEl.innerHTML = `<span style="color: var(--danger);">${escapeHtml(data.error)}</span>`;
             return;
         }
         
@@ -295,11 +295,11 @@ async function refreshMemoryInfo() {
             memoryBarFillEl.style.width = `${percent}%`;
             // 根据内存使用量改变颜色
             if (processMemoryMb > 500) {
-                memoryBarFillEl.style.background = '#ef4444'; // 红色
+                memoryBarFillEl.style.background = 'var(--danger)'; // 红色
             } else if (processMemoryMb > 300) {
-                memoryBarFillEl.style.background = '#f59e0b'; // 橙色
+                memoryBarFillEl.style.background = 'var(--warn)'; // 黄色警示
             } else {
-                memoryBarFillEl.style.background = 'var(--accent)'; // 蓝色
+                memoryBarFillEl.style.background = 'var(--accent)'; // 常态用灰色
             }
         }
         
@@ -350,7 +350,7 @@ async function refreshMemoryInfo() {
         const memoryValueEl = document.getElementById('memory-value');
         const memoryDetailsEl = document.getElementById('memory-details');
         if (memoryValueEl) memoryValueEl.textContent = '错误';
-        if (memoryDetailsEl) memoryDetailsEl.innerHTML = '<span style="color: #f87171;">请求失败</span>';
+        if (memoryDetailsEl) memoryDetailsEl.innerHTML = '<span style="color: var(--danger);">请求失败</span>';
     }
 }
 

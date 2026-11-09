@@ -4,29 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Token 计算器 - LMArena Bridge</title>
+    <link rel="stylesheet" href="/css/tokens.css">
     <style>
-        /* 使用与admin.html相同的深色科技风格 */
-        :root {
-            --bg-deep: linear-gradient(180deg, #090e16 0%, #0a1220 100%);
-            --bg-elev: linear-gradient(135deg, rgba(16,28,48,0.85), rgba(9,16,30,0.9));
-            --line-weak: #162339;
-            --line-strong: #223650;
-            --text-main: #d9e5ff;
-            --text-dim: #8fa0bf;
-            --btn-bg: #0e1a2d;
-            --btn-hover: #15263f;
-            --btn-active: #132745;
-            --btn-border: #223650;
-            --accent: #2aa8ff;
-            --accent-soft: rgba(42,168,255,0.35);
-            --accent-faint: rgba(42,168,255,0.12);
-            --card-bg: rgba(16,28,48,0.6);
-            --surface: #0e1a2d;
-            --surface-2: #0b1626;
-            --surface-3: #0b1422;
-            --notch: 10px;
-        }
-
         * {
             margin: 0;
             padding: 0;
@@ -58,8 +37,7 @@
 
         .header h1 {
             font-size: 2rem;
-            color: var(--accent);
-            text-shadow: 0 0 20px rgba(42,168,255,0.3);
+            color: var(--text-main);
         }
 
         .header-actions {
@@ -119,13 +97,14 @@
         }
 
         .btn-primary {
-            background: rgba(42, 168, 255, 0.2);
-            border-color: var(--accent-soft);
-            color: var(--accent);
+            background: var(--action);
+            border-color: transparent;
+            color: var(--on-action);
         }
 
         .btn-primary:hover {
-            background: rgba(42, 168, 255, 0.3);
+            background: var(--action-hover);
+            border-color: transparent;
         }
 
         .btn-sm {
@@ -159,7 +138,7 @@
         .form-input:focus, .form-select:focus, textarea:focus {
             outline: none;
             border-color: var(--accent);
-            box-shadow: 0 0 0 3px rgba(42, 168, 255, 0.1);
+            box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.1);
         }
 
         textarea {
@@ -188,8 +167,8 @@
         }
 
         .result-card.error {
-            border-color: rgba(239, 68, 68, 0.5);
-            background: rgba(239, 68, 68, 0.1);
+            border-color: rgb(var(--danger-rgb) / 0.5);
+            background: rgb(var(--danger-rgb) / 0.1);
         }
 
         .result-card-title {
@@ -212,7 +191,7 @@
 
         .result-card-error {
             font-size: 0.8rem;
-            color: #ef4444;
+            color: var(--danger);
         }
 
         .text-info {
@@ -267,7 +246,7 @@
         .difference-card {
             margin-top: 20px;
             padding: 20px;
-            background: rgba(42, 168, 255, 0.1);
+            background: rgb(var(--accent-rgb) / 0.1);
             border: 1px solid var(--accent-soft);
             border-radius: 6px;
             text-align: center;
@@ -350,13 +329,13 @@
         }
 
         .badge-success {
-            background: rgba(16, 185, 129, 0.2);
-            color: #10b981;
-            border-color: rgba(16, 185, 129, 0.3);
+            background: rgb(var(--ok-rgb) / 0.2);
+            color: var(--ok);
+            border-color: rgb(var(--ok-rgb) / 0.3);
         }
 
         .badge-info {
-            background: rgba(42, 168, 255, 0.2);
+            background: rgb(var(--accent-rgb) / 0.2);
             color: var(--accent);
             border-color: var(--accent-soft);
         }
@@ -379,7 +358,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🧮 Token 计算器</h1>
+            <h1><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calculator"/></svg> Token 计算器</h1>
             <div class="header-actions">
                 <a href="/admin" class="btn">← 返回管理面板</a>
             </div>
@@ -387,8 +366,8 @@
 
         <!-- 标签页导航 -->
         <div class="tabs">
-            <button class="tab active" onclick="switchTab('calculate')">📊 计算Token</button>
-            <button class="tab" onclick="switchTab('compare')">⚖️ 对比分词器</button>
+            <button class="tab active" onclick="switchTab('calculate')"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg> 计算Token</button>
+            <button class="tab" onclick="switchTab('compare')"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#compare"/></svg> 对比分词器</button>
         </div>
 
         <!-- 计算Token标签页 -->
@@ -397,7 +376,7 @@
                 <div class="card-header">
                     <h3>输入文本</h3>
                     <button class="btn btn-primary" onclick="calculateTokens()">
-                        🔢 计算Token
+                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calculator"/></svg> 计算Token
                     </button>
                 </div>
                 <div class="form-group">
@@ -436,7 +415,7 @@
                 <div class="card-header">
                     <h3>对比设置</h3>
                     <button class="btn btn-primary" onclick="compareTokenizers()">
-                        ⚖️ 开始对比
+                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#compare"/></svg> 开始对比
                     </button>
                 </div>
                 
@@ -580,7 +559,7 @@
                         resultsHTML += `
                             <div class="result-card error">
                                 <div class="result-card-title">${escapeHtml(result.name || key)}</div>
-                                <div class="result-card-error">❌ ${escapeHtml(result.error)}</div>
+                                <div class="result-card-error"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> ${escapeHtml(result.error)}</div>
                                 ${result.install_cmd ? `<div class="result-card-hint">安装: ${escapeHtml(result.install_cmd)}</div>` : ''}
                                 ${result.hint ? `<div class="result-card-hint">${escapeHtml(result.hint)}</div>` : ''}
                             </div>
@@ -653,7 +632,7 @@
                 document.getElementById('compare-result-1').innerHTML = `
                     <h4 style="color: var(--accent); margin-bottom: 15px;">${escapeHtml(t1.name || t1.id)}</h4>
                     ${t1.error ? `
-                        <div style="color: #ef4444;">❌ ${escapeHtml(t1.error)}</div>
+                        <div style="color: var(--danger);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> ${escapeHtml(t1.error)}</div>
                         ${t1.hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 5px;">${escapeHtml(t1.hint)}</div>` : ''}
                     ` : `
                         <div style="font-size: 2.5rem; font-weight: bold; color: var(--accent);">
@@ -670,7 +649,7 @@
                 document.getElementById('compare-result-2').innerHTML = `
                     <h4 style="color: var(--accent); margin-bottom: 15px;">${escapeHtml(t2.name || t2.id)}</h4>
                     ${t2.error ? `
-                        <div style="color: #ef4444;">❌ ${escapeHtml(t2.error)}</div>
+                        <div style="color: var(--danger);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> ${escapeHtml(t2.error)}</div>
                         ${t2.hint ? `<div style="color: var(--text-dim); font-size: 0.8rem; margin-top: 5px;">${escapeHtml(t2.hint)}</div>` : ''}
                     ` : `
                         <div style="font-size: 2.5rem; font-weight: bold; color: var(--accent);">

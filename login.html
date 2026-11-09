@@ -4,16 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>访问验证 - LMArena Bridge</title>
+    <link rel="stylesheet" href="/css/tokens.css">
     <style>
-        :root {
-            --bg-deep: linear-gradient(180deg, #090e16 0%, #0a1220 100%);
-            --surface: #0e1a2d;
-            --line-strong: #223650;
-            --text-main: #d9e5ff;
-            --text-dim: #8fa0bf;
-            --accent: #2aa8ff;
-            --accent-soft: rgba(42,168,255,0.35);
-        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -34,7 +26,7 @@
             box-shadow: 0 20px 60px rgba(0,0,0,0.5);
         }
         h1 {
-            color: var(--accent);
+            color: var(--text-main);
             text-align: center;
             margin-bottom: 10px;
             font-size: 1.8rem;
@@ -57,7 +49,7 @@
         input {
             width: 100%;
             padding: 12px 15px;
-            background: #0b1422;
+            background: var(--surface-3);
             border: 1px solid var(--line-strong);
             border-radius: 6px;
             color: var(--text-main);
@@ -66,27 +58,27 @@
         input:focus {
             outline: none;
             border-color: var(--accent);
-            box-shadow: 0 0 0 3px rgba(42, 168, 255, 0.1);
+            box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 0.1);
         }
         button {
             width: 100%;
             padding: 14px;
-            background: rgba(42, 168, 255, 0.2);
-            border: 1px solid var(--accent-soft);
+            background: var(--action);
+            border: 1px solid transparent;
             border-radius: 6px;
-            color: var(--accent);
+            color: var(--on-action);
             font-size: 1rem;
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s;
         }
         button:hover {
-            background: rgba(42, 168, 255, 0.3);
+            background: var(--action-hover);
         }
         .error {
-            background: rgba(239, 68, 68, 0.1);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            color: #ef4444;
+            background: rgb(var(--danger-rgb) / 0.1);
+            border: 1px solid rgb(var(--danger-rgb) / 0.3);
+            color: var(--danger);
             padding: 12px;
             border-radius: 6px;
             margin-bottom: 20px;
@@ -94,9 +86,9 @@
         }
         .error.show { display: block; }
         .success {
-            background: rgba(16, 185, 129, 0.1);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-            color: #10b981;
+            background: rgb(var(--ok-rgb) / 0.1);
+            border: 1px solid rgb(var(--ok-rgb) / 0.3);
+            color: var(--ok);
             padding: 12px;
             border-radius: 6px;
             margin-bottom: 20px;
@@ -107,7 +99,7 @@
 </head>
 <body>
     <div class="login-box">
-        <h1>🔐 访问验证</h1>
+        <h1><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#lock"/></svg> 访问验证</h1>
         <p class="subtitle">请输入Web访问密钥</p>
         <div id="error" class="error"></div>
         <div id="success" class="success"></div>
@@ -116,7 +108,7 @@
                 <label for="key">访问密钥</label>
                 <input type="password" id="key" placeholder="请输入密钥..." autofocus>
             </div>
-            <button type="submit">🚀 验证并进入</button>
+            <button type="submit">验证并进入</button>
         </form>
     </div>
     <script>
@@ -162,7 +154,7 @@
                             // 验证通过就直接进入；旧版还要用户再点一次"进入管理面板"，
                             // 多出一步纯粹的无效交互
                             var next = getNextPath();
-                            successDiv.textContent = '✅ 验证成功，正在进入...';
+                            successDiv.textContent = '验证成功，正在进入...';
                             successDiv.className = 'success show';
                             btn.textContent = '跳转中...';
                             window.location.replace(next);
@@ -170,13 +162,13 @@
                             errorDiv.textContent = data.message || '密钥错误';
                             errorDiv.className = 'error show';
                             btn.disabled = false;
-                            btn.textContent = '🚀 验证并进入';
+                            btn.textContent = '验证并进入';
                         }
                     } catch (e) {
                         errorDiv.textContent = '验证失败: ' + (xhr.status === 0 ? '网络错误' : xhr.statusText);
                         errorDiv.className = 'error show';
                         btn.disabled = false;
-                        btn.textContent = '🚀 验证并进入';
+                        btn.textContent = '验证并进入';
                     }
                 }
             };

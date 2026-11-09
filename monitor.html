@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bridge · 监控中心</title>
+<link rel="stylesheet" href="/css/tokens.css">
 <link rel="stylesheet" href="/css/monitor.css">
 </head>
 <body>
@@ -187,7 +188,7 @@
                 <!-- 基础信息 -->
                 <div style="padding: 16px; background: var(--accent-faint); border: 1px solid var(--line-weak); border-radius: 0; margin-bottom: 20px;">
                     <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
-                        <span style="font-size: 20px;">🌐</span>
+                        <span style="font-size: 20px;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#link"/></svg></span>
                         <h3 style="color: var(--accent); margin: 0;">服务器基础信息</h3>
                     </div>
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-top: 12px;">
@@ -197,7 +198,7 @@
                         </div>
                         <div>
                             <span style="color: var(--text-dim); font-size: 13px;">当前状态：</span>
-                            <span style="color: #10b981; font-weight: 500;">✅ 运行中</span>
+                            <span style="color: var(--ok); font-weight: 500;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 运行中</span>
                         </div>
                         <div>
                             <span style="color: var(--text-dim); font-size: 13px;">协议版本：</span>
@@ -208,9 +209,9 @@
 
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 20px;">
                     <!-- AI API -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 0; color: white;">
+                    <div class="api-info" style="background: linear-gradient(135deg, var(--accent) 0%, var(--accent) 100%); padding: 20px; border-radius: 0; color: white;">
                         <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>🤖</span>
+                            <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#layers"/></svg></span>
                             <span>核心 AI 接口</span>
                         </h3>
                         <div style="margin-bottom: 16px;">
@@ -230,9 +231,9 @@
                     </div>
 
                     <!-- 监控与健康 -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #10b981 0%, #047857 100%); padding: 20px; border-radius: 0; color: white;">
+                    <div class="api-info" style="background: linear-gradient(135deg, var(--ok) 0%, var(--ok) 100%); padding: 20px; border-radius: 0; color: white;">
                         <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>📊</span>
+                            <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg></span>
                             <span>监控与统计</span>
                         </h3>
                         <div style="margin-bottom: 12px;">
@@ -250,9 +251,9 @@
                     </div>
 
                     <!-- 日志与详情 -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); padding: 20px; border-radius: 0; color: white;">
+                    <div class="api-info" style="background: linear-gradient(135deg, var(--warn) 0%, var(--warn) 100%); padding: 20px; border-radius: 0; color: white;">
                         <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>📈</span>
+                            <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg></span>
                             <span>日志与详情</span>
                         </h3>
                         <div style="margin-bottom: 12px;">
@@ -276,9 +277,9 @@
                     </div>
 
                     <!-- WebSocket -->
-                    <div class="api-info" style="background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); padding: 20px; border-radius: 0; color: white;">
+                    <div class="api-info" style="background: linear-gradient(135deg, var(--danger) 0%, var(--danger) 100%); padding: 20px; border-radius: 0; color: white;">
                         <h3 style="margin-bottom: 16px; display: flex; align-items: center; gap: 8px;">
-                            <span>🔌</span>
+                            <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#link"/></svg></span>
                             <span>WebSocket 连接</span>
                         </h3>
                         <div style="margin-bottom: 12px;">
@@ -300,7 +301,7 @@
 
                 <!-- 使用示例 -->
                 <div style="margin-top: 30px;">
-                    <h3 style="margin-bottom: 16px; font-size: 18px; font-weight: 600;">💡 快速集成示例</h3>
+                    <h3 style="margin-bottom: 16px; font-size: 18px; font-weight: 600;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg> 快速集成示例</h3>
 
                     <!-- 多个示例标签 -->
                     <div style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
@@ -312,54 +313,54 @@
 
                     <!-- Python 示例 -->
                     <div id="example-python" class="example-content" style="display: block;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;"># Python - 使用 OpenAI SDK</div>
-                            <div style="color: #fbbf24;">from</div> openai <div style="display: inline; color: #fbbf24;">import</div> OpenAI<br>
+                        <div style="font-family: monospace; background: var(--line-weak); color: var(--text-main); padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: var(--text-faint); margin-bottom: 8px;"># Python - 使用 OpenAI SDK</div>
+                            <div style="color: var(--warn);">from</div> openai <div style="display: inline; color: var(--warn);">import</div> OpenAI<br>
                             <br>
-                            <div style="color: #6b7280;"># 初始化客户端</div>
+                            <div style="color: var(--text-faint);"># 初始化客户端</div>
                             client = OpenAI(<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;base_url=<span style="color: #34d399;">"http://localhost:5102/v1"</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;api_key=<span style="color: #34d399;">"sk-any-string-you-like"</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;base_url=<span style="color: var(--ok);">"http://localhost:5102/v1"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;api_key=<span style="color: var(--ok);">"sk-any-string-you-like"</span><br>
                             )<br>
                             <br>
-                            <div style="color: #6b7280;"># 发送请求</div>
+                            <div style="color: var(--text-faint);"># 发送请求</div>
                             response = client.chat.completions.create(<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;model=<span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;model=<span style="color: var(--ok);">"claude-3-5-sonnet-20241022"</span>,<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;messages=[<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: var(--ok);">"role"</span>: <span style="color: var(--ok);">"user"</span>, <span style="color: var(--ok);">"content"</span>: <span style="color: var(--ok);">"Hello!"</span>}<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;stream=<span style="color: #93c5fd;">True</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;stream=<span style="color: var(--accent-hover);">True</span><br>
                             )<br>
                             <br>
-                            <div style="color: #6b7280;"># 处理流式响应</div>
-                            <div style="color: #fbbf24;">for</div> chunk <div style="display: inline; color: #fbbf24;">in</div> response:<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">print</div>(chunk.choices[0].delta.content, end=<span style="color: #34d399;">""</span>)
+                            <div style="color: var(--text-faint);"># 处理流式响应</div>
+                            <div style="color: var(--warn);">for</div> chunk <div style="display: inline; color: var(--warn);">in</div> response:<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: var(--warn);">print</div>(chunk.choices[0].delta.content, end=<span style="color: var(--ok);">""</span>)
                         </div>
                     </div>
 
                     <!-- Node.js 示例 -->
                     <div id="example-nodejs" class="example-content" style="display: none;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;">// Node.js - 使用 OpenAI SDK</div>
-                            <div style="color: #fbbf24;">const</div> OpenAI = <div style="display: inline; color: #fbbf24;">require</div>(<span style="color: #34d399;">'openai'</span>);<br>
+                        <div style="font-family: monospace; background: var(--line-weak); color: var(--text-main); padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: var(--text-faint); margin-bottom: 8px;">// Node.js - 使用 OpenAI SDK</div>
+                            <div style="color: var(--warn);">const</div> OpenAI = <div style="display: inline; color: var(--warn);">require</div>(<span style="color: var(--ok);">'openai'</span>);<br>
                             <br>
-                            <div style="color: #6b7280;">// 初始化客户端</div>
-                            <div style="color: #fbbf24;">const</div> openai = <div style="display: inline; color: #fbbf24;">new</div> OpenAI({<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;baseURL: <span style="color: #34d399;">'http://localhost:5102/v1'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;apiKey: <span style="color: #34d399;">'sk-any-string-you-like'</span><br>
+                            <div style="color: var(--text-faint);">// 初始化客户端</div>
+                            <div style="color: var(--warn);">const</div> openai = <div style="display: inline; color: var(--warn);">new</div> OpenAI({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;baseURL: <span style="color: var(--ok);">'http://localhost:5102/v1'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;apiKey: <span style="color: var(--ok);">'sk-any-string-you-like'</span><br>
                             });<br>
                             <br>
-                            <div style="color: #6b7280;">// 发送请求</div>
-                            <div style="color: #fbbf24;">async function</div> chat() {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> openai.chat.completions.create({<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">true</span><br>
+                            <div style="color: var(--text-faint);">// 发送请求</div>
+                            <div style="color: var(--warn);">async function</div> chat() {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: var(--warn);">const</div> response = <div style="display: inline; color: var(--warn);">await</div> openai.chat.completions.create({<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: var(--ok);">'claude-3-5-sonnet-20241022'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: var(--ok);">'user'</span>, content: <span style="color: var(--ok);">'Hello!'</span>}],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: var(--accent-hover);">true</span><br>
                             &nbsp;&nbsp;&nbsp;&nbsp;});<br>
                             <br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #6b7280;">// 处理流式响应</div><br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">for await</div> (<div style="display: inline; color: #fbbf24;">const</div> chunk <div style="display: inline; color: #fbbf24;">of</div> response) {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;process.stdout.write(chunk.choices[0]?.delta?.content || <span style="color: #34d399;">''</span>);<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: var(--text-faint);">// 处理流式响应</div><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: var(--warn);">for await</div> (<div style="display: inline; color: var(--warn);">const</div> chunk <div style="display: inline; color: var(--warn);">of</div> response) {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;process.stdout.write(chunk.choices[0]?.delta?.content || <span style="color: var(--ok);">''</span>);<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;}<br>
                             }
                         </div>
@@ -367,40 +368,40 @@
 
                     <!-- cURL 示例 -->
                     <div id="example-curl" class="example-content" style="display: none;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;"># cURL - 命令行请求</div>
-                            curl <span style="color: #34d399;">http://localhost:5102/v1/chat/completions</span> \<br>
-                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Content-Type: application/json"</span> \<br>
-                            &nbsp;&nbsp;-H <span style="color: #34d399;">"Authorization: Bearer sk-any-string-you-like"</span> \<br>
+                        <div style="font-family: monospace; background: var(--line-weak); color: var(--text-main); padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: var(--text-faint); margin-bottom: 8px;"># cURL - 命令行请求</div>
+                            curl <span style="color: var(--ok);">http://localhost:5102/v1/chat/completions</span> \<br>
+                            &nbsp;&nbsp;-H <span style="color: var(--ok);">"Content-Type: application/json"</span> \<br>
+                            &nbsp;&nbsp;-H <span style="color: var(--ok);">"Authorization: Bearer sk-any-string-you-like"</span> \<br>
                             &nbsp;&nbsp;-d '{<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"model"</span>: <span style="color: #34d399;">"claude-3-5-sonnet-20241022"</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"messages"</span>: [<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: #34d399;">"role"</span>: <span style="color: #34d399;">"user"</span>, <span style="color: #34d399;">"content"</span>: <span style="color: #34d399;">"Hello!"</span>}<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: var(--ok);">"model"</span>: <span style="color: var(--ok);">"claude-3-5-sonnet-20241022"</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: var(--ok);">"messages"</span>: [<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{<span style="color: var(--ok);">"role"</span>: <span style="color: var(--ok);">"user"</span>, <span style="color: var(--ok);">"content"</span>: <span style="color: var(--ok);">"Hello!"</span>}<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">"stream"</span>: <span style="color: #93c5fd;">true</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color: var(--ok);">"stream"</span>: <span style="color: var(--accent-hover);">true</span><br>
                             &nbsp;&nbsp;}'
                         </div>
                     </div>
 
                     <!-- JavaScript 示例 -->
                     <div id="example-javascript" class="example-content" style="display: none;">
-                        <div style="font-family: monospace; background: #1f2937; color: #e5e7eb; padding: 20px; border-radius: 0; overflow-x: auto;">
-                            <div style="color: #6b7280; margin-bottom: 8px;">// JavaScript - 浏览器/前端</div>
-                            <div style="color: #fbbf24;">async function</div> chatWithAPI() {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> response = <div style="display: inline; color: #fbbf24;">await</div> fetch(<span style="color: #34d399;">'http://localhost:5102/v1/chat/completions'</span>, {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;method: <span style="color: #34d399;">'POST'</span>,<br>
+                        <div style="font-family: monospace; background: var(--line-weak); color: var(--text-main); padding: 20px; border-radius: 0; overflow-x: auto;">
+                            <div style="color: var(--text-faint); margin-bottom: 8px;">// JavaScript - 浏览器/前端</div>
+                            <div style="color: var(--warn);">async function</div> chatWithAPI() {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: var(--warn);">const</div> response = <div style="display: inline; color: var(--warn);">await</div> fetch(<span style="color: var(--ok);">'http://localhost:5102/v1/chat/completions'</span>, {<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;method: <span style="color: var(--ok);">'POST'</span>,<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;headers: {<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Content-Type'</span>: <span style="color: #34d399;">'application/json'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: #34d399;">'Authorization'</span>: <span style="color: #34d399;">'Bearer sk-any-string-you-like'</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: var(--ok);">'Content-Type'</span>: <span style="color: var(--ok);">'application/json'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color: var(--ok);">'Authorization'</span>: <span style="color: var(--ok);">'Bearer sk-any-string-you-like'</span><br>
                             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;},<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;body: JSON.stringify({<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: #34d399;">'claude-3-5-sonnet-20241022'</span>,<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: #34d399;">'user'</span>, content: <span style="color: #34d399;">'Hello!'</span>}],<br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: #93c5fd;">false</span><br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;model: <span style="color: var(--ok);">'claude-3-5-sonnet-20241022'</span>,<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;messages: [{role: <span style="color: var(--ok);">'user'</span>, content: <span style="color: var(--ok);">'Hello!'</span>}],<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;stream: <span style="color: var(--accent-hover);">false</span><br>
                             &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;})<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;});<br>
                             <br>
-                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: #fbbf24;">const</div> data = <div style="display: inline; color: #fbbf24;">await</div> response.json();<br>
+                            &nbsp;&nbsp;&nbsp;&nbsp;<div style="display: inline; color: var(--warn);">const</div> data = <div style="display: inline; color: var(--warn);">await</div> response.json();<br>
                             &nbsp;&nbsp;&nbsp;&nbsp;console.log(data.choices[0].message.content);<br>
                             }
                         </div>
@@ -422,7 +423,7 @@
                     <div id="tab-summary" style="display: flex; gap: 24px; margin-bottom: 20px; flex-wrap: wrap;">
                         <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 0; border: 1px solid var(--line-strong);">
                             <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">连接标签页</div>
-                            <div style="font-size: 28px; font-weight: 600; color: #34d399;" id="total-tabs">0</div>
+                            <div style="font-size: 28px; font-weight: 600; color: var(--ok);" id="total-tabs">0</div>
                         </div>
                         <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 0; border: 1px solid var(--line-strong);">
                             <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">总并发能力</div>
@@ -431,8 +432,8 @@
                         </div>
                         <div style="flex: 1; min-width: 200px; padding: 16px; background: var(--card-bg); border-radius: 0; border: 1px solid var(--line-strong);">
                             <div style="font-size: 14px; color: var(--text-dim); margin-bottom: 4px;">当前使用</div>
-                            <div style="font-size: 28px; font-weight: 600; color: #fbbf24;" id="total-used">0</div>
-                            <div style="font-size: 12px; color: #f59e0b; margin-top: 4px;" id="capacity-usage">使用率: 0%</div>
+                            <div style="font-size: 28px; font-weight: 600; color: var(--warn);" id="total-used">0</div>
+                            <div style="font-size: 12px; color: var(--warn); margin-top: 4px;" id="capacity-usage">使用率: 0%</div>
                         </div>
                     </div>
 

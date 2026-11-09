@@ -1,0 +1,91 @@
+/* 全站设计变量：admin、monitor、login、token_calculator 共用。颜色、字体和圆角只在这里定义。 */
+:root {
+    color-scheme: dark;
+
+    /* 底色，由深到浅 */
+    --bg-deep: #191919;        /* 页面 */
+    --surface-3: #1f1f1f;      /* 侧栏、代码块 */
+    --surface-2: #242424;      /* 卡片里的次级块 */
+    --surface: #292929;        /* 卡片、输入框 */
+    --surface-hover: #383838;  /* 悬停、选中 */
+    --card-bg: var(--surface);
+    --bg-elev: var(--surface);
+
+    /* 线 */
+    --line-weak: #333333;
+    --line-strong: #434343;
+
+    /* 字 */
+    --text-main: #ececec;
+    --text-dim: #adadad;
+    --text-faint: #8b8b8b;
+
+    /* 链接、焦点和普通控件用灰色强调，暖橙由主操作显式使用。 */
+    --accent: #c4c4c4;
+    --accent-hover: #dedede;
+    --accent-rgb: 196 196 196;
+    --accent-soft: rgb(var(--accent-rgb) / .30);
+    --accent-faint: rgb(var(--accent-rgb) / .10);
+    --action: #c58a74;
+    --action-hover: #d29984;
+    --on-action: #201714;
+
+    /* 状态色 */
+    --ok: #8fb573;
+    --ok-rgb: 143 181 115;
+    --warn: #d9a84e;
+    --warn-rgb: 217 168 78;
+    --danger: #e5646e;
+    --danger-rgb: 229 100 110;
+    --info: #7fa8d6;
+    --info-rgb: 127 168 214;
+
+    /* 按钮 */
+    --btn-bg: var(--surface);
+    --btn-hover: var(--surface-hover);
+    --btn-active: #424242;
+    --btn-border: var(--line-strong);
+
+    /* 形状和字体 */
+    --radius: 8px;
+    --radius-sm: 6px;
+    --font-sans: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+    --font-serif: "Source Serif 4", "Noto Serif SC", "Source Han Serif SC", "Source Han Serif CN", "Songti SC", Cambria, serif;
+    --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+body {
+    font-family: var(--font-sans);
+    background: var(--bg-deep);
+    color: var(--text-main);
+    -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+    font-family: var(--font-serif);
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+code, pre, kbd, samp { font-family: var(--font-mono); }
+
+/* 单色图标沿用所在文字的颜色与字号。 */
+.ui-icon {
+    display: inline-block;
+    width: 1.1em;
+    height: 1.1em;
+    flex-shrink: 0;
+    pointer-events: none;
+    vertical-align: -.18em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+::selection { background: rgb(var(--accent-rgb) / .35); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
