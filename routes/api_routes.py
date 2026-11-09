@@ -265,8 +265,10 @@ async def _read_request_json_non_blocking(request: Request) -> Dict[str, Any]:
     if 'stream' in data and not isinstance(data['stream'], bool):
         raise HTTPException(status_code=400, detail="stream 必须是布尔值。")
     context = current_request.get()
-    if context and not context.request_body:
-        context.request_body = copy.deepcopy(data)
+    if context:
+        context.mark('parsed')
+        if not context.request_body:
+            context.request_body = copy.deepcopy(data)
     return data
 
 

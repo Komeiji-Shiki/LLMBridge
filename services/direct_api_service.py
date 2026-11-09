@@ -167,6 +167,15 @@ def _retry_after_seconds(value: str) -> Optional[str]:
     return str(max(0, math.ceil(when.timestamp() - time.time())))
 
 
+def _upstream_payload(body: Dict[str, Any]) -> bytes:
+    """序列化上游正文，并记下开始发送的时间点（之前算网关构造请求，之后算等上游）。"""
+    data = fastjson.dumps(body)
+    context = current_request.get()
+    if context:
+        context.mark('upstream_post')
+    return data
+
+
 def _remember_response_headers(response) -> None:
     """保存上游的限流和重试提示，由中间件转给客户端。每次尝试覆盖，重试成功后不留旧值。"""
     context = current_request.get()
@@ -508,7 +517,7 @@ class DirectAPIService:
             # 序列化结果不留在局部变量里：发完就该释放，否则整份请求体要陪着流式响应活到结束
             async with self.session.post(
                 endpoint,
-                data=fastjson.dumps(request_body),
+                data=_upstream_payload(request_body),
                 headers=headers,
                 timeout=_upstream_timeout()
             ) as response:
@@ -859,7 +868,7 @@ class DirectAPIService:
             while True:
                 async with self.session.post(
                     endpoint,
-                    data=fastjson.dumps(upstream_body),
+                    data=_upstream_payload(upstream_body),
                     headers=headers,
                     timeout=_upstream_timeout()
                 ) as response:
@@ -1059,7 +1068,7 @@ class DirectAPIService:
                 try:
                     async with self.session.post(
                         endpoint,
-                        data=fastjson.dumps(upstream_body),
+                        data=_upstream_payload(upstream_body),
                         headers=headers,
                         timeout=_upstream_timeout()
                     ) as response:
@@ -1431,7 +1440,7 @@ class DirectAPIService:
         try:
             async with self.session.post(
                 endpoint,
-                data=fastjson.dumps(request_body),
+                data=_upstream_payload(request_body),
                 headers=request_headers,
                 timeout=_upstream_timeout()
             ) as response:

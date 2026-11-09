@@ -73,6 +73,8 @@ class GatewayRequestMiddleware:
             if received > limit:
                 from fastapi import HTTPException
                 raise HTTPException(413, '请求体超过配置的大小上限')
+            if message['type'] == 'http.request' and not message.get('more_body'):
+                context.mark('body_received')
             return message
 
         async def observe(message):

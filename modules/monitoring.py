@@ -663,6 +663,9 @@ class MonitoringService:
                      session_id: Optional[str] = None, mode: Optional[str] = None,
                      messages: Optional[List[dict]] = None, params: Optional[dict] = None):
         """记录请求开始（非阻塞版：提交到串行事件池，不阻塞事件循环）"""
+        context = current_request.get()
+        if context:
+            context.mark('recorded')
         self._event_pool.submit(
             copy_context().run, self._request_start_sync,
             request_id, model, messages_count, session_id, mode, messages, params

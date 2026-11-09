@@ -32,6 +32,12 @@ CLIENT_TRACE_HEADERS = {
 }
 
 
+# 准备阶段（进入网关到开始调用上游）的分段点，按发生顺序；某条链路没打的点并进下一段。
+# receive 收完请求体，parse 解析出 JSON，route 鉴权、选线路和入口协议转换，convert 之后到调用上游。
+PREPARE_STAGES = (('receive_ms', 'body_received'), ('parse_ms', 'parsed'),
+                  ('route_ms', 'recorded'), ('convert_ms', 'upstream_start'))
+
+
 @dataclass
 class RequestContext:
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -77,8 +83,16 @@ class RequestContext:
         end = self.marks.get('finished', now)
         def ms(start, stop):
             return round(max(0, stop - start) * 1000, 2) if start is not None and stop is not None else None
+        stages, previous = {}, self.started
+        for name, mark in PREPARE_STAGES:
+            reached = self.marks.get(mark)
+            if reached is not None:
+                stages[name] = ms(previous, reached)
+                previous = reached
         return {'request_id': self.request_id, 'prepare_ms': ms(self.started, send),
-                'upstream_wait_ms': ms(send, byte), 'first_business_ms': ms(self.started, business),
+                'prepare_stages': stages,
+                'upstream_wait_ms': ms(send, byte), 'upstream_build_ms': ms(send, self.marks.get('upstream_post')),
+                'first_business_ms': ms(self.started, business),
                 'output_ms': ms(business, end), 'total_ms': ms(self.started, end),
                 'attempts': [dict(attempt) for attempt in self.attempts]}
 

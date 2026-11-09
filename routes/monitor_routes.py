@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from core.app_state import get_app_state
 from core.config_loader import CONFIG
 from modules.monitoring import monitoring_service, MonitorConfig
+from utils import loop_watchdog
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["monitor"])
@@ -181,6 +182,7 @@ async def get_performance_metrics(
             "response_channels": len(response_channels),
             "disabled_endpoints": len(DISABLED_ENDPOINTS)
         },
+        "event_loop": dict(loop_watchdog.stats),
         "config": {
             "max_concurrent_downloads": CONFIG.get("max_concurrent_downloads", 50),
             "download_timeout": CONFIG.get("download_timeout", {}),

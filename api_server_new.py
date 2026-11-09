@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # 内部模块导入
 from modules.monitoring import monitoring_service  # noqa: E402
 from utils.task_registry import spawn, cancel_background_tasks  # noqa: E402
+from utils import loop_watchdog  # noqa: E402
 
 # Core模块
 from core.config_loader import (  # noqa: E402
@@ -178,6 +179,8 @@ async def lifespan(app: FastAPI):
     # 但此前没有任何执行者，配置改了不生效
     from background_tasks.request_processor import idle_monitor
     spawn(idle_monitor(server_state.last_activity_time_ref, CONFIG), name="idle-monitor")
+    # 事件循环停顿超过 1 秒时把各线程调用栈写进日志，定位是谁占着循环或 GIL
+    spawn(loop_watchdog.heartbeat(), name="loop-heartbeat")
 
     # 🔧 模型自动归档后台任务：每 24 小时检查一次 auto_archive 配置，
     # 启用时自动归档超过 days 天未调用的模型（手动触发走管理面板接口）

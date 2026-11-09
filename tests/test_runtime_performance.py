@@ -162,3 +162,41 @@ def test_request_log_is_written_as_utf8_bytes_and_read_back(tmp_path, monkeypatc
     [path] = tmp_path.rglob('*.json.gz')
     with gzip.open(path, 'rt', encoding='utf-8') as stream:
         assert json.load(stream) == entry
+
+
+def test_prepare_time_is_split_into_stages_and_missing_marks_fold_forward():
+    from core.request_context import RequestContext
+    context = RequestContext()
+    context.started = 100.0
+    context.marks.update({'body_received': 100.5, 'recorded': 100.75, 'upstream_start': 101.0,
+                          'upstream_post': 101.25, 'first_byte': 103.0})
+    timings = context.snapshot()
+    # 这条链路没打 parsed，解析时间并进 route
+    assert timings['prepare_stages'] == {'receive_ms': 500.0, 'route_ms': 250.0, 'convert_ms': 250.0}
+    assert sum(timings['prepare_stages'].values()) == timings['prepare_ms'] == 1000.0
+    assert timings['upstream_build_ms'] == 250.0
+    assert timings['upstream_wait_ms'] == 2000.0
+
+
+def test_loop_watchdog_reports_a_blocked_event_loop(monkeypatch, caplog):
+    import time
+    from utils import loop_watchdog
+    monkeypatch.setattr(loop_watchdog, 'BEAT_SECONDS', 0.01)
+    monkeypatch.setattr(loop_watchdog, 'STALL_SECONDS', 0.2)
+    monkeypatch.setattr(loop_watchdog, 'stats', {'stalls': 0, 'max_stall_ms': 0.0, 'last_stall_at': None, 'last_stall_ms': 0.0})
+
+    def hog_the_loop():
+        time.sleep(0.5)
+
+    async def run():
+        beat = asyncio.create_task(loop_watchdog.heartbeat())
+        await asyncio.sleep(0.1)
+        hog_the_loop()
+        await asyncio.sleep(0.3)
+        beat.cancel()
+        await asyncio.gather(beat, return_exceptions=True)
+    with caplog.at_level('WARNING', logger='utils.loop_watchdog'):
+        asyncio.run(run())
+    assert loop_watchdog.stats['stalls'] == 1
+    assert loop_watchdog.stats['max_stall_ms'] >= 400
+    assert 'hog_the_loop' in caplog.text
