@@ -591,25 +591,79 @@ function sortTokenStatsTable(key) {
     renderTokenStatsTable(latestModelStatsCache);
 }
 
+const ENDPOINT_CACHE_COLUMNS = [
+    ['endpoint_model', '线路'],
+    ['request_count', '请求数'],
+    ['input_tokens', '输入 Token'],
+    ['cached_tokens', '缓存命中 Token'],
+    ['hit_rate', '命中率'],
+];
+
+// 默认沿用后端的输入 Token 降序，重新取数时保留用户选择。
+const endpointCacheSort = { key: 'input_tokens', ascending: false };
+
 function renderEndpointCacheTable(endpointStats) {
     const container = document.getElementById('endpoint-cache-table');
     if (!container) return;
     const rows = Array.isArray(endpointStats) ? endpointStats : [];
     container.hidden = rows.length === 0;
-    container.innerHTML = rows.length === 0 ? '' : `
+    if (container.hidden) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const headerCells = ENDPOINT_CACHE_COLUMNS.map(([key, label]) => `
+        <th scope="col" class="sortable-th">
+            <button type="button" data-endpoint-sort-key="${key}">${label} <span aria-hidden="true"></span></button>
+        </th>`).join('');
+    container.innerHTML = `
         <div class="usage-charts-header"><h3>线路缓存命中</h3></div>
-        <table class="table">
-            <thead><tr><th>线路</th><th>请求数</th><th>输入 Token</th><th>缓存命中 Token</th><th>命中率</th></tr></thead>
-            <tbody>
-                ${rows.map(row => `<tr>
-                    <td>${escapeHtml(row.endpoint_model)}</td>
-                    <td>${row.request_count}</td>
-                    <td>${formatTokenNumber(row.input_tokens)}</td>
-                    <td>${formatTokenNumber(row.cached_tokens)}</td>
-                    <td>${(row.hit_rate * 100).toFixed(1)}%</td>
-                </tr>`).join('')}
-            </tbody>
-        </table>`;
+        <div class="endpoint-cache-scroll">
+            <table class="table">
+                <thead><tr>${headerCells}</tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>`;
+
+    const body = container.querySelector('tbody');
+    const sortButtons = container.querySelectorAll('[data-endpoint-sort-key]');
+    function updateOrder() {
+        const { key, ascending } = endpointCacheSort;
+        const direction = ascending ? 1 : -1;
+        const sortedRows = [...rows].sort((a, b) => {
+            const difference = key === 'endpoint_model'
+                ? a.endpoint_model.localeCompare(b.endpoint_model)
+                : a[key] - b[key];
+            return difference * direction;
+        });
+        body.innerHTML = sortedRows.map(row => `<tr>
+            <td>${escapeHtml(row.endpoint_model)}</td>
+            <td>${row.request_count}</td>
+            <td>${formatTokenNumber(row.input_tokens)}</td>
+            <td>${formatTokenNumber(row.cached_tokens)}</td>
+            <td>${(row.hit_rate * 100).toFixed(1)}%</td>
+        </tr>`).join('');
+        for (const button of sortButtons) {
+            const header = button.parentElement;
+            const active = button.dataset.endpointSortKey === key;
+            header.classList.toggle('active', active);
+            if (active) header.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
+            else header.removeAttribute('aria-sort');
+            button.lastElementChild.textContent = active ? (ascending ? '▲' : '▼') : '⇅';
+        }
+    }
+
+    for (const button of sortButtons) {
+        button.addEventListener('click', () => {
+            const key = button.dataset.endpointSortKey;
+            endpointCacheSort.ascending = key === endpointCacheSort.key
+                ? !endpointCacheSort.ascending
+                : key === 'endpoint_model';
+            endpointCacheSort.key = key;
+            updateOrder();
+        });
+    }
+    updateOrder();
 }
 
 function renderTokenStatsTable(modelStats) {

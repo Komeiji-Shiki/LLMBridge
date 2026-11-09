@@ -56,6 +56,23 @@
 .table-scroll { overflow: auto; max-width: 100%; max-height: 560px; scrollbar-gutter: stable; border: 1px solid var(--line-weak); }
 .table-scroll .table { min-width: 1100px; margin: 0; }
 .table-scroll thead th { position: sticky; top: 0; background: var(--surface-2); z-index: 1; }
+.endpoint-cache-scroll { overflow-x: auto; }
+#endpoint-cache-table .sortable-th { padding: 0; }
+#endpoint-cache-table .sortable-th button {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-align: left;
+    text-transform: inherit;
+    cursor: pointer;
+}
+#endpoint-cache-table .sortable-th button:focus-visible { outline-offset: -2px; }
+#endpoint-cache-table .sortable-th:not(.active) button span { color: var(--text-faint); }
 #token-stats-table .table td { font-size: .78rem; font-variant-numeric: tabular-nums; }
 #token-stats-table .table td:nth-child(2) { min-width: 175px; max-width: 250px; overflow-wrap: anywhere; }
 .stat-source { display: block; margin-top: 4px; color: var(--text-dim); font-size: .7rem; }
