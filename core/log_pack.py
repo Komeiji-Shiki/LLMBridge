@@ -38,7 +38,9 @@ PART_SUFFIX = '.tar.zst'
 KIND_LOGS = 'logs'
 KIND_EXCHANGES = 'exchanges'
 
-DEFAULT_COMPRESS_AFTER_DAYS = 14
+# 未打包的日目录每个请求约 1.9MB（带图对话每轮都重存一遍图片），打包后跨请求去重，实测 42 倍；
+# 从分块里读单条在 50ms 以内，所以只留最近几天不打包
+DEFAULT_COMPRESS_AFTER_DAYS = 3
 PART_BYTES = 256 * 1024 * 1024
 ZSTD_LEVEL = 9
 ZSTD_WINDOW_LOG = 27
