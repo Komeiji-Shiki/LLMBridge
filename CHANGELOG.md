@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-11-09：首包等待放宽到 19 分钟
+
+- `first_chunk_timeout_seconds` 的示例值从 600 改成 1140。流式响应头发出后，首包超时只能把错误写进 SSE，Claude Code 收到后会改发非流式，上游慢的时候等于白等一轮还重复计费。心跳 30 秒一次时 Claude Code 在首个事件前最多等约 20 分钟，这个值要留在它之内。
+
 ### 2026-11-08：上游过滤不再让 Claude Code 判死会话
 
 - Chat 和 Responses 上游返回 `content_filter` 或 `refusal` 字段时，Anthropic 客户端只有在既没有正文也没有工具调用的情况下才收到 `stop_reason: "refusal"`；已有产出时按 `end_turn` 结束，有工具调用时按 `tool_use` 结束。Claude Code 收到 refusal 会把整轮标成违规、要求开新会话，而触发过滤的内容还留在上下文里，之后每一轮都会再被拦，已经执行过的工具调用也一起被标掉。此前流式和非流式都无条件报 refusal，refusal 还会盖掉 `tool_use`。

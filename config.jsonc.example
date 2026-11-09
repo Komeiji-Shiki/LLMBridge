@@ -37,7 +37,8 @@
   "force_stream_flush": true,
   "stream_response_timeout_seconds": 3000,
   "api_call_timeout_seconds": 3000,
-  "first_chunk_timeout_seconds": 600,
+  // 等上游第一块的上限。Claude Code 收到首个事件前，靠 30 秒一次的心跳最多等约 20 分钟，这里留在它之内
+  "first_chunk_timeout_seconds": 1140,
   // Gemini 输出达到单次上限（CONTINUATION / requires_continuation）时的自动续传次数；0 表示不续传，按输出截断。
   // generateContent 和 Interactions 共用；原生入口的客户端自己决定是否续传，不受此项影响
   "gemini_max_continuation_hops": 32,
