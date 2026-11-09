@@ -272,6 +272,15 @@ async def config_monitor(CONFIG, CONFIG_FILE_MTIMES, load_config_func, load_mode
             logger.error(f"[CONFIG_MONITOR] 错误: {e}", exc_info=True)
 
 
+def should_run_heavy_gc(memory_mb: float, threshold_mb: float, floor_mb) -> bool:
+    """常驻内存本来就高于阈值时，只有比上次回收后的水位再涨四分之一才再回收。
+
+    进程空载就有 120MB 以上，阈值配成 80 或 150 时旧版每两分钟空转一次：
+    全量 GC、强制卸载分词器，下一个请求再花 0.2-0.8 秒把分词器读回来，期间事件循环卡住。
+    """
+    return memory_mb > threshold_mb and (floor_mb is None or memory_mb > floor_mb * 1.25)
+
+
 async def memory_monitor(
     CONFIG,
     DOWNLOAD_SEMAPHORE,
@@ -286,12 +295,13 @@ async def memory_monitor(
 ):
     """
     分层内存监控任务
-    - 轻量清理：每轮都执行（TTLCache expire、下载记录清理、元数据清理）
-    - 重量GC：仅在内存超阈值时触发（tokenizer卸载、GC回收）
+    - 轻量清理：每轮都执行（TTLCache expire、空闲 tokenizer 卸载、下载记录清理、元数据清理）
+    - 重量GC：内存超阈值且比上次回收后明显上涨时触发（GC回收、工作集回收）
     """
     process = psutil.Process(os.getpid())
     last_gc_time = time.time()
     last_trim_time = 0.0
+    gc_floor_mb = None  # 上次重量 GC 之后的内存水位
     
     while True:
         try:
@@ -319,7 +329,18 @@ async def memory_monitor(
             # TTLCache 过期驱逐
             IMAGE_BASE64_CACHE.expire()
             FILEBED_URL_CACHE.expire()
-            
+
+            # 只卸载超过 tokenizer_idle_timeout_seconds 没用过的分词器，还在用的留着
+            try:
+                from modules.token_counter import clear_tokenizer_cache
+                clean_result = await asyncio.to_thread(clear_tokenizer_cache)
+                if clean_result['count'] > 0:
+                    logger.info(f"[MEM_MONITOR] 🧹 卸载了 {clean_result['count']} 个空闲tokenizer")
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"[MEM_MONITOR] 清理tokenizer缓存时出错: {e}")
+
             # 清理超量的 downloaded_urls_set（不等到GC阈值）
             url_history_max = cache_config.get("url_history_max", CacheDefaults.URL_HISTORY_MAX)
             url_history_keep = cache_config.get("url_history_keep", CacheDefaults.URL_HISTORY_KEEP)
@@ -356,27 +377,23 @@ async def memory_monitor(
             
             # ========== 重量GC（仅在超阈值时触发） ==========
             gc_threshold = mem_config.get("gc_threshold_mb", MemoryDefaults.GC_THRESHOLD_MB)
-            
-            if memory_mb > gc_threshold:
+            if gc_floor_mb is not None:
+                gc_floor_mb = min(gc_floor_mb, memory_mb)
+
+            if should_run_heavy_gc(memory_mb, gc_threshold, gc_floor_mb):
                 current_time = time.time()
                 # 降低GC冷却时间：2分钟（原为5分钟）
                 if current_time - last_gc_time > 120:
                     logger.warning(f"[MEM_MONITOR] 触发垃圾回收 (内存: {memory_mb:.2f}MB > {gc_threshold}MB)")
                     
-                    # 强清所有空闲tokenizer
                     try:
-                        from modules.token_counter import clear_tokenizer_cache, get_tokenizer_memory_info
+                        from modules.token_counter import get_tokenizer_memory_info
                         tokenizer_mem = get_tokenizer_memory_info()
                         if tokenizer_mem['estimated_memory_mb'] > 0:
-                            logger.info(f"[MEM_MONITOR] Tokenizer缓存占用约 {tokenizer_mem['estimated_memory_mb']:.0f}MB")
-                        clean_result = clear_tokenizer_cache(force=True)
-                        if clean_result['count'] > 0:
-                            logger.info(f"[MEM_MONITOR] ✅ 强制清理了 {clean_result['count']} 个tokenizer缓存")
-                    except ImportError:
-                        pass
+                            logger.info(f"[MEM_MONITOR] 在用的Tokenizer占用约 {tokenizer_mem['estimated_memory_mb']:.0f}MB")
                     except Exception as e:
-                        logger.warning(f"[MEM_MONITOR] 清理tokenizer缓存时出错: {e}")
-                    
+                        logger.debug(f"[MEM_MONITOR] 读取tokenizer占用失败: {e}")
+
                     # 图片缓存主动驱逐
                     IMAGE_BASE64_CACHE.expire()
                     if len(IMAGE_BASE64_CACHE) > mem_config.get("image_cache_keep_size", 20) * 2:
@@ -408,6 +425,7 @@ async def memory_monitor(
                             )
                             new_memory_mb = trimmed_mb
 
+                    gc_floor_mb = new_memory_mb
                     freed_mb = memory_mb - new_memory_mb
                     
                     logger.info(f"[MEM_MONITOR] GC后内存: {memory_mb:.2f}MB -> {new_memory_mb:.2f}MB "

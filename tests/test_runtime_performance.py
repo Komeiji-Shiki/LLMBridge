@@ -131,3 +131,11 @@ def test_message_token_count_does_not_rescan_the_vocabulary(monkeypatch):
     assert Backend.vocab_scans == 0
     assert len(tokenizer) == len(tokenizer) == 262144
     assert Backend.vocab_scans == 1
+
+
+def test_heavy_gc_waits_for_growth_when_resident_memory_exceeds_threshold():
+    from background_tasks.monitors import should_run_heavy_gc
+    assert not should_run_heavy_gc(140, 150, None)
+    assert should_run_heavy_gc(330, 150, None)
+    assert not should_run_heavy_gc(340, 150, 320)
+    assert should_run_heavy_gc(410, 150, 320)
