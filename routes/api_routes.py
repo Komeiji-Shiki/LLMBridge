@@ -247,7 +247,10 @@ _JSON_OFFLOAD_THRESHOLD_BYTES = 64 * 1024
 
 async def _read_request_json_non_blocking(request: Request) -> Dict[str, Any]:
     """读取并解析请求 JSON；大 body（长上下文对话）才移入线程池，避免阻塞事件循环。"""
-    body = await request.body()
+    # 不走 request.body()：它把原始字节缓存在 Request 上，流式响应期间一直多占一份请求体
+    chunks = [chunk async for chunk in request.stream()]
+    body = chunks[0] if len(chunks) == 1 else b"".join(chunks)
+    del chunks
     if len(body) > _JSON_OFFLOAD_THRESHOLD_BYTES:
         data = await asyncio.to_thread(json.loads, body)
     else:

@@ -139,3 +139,26 @@ def test_heavy_gc_waits_for_growth_when_resident_memory_exceeds_threshold():
     assert should_run_heavy_gc(330, 150, None)
     assert not should_run_heavy_gc(340, 150, 320)
     assert should_run_heavy_gc(410, 150, 320)
+
+
+def test_fastjson_matches_stdlib_and_falls_back_for_unsupported_values():
+    from utils import fastjson
+    def stdlib(value):
+        return json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    for value in ({'text': '中文😀', 'items': [1, 2.5, None, True, ('a', 'b')]},
+                  {'beyond_64_bit': 2 ** 70},
+                  {1: 'non-string key'}):
+        assert fastjson.dumps(value) == stdlib(value)
+    assert json.loads(fastjson.dumps({'big': 2 ** 70}))['big'] == 2 ** 70
+
+
+def test_request_log_is_written_as_utf8_bytes_and_read_back(tmp_path, monkeypatch):
+    from modules.monitoring import LogManager, MonitorConfig
+    monkeypatch.setattr(MonitorConfig, 'LOG_DIR', tmp_path)
+    writer = object.__new__(LogManager)
+    entry = {'type': 'request_end', 'request_id': 'abcdef123456', 'model': 'demo', 'timestamp': 1794200272.0,
+             'success': True, 'request_messages': [{'role': 'user', 'content': '你好😀'}]}
+    writer._write_hierarchical_log(entry)
+    [path] = tmp_path.rglob('*.json.gz')
+    with gzip.open(path, 'rt', encoding='utf-8') as stream:
+        assert json.load(stream) == entry

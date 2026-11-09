@@ -24,6 +24,7 @@ from typing import Dict, Optional, List
 import logging
 from pathlib import Path
 
+from utils import fastjson
 from utils.monitor_params import MONITOR_PARAM_EXCLUDED_KEYS, compact_monitor_params
 
 logger = logging.getLogger(__name__)
@@ -366,14 +367,14 @@ class LogManager:
             log_entry_filtered = log_entry
 
             # 写入文件
-            # 紧凑序列化，减少大响应日志写盘时的 CPU/GIL 占用
-            json_data = json.dumps(log_entry_filtered, ensure_ascii=False, separators=(',', ':'))
-            
+            # 直接出字节：不经过整份 str，写盘线程占 GIL 的时间短一个量级
+            json_data = fastjson.dumps(log_entry_filtered)
+
             if MonitorConfig.USE_COMPRESSION:
-                with gzip.open(file_path, 'wt', encoding='utf-8') as f:
+                with gzip.open(file_path, 'wb') as f:
                     f.write(json_data)
             else:
-                with open(file_path, 'w', encoding='utf-8') as f:
+                with open(file_path, 'wb') as f:
                     f.write(json_data)
             
             logger.debug(f"已写入分层日志: {file_path}")
@@ -1367,9 +1368,12 @@ class MonitoringService:
             # "Expecting value ... char 19304546"），历史统计全部丢失
             # 🔧 并发安全：唯一化 tmp 路径避免多写端交错 + threading.Lock 互斥
             tmp_path = f"{stats_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+            # 锁外一次性序列化：json.dump 往文件流式写走的是纯 Python 编码器，
+            # 2MB 的统计要占着监控锁编码上百毫秒，request_start/end 都得等
+            payload = json.dumps(stats_data, ensure_ascii=False, separators=(',', ':'), default=str)
             with self._lock:
                 with open(tmp_path, 'w', encoding='utf-8') as f:
-                    json.dump(stats_data, f, ensure_ascii=False, separators=(',', ':'), default=str)
+                    f.write(payload)
 
                 # 🔧 Windows 兼容：os.replace 在目标文件被外部进程（杀软/备份/
                 # 索引服务）持锁时可能抛 PermissionError (WinError 5)。
@@ -1388,7 +1392,7 @@ class MonitoringService:
                         "os.replace 重试 3 次均失败，回退到直接覆写: %s", stats_path
                     )
                     with open(stats_path, 'w', encoding='utf-8') as f:
-                        json.dump(stats_data, f, ensure_ascii=False, separators=(',', ':'), default=str)
+                        f.write(payload)
                     try:
                         os.unlink(tmp_path)
                     except OSError:

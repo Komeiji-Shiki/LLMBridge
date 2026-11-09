@@ -36,6 +36,7 @@ from converters.gemini_partial_args import PartialCallMerger
 from converters.media import gemini_code_text
 from services.model_capabilities import limits_for
 from services.provider_capabilities import provider_name
+from utils import fastjson
 from utils.upstream_fields import omit_configured_fields
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage, rough_token_count
 
@@ -504,15 +505,10 @@ class DirectAPIService:
             if context:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'chat')
                 context.upstream_request = copy.deepcopy(request_body)
-            request_body_json = await asyncio.to_thread(
-                json.dumps,
-                request_body,
-                ensure_ascii=False,
-                separators=(',', ':')
-            )
+            # 序列化结果不留在局部变量里：发完就该释放，否则整份请求体要陪着流式响应活到结束
             async with self.session.post(
                 endpoint,
-                data=request_body_json.encode('utf-8'),
+                data=fastjson.dumps(request_body),
                 headers=headers,
                 timeout=_upstream_timeout()
             ) as response:
@@ -851,12 +847,7 @@ class DirectAPIService:
                 context.upstream_request = await asyncio.to_thread(upstream_snapshot, request_body)
                 # 重试复用同一个上下文，上一次尝试的过滤依据不能算到这一次
                 context.outcome.pop('safety', None)
-            request_body_json = await asyncio.to_thread(
-                json.dumps,
-                request_body,
-                ensure_ascii=False,
-                separators=(',', ':')
-            )
+            upstream_body = request_body
             headers = {"Content-Type": "application/json"}
             # 与 Google SDK 和原生透传一致，使用请求头传递上游密钥。
             if api_key:
@@ -868,7 +859,7 @@ class DirectAPIService:
             while True:
                 async with self.session.post(
                     endpoint,
-                    data=request_body_json.encode('utf-8'),
+                    data=fastjson.dumps(upstream_body),
                     headers=headers,
                     timeout=_upstream_timeout()
                 ) as response:
@@ -921,12 +912,7 @@ class DirectAPIService:
                     break
                 logger.info(f"[GEMINI_NATIVE] 上游达到单次输出上限，开始第 {continuation.hops} 次续传")
                 # 已生成内容由 token 携带，不能追加到 contents
-                request_body_json = await asyncio.to_thread(
-                    json.dumps,
-                    {**request_body, "continuationToken": token},
-                    ensure_ascii=False,
-                    separators=(',', ':')
-                )
+                upstream_body = {**request_body, "continuationToken": token}
 
             if history is not None:
                 if not stream:
@@ -1059,12 +1045,7 @@ class DirectAPIService:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'interactions')
                 omit_configured_fields(request_body, context.endpoint)
                 context.upstream_request = await asyncio.to_thread(upstream_snapshot, request_body)
-            request_body_json = await asyncio.to_thread(
-                json.dumps,
-                request_body,
-                ensure_ascii=False,
-                separators=(',', ':')
-            )
+            upstream_body = request_body
             headers = {
                 "Content-Type": "application/json"
             }
@@ -1078,7 +1059,7 @@ class DirectAPIService:
                 try:
                     async with self.session.post(
                         endpoint,
-                        data=request_body_json.encode('utf-8'),
+                        data=fastjson.dumps(upstream_body),
                         headers=headers,
                         timeout=_upstream_timeout()
                     ) as response:
@@ -1127,12 +1108,7 @@ class DirectAPIService:
                     continuation.step_open = False
                     yield {"event_type": "step.stop"}
                 # 已生成内容由 token 携带，不能追加到 input
-                request_body_json = await asyncio.to_thread(
-                    json.dumps,
-                    {**request_body, "continuation_token": token},
-                    ensure_ascii=False,
-                    separators=(',', ':')
-                )
+                upstream_body = {**request_body, "continuation_token": token}
 
             if not stream:
                 yield response_data
@@ -1453,15 +1429,9 @@ class DirectAPIService:
                                 f"(包含分号，将导致上游400错误)")
 
         try:
-            request_body_json = await asyncio.to_thread(
-                json.dumps,
-                request_body,
-                ensure_ascii=False,
-                separators=(',', ':')
-            )
             async with self.session.post(
                 endpoint,
-                data=request_body_json.encode('utf-8'),
+                data=fastjson.dumps(request_body),
                 headers=request_headers,
                 timeout=_upstream_timeout()
             ) as response:

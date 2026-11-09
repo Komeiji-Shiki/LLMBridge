@@ -12,6 +12,8 @@ watchdog>=2.0,<7.0
 typing_extensions>=4.0,<5.0
 # Codex 历史会话的 Zstandard 压缩日志
 zstandard>=0.22,<1.0
+# 大请求体和日志的序列化：直接输出 UTF-8 字节，不经过整份 str
+orjson>=3.9,<4.0
 
 # HTTP/2 support (Hypercorn 原生支持 h2c/h2，h2 为其依赖项)
 h2>=4.0,<5.0
