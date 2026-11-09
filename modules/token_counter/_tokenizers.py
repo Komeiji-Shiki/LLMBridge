@@ -39,11 +39,12 @@ class LocalFastTokenizer:
     tokenizers 库即可直接加载，token 数与 HF fast tokenizer 完全一致。
     """
 
-    __slots__ = ("name_or_path", "_tokenizer")
+    __slots__ = ("name_or_path", "_tokenizer", "_vocab_size")
 
     def __init__(self, name_or_path: str, tokenizer: Any):
         self.name_or_path = name_or_path
         self._tokenizer = tokenizer
+        self._vocab_size = None
 
     def encode(self, text: str, *, add_special_tokens: bool = True, **_: Any):
         return self._tokenizer.encode(
@@ -54,10 +55,18 @@ class LocalFastTokenizer:
         return self.encode(text, **kwargs)
 
     def get_vocab_size(self) -> int:
-        return self._tokenizer.get_vocab_size()
+        # 底层每次调用都重建整张词表（Gemma 26 万词约 47ms，期间不放 GIL），词表加载后不变
+        if self._vocab_size is None:
+            self._vocab_size = self._tokenizer.get_vocab_size()
+        return self._vocab_size
 
     def __len__(self) -> int:
-        return self._tokenizer.get_vocab_size()
+        return self.get_vocab_size()
+
+    def __bool__(self) -> bool:
+        # 没有它时 `if tokenizer:` 会落到 __len__：逐条消息计数时每条都统计一遍词表，
+        # 19 万 token 的对话要 13 秒，其中编码本身只占 0.2 秒
+        return True
 
 
 def _load_local_fast_tokenizer(local_path: str) -> Optional[LocalFastTokenizer]:

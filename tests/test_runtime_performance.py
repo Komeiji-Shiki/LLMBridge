@@ -108,3 +108,26 @@ def test_hierarchical_error_list_excludes_successful_logs(tmp_path, monkeypatch)
     logs = reader._read_hierarchical_logs('error', limit=20)
     assert len(logs) == 2
     assert all(row.get('error') for row in logs)
+
+
+def test_message_token_count_does_not_rescan_the_vocabulary(monkeypatch):
+    from modules.token_counter import _counting
+    from modules.token_counter._tokenizers import LocalFastTokenizer
+
+    class Backend:
+        vocab_scans = 0
+        def encode(self, text, add_special_tokens=True):
+            return type('Encoding', (), {'ids': text.split()})()
+        def get_vocab_size(self):
+            Backend.vocab_scans += 1
+            return 262144
+
+    tokenizer = LocalFastTokenizer('gemma', Backend())
+    monkeypatch.setattr(_counting, 'get_tokenizer_for_model', lambda model: 'google')
+    monkeypatch.setattr(_counting, 'get_gemma_tokenizer', lambda: tokenizer)
+    messages = [{'role': 'user', 'content': 'one two three'}] * 50
+    total, _ = _counting.count_messages_tokens(messages, 'gemini-test')
+    assert total >= 150
+    assert Backend.vocab_scans == 0
+    assert len(tokenizer) == len(tokenizer) == 262144
+    assert Backend.vocab_scans == 1

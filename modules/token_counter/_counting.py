@@ -34,7 +34,7 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
 
     if tokenizer_type == 'deepseek':
         deepseek_tokenizer = get_deepseek_tokenizer()
-        if deepseek_tokenizer:
+        if deepseek_tokenizer is not None:
             try:
                 tokens = deepseek_tokenizer.encode(text)
                 token_count = len(tokens)
@@ -45,7 +45,7 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
 
     elif tokenizer_type == 'google':
         gemma_tokenizer = get_gemma_tokenizer()
-        if gemma_tokenizer:
+        if gemma_tokenizer is not None:
             try:
                 tokens = gemma_tokenizer.encode(text)
                 token_count = len(tokens)
@@ -71,7 +71,7 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
         custom_name = tokenizer_type[len('custom_'):]
         from ._custom import get_custom_tokenizer
         custom_tokenizer, is_tiktoken_model = get_custom_tokenizer(custom_name)
-        if custom_tokenizer:
+        if custom_tokenizer is not None:
             try:
                 if is_tiktoken_model:
                     tokens = custom_tokenizer.encode(text, allowed_special="all")
