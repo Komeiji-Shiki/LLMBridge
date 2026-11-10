@@ -43,7 +43,7 @@ from core.config_loader import (  # noqa: E402
 from core.api_key_manager import api_key_manager  # noqa: E402
 from core.db_stats import stats_db  # noqa: E402
 from core.app_state import get_app_state, AppState  # noqa: E402
-from core.constants import CacheDefaults, ServerDefaults  # noqa: E402
+from core.constants import CacheDefaults, PROJECT_ROOT, ServerDefaults  # noqa: E402
 from core.middleware import (  # noqa: E402
     SelectiveGZipMiddleware, SelectiveCORSMiddleware,
     CachedStaticFiles, WebAccessKeyMiddleware
@@ -243,8 +243,8 @@ app.add_middleware(SelectiveGZipMiddleware, minimum_size=500)
 app.add_middleware(WebAccessKeyMiddleware)
 
 # ==================== 静态资源（带缓存头） ====================
-app.mount("/js", CachedStaticFiles(directory="js"), name="js")
-app.mount("/css", CachedStaticFiles(directory="css"), name="css")
+app.mount("/js", CachedStaticFiles(directory=PROJECT_ROOT / "js"), name="js")
+app.mount("/css", CachedStaticFiles(directory=PROJECT_ROOT / "css"), name="css")
 
 # ==================== 路由挂载 ====================
 app.include_router(websocket_routes.router)   # /ws（油猴脚本连接）

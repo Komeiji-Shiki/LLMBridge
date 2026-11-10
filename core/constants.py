@@ -3,7 +3,11 @@
 将硬编码值集中管理
 """
 
+from pathlib import Path
 from typing import Dict, Any
+
+# 页面、脚本和样式跟着代码走，不依赖启动时的工作目录
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # ==================== 超时配置 ====================
 

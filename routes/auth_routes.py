@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from core import web_session
 from core.config_loader import CONFIG
+from core.constants import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["auth"])
@@ -25,7 +26,7 @@ router = APIRouter(tags=["auth"])
 async def login_page():
     """返回登录页面（HTML 已外置到 login.html，next 参数由页面 JS 读取并校验）"""
     try:
-        with open('login.html', 'r', encoding='utf-8') as f:
+        with open(PROJECT_ROOT / 'login.html', 'r', encoding='utf-8') as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
         return HTMLResponse(

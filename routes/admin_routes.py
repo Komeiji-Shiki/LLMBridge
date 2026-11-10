@@ -19,6 +19,7 @@ from core.model_archive import (
     find_inactive_models, build_last_used_map,
 )
 from core.app_state import get_app_state
+from core.constants import PROJECT_ROOT
 from core.upstream_auth import apply_upstream_auth
 from core.db_stats import stats_db, get_exchange_rates
 from .admin_usage import selected_usage, usage_csv
@@ -129,7 +130,7 @@ async def _invalidate_admin_stats_cache():
 async def admin_dashboard():
     """返回管理界面HTML页面"""
     try:
-        with open('admin.html', 'r', encoding='utf-8') as f:
+        with open(PROJECT_ROOT / 'admin.html', 'r', encoding='utf-8') as f:
             html_content = f.read()
         return HTMLResponse(content=html_content)
     except FileNotFoundError:
@@ -1474,7 +1475,7 @@ async def admin_dashboard_endpoint():
 async def token_calculator_endpoint():
     """返回Token计算器页面"""
     try:
-        with open('token_calculator.html', 'r', encoding='utf-8') as f:
+        with open(PROJECT_ROOT / 'token_calculator.html', 'r', encoding='utf-8') as f:
             html_content = f.read()
         return HTMLResponse(content=html_content)
     except FileNotFoundError:

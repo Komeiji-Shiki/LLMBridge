@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from core.app_state import get_app_state
 from core.config_loader import CONFIG
+from core.constants import PROJECT_ROOT
 from modules.monitoring import monitoring_service, MonitorConfig
 from utils import loop_watchdog
 
@@ -26,7 +27,7 @@ _app_state = get_app_state()
 async def monitor_dashboard():
     """返回监控面板HTML页面"""
     try:
-        with open('monitor.html', 'r', encoding='utf-8') as f:
+        with open(PROJECT_ROOT / 'monitor.html', 'r', encoding='utf-8') as f:
             html_content = f.read()
         return HTMLResponse(content=html_content)
     except FileNotFoundError:
