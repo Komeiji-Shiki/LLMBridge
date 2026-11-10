@@ -14,6 +14,7 @@ Routes package for LMArena Bridge
 - admin_routes.py: 管理面板端点（/admin、/api/admin/*）
 - auth_routes.py: Web 登录与访问密钥验证（/login、/auth/*）
 - apikey_routes.py: API Key 管理（/api/admin/api_keys*）
+- admin_channels.py: 渠道管理（/api/admin/channels*、/api/admin/models/channel）
 """
 
 # 核心API处理函数（保持向后兼容的函数级导出）

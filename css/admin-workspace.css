@@ -168,3 +168,24 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .palette-empty { padding: 22px 10px; color: var(--text-dim); font-size: .85rem; text-align: center; }
 .palette-foot { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line-weak); color: var(--text-faint); font-size: .7rem; }
 @media (max-width: 760px) { .palette-trigger { display: none; } }
+
+/* 渠道：列表页、编辑窗，以及模型列表和模型设置里的引用 */
+.field-hint { display: block; margin-top: 5px; color: var(--text-dim); font-size: .78rem; line-height: 1.7; }
+.badge-channel { margin-left: 6px; background: none; color: var(--action); font-family: inherit; cursor: pointer; }
+.badge-channel:hover { color: var(--action-hover); }
+#channels-suggest .btn { margin-left: auto; flex-shrink: 0; }
+#channels-list .table td { vertical-align: middle; }
+.channel-address { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-family: var(--font-mono); font-size: .8rem; }
+.channel-unused, .channel-usage-note { color: var(--text-dim); font-size: .8rem; }
+.channel-dialog { max-width: 650px; }
+.channel-dialog .modal-body { max-height: 70vh; overflow-y: auto; }
+.channel-dialog #channel-api-keys-list + .btn { margin-top: 2px; }
+.channel-select-row, .channel-strategy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.channel-select-row select { flex: 1; min-width: 0; }
+.channel-strategy-row select { max-width: 200px; }
+.channel-strategy-row label { display: flex; align-items: center; gap: 6px; color: var(--text-dim); font-size: .85rem; white-space: nowrap; }
+.channel-strategy-row input { max-width: 110px; }
+/* 接了渠道的模型：这几项来自渠道，只读 */
+.channel-locked [data-channel-field] input:disabled, .channel-locked [data-channel-field] select:disabled { opacity: .6; cursor: not-allowed; }
+.channel-locked [data-channel-field] .btn-danger, .channel-locked [data-channel-field] button[onclick="addApiKeyRow()"] { display: none; }
+.dialog .form-select { width: 100%; margin-top: 12px; }

@@ -147,6 +147,9 @@ function fillModelForm(config) {
         const cooldown = config.api_key_cooldown_seconds;
         document.getElementById('api-key-cooldown').value = (cooldown && cooldown > 0) ? cooldown : '';
         toggleApiKeyStrategyOptions();
+        // 接了渠道：上面这几项换成渠道里的值并锁住
+        document.getElementById('model-channel').value = modelWorkspace.channels[config.channel] ? config.channel : '';
+        applyModelChannel();
         
         document.getElementById('model-id').value = config.model_id || '';
         document.getElementById('display-name').value = config.display_name || '';
@@ -323,7 +326,7 @@ async function saveModel() {
         }
         
         // 🔧 多 API Key 轮询：至少要有一个有效 key
-        if (apiKeys.length === 0) {
+        if (apiKeys.length === 0 && !document.getElementById('model-channel').value) {
             if (!(await confirmDialog({ title: '没有填写 API Key', message: '未填写任何 API Key，将使用无认证模式访问上游 API。确定继续？', confirmText: '继续保存' }))) return;
         }
         
@@ -494,6 +497,13 @@ async function saveModel() {
             }
         }
         
+        // 接了渠道：地址和 Key 以渠道为准，模型里只留引用
+        const channelId = document.getElementById('model-channel').value;
+        if (channelId) {
+            for (const field of MODEL_CHANNEL_FIELDS) delete config[field];
+            config.channel = channelId;
+        }
+
         // 只在有值时添加thinking_separator字段
         if (thinkingSeparator) {
             config.thinking_separator = thinkingSeparator;

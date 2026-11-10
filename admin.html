@@ -23,6 +23,7 @@
     <script defer src="js/admin-models-edit.js"></script>
     <script defer src="js/admin-models-workspace.js"></script>
     <script defer src="js/admin-models-list.js"></script>
+    <script defer src="js/admin-channels.js"></script>
     <script defer src="js/admin-models-capture.js"></script>
     <script defer src="js/admin-tokenizer.js"></script>
     <script defer src="js/admin-config.js"></script>
@@ -47,6 +48,7 @@
                 <li class="nav-item" data-page="monitor"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg> 请求监控</li>
                 <li class="nav-group" aria-hidden="true">模型</li>
                 <li class="nav-item" data-page="models"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#layers"/></svg> 模型端点</li>
+                <li class="nav-item" data-page="channels"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#link"/></svg> 上游渠道</li>
                 <li class="nav-item" data-page="api-keys"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg> API Key 管理</li>
                 <!-- “能力与 Playground”由 admin-gateway.js 插在这里 -->
                 <li class="nav-group" aria-hidden="true">工具</li>
@@ -287,14 +289,15 @@
                     </div>
                     <div class="models-sticky">
                     <div class="models-toolbar">
-                        <label class="model-search-label">搜索模型<input id="models-query" class="form-input" type="search" placeholder="名称、模型 ID 或服务地址（按 / 搜索）" oninput="applyModelFilters()"></label>
+                        <label class="model-search-label">搜索模型<input id="models-query" class="form-input" type="search" placeholder="名称、模型 ID、渠道或服务地址（按 / 搜索）" oninput="applyModelFilters()"></label>
                         <label>接口协议<select id="models-protocol" class="form-select" onchange="applyModelFilters()"><option value="">全部协议</option><option value="direct_api">OpenAI 兼容</option><option value="responses_native">Responses</option><option value="anthropic_native">Anthropic</option><option value="gemini_native">Gemini</option><option value="legacy">LMArena（兼容）</option></select></label>
-                        <label>服务地址<select id="models-provider" class="form-select" onchange="applyModelFilters()"><option value="">全部服务地址</option></select></label>
+                        <label>渠道或服务地址<select id="models-provider" class="form-select" onchange="applyModelFilters()"><option value="">全部渠道和地址</option></select></label>
                     </div>
                     <div class="models-summary-row">
                         <div id="models-summary" class="models-summary" role="status"></div>
                         <div class="card-actions">
                             <button class="btn btn-sm" onclick="archiveSelectedModels()" id="archive-selected-btn" disabled title="归档勾选的模型（归档后不可请求、列表折叠）">归档所选</button>
+                            <button class="btn btn-sm" onclick="assignSelectedModelsChannel()" id="channel-selected-btn" disabled title="让勾选的模型共用一个渠道的地址和 Key">改用渠道</button>
                             <button class="btn btn-sm" onclick="resetModelFilters()">清除筛选</button>
                             <button class="btn btn-sm" onclick="loadModels()">刷新列表</button>
                             <button class="btn btn-sm" id="models-density" aria-pressed="false" onclick="toggleModelsCompact()" title="一个模型一行，同屏能看到更多模型">紧凑</button>
@@ -303,6 +306,34 @@
                     </div>
                     <div id="models-list" aria-label="模型列表"></div>
                     <div id="models-no-results" class="empty-state" hidden>没有匹配的模型。试试其他关键词，或清除筛选。</div>
+                </div>
+            </div>
+
+            <!-- 上游渠道页面 -->
+            <div id="channels" class="page">
+                <div class="page-header">
+                    <h2>上游渠道</h2>
+                    <p>地址和 Key 相同的模型共用一个渠道，换 Key、换地址只改这一处。</p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>渠道列表</h3>
+                        <div class="card-actions">
+                            <button class="btn" onclick="loadChannels()">
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 刷新
+                            </button>
+                            <button class="btn btn-accent" onclick="openChannelModal()">
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 新建渠道
+                            </button>
+                        </div>
+                    </div>
+                    <div id="channels-suggest" class="alert alert-info" hidden>
+                        <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
+                        <div id="channels-suggest-text"></div>
+                        <button class="btn btn-sm" onclick="adoptChannelSuggestions()">查看并整理</button>
+                    </div>
+                    <div id="channels-list"></div>
                 </div>
             </div>
 
@@ -678,6 +709,65 @@
     </div>
 
     <!-- 自动归档设置模态框 -->
+    <!-- 渠道编辑窗 -->
+    <div id="channel-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="channel-modal-title">
+        <div class="modal-content channel-dialog">
+            <div class="modal-header">
+                <h3 id="channel-modal-title">新建渠道</h3>
+                <button class="close-btn" aria-label="关闭渠道设置" onclick="closeChannelModal()">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label" for="channel-name">渠道名称 *</label>
+                    <input type="text" id="channel-name" class="form-input" placeholder="例如: DeepSeek 官方、本地反代">
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="channel-base-url">API Base URL</label>
+                    <input type="text" id="channel-base-url" class="form-input" placeholder="http://127.0.0.1:7861 或 https://api.openai.com/v1">
+                    <small class="field-hint">写法和模型设置里的一样，版本路径自己带上。Gemini 留空时使用 Google 官方地址。</small>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">API Key</label>
+                    <div id="channel-api-keys-list"></div>
+                    <button class="btn btn-sm" onclick="addApiKeyRow('', 'channel-api-keys-list')" type="button">
+                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 添加 API Key
+                    </button>
+                    <small class="field-hint">多个 Key 自动轮询；本地反代等不需要认证的可以不填。</small>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="channel-auth-mode">API Key 鉴权方式</label>
+                    <select class="form-select" id="channel-auth-mode" onchange="updateApiKeyInputHints()">
+                        <option value="auto">自动（沿用协议默认方式）</option>
+                        <option value="bearer">Authorization: Bearer</option>
+                        <option value="api-key">api-key</option>
+                        <option value="x-api-key">x-api-key</option>
+                        <option value="x-goog-api-key">x-goog-api-key</option>
+                        <option value="google-oauth">Google OAuth（Vertex 项目凭据）</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="channel-key-strategy">轮询策略</label>
+                    <div class="channel-strategy-row">
+                        <select class="form-select" id="channel-key-strategy" onchange="toggleChannelStrategyOptions()">
+                            <option value="round_robin">逐 Key 轮询</option>
+                            <option value="sticky">粘性轮询</option>
+                        </select>
+                        <label id="channel-key-cooldown-group" hidden>冷却时长
+                            <input class="form-input" id="channel-key-cooldown" min="0" placeholder="172800" step="3600" type="number">
+                            秒（48h=172800）
+                        </label>
+                    </div>
+                    <small class="field-hint">逐 Key 轮询每次请求换下一个 Key；粘性轮询一直用同一个，额度不足时切换并冷却。</small>
+                </div>
+                <p id="channel-usage-note" class="channel-usage-note"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeChannelModal()">取消</button>
+                <button class="btn btn-accent" id="channel-save-btn" onclick="saveChannel()">保存渠道</button>
+            </div>
+        </div>
+    </div>
+
     <div id="archive-settings-modal" class="modal">
         <div class="modal-content" style="max-width: 440px;">
             <div class="modal-header">
@@ -771,6 +861,13 @@
                             仅对上游 Responses API 生效。本地请求仍按无状态方式转发，不会自动复用 previous_response_id。
                         </small>
 </div><div class="form-group" data-direct-setting="">
+<label class="form-label" for="model-channel">渠道</label>
+<div class="channel-select-row">
+<select class="form-select" id="model-channel" onchange="applyModelChannel()"></select>
+<button class="btn" hidden id="model-channel-edit" onclick="editModelChannel()" type="button">编辑渠道</button>
+</div>
+<small class="field-hint">接了渠道的模型共用渠道的地址和 Key，换 Key 只改渠道一处。选了渠道后，下面的地址、Key、鉴权方式和轮询策略显示渠道里的值，要改去编辑渠道。</small>
+</div><div class="form-group" data-channel-field="" data-direct-setting="">
 <label class="form-label" for="api-base-url">API Base URL</label>
 <input class="form-input" id="api-base-url" placeholder="http://127.0.0.1:7861 或 https://api.openai.com/v1" type="text"/>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
@@ -811,7 +908,7 @@
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             默认 <code>/chat/completions</code>（OpenAI兼容）；Responses 原生格式默认 <code>/responses</code>；Anthropic 原生模式默认 <code>/messages</code>。
                         </small>
-</div><div class="form-group" data-direct-setting="">
+</div><div class="form-group" data-channel-field="" data-direct-setting="">
 <label class="form-label">API Key（支持多Key轮询）</label>
 <div id="model-api-keys-list">
 <!-- 动态生成的 API Key 输入行 -->
@@ -831,7 +928,7 @@
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             可添加多个 API Key 实现自动轮询。本地反代等无需认证的场景可留空
                         </small>
-</div><div class="form-group" data-direct-setting="">
+</div><div class="form-group" data-channel-field="" data-direct-setting="">
 <label class="form-label" for="api-key-auth-mode">API Key 鉴权方式</label>
 <select class="form-select" id="api-key-auth-mode" onchange="updateApiKeyInputHints()">
 <option value="auto">自动（沿用协议默认方式）</option>
@@ -844,7 +941,7 @@
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                             按上游要求选择请求头。Google 原生接口通常使用 x-goog-api-key，Anthropic 使用 x-api-key，OpenAI 兼容接口通常使用 Authorization: Bearer。显式选择后只发送这一种鉴权头。Google OAuth 时 API Key 填凭据文件路径或单行 JSON（服务账号密钥、ADC 文件），网关自动换取并刷新访问令牌。
                         </small>
-</div><div class="form-group" data-direct-setting="" id="api-key-strategy-group">
+</div><div class="form-group" data-channel-field="" data-direct-setting="" id="api-key-strategy-group">
 <label class="form-label" for="api-key-strategy">轮询策略</label>
 <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;">
 <select class="form-input" id="api-key-strategy" onchange="toggleApiKeyStrategyOptions()" style="max-width: 200px;">

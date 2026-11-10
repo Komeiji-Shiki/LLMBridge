@@ -124,6 +124,9 @@ function loadPageData(page, detail = '') {
                 if (name && !editing) openModelFromList(name);
             });
             break;
+        case 'channels':
+            loadChannels().then(() => { if (detail) openChannelModal(detail); });
+            break;
         case 'tokenizer':
             refreshTokenizerInfo();
             loadTokenizerMappings();
@@ -261,6 +264,7 @@ function showMessage(type, message) {
 // ==================== 确认与输入对话框 ====================
 // 代替浏览器自带的 confirm / prompt：样式跟界面一致，Esc 取消，Enter 确认，关掉后焦点回到原处。
 // 确认框返回 true / false；带 input 时返回输入的文字，取消返回 null。
+// input.options 给出 [值, 文字] 列表时是下拉选择，返回选中的值。
 function openDialog({ title, message = '', confirmText = '确定', cancelText = '取消', danger = false, input = null }) {
     return new Promise(resolve => {
         const opener = document.activeElement;
@@ -283,8 +287,9 @@ function openDialog({ title, message = '', confirmText = '确定', cancelText = 
         confirmButton.textContent = confirmText;
         let field = null;
         if (input) {
-            field = document.createElement(input.multiline ? 'textarea' : 'input');
-            field.className = 'form-input';
+            field = document.createElement(input.options ? 'select' : input.multiline ? 'textarea' : 'input');
+            field.className = input.options ? 'form-select' : 'form-input';
+            if (input.options) field.append(...input.options.map(([value, label]) => new Option(label, value)));
             field.value = input.value || '';
             field.placeholder = input.placeholder || '';
             field.setAttribute('aria-labelledby', 'dialog-title');
@@ -309,7 +314,7 @@ function openDialog({ title, message = '', confirmText = '确定', cancelText = 
                 accept();
             } else if (event.key === 'Tab') {
                 event.preventDefault();
-                const focusable = Array.from(overlay.querySelectorAll('button, input, textarea'));
+                const focusable = Array.from(overlay.querySelectorAll('button, input, select, textarea'));
                 const index = focusable.indexOf(document.activeElement);
                 focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
             }
@@ -323,7 +328,7 @@ function openDialog({ title, message = '', confirmText = '确定', cancelText = 
         document.body.append(overlay);
         // 不可恢复的操作默认停在取消上，随手按回车不会误删
         (field || (danger ? cancelButton : confirmButton)).focus();
-        field?.select();
+        field?.select?.();
     });
 }
 

@@ -1,10 +1,12 @@
 // Model browsing and editor interaction; option serialization lives in admin-models-edit.
 'use strict';
 
-const modelWorkspace = { models: {}, request: 0, archiveOpen: false };
+const modelWorkspace = { models: {}, channels: {}, pendingGroup: '', request: 0, archiveOpen: false };
 // 这些输入框边输入边检查 JSON，保存时由 validateModelEditor 拦下并跳到所在页
 const MODEL_JSON_FIELDS = ['custom-params', 'extra-body-params', 'model-native-tool-options'];
 const modelEditor = { snapshot: '', saving: false, opener: null, page: 'connection', originalConfig: {} };
+// 接了渠道的模型不保存这些字段，和后端 core/model_channels.CHANNEL_FIELDS 一致
+const MODEL_CHANNEL_FIELDS = ['api_base_url', 'api_key', 'api_keys', 'api_key_auth_mode', 'api_key_strategy', 'api_key_cooldown_seconds'];
 
 function modelPrimaryConfig(config) {
     return (Array.isArray(config) ? config[0] : config) || {};
@@ -29,7 +31,7 @@ function mergeModelEditorConfig(config) {
         'enable_thinking', 'reasoning_effort', 'thinking_budget', 'thinking_effort', 'thinking_display',
         'responses_store', 'responses_reasoning_summary', 'auto_cache', 'tool_name_rewrite', 'verbosity',
         'oai_thinking_type', 'oai_thinking_effort', 'prefill_content', 'prefill_reasoning_content', 'endpoint_path', 'upstream_protocol',
-        'api_base_url', 'api_key', 'api_keys', 'api_key_auth_mode', 'api_key_strategy', 'api_key_cooldown_seconds',
+        'channel', 'api_base_url', 'api_key', 'api_keys', 'api_key_auth_mode', 'api_key_strategy', 'api_key_cooldown_seconds',
         'thinking_separator', 'custom_params', 'extra_body_params', 'pricing', 'max_temperature',
         'max_tokens', 'cached_tokens_mode', 'token_stats_mode', 'completion_tokens_mode',
         'image_compression', 'system_prompt_injection', 'auto_retry', 'session_id', 'mode',
@@ -47,8 +49,18 @@ function modelProtocol(config) {
     return ['direct_api', 'responses_native', 'anthropic_native', 'gemini_native'].includes(config.api_type) ? config.api_type : 'legacy';
 }
 
+// 接了渠道的模型，地址和 Key 以渠道为准
+function modelConnection(config) {
+    return modelWorkspace.channels[config.channel] || config;
+}
+
 function modelService(config) {
-    return config.api_base_url || (config.api_type === 'gemini_native' ? 'Google 官方默认地址' : '未指定地址');
+    return modelConnection(config).api_base_url || (config.api_type === 'gemini_native' ? 'Google 官方默认地址' : '未指定地址');
+}
+
+// 筛选用的分组：接了渠道的按渠道，其余按服务地址
+function modelGroup(config) {
+    return modelWorkspace.channels[config.channel] ? 'ch:' + config.channel : modelService(config);
 }
 
 // 地址栏和监控页给的可能是显示名称，这里换回配置里的模型名
@@ -84,10 +96,25 @@ function openModelFromList(name, copy = false) {
 
 function refreshModelProviders() {
     const select = document.getElementById('models-provider');
-    const selected = select.value;
-    const services = [...new Set(Object.values(modelWorkspace.models).map(config => modelService(modelPrimaryConfig(config))))];
-    select.replaceChildren(new Option('全部服务地址', ''), ...services.sort().map(service => new Option(service, service)));
-    if (services.includes(selected)) select.value = selected;
+    // 从渠道页跳过来时带着要看的渠道
+    const selected = modelWorkspace.pendingGroup || select.value;
+    modelWorkspace.pendingGroup = '';
+    const groups = new Set(Object.values(modelWorkspace.models).map(config => modelGroup(modelPrimaryConfig(config))));
+    const channels = Object.entries(modelWorkspace.channels)
+        .filter(([id]) => groups.has('ch:' + id))
+        .sort(([, a], [, b]) => a.name.localeCompare(b.name))
+        .map(([id, channel]) => new Option(channel.name, 'ch:' + id));
+    const services = [...groups].filter(group => !group.startsWith('ch:')).sort().map(service => new Option(service, service));
+    const section = (label, options) => {
+        const group = document.createElement('optgroup');
+        group.label = label;
+        group.append(...options);
+        return group;
+    };
+    // 没有渠道时和以前一样，只是一列服务地址
+    select.replaceChildren(new Option('全部渠道和地址', ''),
+        ...(channels.length ? [section('渠道', channels), section('没接渠道的地址', services)] : services));
+    if (Array.from(select.options).some(option => option.value === selected)) select.value = selected;
 }
 
 function applyModelFilters() {
@@ -98,8 +125,8 @@ function applyModelFilters() {
     document.querySelectorAll('#models-list .model-row').forEach(row => {
         const name = row.dataset.modelName;
         const config = modelPrimaryConfig(modelWorkspace.models[name]);
-        const matches = (!protocol || modelProtocol(config) === protocol) && (!provider || modelService(config) === provider)
-            && [name, config.model_id, config.display_name, modelService(config)].some(value => String(value || '').toLocaleLowerCase().includes(query));
+        const matches = (!protocol || modelProtocol(config) === protocol) && (!provider || modelGroup(config) === provider)
+            && [name, config.model_id, config.display_name, modelService(config), modelWorkspace.channels[config.channel]?.name].some(value => String(value || '').toLocaleLowerCase().includes(query));
         row.hidden = !matches;
         if (!matches) row.querySelector('.model-checkbox').checked = false;
         else { visible++; if (isModelConfigArchived(modelWorkspace.models[name])) archived++; else active++; }
@@ -143,6 +170,9 @@ function resetModelEditorForm() {
         } else el.value = el.defaultValue;
     });
     for (const id of ['model-select-container', 'key-test-results']) document.getElementById(id).style.display = 'none';
+    // 渠道可能刚改过，选项每次重建；先回到不用渠道并解锁，填表时再按模型的配置选上
+    refreshModelChannelOptions();
+    applyModelChannel();
 }
 
 function selectModelSettings(page) {

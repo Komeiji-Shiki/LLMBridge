@@ -23,6 +23,11 @@ function updateArchiveButtons() {
     if (archiveBtn) archiveBtn.disabled = activeChecked === 0;
     if (restoreBtn) restoreBtn.disabled = archivedChecked === 0;
     if (archiveBtn) archiveBtn.textContent = activeChecked ? `归档所选（${activeChecked}）` : '归档所选';
+    const channelBtn = document.getElementById('channel-selected-btn');
+    if (channelBtn) {
+        channelBtn.disabled = activeChecked + archivedChecked === 0;
+        channelBtn.textContent = channelBtn.disabled ? '改用渠道' : `改用渠道（${activeChecked + archivedChecked}）`;
+    }
     for (const [tbodyId, headerId] of [['models-tbody', 'select-all-active'], ['archived-models-tbody', 'select-all-archived']]) {
         const header = document.getElementById(headerId);
         if (!header) continue;
@@ -47,6 +52,7 @@ async function loadModels() {
         const data = await response.json();
         if (request !== modelWorkspace.request) return;
         modelWorkspace.models = data.model_endpoint_map || {};
+        modelWorkspace.channels = data.channels || {};
         refreshModelProviders();
         
         const modelsHtml = Object.keys(data.model_endpoint_map).length > 0
@@ -72,7 +78,9 @@ function buildModelsRow(name, cfg, isArchived) {
     const labels = { direct_api: 'OpenAI 兼容', responses_native: 'Responses', anthropic_native: 'Anthropic', gemini_native: 'Gemini', legacy: 'LMArena · 已弃用' };
     const endpoint = cfg.endpoint_path || ({direct_api:'/chat/completions', responses_native:'/responses', anthropic_native:'/messages', gemini_native: cfg.upstream_protocol === 'interactions' ? '/v1beta/interactions' : 'generateContent'}[protocol] || '会话连接');
     const attr = escapeHtml(name);
-    const keyCount = Array.isArray(cfg.api_keys) && cfg.api_keys.length ? cfg.api_keys.length : (cfg.api_key ? 1 : 0);
+    const channel = modelWorkspace.channels[cfg.channel];
+    const connection = modelConnection(cfg);
+    const keyCount = Array.isArray(connection.api_keys) && connection.api_keys.length ? connection.api_keys.length : (connection.api_key ? 1 : 0);
     const flags = [cfg.auto_retry?.enabled ? '自动重试' : '', cfg.image_compression?.enabled ? '图片压缩' : '', cfg.enable_thinking ? '思考配置' : '', cfg.passthrough && protocol === 'direct_api' ? '透传' : ''].filter(Boolean);
     return `<tr class="model-row${isArchived ? ' model-row-archived' : ''}" data-model-name="${attr}">
         <td><input type="checkbox" class="model-checkbox" onchange="updateArchiveButtons()" aria-label="选择 ${attr}"></td>
@@ -80,7 +88,7 @@ function buildModelsRow(name, cfg, isArchived) {
         <td class="model-identity" title="${attr}"><button class="model-name" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">${attr}</button>
             <div class="model-subtitle">${escapeHtml(cfg.display_name && cfg.display_name !== name ? cfg.display_name : cfg.model_id || name)}</div>
             <div class="model-flags"><span class="badge ${isArchived ? 'badge-info' : 'badge-success'}">${isArchived ? '已归档' : '可用'}</span>${flags.map(flag => `<span class="badge badge-info">${flag}</span>`).join('')}</div></td>
-        <td class="model-connection"><span class="badge badge-info">${labels[protocol]}</span>
+        <td class="model-connection"><span class="badge badge-info">${labels[protocol]}</span>${channel ? `<button class="badge badge-channel" data-channel-id="${escapeHtml(cfg.channel)}" onclick="navigateTo('channels', this.dataset.channelId)" title="地址和 Key 来自这个渠道，点击去编辑">${escapeHtml(channel.name)}</button>` : ''}
             <div class="model-subtitle" title="${escapeHtml(modelService(cfg))}">${escapeHtml(modelService(cfg))}</div><div class="model-subtitle">${escapeHtml(endpoint)} · ${keyCount ? keyCount + ' 个 Key' : '无需认证'}</div></td>
         <td><div class="model-actions"><button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">设置</button>
             <details class="model-more"><summary class="btn btn-sm" aria-label="${attr} 的更多操作">更多</summary>

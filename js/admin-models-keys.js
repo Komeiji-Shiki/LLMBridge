@@ -9,12 +9,13 @@ let _apiKeyRowCounter = 0; // 用于生成唯一的行ID
 /**
  * 添加一个 API Key 输入行
  * @param {string} value - 预填的 API Key 值（编辑时使用）
+ * @param {string} listId - 放进哪个列表：模型编辑窗（默认）或渠道编辑窗
  */
-function addApiKeyRow(value = '') {
+function addApiKeyRow(value = '', listId = 'model-api-keys-list') {
     _apiKeyRowCounter++;
     const rowId = `api-key-row-${_apiKeyRowCounter}`;
 
-    const container = document.getElementById('model-api-keys-list');
+    const container = document.getElementById(listId);
     if (!container) {
         console.error('[API-Key] 容器 #model-api-keys-list 未找到！请刷新页面重试。');
         showMessage('warning', 'API Key 输入容器未找到，请刷新页面重试。');
@@ -44,13 +45,15 @@ function addApiKeyRow(value = '') {
 
 // Google OAuth 模式下这一栏填的是凭据，提示跟着鉴权方式切换
 function updateApiKeyInputHints() {
-    const oauth = document.getElementById('api-key-auth-mode').value === 'google-oauth';
-    document.querySelectorAll('#model-api-keys-list .api-key-input').forEach(input => {
-        input.placeholder = oauth
-            ? '凭据文件路径（如 C:/secrets/vertex-sa.json）或单行凭据 JSON'
-            : 'sk-...（留空表示不使用此Key）';
-        input.setAttribute('aria-label', oauth ? 'Google 凭据' : '上游 API Key');
-    });
+    for (const [listId, authModeId] of [['model-api-keys-list', 'api-key-auth-mode'], ['channel-api-keys-list', 'channel-auth-mode']]) {
+        const oauth = document.getElementById(authModeId).value === 'google-oauth';
+        document.querySelectorAll(`#${listId} .api-key-input`).forEach(input => {
+            input.placeholder = oauth
+                ? '凭据文件路径（如 C:/secrets/vertex-sa.json）或单行凭据 JSON'
+                : 'sk-...（留空表示不使用此Key）';
+            input.setAttribute('aria-label', oauth ? 'Google 凭据' : '上游 API Key');
+        });
+    }
 }
 
 /**
@@ -66,14 +69,14 @@ function removeApiKeyRow(rowId) {
 /**
  * 清空所有 API Key 输入行
  */
-function clearApiKeyRows() {
-    const container = document.getElementById('model-api-keys-list');
+function clearApiKeyRows(listId = 'model-api-keys-list') {
+    const container = document.getElementById(listId);
     if (!container) {
         console.error('[API-Key] 容器 #model-api-keys-list 未找到（clearApiKeyRows）！');
         return;
     }
+    // 行 ID 的计数不归零：模型和渠道两个列表共用，归零会撞 ID
     container.innerHTML = '';
-    _apiKeyRowCounter = 0;
 }
 
 /**
@@ -249,8 +252,8 @@ async function autoStickyToBestBalanceKey(keys, results, rows) {
  * 获取所有非空的 API Key
  * @returns {string[]} 非空 API Key 数组
  */
-function getApiKeys() {
-    const inputs = document.querySelectorAll('.api-key-input');
+function getApiKeys(listId = 'model-api-keys-list') {
+    const inputs = document.querySelectorAll(`#${listId} .api-key-input`);
     const keys = [];
     inputs.forEach(input => {
         const value = input.value.trim();

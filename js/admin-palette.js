@@ -19,7 +19,14 @@
                 open: () => navigateTo('models', name),
             };
         });
-        return pages.concat(models);
+        const channels = Object.entries(modelWorkspace.channels).map(([id, channel]) => ({
+            kind: '渠道',
+            label: channel.name,
+            hint: channel.api_base_url || '',
+            search: `${channel.name} ${channel.api_base_url || ''}`.toLowerCase(),
+            open: () => navigateTo('channels', id),
+        }));
+        return pages.concat(channels, models);
     }
 
     function render() {
@@ -54,7 +61,7 @@
         overlay.innerHTML = `<div class="modal-content palette" role="dialog" aria-modal="true" aria-label="快速跳转">
             <input class="form-input" type="search" placeholder="跳到页面，或输入模型名直接打开设置" aria-label="搜索页面和模型" autocomplete="off" spellcheck="false">
             <div class="palette-list" role="listbox"></div>
-            <div class="palette-empty" hidden>没有匹配的页面或模型</div>
+            <div class="palette-empty" hidden>没有匹配的页面、渠道或模型</div>
             <div class="palette-foot">↑ ↓ 选择 · Enter 打开 · Esc 关闭</div>
         </div>`;
         const input = overlay.querySelector('input');

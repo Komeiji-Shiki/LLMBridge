@@ -977,3 +977,112 @@ def test_editor_steps_to_neighbouring_models(ui):
     page.locator('.dialog').get_by_role('button', name='放弃修改').click()
     page.get_by_role('button', name='添加模型').click()
     assert page.locator('#model-stepper').is_hidden()
+
+
+CHANNELS = {'ch-main': {'name': '主力上游', 'api_base_url': 'https://shared.example/v1', 'api_keys': ['shared-a', 'shared-b'],
+                        'api_key_strategy': 'sticky'}}
+
+
+def use_channels(page, models, channels):
+    """模型列表接口带上渠道表，渠道列表接口按同一份数据回应；写操作仍落到夹具里记录。"""
+    def models_route(route):
+        if route.request.method != 'GET':
+            return route.fallback()
+        route.fulfill(json={'model_endpoint_map': models, 'channels': channels})
+
+    def channels_route(route):
+        if route.request.method != 'GET':
+            return route.fallback()
+        usage = {channel_id: [name for name, config in models.items() if isinstance(config, dict) and config.get('channel') == channel_id]
+                 for channel_id in channels}
+        route.fulfill(json={'channels': channels, 'usage': {channel_id: names for channel_id, names in usage.items() if names}})
+
+    page.route('**/api/admin/models', models_route)
+    page.route('**/api/admin/channels', channels_route)
+
+
+def test_channel_model_shows_channel_connection_and_saves_only_the_reference(ui):
+    page, models, writes, _ = ui
+    models['Alpha'] = {'api_type': 'direct_api', 'model_id': 'upstream-alpha', 'channel': 'ch-main'}
+    use_channels(page, models, CHANNELS)
+    page.evaluate('loadModels()')
+    row = page.locator('.model-row[data-model-name="Alpha"]')
+    row.locator('.badge-channel', has_text='主力上游').wait_for()
+    assert 'https://shared.example/v1' in row.inner_text() and '2 个 Key' in row.inner_text()
+    page.locator('#models-provider').select_option('ch:ch-main')
+    assert page.locator('.model-row:visible').count() == 1
+    page.locator('#models-query').fill('主力')
+    assert page.locator('.model-row:visible').count() == 1
+
+    row.locator('.model-name').click()
+    assert page.locator('#model-channel').input_value() == 'ch-main'
+    assert page.locator('#api-base-url').input_value() == 'https://shared.example/v1'
+    assert page.locator('#api-base-url').is_disabled() and page.locator('#api-key-strategy').is_disabled()
+    assert page.locator('#model-api-keys-list .api-key-input').count() == 2
+    assert page.locator('button[onclick="addApiKeyRow()"]').is_hidden()
+    page.locator('#display-name').fill('阿尔法')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    saved = writes[-1]['config']
+    assert saved['channel'] == 'ch-main' and saved['display_name'] == '阿尔法'
+    assert not {'api_base_url', 'api_key', 'api_keys', 'api_key_strategy'} & set(saved)
+
+    # 改回不用渠道：渠道里的值留在表单里，随模型一起保存
+    page.wait_for_function("modelWorkspace.models.Alpha.display_name === '阿尔法'")
+    page.locator('.model-row[data-model-name="Alpha"] .model-name').click()
+    page.locator('#model-channel').select_option('')
+    assert not page.locator('#api-base-url').is_disabled()
+    assert page.locator('#model-save-status').inner_text() == '有未保存的修改'
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    saved = writes[-1]['config']
+    assert 'channel' not in saved and saved['api_base_url'] == 'https://shared.example/v1'
+    assert saved['api_keys'] == ['shared-a', 'shared-b'] and saved['api_key_strategy'] == 'sticky'
+
+
+def test_channels_page_rotates_keys_and_assigns_selected_models(ui):
+    page, models, writes, _ = ui
+    models['Alpha'] = {'api_type': 'direct_api', 'channel': 'ch-main'}
+    use_channels(page, models, CHANNELS)
+    page.route('**/api/admin/channels/suggest', lambda route: route.fulfill(json={'suggestions': [
+        {'channel_id': None, 'name': 'beta.example', 'api_base_url': 'https://beta.example/v1', 'key_count': 2, 'models': ['Beta', 'Gamma']}]}))
+    page.locator('[data-page="channels"]').click()
+    row = page.locator('#channels-list tr[data-channel-id="ch-main"]')
+    row.wait_for()
+    assert '2 个 Key · 粘性轮询' in row.inner_text()
+    assert '有 2 个模型' in page.locator('#channels-suggest-text').inner_text()
+
+    # 换 Key 只提交渠道
+    row.get_by_role('button', name='编辑').click()
+    assert page.evaluate('location.hash') == '#channels/ch-main'
+    assert page.locator('#channel-key-cooldown-group').is_visible()
+    page.locator('#channel-api-keys-list .api-key-input').first.fill('rotated')
+    page.locator('#channel-save-btn').click()
+    page.wait_for_selector('#channel-modal', state='hidden')
+    assert writes[-1] == {'path': '/api/admin/channels', 'id': 'ch-main', 'channel': {
+        'name': '主力上游', 'api_base_url': 'https://shared.example/v1', 'api_keys': ['rotated', 'shared-b'],
+        'api_key_auth_mode': 'auto', 'api_key_strategy': 'sticky'}}
+    assert page.evaluate('location.hash') == '#channels'
+
+    # 从渠道跳到模型列表，只看它的模型
+    row.get_by_role('button', name='1 个模型').click()
+    page.wait_for_function("document.getElementById('models-provider').value === 'ch:ch-main'")
+    assert page.evaluate('location.hash') == '#models' and page.locator('.model-row:visible').count() == 1
+
+    # 勾选别的模型批量改用
+    page.get_by_role('button', name='清除筛选').click()
+    assert page.locator('#channel-selected-btn').is_disabled()
+    page.locator('.model-row[data-model-name="Beta"] .model-checkbox').check()
+    page.locator('#channel-selected-btn').click()
+    dialog = page.locator('.dialog')
+    assert dialog.locator('select').input_value() == 'ch-main'
+    with page.expect_response('**/api/admin/models/channel'):
+        dialog.get_by_role('button', name='改用', exact=True).click()
+    assert writes[-1] == {'path': '/api/admin/models/channel', 'model_names': ['Beta'], 'channel': 'ch-main'}
+
+    # 快速跳转能直接打开渠道
+    page.keyboard.press('Control+k')
+    page.locator('.palette input').fill('主力上游')
+    page.keyboard.press('Enter')
+    page.wait_for_selector('#channel-modal.active')
+    assert page.locator('#channel-name').input_value() == '主力上游'
