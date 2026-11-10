@@ -54,6 +54,15 @@ function modelConnection(config) {
     return modelWorkspace.channels[config.channel] || config;
 }
 
+// 模型实际生效的配置：渠道的默认设置打底，模型自己写的盖在上面，写成 null 的项表示明确不设置
+function modelEffective(config) {
+    const defaults = modelWorkspace.channels[config.channel]?.defaults;
+    if (!defaults) return config;
+    const merged = { ...defaults, ...config };
+    for (const field of Object.keys(defaults)) if (merged[field] === null) delete merged[field];
+    return merged;
+}
+
 function modelService(config) {
     return modelConnection(config).api_base_url || (config.api_type === 'gemini_native' ? 'Google 官方默认地址' : '未指定地址');
 }

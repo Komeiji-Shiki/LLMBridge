@@ -9,6 +9,12 @@ const CHANNEL_SORT_KEY = 'llmbridge.channels.sort';
 const CHANNEL_COLUMNS = [['name', '渠道', false], ['address', '服务地址', false], ['keys', 'Key', true], ['models', '模型', true]];
 
 const channelWorkspace = { usage: {}, suggestions: [], editing: null, snapshot: '', expanded: new Set(), sort: loadChannelSort() };
+// 渠道可以统一给默认值的模型设置，和后端 core/model_channels.DEFAULT_FIELDS 一致
+const CHANNEL_DEFAULT_LABELS = {
+    passthrough: '透传', convert_system_to_user: 'System 转 User', enable_prefix: 'Prefix 续写', enable_partial: 'Partial 续写',
+    force_stream: '流式模式', first_chunk_timeout_seconds: '首块超时', cached_tokens_mode: '缓存 Token 统计',
+    auto_retry: '自动重试', image_compression: '图片压缩',
+};
 
 function loadChannelSort() {
     try {
@@ -54,11 +60,12 @@ async function postChannelApi(path, body = {}) {
 
 async function loadChannels() {
     try {
-        const [listing, preview] = await Promise.all(['/api/admin/channels', '/api/admin/channels/suggest'].map(async path => {
+        // 模型配置一起刷新：改渠道会连带改模型，“模型现在各是什么”和测 Key 都要用最新的
+        const [listing, preview] = await Promise.all([...['/api/admin/channels', '/api/admin/channels/suggest'].map(async path => {
             const response = await fetch(path);
             await ensureOk(response);
             return response.json();
-        }));
+        }), loadModels()]);
         modelWorkspace.channels = listing.channels || {};
         channelWorkspace.usage = listing.usage || {};
         channelWorkspace.suggestions = preview.suggestions || [];
@@ -117,8 +124,9 @@ function buildChannelRow(id, channel) {
     const open = users.length > 0 && channelWorkspace.expanded.has(id);
     const address = escapeHtml(channel.api_base_url || '协议默认地址');
     const previews = keys.slice(0, 2).map(channelKeyPreview).join('、') + (keys.length > 2 ? ' 等' : '');
+    const unified = Object.keys(channel.defaults || {}).map(field => CHANNEL_DEFAULT_LABELS[field] || field).join('、');
     const row = `<tr data-channel-id="${attr}"${users.length ? (open ? ' class="channel-open"' : '') : ' class="channel-idle"'}>
-        <td><button class="model-name" data-channel-id="${attr}" onclick="openChannelModal(this.dataset.channelId)">${escapeHtml(channel.name)}</button></td>
+        <td><button class="model-name" data-channel-id="${attr}" onclick="openChannelModal(this.dataset.channelId)">${escapeHtml(channel.name)}</button>${unified ? `<div class="model-subtitle">统一设置：${escapeHtml(unified)}</div>` : ''}</td>
         <td class="channel-address" title="${address}">${address}</td>
         <td>${channelKeySummary(channel)}${keys.length ? `<div class="model-subtitle channel-key-preview">${escapeHtml(previews)}</div>` : ''}</td>
         <td>${users.length
@@ -210,7 +218,7 @@ function toggleChannelStrategyOptions() {
 function channelFormSnapshot() {
     // 测 Key 用哪个模型不属于渠道内容
     return JSON.stringify(Array.from(document.querySelectorAll('#channel-modal input, #channel-modal select'))
-        .filter(el => el.id !== 'channel-test-model').map(el => el.value));
+        .filter(el => el.id !== 'channel-test-model').map(el => el.type === 'checkbox' ? el.checked : el.value));
 }
 
 function updateChannelSaveStatus() {
@@ -235,6 +243,7 @@ function openChannelModal(id = null, copyFrom = null) {
     document.getElementById('channel-key-strategy').value = channel.api_key_strategy || 'round_robin';
     document.getElementById('channel-key-cooldown').value = channel.api_key_cooldown_seconds || '';
     toggleChannelStrategyOptions();
+    fillChannelDefaults(channel.defaults || {});
     clearApiKeyRows('channel-api-keys-list');
     const keys = channel.api_keys || [];
     (keys.length ? keys : ['']).forEach(key => addApiKeyRow(key, 'channel-api-keys-list'));
@@ -250,6 +259,7 @@ function openChannelModal(id = null, copyFrom = null) {
     document.getElementById('channel-usage-note').textContent = users.length
         ? `${users.length} 个模型在用这个渠道，保存后立即生效，不需要重启。`
         : '还没有模型用这个渠道。到模型列表勾选模型后点“改用渠道”，或者在模型设置里选它。';
+    renderChannelDefaultNotes();
     // 地址栏记下正在编辑的渠道，刷新后回到这里
     if (id) history.replaceState(null, '', routeHash('channels', id));
     channelWorkspace.snapshot = channelFormSnapshot();
@@ -257,6 +267,50 @@ function openChannelModal(id = null, copyFrom = null) {
     document.getElementById('channel-modal').classList.add('active');
     nameInput.focus();
     if (copyFrom) nameInput.select();
+}
+
+// ==================== 渠道统一给模型的默认设置 ====================
+
+function fillChannelDefaults(defaults) {
+    document.querySelectorAll('[data-channel-default]').forEach(control => {
+        const value = defaults[control.dataset.channelDefault];
+        control.value = value === undefined ? '' : String(value);
+    });
+    loadAutoRetryConfig(defaults.auto_retry, 'channel-');
+    loadImageCompressionConfig(defaults.image_compression, 'channel-');
+}
+
+// 留在“各模型自己定”的项不进默认设置
+function readChannelDefaults() {
+    const defaults = {};
+    document.querySelectorAll('[data-channel-default]').forEach(control => {
+        if (control.value === '') return;
+        const kind = control.dataset.kind;
+        defaults[control.dataset.channelDefault] = kind === 'boolean' ? control.value === 'true' : (kind === 'number' ? Number(control.value) : control.value);
+    });
+    const autoRetry = getAutoRetryConfig('channel-');
+    if (autoRetry) defaults.auto_retry = autoRetry;
+    const imageCompression = getImageCompressionConfig('channel-');
+    if (imageCompression) defaults.image_compression = imageCompression;
+    return defaults;
+}
+
+// 每个开关下面写上用这个渠道的模型现在各是什么，改之前心里有数
+function renderChannelDefaultNotes() {
+    const users = channelWorkspace.editing ? (channelWorkspace.usage[channelWorkspace.editing] || []) : [];
+    document.querySelectorAll('select[data-channel-default]').forEach(control => {
+        const field = control.dataset.channelDefault;
+        const counts = new Map();
+        for (const name of users) {
+            if (!modelWorkspace.models[name]) continue;
+            const value = modelEffective(modelPrimaryConfig(modelWorkspace.models[name]))[field];
+            const label = value === undefined ? '没设置'
+                : (Array.from(control.options).find(option => option.value === String(value))?.textContent || String(value));
+            counts.set(label, (counts.get(label) || 0) + 1);
+        }
+        document.querySelector(`[data-default-note="${field}"]`).textContent =
+            counts.size ? '模型现在：' + Array.from(counts, ([label, count]) => `${label} ${count}`).join(' · ') : '';
+    });
 }
 
 // 有没保存的修改时先问；返回 false 表示留在编辑窗里
@@ -288,10 +342,24 @@ async function saveChannel() {
     };
     const cooldown = parseInt(document.getElementById('channel-key-cooldown').value, 10);
     if (cooldown > 0) channel.api_key_cooldown_seconds = cooldown;
+    const defaults = readChannelDefaults();
+    if (Object.keys(defaults).length) channel.defaults = defaults;
 
     button.disabled = true;
     try {
-        const result = await postChannelApi('/api/admin/channels', { id: channelWorkspace.editing, channel });
+        let result = await postChannelApi('/api/admin/channels', { id: channelWorkspace.editing, channel });
+        if (result.status === 'conflict') {
+            // 有模型在这次改的项上自己设了不一样的值：问清楚是跟着渠道改，还是各自保留
+            const lines = Object.entries(result.conflicts).map(([field, names]) =>
+                `${CHANNEL_DEFAULT_LABELS[field] || field}：${names.slice(0, 4).join('、')}${names.length > 4 ? ` 等 ${names.length} 个` : ''}`);
+            const override = await confirmDialog({
+                title: '有模型的设置和渠道不一样',
+                message: `这些模型现在的取值和这次设的渠道默认值不同：\n\n${lines.join('\n')}\n\n渠道都会保存。要不要让它们也改成跟随渠道？`,
+                confirmText: '都跟随渠道',
+                cancelText: '保留它们的设置'
+            });
+            result = await postChannelApi('/api/admin/channels', { id: channelWorkspace.editing, channel, override });
+        }
         closeChannelModal(true);
         showMessage('success', result.message || '渠道已保存');
         loadChannels();
@@ -309,8 +377,6 @@ async function testChannelKeys() {
         showMessage('warning', '请先填写至少一个 API Key');
         return;
     }
-    // 直接打开渠道页时模型配置还没读过
-    if (!Object.keys(modelWorkspace.models).length) await loadModels();
     const modelName = document.getElementById('channel-test-model').value;
     const config = modelPrimaryConfig(modelWorkspace.models[modelName]);
     if (!config.api_type) {
@@ -391,8 +457,8 @@ function refreshModelChannelOptions() {
 }
 
 // 选了渠道：地址、Key、鉴权方式和轮询策略显示渠道里的值并锁住（测 Key、从 API 获取模型照常能用）；
-// 改回不用渠道时这些值留在表单里，相当于给模型留一份。
-function applyModelChannel() {
+// 改回不用渠道时这些值留在表单里，相当于给模型留一份。userChanged 表示是用户在下拉框里手动换的。
+function applyModelChannel(userChanged = false) {
     const channel = modelWorkspace.channels[document.getElementById('model-channel').value];
     if (channel) {
         document.getElementById('api-base-url').value = channel.api_base_url || '';
@@ -403,9 +469,25 @@ function applyModelChannel() {
         clearApiKeyRows();
         (channel.api_keys || []).forEach(key => addApiKeyRow(key));
     }
+    if (channel && userChanged) {
+        // 手动换了渠道：渠道统一设置的项，表单跟着换成渠道的默认值，之后还可以单独改
+        for (const [field, value] of Object.entries(channel.defaults || {})) MODEL_DEFAULT_FILLERS[field]?.(value);
+    }
     document.getElementById('settings-connection').classList.toggle('channel-locked', Boolean(channel));
     document.querySelectorAll('[data-channel-field] input, [data-channel-field] select').forEach(el => { el.disabled = Boolean(channel); });
     document.getElementById('model-channel-edit').hidden = !channel;
+
+    // 渠道统一了哪些设置、这个模型又在哪几项上不一样
+    const unified = Object.keys(channel?.defaults || {});
+    const own = modelPrimaryConfig(modelEditor.originalConfig);
+    const differing = own.channel === document.getElementById('model-channel').value ? unified.filter(field => field in own) : [];
+    const label = fields => fields.map(field => CHANNEL_DEFAULT_LABELS[field] || field).join('、');
+    const note = document.getElementById('model-channel-overrides');
+    note.hidden = !unified.length;
+    note.textContent = unified.length
+        ? `渠道统一设置了${label(unified)}，在对应的设置页里显示的是渠道的值，可以单独改。`
+            + (differing.length ? `这个模型现在有 ${differing.length} 项和渠道不同：${label(differing)}；改成和渠道一样再保存，就会重新跟随渠道。` : '')
+        : '';
 }
 
 async function editModelChannel() {

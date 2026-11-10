@@ -4,6 +4,19 @@ function toggleCollapsible(headerElement) {
     section.classList.toggle('collapsed');
 }
 
+// 渠道可以给默认值的那几项的回填：打开模型时按生效的配置填，手动换渠道时按渠道的默认值填
+const MODEL_DEFAULT_FILLERS = {
+    passthrough: value => { document.getElementById('passthrough').checked = value !== false; },
+    convert_system_to_user: value => { document.getElementById('convert-system-to-user').checked = value || false; },
+    enable_prefix: value => { document.getElementById('enable-prefix').checked = value || false; },
+    enable_partial: value => { document.getElementById('enable-partial').checked = value || false; },
+    force_stream: value => { document.getElementById('force-stream').value = value !== undefined ? String(value) : ''; },
+    first_chunk_timeout_seconds: value => { document.getElementById('model-first-chunk-timeout').value = value || ''; },
+    cached_tokens_mode: value => { document.getElementById('cached-tokens-mode').value = value || 'reverse'; },
+    image_compression: value => loadImageCompressionConfig(value),
+    auto_retry: value => loadAutoRetryConfig(value),
+};
+
 function showAddModelModal() {
     resetModelEditorForm();
     modelEditor.originalConfig = {};
@@ -120,7 +133,8 @@ function editModel(name, config) {
 function fillModelForm(config) {
     resetModelEditorForm();
     modelEditor.originalConfig = structuredClone(config);
-    config = modelPrimaryConfig(config);
+    // 表单按生效的配置填：没单独改过的项显示渠道的默认值
+    config = modelEffective(modelPrimaryConfig(config));
     
     if (config.api_type === 'direct_api' || config.api_type === 'responses_native' || config.api_type === 'gemini_native' || config.api_type === 'anthropic_native') {
         document.getElementById('config-type').value = 'direct_api';
@@ -156,16 +170,11 @@ function fillModelForm(config) {
         document.getElementById('endpoint-path').value = config.endpoint_path || '';
         // Gemini 上游协议（generate_content 为默认值）
         document.getElementById('upstream-protocol').value = config.upstream_protocol || 'generate_content';
-        document.getElementById('passthrough').checked = config.passthrough !== false;
+        for (const [field, fill] of Object.entries(MODEL_DEFAULT_FILLERS)) fill(config[field]);
         document.getElementById('model-provider').value = config.provider || '';
         document.getElementById('model-family').value = config.model_family || '';
-        document.getElementById('model-first-chunk-timeout').value = config.first_chunk_timeout_seconds || '';
         document.getElementById('model-native-tools').value = (config.native_tools || []).join(', ');
         document.getElementById('model-native-tool-options').value = config.native_tool_options ? JSON.stringify(config.native_tool_options, null, 2) : '';
-        document.getElementById('force-stream').value = config.force_stream !== undefined ? String(config.force_stream) : '';
-        document.getElementById('convert-system-to-user').checked = config.convert_system_to_user || false;
-        document.getElementById('enable-prefix').checked = config.enable_prefix || false;
-        document.getElementById('enable-partial').checked = config.enable_partial || false;
         document.getElementById('prefill-content').value = config.prefill_content || '';
         document.getElementById('prefill-reasoning-content').value = config.prefill_reasoning_content || '';
         // 思维链模式：兼容旧的 thinking_mode 配置和布尔值 enable_thinking
@@ -234,20 +243,11 @@ function fillModelForm(config) {
         // 加载最大输出Token限制
         document.getElementById('max-tokens').value = config.max_tokens || '';
         
-        // 加载缓存Token统计模式
-        document.getElementById('cached-tokens-mode').value = config.cached_tokens_mode || 'reverse';
-        
         // 加载Token统计来源
         document.getElementById('token-stats-mode').value = config.token_stats_mode || 'api';
 
         // 加载思考Token是否计入输出Token（不写入配置时为默认相加）
         document.getElementById('completion-tokens-mode').checked = config.completion_tokens_mode !== 'separate';
-        
-        // 加载图片压缩配置
-        loadImageCompressionConfig(config.image_compression);
-        
-        // 加载自动重试配置
-        loadAutoRetryConfig(config.auto_retry);
         
         // 加载系统提示词注入配置
         loadSystemInjectionConfig(config.system_prompt_injection);
@@ -628,6 +628,11 @@ async function saveModel() {
         if (lmarenaMaxTokens) {
             config.max_tokens = parseInt(lmarenaMaxTokens);
         }
+    }
+
+    // 渠道给了默认值而表单里没有值的项，明确存成“不设置”；不写的话会被当成跟随渠道
+    for (const field of Object.keys(modelWorkspace.channels[config.channel]?.defaults || {})) {
+        if (!(field in config)) config[field] = null;
     }
 
     // 编辑已归档模型时保留归档状态（不因编辑保存而意外解除归档）

@@ -1,71 +1,72 @@
 'use strict';
+// 下面几组读写函数的 prefix：模型编辑窗不带，渠道编辑窗里同名控件的 id 前面多一个 channel-
 // 重置图片压缩字段
-function resetImageCompressionFields() {
-    document.getElementById('img-compression-enabled').checked = false;
-    document.getElementById('img-target-format').value = '';
-    document.getElementById('img-quality').value = '';
-    document.getElementById('img-target-size-kb').value = '';
-    document.getElementById('img-max-width').value = '';
-    document.getElementById('img-max-height').value = '';
-    document.getElementById('img-convert-png-to-jpg').checked = false;
-    document.getElementById('img-compression-options').style.display = 'none';
+function resetImageCompressionFields(prefix = '') {
+    document.getElementById(prefix + 'img-compression-enabled').checked = false;
+    document.getElementById(prefix + 'img-target-format').value = '';
+    document.getElementById(prefix + 'img-quality').value = '';
+    document.getElementById(prefix + 'img-target-size-kb').value = '';
+    document.getElementById(prefix + 'img-max-width').value = '';
+    document.getElementById(prefix + 'img-max-height').value = '';
+    document.getElementById(prefix + 'img-convert-png-to-jpg').checked = false;
+    document.getElementById(prefix + 'img-compression-options').style.display = 'none';
 }
 
 // 切换图片压缩选项显示
-function toggleImageCompressionOptions() {
-    const enabled = document.getElementById('img-compression-enabled').checked;
-    document.getElementById('img-compression-options').style.display = enabled ? 'block' : 'none';
+function toggleImageCompressionOptions(prefix = '') {
+    const enabled = document.getElementById(prefix + 'img-compression-enabled').checked;
+    document.getElementById(prefix + 'img-compression-options').style.display = enabled ? 'block' : 'none';
 }
 
 // 重置自动重试字段
-function resetAutoRetryFields() {
-    document.getElementById('auto-retry-enabled').checked = false;
-    document.getElementById('auto-retry-max-retries').value = '2';
-    document.getElementById('auto-retry-delay-seconds').value = '2';
-    document.getElementById('auto-retry-on-429').checked = true;
-    document.getElementById('auto-retry-on-503').checked = true;
-    document.getElementById('auto-retry-on-other-errors').checked = false;
-    document.getElementById('auto-retry-options').style.display = 'none';
+function resetAutoRetryFields(prefix = '') {
+    document.getElementById(prefix + 'auto-retry-enabled').checked = false;
+    document.getElementById(prefix + 'auto-retry-max-retries').value = '2';
+    document.getElementById(prefix + 'auto-retry-delay-seconds').value = '2';
+    document.getElementById(prefix + 'auto-retry-on-429').checked = true;
+    document.getElementById(prefix + 'auto-retry-on-503').checked = true;
+    document.getElementById(prefix + 'auto-retry-on-other-errors').checked = false;
+    document.getElementById(prefix + 'auto-retry-options').style.display = 'none';
 }
 
 // 切换自动重试选项显示
-function toggleAutoRetryOptions() {
-    const enabled = document.getElementById('auto-retry-enabled').checked;
-    document.getElementById('auto-retry-options').style.display = enabled ? 'block' : 'none';
+function toggleAutoRetryOptions(prefix = '') {
+    const enabled = document.getElementById(prefix + 'auto-retry-enabled').checked;
+    document.getElementById(prefix + 'auto-retry-options').style.display = enabled ? 'block' : 'none';
 }
 
 // 加载自动重试配置到表单
-function loadAutoRetryConfig(autoRetryConfig) {
+function loadAutoRetryConfig(autoRetryConfig, prefix = '') {
     if (autoRetryConfig && autoRetryConfig.enabled) {
-        document.getElementById('auto-retry-enabled').checked = true;
-        document.getElementById('auto-retry-options').style.display = 'block';
-        document.getElementById('auto-retry-max-retries').value = autoRetryConfig.max_retries ?? 2;
-        document.getElementById('auto-retry-delay-seconds').value = autoRetryConfig.retry_delay_seconds ?? 2;
-        document.getElementById('auto-retry-on-429').checked = autoRetryConfig.retry_on_429 !== false;
-        document.getElementById('auto-retry-on-503').checked = autoRetryConfig.retry_on_503 !== false;
-        document.getElementById('auto-retry-on-other-errors').checked = autoRetryConfig.retry_on_other_errors || false;
+        document.getElementById(prefix + 'auto-retry-enabled').checked = true;
+        document.getElementById(prefix + 'auto-retry-options').style.display = 'block';
+        document.getElementById(prefix + 'auto-retry-max-retries').value = autoRetryConfig.max_retries ?? 2;
+        document.getElementById(prefix + 'auto-retry-delay-seconds').value = autoRetryConfig.retry_delay_seconds ?? 2;
+        document.getElementById(prefix + 'auto-retry-on-429').checked = autoRetryConfig.retry_on_429 !== false;
+        document.getElementById(prefix + 'auto-retry-on-503').checked = autoRetryConfig.retry_on_503 !== false;
+        document.getElementById(prefix + 'auto-retry-on-other-errors').checked = autoRetryConfig.retry_on_other_errors || false;
     } else {
-        resetAutoRetryFields();
+        resetAutoRetryFields(prefix);
     }
 }
 
 // 获取自动重试配置
-function getAutoRetryConfig() {
-    const enabled = document.getElementById('auto-retry-enabled').checked;
+function getAutoRetryConfig(prefix = '') {
+    const enabled = document.getElementById(prefix + 'auto-retry-enabled').checked;
     if (!enabled) {
         return null;
     }
 
-    const maxRetries = Math.max(0, parseInt(document.getElementById('auto-retry-max-retries').value) || 0);
-    const retryDelaySeconds = Math.max(0, parseFloat(document.getElementById('auto-retry-delay-seconds').value) || 0);
+    const maxRetries = Math.max(0, parseInt(document.getElementById(prefix + 'auto-retry-max-retries').value) || 0);
+    const retryDelaySeconds = Math.max(0, parseFloat(document.getElementById(prefix + 'auto-retry-delay-seconds').value) || 0);
 
     return {
         enabled: true,
         max_retries: maxRetries,
         retry_delay_seconds: retryDelaySeconds,
-        retry_on_429: document.getElementById('auto-retry-on-429').checked,
-        retry_on_503: document.getElementById('auto-retry-on-503').checked,
-        retry_on_other_errors: document.getElementById('auto-retry-on-other-errors').checked
+        retry_on_429: document.getElementById(prefix + 'auto-retry-on-429').checked,
+        retry_on_503: document.getElementById(prefix + 'auto-retry-on-503').checked,
+        retry_on_other_errors: document.getElementById(prefix + 'auto-retry-on-other-errors').checked
     };
 }
 
@@ -73,13 +74,13 @@ function getAutoRetryConfig() {
 document.addEventListener('DOMContentLoaded', function() {
     const imgCompressionCheckbox = document.getElementById('img-compression-enabled');
     if (imgCompressionCheckbox) {
-        imgCompressionCheckbox.addEventListener('change', toggleImageCompressionOptions);
+        imgCompressionCheckbox.addEventListener('change', () => toggleImageCompressionOptions());
     }
 
     // 初始化自动重试checkbox事件
     const autoRetryCheckbox = document.getElementById('auto-retry-enabled');
     if (autoRetryCheckbox) {
-        autoRetryCheckbox.addEventListener('change', toggleAutoRetryOptions);
+        autoRetryCheckbox.addEventListener('change', () => toggleAutoRetryOptions());
     }
 
     // 初始化系统提示词注入checkbox事件
@@ -333,25 +334,25 @@ function getSystemInjectionConfig() {
 }
 
 // 加载图片压缩配置到表单
-function loadImageCompressionConfig(imgConfig) {
+function loadImageCompressionConfig(imgConfig, prefix = '') {
     if (imgConfig && imgConfig.enabled) {
-        document.getElementById('img-compression-enabled').checked = true;
-        document.getElementById('img-compression-options').style.display = 'block';
+        document.getElementById(prefix + 'img-compression-enabled').checked = true;
+        document.getElementById(prefix + 'img-compression-options').style.display = 'block';
 
-        document.getElementById('img-target-format').value = imgConfig.target_format || '';
-        document.getElementById('img-quality').value = imgConfig.quality || imgConfig.jpeg_quality || '';
-        document.getElementById('img-target-size-kb').value = imgConfig.target_size_kb || '';
-        document.getElementById('img-max-width').value = imgConfig.max_width || '';
-        document.getElementById('img-max-height').value = imgConfig.max_height || '';
-        document.getElementById('img-convert-png-to-jpg').checked = imgConfig.convert_png_to_jpg || false;
+        document.getElementById(prefix + 'img-target-format').value = imgConfig.target_format || '';
+        document.getElementById(prefix + 'img-quality').value = imgConfig.quality || imgConfig.jpeg_quality || '';
+        document.getElementById(prefix + 'img-target-size-kb').value = imgConfig.target_size_kb || '';
+        document.getElementById(prefix + 'img-max-width').value = imgConfig.max_width || '';
+        document.getElementById(prefix + 'img-max-height').value = imgConfig.max_height || '';
+        document.getElementById(prefix + 'img-convert-png-to-jpg').checked = imgConfig.convert_png_to_jpg || false;
     } else {
-        resetImageCompressionFields();
+        resetImageCompressionFields(prefix);
     }
 }
 
 // 获取图片压缩配置
-function getImageCompressionConfig() {
-    const enabled = document.getElementById('img-compression-enabled').checked;
+function getImageCompressionConfig(prefix = '') {
+    const enabled = document.getElementById(prefix + 'img-compression-enabled').checked;
     if (!enabled) {
         return null;
     }
@@ -360,22 +361,22 @@ function getImageCompressionConfig() {
         enabled: true
     };
 
-    const targetFormat = document.getElementById('img-target-format').value;
+    const targetFormat = document.getElementById(prefix + 'img-target-format').value;
     if (targetFormat) config.target_format = targetFormat;
 
-    const quality = document.getElementById('img-quality').value;
+    const quality = document.getElementById(prefix + 'img-quality').value;
     if (quality) config.quality = parseInt(quality);
 
-    const targetSizeKb = document.getElementById('img-target-size-kb').value;
+    const targetSizeKb = document.getElementById(prefix + 'img-target-size-kb').value;
     if (targetSizeKb) config.target_size_kb = parseInt(targetSizeKb);
 
-    const maxWidth = document.getElementById('img-max-width').value;
+    const maxWidth = document.getElementById(prefix + 'img-max-width').value;
     if (maxWidth) config.max_width = parseInt(maxWidth);
 
-    const maxHeight = document.getElementById('img-max-height').value;
+    const maxHeight = document.getElementById(prefix + 'img-max-height').value;
     if (maxHeight) config.max_height = parseInt(maxHeight);
 
-    const convertPngToJpg = document.getElementById('img-convert-png-to-jpg').checked;
+    const convertPngToJpg = document.getElementById(prefix + 'img-convert-png-to-jpg').checked;
     if (convertPngToJpg) config.convert_png_to_jpg = true;
 
     return config;

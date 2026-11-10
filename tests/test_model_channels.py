@@ -16,8 +16,8 @@ from fastapi import HTTPException
 
 from core import config_loader
 from core.model_channels import (
-    CHANNELS_FILE, adopt_suggestions, apply_channel_refs, assign_channel, channel_usage,
-    connection_fields, expand_model_map, normalize_channel, remove_channel, suggest_channels,
+    CHANNELS_FILE, DEFAULT_FIELDS, adopt_suggestions, apply_channel_refs, assign_channel, channel_usage,
+    connection_fields, expand_model_map, normalize_channel, remove_channel, settle_channel_defaults, suggest_channels,
 )
 from routes import admin_channels, admin_routes
 
@@ -288,3 +288,110 @@ def test_saving_a_model_validates_and_normalizes_its_channel(workdir, monkeypatc
     listing = asyncio.run(admin_routes.get_models_config({}, {}, lambda: None))
     assert listing['model_endpoint_map']['m']['channel'] == 'ch-solo' and 'api_key' not in listing['model_endpoint_map']['m']
     assert listing['channels'] == {'ch-solo': CHANNELS['ch-solo']}
+
+
+# ==================== 渠道默认值 ====================
+
+DEFAULTS = {'passthrough': True, 'enable_prefix': True, 'auto_retry': {'enabled': True, 'max_retries': 3}}
+WITH_DEFAULTS = {'ch-d': {'name': '带默认值', 'api_base_url': 'https://d.example/v1', 'api_keys': ['k'], 'defaults': DEFAULTS},
+                 'ch-solo': CHANNELS['ch-solo']}
+BUILTIN = {'passthrough': False, 'convert_system_to_user': False, 'enable_prefix': False, 'enable_partial': False,
+           'cached_tokens_mode': 'reverse'}
+
+
+def settings(endpoint):
+    """端点在可继承的各项上实际生效的取值"""
+    return {field: endpoint.get(field, BUILTIN.get(field)) for field in DEFAULT_FIELDS}
+
+
+class TestChannelDefaults:
+    def test_normalize_keeps_valid_defaults_and_rejects_the_rest(self):
+        channel = normalize_channel({'name': 'x', 'api_base_url': 'u',
+                                     'defaults': {'passthrough': False, 'force_stream': None, 'cached_tokens_mode': 'forward'}})
+        assert channel['defaults'] == {'passthrough': False, 'cached_tokens_mode': 'forward'}
+        assert 'defaults' not in normalize_channel({'name': 'x', 'api_base_url': 'u', 'defaults': {}})
+        for bad in ({'model_id': 'x'}, {'passthrough': 'yes'}, {'first_chunk_timeout_seconds': 0}, {'cached_tokens_mode': 'sideways'},
+                    {'auto_retry': True}, ['passthrough']):
+            with pytest.raises(ValueError):
+                normalize_channel({'name': 'x', 'api_base_url': 'u', 'defaults': bad})
+
+    def test_expand_puts_defaults_under_the_models_own_values(self):
+        raw = {'follows': {'api_type': 'direct_api', 'channel': 'ch-d'},
+               'differs': {'api_type': 'direct_api', 'channel': 'ch-d', 'passthrough': False, 'auto_retry': None}}
+        expanded = expand_model_map(raw, WITH_DEFAULTS)
+        assert expanded['follows']['passthrough'] is True and expanded['follows']['auto_retry'] == DEFAULTS['auto_retry']
+        assert expanded['differs']['passthrough'] is False and expanded['differs']['enable_prefix'] is True
+        assert 'auto_retry' not in expanded['differs']
+
+    def test_saving_a_model_only_keeps_what_differs_from_the_channel(self):
+        saved = apply_channel_refs({'api_type': 'direct_api', 'channel': 'ch-d', 'passthrough': True, 'enable_prefix': False,
+                                    'auto_retry': None, 'force_stream': None, 'enable_partial': False}, WITH_DEFAULTS)
+        assert saved == {'api_type': 'direct_api', 'channel': 'ch-d', 'enable_prefix': False, 'auto_retry': None, 'enable_partial': False}
+
+    def test_joining_and_leaving_keep_each_models_behaviour(self):
+        raw = {'same': direct(passthrough=True, enable_prefix=True), 'other': direct(passthrough=False), 'bare': direct()}
+        joined, changed = assign_channel(raw, list(raw), 'ch-d', WITH_DEFAULTS)
+        assert changed == list(raw)
+        assert joined['same'] == {'api_type': 'direct_api', 'channel': 'ch-d', 'auto_retry': None}
+        expanded = expand_model_map(joined, WITH_DEFAULTS)
+        assert {name: settings(expanded[name]) for name in raw} == {name: settings(raw[name]) for name in raw}
+        # 换到没有默认值的渠道、再脱离，效果都不变，也不留下 null
+        moved, _ = assign_channel(joined, list(raw), 'ch-solo', WITH_DEFAULTS)
+        assert moved['bare'] == {'api_type': 'direct_api', 'channel': 'ch-solo'}
+        left, _ = assign_channel(joined, list(raw), None, WITH_DEFAULTS)
+        assert {name: settings(left[name]) for name in raw} == {name: settings(raw[name]) for name in raw}
+        assert all(None not in config.values() and 'channel' not in config for config in left.values())
+        removed, _, _ = remove_channel(joined, WITH_DEFAULTS, 'ch-d')
+        assert removed == left
+
+    def test_changing_defaults_reports_models_that_differ(self):
+        raw = {'follows': {'api_type': 'direct_api', 'channel': 'ch-d'},
+               'explicit': {'api_type': 'direct_api', 'channel': 'ch-d', 'passthrough': False, 'convert_system_to_user': True},
+               'legacy': {'api_type': 'direct_api', 'channel': 'ch-d', 'convert_system_to_user': False},
+               'elsewhere': {'api_type': 'direct_api', 'channel': 'ch-solo', 'passthrough': False}}
+        # 透传从开改成关，system 转 user 第一次统一，前缀续写不再统一，自动重试没动
+        new = {'passthrough': False, 'convert_system_to_user': True, 'auto_retry': DEFAULTS['auto_retry']}
+        base = {'api_type': 'direct_api', 'channel': 'ch-d', 'enable_prefix': True}
+
+        kept, changed, conflicts = settle_channel_defaults(raw, 'ch-d', DEFAULTS, new)
+        assert conflicts == {'convert_system_to_user': ['follows', 'legacy']} and changed == ['follows', 'explicit', 'legacy']
+        assert kept['follows'] == {**base, 'convert_system_to_user': None}
+        assert kept['explicit'] == base
+        assert kept['legacy'] == {**base, 'convert_system_to_user': False}
+        assert kept['elsewhere'] is raw['elsewhere']
+
+        followed, _, conflicts = settle_channel_defaults(raw, 'ch-d', DEFAULTS, new, override=True)
+        assert conflicts == {'convert_system_to_user': ['follows', 'legacy']}
+        assert followed['follows'] == followed['explicit'] == followed['legacy'] == base
+
+        # 默认值没变时，模型自己不同的取值不算冲突，也不动
+        same, changed, conflicts = settle_channel_defaults({'own': {'api_type': 'direct_api', 'channel': 'ch-d', 'passthrough': False}},
+                                                           'ch-d', DEFAULTS, DEFAULTS, override=True)
+        assert (changed, conflicts) == ([], {}) and same['own']['passthrough'] is False
+
+
+def test_admin_channel_defaults_ask_before_overriding_models(workdir, monkeypatch):
+    models = {'a': {'api_type': 'direct_api', 'channel': 'ch-d', 'passthrough': False}, 'b': {'api_type': 'direct_api', 'channel': 'ch-d'}}
+    plain = {'name': '带默认值', 'api_base_url': 'https://d.example/v1', 'api_keys': ['k']}
+    write_json('model_endpoint_map.json', models)
+    write_json(CHANNELS_FILE, {'ch-d': plain})
+
+    asked = run_admin(monkeypatch, 'save_channel', {'id': 'ch-d', 'channel': {**plain, 'defaults': {'passthrough': True}}})
+    assert asked == {'status': 'conflict', 'conflicts': {'passthrough': ['a', 'b']}}
+    assert read_json(CHANNELS_FILE) == {'ch-d': plain} and read_json('model_endpoint_map.json') == models
+
+    kept = run_admin(monkeypatch, 'save_channel', {'id': 'ch-d', 'channel': {**plain, 'defaults': {'passthrough': True}}, 'override': False})
+    assert kept['status'] == 'success' and kept['changed'] == ['b']
+    assert read_json(CHANNELS_FILE)['ch-d']['defaults'] == {'passthrough': True}
+    assert read_json('model_endpoint_map.json') == {'a': models['a'], 'b': {**models['b'], 'passthrough': None}}
+
+    both = {'passthrough': True, 'enable_prefix': True}
+    followed = run_admin(monkeypatch, 'save_channel', {'id': 'ch-d', 'channel': {**plain, 'defaults': both}, 'override': True})
+    assert followed['changed'] == []
+    expanded = expand_model_map(read_json('model_endpoint_map.json'), read_json(CHANNELS_FILE))
+    assert settings(expanded['a'])['enable_prefix'] is True and settings(expanded['a'])['passthrough'] is False
+    assert 'passthrough' not in expanded['b'] and expanded['b']['enable_prefix'] is True
+
+    # 取消统一：跟随的模型拿回原来的默认值
+    run_admin(monkeypatch, 'save_channel', {'id': 'ch-d', 'channel': plain})
+    assert read_json('model_endpoint_map.json') == {'a': {**models['a'], 'enable_prefix': True}, 'b': {**models['b'], 'enable_prefix': True}}

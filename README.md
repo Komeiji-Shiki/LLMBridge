@@ -291,6 +291,7 @@ total_cost = (uncached_input × input_price + cached_input × cached_input_price
 ```
 
 - 接了渠道的模型，`api_base_url`、`api_key` / `api_keys`、`api_key_auth_mode`、`api_key_strategy`、`api_key_cooldown_seconds` 以渠道为准。
+- 渠道还可以带 `defaults`，给透传、System 转 User、Prefix / Partial 续写、流式模式、缓存 Token 统计、首块超时、自动重试、图片压缩这些上游性质的设置统一默认值。模型自己写了的优先，没写的跟渠道走，写成 `null` 表示明确不设置。
 - 一般不用手写：管理面板的“上游渠道”页可以新建渠道，也可以把地址和 Key 完全相同的现有模型一键整理成渠道（整理前自动备份到 `.migration_backups`）。
 - 两个文件都会热更新。引用的渠道不存在时，模型按自己的配置加载，并在日志里给出警告。
 

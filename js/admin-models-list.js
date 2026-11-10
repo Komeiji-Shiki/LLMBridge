@@ -106,7 +106,7 @@ function buildModelsTable(modelEndpointMap) {
     const activeEntries = [];
     const archivedEntries = [];
     for (const [name, config] of entries) {
-        const cfg = Array.isArray(config) ? (config[0] || {}) : config;
+        const cfg = modelEffective(Array.isArray(config) ? (config[0] || {}) : config);
         if (isModelConfigArchived(config)) {
             archivedEntries.push([name, cfg]);
         } else {

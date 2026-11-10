@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from core.config_loader import load_model_endpoint_map
 from core.model_channels import (
     CHANNELS_FILE, adopt_suggestions, assign_channel, channel_usage,
-    new_channel_id, normalize_channel, remove_channel, suggest_channels,
+    new_channel_id, normalize_channel, remove_channel, settle_channel_defaults, suggest_channels,
 )
 from routes import admin_routes
 from routes.admin_routes import MODEL_ENDPOINT_MAP_FILE, _read_admin_json
@@ -71,26 +71,38 @@ async def list_channels():
 
 
 async def save_channel(request: Request):
-    """新建或修改渠道。body: {"id": 可选, "channel": {...}}，不带 id 时新建"""
+    """新建或修改渠道。body: {"id": 可选, "channel": {...}, "override": 可选}，不带 id 时新建
+
+    默认设置改了、而有模型在这些项上的取值和新默认值不同时，不带 override 只返回冲突名单（不保存）；
+    带 override=true 让这些模型改为跟随渠道，false 保留它们各自的效果。
+    """
     data = await _read_admin_json(request)
     channel_id = data.get("id")
+    override = data.get("override")
     try:
         channel = normalize_channel(data.get("channel"))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
     async with admin_routes._MODEL_ENDPOINT_MAP_LOCK:
-        channels = await admin_routes.read_channels_file()
+        model_map, channels = await _read_both()
         if channel_id and channel_id not in channels:
             raise HTTPException(status_code=404, detail=f"渠道 {channel_id} 不存在")
         if any(other_id != channel_id and other.get("name") == channel["name"] for other_id, other in channels.items()):
             raise HTTPException(status_code=409, detail=f"已经有一个叫 {channel['name']} 的渠道")
+        old_defaults = (channels[channel_id].get("defaults") or {}) if channel_id else {}
+        new_defaults = channel.get("defaults") or {}
+        new_map, changed, conflicts = settle_channel_defaults(model_map, channel_id, old_defaults, new_defaults, override=bool(override))
+        if conflicts and override is None:
+            return {"status": "conflict", "conflicts": conflicts}
         channel_id = channel_id or new_channel_id(channels)
         channels[channel_id] = channel
-        await _write_both(None, channels, channels_first=True)
+        # 有默认值被取消时模型要先拿到抄回去的值，其余情况先写渠道：中途被热重载读到，模型的效果也不变
+        channels_first = all(field in new_defaults for field in old_defaults)
+        await _write_both(new_map if changed else None, channels, channels_first=channels_first)
 
-    logger.info(f"✅ 渠道已保存: {channel['name']} ({channel_id})")
-    return {"status": "success", "id": channel_id, "message": f"渠道 {channel['name']} 已保存"}
+    logger.info(f"✅ 渠道已保存: {channel['name']} ({channel_id})，{len(changed)} 个模型跟着整理")
+    return {"status": "success", "id": channel_id, "changed": changed, "message": f"渠道 {channel['name']} 已保存"}
 
 
 async def delete_channel(request: Request):

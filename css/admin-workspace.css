@@ -177,7 +177,7 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 #channels-list .table td { vertical-align: middle; }
 .channel-address { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-family: var(--font-mono); font-size: .8rem; }
 .channel-unused, .channel-usage-note { color: var(--text-dim); font-size: .8rem; }
-.channel-dialog { max-width: 650px; }
+.channel-dialog { max-width: 720px; }
 .channel-dialog .modal-body { max-height: 70vh; overflow-y: auto; }
 .channel-select-row, .channel-strategy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .channel-select-row select { flex: 1; min-width: 0; }
@@ -206,3 +206,16 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .channel-key-actions select { flex: 1; min-width: 160px; max-width: 280px; padding: 6px 10px; font-size: .8rem; }
 #channel-key-test-results { margin-top: 10px; }
 #channel-save-status { margin-right: auto; align-self: center; color: var(--text-dim); font-size: .78rem; }
+/* 渠道编辑窗：统一给模型的默认设置 */
+.channel-defaults { margin: 26px 0 20px; padding-top: 18px; border-top: 1px solid var(--line-weak); }
+.channel-defaults h4 { margin-bottom: 4px; font-size: 1rem; }
+.channel-defaults-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; margin: 16px 0; }
+.channel-defaults-grid label { display: grid; align-content: start; gap: 6px; font-size: .85rem; font-weight: 500; }
+.channel-defaults-grid .field-hint { margin-top: 0; font-weight: 400; }
+.channel-default-block { margin-top: 12px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--line-weak); }
+.channel-default-block > label { display: flex; align-items: center; gap: 8px; font-size: .85rem; font-weight: 500; }
+.channel-default-options { display: grid; gap: 10px; margin-top: 12px; }
+.channel-default-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.channel-default-row label { display: grid; gap: 4px; color: var(--text-dim); font-size: .8rem; }
+.channel-default-check { display: flex; align-items: center; gap: 8px; font-size: .85rem; }
+@media (max-width: 760px) { .channel-defaults-grid { grid-template-columns: 1fr; } }

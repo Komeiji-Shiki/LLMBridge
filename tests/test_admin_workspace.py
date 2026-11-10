@@ -1181,3 +1181,78 @@ def test_channel_copy_pastes_keys_tests_them_and_guards_edits(ui):
     assert writes[-1] == {'path': '/api/admin/channels', 'id': None, 'channel': {
         'name': '主力上游 副本', 'api_base_url': 'https://shared.example/v1', 'api_keys': keys,
         'api_key_auth_mode': 'auto', 'api_key_strategy': 'sticky'}}
+
+
+RETRY = {'enabled': True, 'max_retries': 5, 'retry_delay_seconds': 1, 'retry_on_429': True, 'retry_on_503': True, 'retry_on_other_errors': False}
+
+
+def test_channel_defaults_fill_model_forms_and_missing_values_are_saved_as_unset(ui):
+    page, models, writes, _ = ui
+    channels = {'ch-main': {**CHANNELS['ch-main'], 'defaults': {'passthrough': False, 'enable_prefix': True, 'force_stream': True, 'auto_retry': RETRY}}}
+    models['Alpha'] = {'api_type': 'direct_api', 'model_id': 'upstream-alpha', 'channel': 'ch-main', 'enable_prefix': False}
+    use_channels(page, models, channels)
+    page.evaluate('loadModels()')
+    row = page.locator('.model-row[data-model-name="Alpha"]')
+    row.locator('.badge-channel').wait_for()
+    flags = row.locator('.model-flags').inner_text()
+    assert '自动重试' in flags and '透传' not in flags
+
+    # 打开模型：没单独改的项显示渠道的值，单独改过的显示自己的
+    row.locator('.model-name').click()
+    note = page.locator('#model-channel-overrides').inner_text()
+    assert '透传' in note and '有 1 项和渠道不同：Prefix 续写' in note
+    assert not page.locator('#passthrough').is_checked() and not page.locator('#enable-prefix').is_checked()
+    assert page.locator('#auto-retry-max-retries').input_value() == '5'
+    page.locator('[data-settings-page="generation"]').click()
+    assert page.locator('#force-stream').input_value() == 'true'
+    # 把渠道给了默认值的一项清空：存成 null，不会被当成跟随渠道
+    page.locator('#force-stream').select_option('')
+    page.locator('#model-save-btn').click()
+    page.wait_for_selector('#model-modal', state='hidden')
+    saved = writes[-1]['config']
+    assert saved['force_stream'] is None and saved['passthrough'] is False and saved['enable_prefix'] is False
+    assert saved['auto_retry'] == RETRY
+
+    # 新模型选上渠道，表单跟着换成渠道的默认设置
+    page.wait_for_function("modelWorkspace.models.Alpha.force_stream === null")
+    page.get_by_role('button', name='添加模型').click()
+    assert page.locator('#passthrough').is_checked()
+    page.locator('#model-channel').select_option('ch-main')
+    assert not page.locator('#passthrough').is_checked() and page.locator('#enable-prefix').is_checked()
+    assert page.locator('#auto-retry-enabled').is_checked() and page.locator('#force-stream').input_value() == 'true'
+
+
+def test_channel_editor_sets_defaults_and_asks_about_models_that_differ(ui):
+    page, models, _, _ = ui
+    models['Alpha'] = {'api_type': 'direct_api', 'channel': 'ch-main', 'passthrough': True}
+    models['Beta'] = {'api_type': 'direct_api', 'channel': 'ch-main', 'passthrough': False}
+    use_channels(page, models, CHANNELS)
+    posts = []
+
+    def save_route(route):
+        if route.request.method != 'POST':
+            return route.fallback()
+        posts.append(route.request.post_data_json)
+        if 'override' not in posts[-1]:
+            return route.fulfill(json={'status': 'conflict', 'conflicts': {'passthrough': ['Alpha']}})
+        route.fulfill(json={'status': 'success', 'message': '渠道 主力上游 已保存'})
+
+    page.route('**/api/admin/channels', save_route)
+    page.locator('[data-page="channels"]').click()
+    page.locator('#channels-list tr[data-channel-id="ch-main"]').get_by_role('button', name='编辑').click()
+    note = page.locator('[data-default-note="passthrough"]').inner_text()
+    assert '开 1' in note and '关 1' in note
+    page.locator('[data-channel-default="passthrough"]').select_option('false')
+    page.locator('[data-channel-default="first_chunk_timeout_seconds"]').fill('300')
+    page.locator('#channel-auto-retry-enabled').check()
+    assert page.locator('#channel-auto-retry-options').is_visible()
+    page.locator('#channel-auto-retry-max-retries').fill('4')
+    assert page.locator('#channel-save-status').inner_text() == '有未保存的修改'
+    page.locator('#channel-save-btn').click()
+    dialog = page.locator('.dialog')
+    assert '透传：Alpha' in dialog.inner_text()
+    dialog.get_by_role('button', name='都跟随渠道').click()
+    page.wait_for_selector('#channel-modal', state='hidden')
+    assert 'override' not in posts[0] and posts[1]['override'] is True
+    assert posts[1]['channel']['defaults'] == {'passthrough': False, 'first_chunk_timeout_seconds': 300, 'auto_retry': {
+        'enabled': True, 'max_retries': 4, 'retry_delay_seconds': 2, 'retry_on_429': True, 'retry_on_503': True, 'retry_on_other_errors': False}}
