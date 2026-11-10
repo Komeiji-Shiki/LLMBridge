@@ -149,7 +149,7 @@ function addFakeConvRow(role = 'user', content = '', reasoning = '', toolId = ''
                 <option value="tool">tool</option>
             </select>
             <span style="flex: 1;"></span>
-            <button type="button" class="btn btn-sm btn-danger" onclick="removeFakeConvRow('${rowId}')" title="删除此消息">🗑️</button>
+            <button type="button" class="btn btn-sm btn-danger" onclick="removeFakeConvRow('${rowId}')" title="删除此消息" aria-label="删除此消息"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg></button>
         </div>
         <textarea class="fake-conv-content form-input" rows="2" placeholder="消息内容（可留空，例如 assistant 仅思考时）" style="width: 100%; margin-bottom: 8px;"></textarea>
         <textarea class="fake-conv-reasoning form-input" rows="2" placeholder="reasoning_content 思维链（仅 assistant 生效）" style="width: 100%; margin-bottom: 8px; display: none;"></textarea>

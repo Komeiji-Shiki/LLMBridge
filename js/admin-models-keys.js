@@ -17,7 +17,7 @@ function addApiKeyRow(value = '') {
     const container = document.getElementById('model-api-keys-list');
     if (!container) {
         console.error('[API-Key] 容器 #model-api-keys-list 未找到！请刷新页面重试。');
-        alert('❌ API Key 输入容器未找到，请刷新页面重试。');
+        alert('API Key 输入容器未找到，请刷新页面重试。');
         return;
     }
 

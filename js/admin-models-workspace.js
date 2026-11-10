@@ -81,7 +81,7 @@ function applyModelFilters() {
     });
     const filtered = !!(query || protocol || provider);
     if (modelsSortable) modelsSortable.option('disabled', filtered);
-    document.getElementById('models-summary').textContent = `${Object.keys(modelWorkspace.models).length} 个模型 · 当前显示 ${active} 个可用 / ${archived} 个已归档${filtered ? ' · 清除筛选后可拖动排序' : ' · 拖动手柄调整可用模型顺序'}`;
+    document.getElementById('models-summary').textContent = `${Object.keys(modelWorkspace.models).length} 个模型 · 显示 ${active} 个可用 / ${archived} 个已归档${filtered ? ' · 清除筛选后可拖动排序' : ''}`;
     document.getElementById('models-no-results').hidden = visible > 0 || !Object.keys(modelWorkspace.models).length;
     const archiveBody = document.getElementById('archive-section-body');
     if (filtered && archived && archiveBody) {
@@ -89,7 +89,12 @@ function applyModelFilters() {
         document.getElementById('archive-toggle-icon').textContent = '▼';
         document.querySelector('.archive-header').setAttribute('aria-expanded', 'true');
     }
+    syncModelsStickyHeight();
     updateArchiveButtons();
+}
+
+function syncModelsStickyHeight() {
+    document.getElementById('models').style.setProperty('--models-sticky-height', document.querySelector('.models-sticky').offsetHeight + 'px');
 }
 
 function resetModelFilters() {
@@ -164,6 +169,11 @@ function checkModelJsonField(input) {
 function beginModelEditing() {
     MODEL_JSON_FIELDS.forEach(id => checkModelJsonField(document.getElementById(id)));
     modelEditor.opener = document.activeElement;
+    // LMArena 模式已弃用，只有本来就是这种配置的模型才显示切换项
+    const configType = document.getElementById('config-type');
+    configType.closest('.form-group').classList.toggle('legacy-lmarena', configType.value === 'direct_api');
+    // 地址栏跟着记下正在编辑的模型，刷新后回到这里
+    if (currentEditingModel) history.replaceState(null, '', routeHash('models', currentEditingModel));
     modelEditor.snapshot = modelFormSnapshot();
     document.getElementById('model-modal').classList.add('active');
     document.body.classList.add('model-editor-open');
@@ -178,6 +188,7 @@ function endModelEditing(force) {
     document.getElementById('model-modal').classList.remove('active');
     document.body.classList.remove('model-editor-open');
     modelEditor.snapshot = '';
+    if (location.hash.startsWith('#models/')) history.replaceState(null, '', '#models');
     if (modelEditor.opener?.isConnected) modelEditor.opener.focus();
     return true;
 }
@@ -221,6 +232,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const modal = document.getElementById('model-modal');
     modal.addEventListener('input', updateModelSaveStatus);
     setModelsCompact(localStorage.getItem(MODELS_COMPACT_KEY) === '1');
+    // 表头吸在筛选栏下面；筛选栏换行时高度会变，跟着更新
+    new ResizeObserver(syncModelsStickyHeight).observe(document.querySelector('.models-sticky'));
     MODEL_JSON_FIELDS.forEach(id => {
         const input = document.getElementById(id);
         input.addEventListener('input', () => checkModelJsonField(input));

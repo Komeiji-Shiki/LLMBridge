@@ -1,14 +1,11 @@
 /* Shared admin shell and model workspace. Existing component colors stay compatible. */
 
 body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
-.sidebar { width: 248px; padding-top: 28px; }
-.sidebar-header { padding: 0 24px 24px; }
-.sidebar-header h1 { font-size: 1.25rem; }
-.top-nav { margin: 24px 20px; padding: 0; gap: 12px; border: 0; background: transparent; }
-.top-nav a { white-space: nowrap; padding: 12px 10px; flex: 1; min-width: 0; }
-#memory-widget { margin: 24px 20px !important; padding: 16px !important; }
-.nav-menu { padding: 12px 16px; }
-.nav-item { border: 0; border-radius: 0; margin-bottom: 6px; padding: 13px 16px; transition: background-color .15s, color .15s, border-color .15s; }
+.sidebar { width: 248px; padding: 24px 0 0; display: flex; flex-direction: column; }
+.sidebar-header { padding: 0 24px 20px; }
+.sidebar-header h1 { font-size: 1.2rem; display: flex; align-items: center; gap: 10px; }
+.nav-menu { padding: 14px 12px; flex: 1; }
+.nav-item { border: 0; border-radius: 0; margin-bottom: 2px; padding: 9px 14px; display: flex; align-items: center; font-size: .9rem; white-space: nowrap; transition: background-color .15s, color .15s; }
 .main-content { margin-left: 248px; padding: 36px; min-width: 0; width: calc(100% - 248px); }
 .page-header { margin-bottom: 26px; }
 .page-header h2 { font-size: 1.8rem; letter-spacing: -.03em; }
@@ -19,12 +16,15 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 [hidden], .protocol-hidden { display: none !important; }
-.models-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 20px 22px 12px; }
-.models-toolbar label { font-size: .78rem; color: var(--text-dim); display: grid; gap: 6px; flex: 1; min-width: 160px; }
+.models-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 16px 22px 10px; }
+/* 标签文字留给读屏，输入框自带占位说明 */
+.models-toolbar label { font-size: 0; display: grid; flex: 1; min-width: 150px; }
+.models-toolbar label > * { font-size: .875rem; }
 .models-toolbar .model-search-label { flex: 2; min-width: 240px; }
 .models-toolbar select { max-width: 100%; }
-.models-summary { color: var(--text-dim); font-size: .8rem; padding: 4px 22px 18px; }
-#models-list { padding: 0 22px 22px; overflow-x: auto; }
+.models-summary { color: var(--text-dim); font-size: .8rem; flex: 1; min-width: 0; }
+.models-summary-row .card-actions { flex-wrap: nowrap; flex-shrink: 0; gap: 8px; }
+#models-list { padding: 0 22px 22px; }
 #models-list .table { margin: 0; width: 100%; }
 #models-list .table th { font-size: .75rem; font-weight: 500; color: var(--text-dim); background: var(--surface-2); padding: 12px 10px; }
 #models-list .table td { padding: 18px 10px; vertical-align: middle; border-bottom: 1px solid var(--line-weak); }
@@ -36,19 +36,21 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .model-flags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
 .model-actions { display: flex; align-items: center; gap: 7px; }
 .model-more summary { cursor: pointer; list-style: none; }
-.model-more[open] { display: flex; flex-direction: column; }
-.model-more .btn { display: block; margin-top: 6px; width: 100%; }
 .badge { border-radius: 0; padding: 2px 7px; font-size: .72rem; }
 .model-checkbox { width: 16px; height: 16px; accent-color: var(--accent); }
 .model-row-archived { opacity: .7; }
-/* 紧凑列表：名称、说明和标记排在同一行，连接信息也并成一行 */
-#models-list.models-compact .table td { padding: 7px 10px; }
-#models-list.models-compact .model-identity > *, #models-list.models-compact .model-connection > * { display: inline-flex; vertical-align: middle; margin: 0 8px 0 0; }
-#models-list.models-compact .model-connection { max-width: 520px; }
-/* 地址过长时截断（悬停看全称），端点和 Key 数量收起，打开设置能看到 */
-#models-list.models-compact .model-connection .model-subtitle { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+/* 紧凑列表：一个模型一行，名称、说明、标记和连接信息都不换行，放不下的截断（悬停看全称） */
+#models-list.models-compact .table { table-layout: fixed; }
+#models-list.models-compact .table th:nth-child(4) { width: 36%; }
+#models-list.models-compact .table th:nth-child(5) { width: 136px; }
+#models-list.models-compact .table td { padding: 5px 10px; }
+#models-list.models-compact .model-identity, #models-list.models-compact .model-connection { min-width: 0; max-width: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#models-list.models-compact .model-identity > *, #models-list.models-compact .model-connection > * { display: inline; margin: 0 8px 0 0; vertical-align: middle; overflow-wrap: normal; }
+#models-list.models-compact .model-flags { display: inline-flex; flex-wrap: nowrap; }
+/* 端点和 Key 数量收起，打开设置能看到 */
 #models-list.models-compact .model-connection .model-subtitle + .model-subtitle { display: none; }
-#models-list.models-compact .model-actions .btn-sm { padding-top: 3px; padding-bottom: 3px; }
+#models-list.models-compact .model-actions { flex-direction: row; align-items: center; }
+#models-list.models-compact .model-actions .btn-sm { min-height: 28px; padding-top: 3px; padding-bottom: 3px; }
 /* 配置搜索固定在表单顶部，命中的字段高亮 */
 .config-form-search { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; padding-bottom: 12px; background: var(--surface); }
 .config-form-search input { flex: 1; }
@@ -82,16 +84,56 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 @media (max-width: 760px) {
  .nav-item { white-space: nowrap; }
  .connection-grid { display: block; }
- .container { display: block; } .sidebar { position: static; width: 100%; height: auto; padding: 12px; } .sidebar-header { border: 0; padding: 0 6px; } .sidebar-header p, .top-nav, #memory-widget { display: none !important; } .nav-menu { display: flex; overflow-x: auto; padding: 12px 0 0; } .nav-item { flex-shrink: 0; margin: 0; font-size: .8rem; padding: 9px; } .nav-item .ui-icon { display: none; }
+ .container { display: block; } .sidebar { position: static; width: 100%; height: auto; padding: 12px; } .sidebar-header { border: 0; padding: 0 6px; } .sidebar-header p, .nav-group, #memory-widget { display: none !important; } .nav-menu { display: flex; overflow-x: auto; padding: 12px 0 0; } .nav-item { flex-shrink: 0; margin: 0; font-size: .8rem; padding: 9px; } .nav-item .ui-icon { display: none; }
  .main-content { margin-left: 0; padding: 20px 12px; width: 100%; } .page-header h2 { font-size: 1.5rem; } #models-list { padding: 0 10px 12px; } #models-list .table { min-width: 680px; } .models-toolbar { padding: 14px; } .models-toolbar .model-search-label { flex-basis: 100%; }
  #model-modal { padding: 0; } #model-modal .modal-content { width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; } .model-settings-nav { display: flex; overflow-x: auto; padding: 8px; border-right: 0; } .model-settings-nav button { width: auto; white-space: nowrap; margin: 0; padding: 9px 12px; } #model-modal .modal-body { padding: 20px 16px; } #model-modal .modal-footer { padding: 12px; flex-wrap: wrap; } #model-save-status { flex-basis: 100%; } #model-modal [style*="grid-template-columns"] { grid-template-columns: 1fr 1fr !important; } #model-modal .api-key-input { min-width: 0; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 
 /* Square surfaces throughout the admin, including legacy inline styles. */
-.container, .sidebar, .top-nav, .top-nav a, .nav-item, .card, .stat-card,
+.container, .sidebar, .nav-item, .card, .stat-card,
 .modal-content, .btn, .badge, .form-input, .form-select, .alert,
 .collapsible-section, .radio-card, .settings-block,
 .container [style*="border-radius"], .modal [style*="border-radius"] {
     border-radius: 0 !important;
+}
+
+/* 侧栏：导航分组，内存占用收在底部 */
+.sidebar-header .brand-mark { display: grid; place-items: center; width: 28px; height: 28px; flex-shrink: 0; background: var(--surface-hover); color: var(--text-main); font-size: 1rem; font-weight: 600; clip-path: polygon(0 0, 100% 0, 100% 72%, 72% 100%, 0 100%); }
+.nav-group { padding: 16px 14px 6px; color: var(--text-faint); font-size: .68rem; font-weight: 600; letter-spacing: .14em; }
+.nav-group:first-child { padding-top: 2px; }
+.nav-item.active { box-shadow: inset 2px 0 0 var(--action); }
+.memory-widget { margin: 0 12px 14px; padding: 12px 14px; border: 1px solid var(--line-weak); background: var(--surface-2); color: var(--text-dim); font-size: .75rem; }
+.memory-head { display: flex; align-items: center; gap: 8px; }
+.memory-head strong { margin-left: auto; color: var(--text-main); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.icon-btn { display: inline-grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; background: none; color: var(--text-dim); cursor: pointer; }
+.icon-btn:hover { color: var(--text-main); }
+.memory-bar { height: 3px; margin-top: 10px; background: var(--line-strong); overflow: hidden; }
+#memory-bar-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.memory-note { margin-top: 8px; font-size: .68rem; line-height: 1.5; }
+.memory-widget .btn { width: 100%; margin-top: 10px; text-align: center; }
+
+/* 模型列表：筛选栏和表头跟着滚动留在顶部 */
+.card-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.models-sticky { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line-weak); }
+.models-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding: 0 22px 12px; }
+#models-list thead th { position: sticky; top: var(--models-sticky-height, 0px); z-index: 4; box-shadow: inset 0 -1px 0 var(--line-strong); }
+.model-more { position: relative; }
+.model-more-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 3; display: grid; gap: 4px; min-width: 128px; padding: 6px; background: var(--surface-2); border: 1px solid var(--line-strong); box-shadow: 0 12px 32px #0007; }
+.model-more-menu .btn { width: 100%; justify-content: flex-start; }
+/* 归档行是半透明的，菜单展开时恢复不透明并浮到后面几行上面 */
+.model-row-archived:has(.model-more[open]) { opacity: 1; position: relative; z-index: 2; }
+.model-row-archived:has(.model-more[open]) td { opacity: 1; filter: none; }
+
+/* 配置页：保存栏贴在视口底部，改到哪里都能保存 */
+.config-savebar { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin: 18px -20px -20px; padding: 14px 20px; background: var(--surface); border-top: 1px solid var(--line-weak); }
+#config-save-status { margin-right: auto; color: var(--text-dim); font-size: .8rem; }
+#config-save-status.is-dirty { color: var(--warn); }
+
+@media (max-width: 760px) {
+    .nav-item.active { box-shadow: inset 0 -2px 0 var(--action); }
+    .models-sticky, #models-list thead th { position: static; }
+    #models-list { overflow-x: auto; }
+    .model-more-menu { position: static; margin-top: 6px; box-shadow: none; }
+    .models-summary-row, .models-summary-row .card-actions { flex-wrap: wrap; }
 }

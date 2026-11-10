@@ -87,16 +87,19 @@ function buildModelsRow(name, cfg, isArchived) {
     return `<tr class="model-row${isArchived ? ' model-row-archived' : ''}" data-model-name="${attr}">
         <td><input type="checkbox" class="model-checkbox" onchange="updateArchiveButtons()" aria-label="选择 ${attr}"></td>
         <td class="drag-handle" title="拖动调整模型顺序"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#grip"/></svg></td>
-        <td class="model-identity"><button class="model-name" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">${attr}</button>
+        <td class="model-identity" title="${attr}"><button class="model-name" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">${attr}</button>
             <div class="model-subtitle">${escapeHtml(cfg.display_name && cfg.display_name !== name ? cfg.display_name : cfg.model_id || name)}</div>
             <div class="model-flags"><span class="badge ${isArchived ? 'badge-info' : 'badge-success'}">${isArchived ? '已归档' : '可用'}</span>${flags.map(flag => `<span class="badge badge-info">${flag}</span>`).join('')}</div></td>
         <td class="model-connection"><span class="badge badge-info">${labels[protocol]}</span>
             <div class="model-subtitle" title="${escapeHtml(modelService(cfg))}">${escapeHtml(modelService(cfg))}</div><div class="model-subtitle">${escapeHtml(endpoint)} · ${keyCount ? keyCount + ' 个 Key' : '无需认证'}</div></td>
         <td><div class="model-actions"><button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">设置</button>
             <details class="model-more"><summary class="btn btn-sm" aria-label="${attr} 的更多操作">更多</summary>
-                <button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName, true)">复制模型</button>
-                <button class="btn btn-sm" data-model-name="${attr}" onclick="toggleModelArchive(this.dataset.modelName)">${isArchived ? '恢复模型' : '归档模型'}</button>
-                <button class="btn btn-danger btn-sm" data-model-name="${attr}" onclick="deleteModel(this.dataset.modelName)">删除模型</button>
+                <div class="model-more-menu">
+                    ${isArchived ? '' : `<button class="btn btn-sm" data-model-name="${attr}" onclick="moveModelToTop(this.dataset.modelName)">移到最前</button>`}
+                    <button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName, true)">复制模型</button>
+                    <button class="btn btn-sm" data-model-name="${attr}" onclick="toggleModelArchive(this.dataset.modelName)">${isArchived ? '恢复模型' : '归档模型'}</button>
+                    <button class="btn btn-danger btn-sm" data-model-name="${attr}" onclick="deleteModel(this.dataset.modelName)">删除模型</button>
+                </div>
             </details></div></td></tr>`;
 }
 
@@ -184,9 +187,9 @@ function toggleArchiveSection() {
     setArchiveSectionOpen(!modelWorkspace.archiveOpen);
 }
 
-// “更多”菜单同时只开一个，点别处或按 Esc 收起
+// “更多”菜单同时只开一个，点别处、选了一项或按 Esc 收起
 document.addEventListener('click', event => {
-    document.querySelectorAll('details.model-more[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; });
+    document.querySelectorAll('details.model-more[open]').forEach(menu => { if (!menu.contains(event.target) || event.target.closest('.model-more-menu')) menu.open = false; });
 });
 document.addEventListener('keydown', event => {
     if (event.key === 'Escape') document.querySelectorAll('details.model-more[open]').forEach(menu => { menu.open = false; });
@@ -247,13 +250,21 @@ async function saveModelsOrder() {
             throw new Error(`API错误 (${response.status}): ${errorDetail}`);
         }
         
-        showQuietMessage('success', '✓ 顺序已保存');
+        showQuietMessage('success', '顺序已保存');
         
     } catch (error) {
         console.error('❌ 保存模型顺序失败:', error);
         console.error('错误详情:', error.message);
         showMessage('danger', '保存顺序失败: ' + error.message);
     }
+}
+
+// 可用模型很多时拖到顶要拖很久，这里一步到位
+function moveModelToTop(name) {
+    const row = document.querySelector(`#models-tbody .model-row[data-model-name="${CSS.escape(name)}"]`);
+    if (!row || row === row.parentElement.firstElementChild) return;
+    row.parentElement.prepend(row);
+    saveModelsOrder();
 }
 
 // ==================== 归档 / 恢复 ====================

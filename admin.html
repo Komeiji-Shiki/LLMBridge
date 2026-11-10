@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LMArena Bridge 管理面板</title>
+    <title>LLMBridge 管理面板</title>
+    <link rel="icon" type="image/svg+xml" href="/css/favicon.svg">
     <script defer src="js/vendor/chart.umd.min.js"></script>
     <script defer src="js/vendor/Sortable.min.js"></script>
     <link rel="stylesheet" href="css/tokens.css">
@@ -34,64 +35,37 @@
         <!-- 侧边栏 -->
         <div class="sidebar">
             <div class="sidebar-header">
-                <h1><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#target"/></svg> LMArena</h1>
-                <p>Bridge 管理面板</p>
+                <h1><span class="brand-mark" aria-hidden="true">B</span> LLMBridge</h1>
+                <p>网关管理面板</p>
             </div>
-            
-            <!-- 顶部导航链接 -->
-            <div class="top-nav">
-                <a href="/admin"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg> 管理</a>
-                <a href="/monitor" target="_blank"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg> 监控</a>
-            </div>
-            
-            <!-- 内存监控小框 -->
-            <div id="memory-widget" style="margin: 10px 20px; padding: 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <span style="font-size: 0.75rem; color: var(--text-dim);"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#chip"/></svg> 内存占用</span>
-                    <button onclick="refreshMemoryInfo()" style="background: none; border: none; cursor: pointer; color: var(--text-dim); font-size: 0.85rem;" title="刷新内存信息" aria-label="刷新内存信息"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg></button>
-                </div>
-                <div id="memory-value" style="font-size: 1.3rem; font-weight: bold;">--</div>
-                <div style="margin-top: 6px;">
-                    <div id="memory-bar" style="height: 4px; background: var(--line-strong); border-radius: 2px; overflow: hidden;">
-                        <div id="memory-bar-fill" style="height: 100%; width: 0%; background: var(--accent); transition: width 0.3s;"></div>
-                    </div>
-                </div>
-                <div id="memory-details" style="font-size: 0.65rem; color: var(--text-dim); margin-top: 6px;">
-                    加载中...
-                </div>
-                <div id="tokenizer-info" style="font-size: 0.65rem; color: var(--text-dim); margin-top: 4px; display: none;">
-                </div>
-                <button id="clear-cache-btn" onclick="clearTokenizerCache()" style="display: none; margin-top: 8px; padding: 4px 8px; font-size: 0.7rem; background: rgb(var(--danger-rgb) / 0.2); border: 1px solid rgb(var(--danger-rgb) / 0.3); color: var(--danger); border-radius: 4px; cursor: pointer; width: 100%;">
-                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg> 清理Tokenizer缓存
-                </button>
-            </div>
-            
+
             <ul class="nav-menu">
-                <li class="nav-item active" data-page="overview">
-                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg> 概览
-                </li>
-                <li class="nav-item" data-page="models">
-                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#layers"/></svg> 模型端点
-                </li>
-                <li class="nav-item" data-page="tokenizer">
-                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#type"/></svg> Tokenizer配置
-                    </li>
-                    <li class="nav-item" data-page="token-calculator">
-                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calculator"/></svg> Token计算器
-                    </li>
-                    <li class="nav-item" data-page="id-capture">
-                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#target"/></svg> ID 捕获
-                </li>
-                <li class="nav-item" data-page="api-keys">
-                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg> API Key 管理
-                </li>
-                <li class="nav-item" data-page="config">
-                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 配置编辑
-                </li>
-                <li class="nav-item" data-page="monitor">
-                    <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg> 监控面板
-                </li>
+                <li class="nav-group" aria-hidden="true">运行</li>
+                <li class="nav-item active" data-page="overview"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg> 概览</li>
+                <li class="nav-item" data-page="monitor"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg> 请求监控</li>
+                <li class="nav-group" aria-hidden="true">模型</li>
+                <li class="nav-item" data-page="models"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#layers"/></svg> 模型端点</li>
+                <li class="nav-item" data-page="api-keys"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg> API Key 管理</li>
+                <!-- “能力与 Playground”由 admin-gateway.js 插在这里 -->
+                <li class="nav-group" aria-hidden="true">工具</li>
+                <li class="nav-item" data-page="tokenizer"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#type"/></svg> Tokenizer 配置</li>
+                <li class="nav-item" data-page="token-calculator"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calculator"/></svg> Token 计算器</li>
+                <li class="nav-item legacy-lmarena" data-page="id-capture"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#target"/></svg> ID 捕获</li>
+                <li class="nav-group" aria-hidden="true">系统</li>
+                <li class="nav-item" data-page="config"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#sliders"/></svg> 配置编辑</li>
             </ul>
+
+            <div id="memory-widget" class="memory-widget">
+                <div class="memory-head">
+                    <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#chip"/></svg> 内存占用</span>
+                    <strong id="memory-value">--</strong>
+                    <button type="button" class="icon-btn" onclick="refreshMemoryInfo()" title="刷新内存信息" aria-label="刷新内存信息"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg></button>
+                </div>
+                <div id="memory-bar" class="memory-bar"><div id="memory-bar-fill"></div></div>
+                <div id="memory-details" class="memory-note">加载中...</div>
+                <div id="tokenizer-info" class="memory-note" style="display: none;"></div>
+                <button type="button" id="clear-cache-btn" class="btn btn-danger btn-sm" onclick="clearTokenizerCache()" style="display: none;">清理 Tokenizer 缓存</button>
+            </div>
         </div>
 
         <!-- 主内容区 -->
@@ -100,7 +74,7 @@
             <div id="overview" class="page active">
                 <div class="page-header overview-header">
                     <div><span class="eyebrow">LLMBRIDGE / ANALYTICS</span><h2>用量概览</h2><p>网关运行状态、模型用量与本地工具估算金额</p></div>
-                    <a class="btn" href="/monitor">查看请求监控 ↗</a>
+                    <a class="btn" href="#monitor"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg> 查看请求监控</a>
                 </div>
                 <div class="stats-grid overview-summary">
 
@@ -277,7 +251,7 @@
 </div>
 <div id="active-requests-list"></div>
 </div>
-                <details class="card runtime-details"><summary>运行信息与浏览器连接</summary><div class="runtime-grid"><div class="stat-card" id="browser-stat">
+                <details class="card runtime-details legacy-lmarena"><summary>运行信息与浏览器连接</summary><div class="runtime-grid"><div class="stat-card" id="browser-stat">
 <div class="stat-card-label">浏览器连接</div>
 <div class="stat-card-value">-</div>
 <div class="stat-card-detail">标签页数量</div>
@@ -298,9 +272,6 @@
                     <div class="card-header">
                         <h3>模型列表</h3>
                         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                            <button class="btn btn-sm" onclick="archiveSelectedModels()" id="archive-selected-btn" disabled title="归档勾选的模型（归档后不可请求、列表折叠）">
-                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#archive"/></svg> 归档所选
-                            </button>
                             <button class="btn btn-sm" onclick="runAutoArchive()" title="按最后调用时间自动归档闲置模型">
                                 <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#clock"/></svg> 自动归档
                             </button>
@@ -312,15 +283,22 @@
                             </button>
                         </div>
                     </div>
+                    <div class="models-sticky">
                     <div class="models-toolbar">
                         <label class="model-search-label">搜索模型<input id="models-query" class="form-input" type="search" placeholder="名称、模型 ID 或服务地址（按 / 搜索）" oninput="applyModelFilters()"></label>
                         <label>接口协议<select id="models-protocol" class="form-select" onchange="applyModelFilters()"><option value="">全部协议</option><option value="direct_api">OpenAI 兼容</option><option value="responses_native">Responses</option><option value="anthropic_native">Anthropic</option><option value="gemini_native">Gemini</option><option value="legacy">LMArena（兼容）</option></select></label>
                         <label>服务地址<select id="models-provider" class="form-select" onchange="applyModelFilters()"><option value="">全部服务地址</option></select></label>
-                        <button class="btn" onclick="resetModelFilters()">清除筛选</button>
-                        <button class="btn" onclick="loadModels()">刷新列表</button>
-                        <button class="btn" id="models-density" aria-pressed="false" onclick="toggleModelsCompact()" title="一个模型一行，同屏能看到更多模型">紧凑</button>
                     </div>
-                    <div id="models-summary" class="models-summary" role="status"></div>
+                    <div class="models-summary-row">
+                        <div id="models-summary" class="models-summary" role="status"></div>
+                        <div class="card-actions">
+                            <button class="btn btn-sm" onclick="archiveSelectedModels()" id="archive-selected-btn" disabled title="归档勾选的模型（归档后不可请求、列表折叠）">归档所选</button>
+                            <button class="btn btn-sm" onclick="resetModelFilters()">清除筛选</button>
+                            <button class="btn btn-sm" onclick="loadModels()">刷新列表</button>
+                            <button class="btn btn-sm" id="models-density" aria-pressed="false" onclick="toggleModelsCompact()" title="一个模型一行，同屏能看到更多模型">紧凑</button>
+                        </div>
+                    </div>
+                    </div>
                     <div id="models-list" aria-label="模型列表"></div>
                     <div id="models-no-results" class="empty-state" hidden>没有匹配的模型。试试其他关键词，或清除筛选。</div>
                 </div>
@@ -522,11 +500,8 @@
                                     <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#file"/></svg> 表单模式
                                 </button>
                             </div>
-                            <button class="btn" onclick="loadConfig()">
+                            <button class="btn" onclick="reloadConfig()">
                                 <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg> 重新加载
-                            </button>
-                            <button class="btn btn-success" onclick="saveConfig()">
-                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#check"/></svg> 保存配置
                             </button>
                         </div>
                     </div>
@@ -539,7 +514,7 @@
                     </div>
                     
                     <!-- 表单编辑器 -->
-                    <div id="config-form-editor" style="display: block; max-height: 70vh; overflow-y: auto;">
+                    <div id="config-form-editor" style="display: block;">
                         <div class="config-form-search">
                             <input id="config-form-search" class="form-input" type="search" aria-label="搜索配置项" placeholder="搜索配置项：名称、说明或配置键（如 retry_timeout）" oninput="filterConfigForm()" onkeydown="if (event.key === 'Escape' && this.value) { this.value = ''; filterConfigForm(); }">
                             <span id="config-form-search-status" role="status"></span>
@@ -547,14 +522,17 @@
                         <div id="config-form-content"><p style="color: var(--text-dim); text-align: center; padding: 40px;">正在加载配置...</p></div>
                     </div>
                     
-                    <div id="config-message"></div>
+                    <div class="config-savebar">
+                        <span id="config-save-status" role="status"></span>
+                        <button class="btn btn-accent" id="config-save-btn" onclick="saveConfig()">保存配置</button>
+                    </div>
                 </div>
             </div>
 
             <!-- Token计算器页面 -->
             <div id="token-calculator" class="page">
                 <iframe
-                    src="/token_calculator"
+                    data-src="/token_calculator"
                     style="width: 100%; height: calc(100vh - 100px); border: none; background: var(--bg-deep);"
                     title="Token计算器"
                 ></iframe>
@@ -685,10 +663,11 @@
             </div>
 
             <!-- 监控面板页面 -->
-            <!-- 🔧 B8 修复：懒加载 iframe，切到 tab 时才设置 src，切走时清空 -->
+            <!-- 第一次打开时才加载，切走只隐藏 -->
             <div id="monitor" class="page">
                 <iframe
                     id="monitor-iframe"
+                    data-src="/monitor"
                     style="width: 100%; height: calc(100vh - 100px); border: none; background: var(--bg-deep);"
                     title="监控面板"
                 ></iframe>

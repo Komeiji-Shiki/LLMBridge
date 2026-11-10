@@ -425,7 +425,7 @@ function renderTokenTrendChart(dailyStats) {
                                 const rawVal = ratioDataRaw[context.dataIndex];
                                 if (rawVal === null) return context.dataset.label + ': N/A';
                                 const isClipped = ratioMax !== undefined && rawVal > ratioMax;
-                                return context.dataset.label + ': ' + rawVal.toFixed(4) + 'x' + (isClipped ? ' ⚠️异常' : '');
+                                return context.dataset.label + ': ' + rawVal.toFixed(4) + 'x' + (isClipped ? ' 异常' : '');
                             }
                             return context.dataset.label + ': ' + formatTokenNumber(context.parsed.y);
                         }
@@ -522,7 +522,7 @@ function toggleOutputAxis() {
     outputAxisSeparate = !outputAxisSeparate;
     const btn = document.getElementById('toggle-output-axis-btn');
     if (btn) {
-        btn.textContent = outputAxisSeparate ? '🔄 合并Y轴' : '🔄 独立Y轴';
+        btn.textContent = outputAxisSeparate ? '合并 Y 轴' : '独立 Y 轴';
     }
     // 直接更新图表配置，无需重新获取数据
     if (tokenTrendChart) {
@@ -674,7 +674,7 @@ function renderTokenStatsTable(modelStats) {
     latestModelStatsCache = modelStats;
     
     if (modelStats.length === 0) {
-        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📊</div><p>暂无Token统计数据</p></div>';
+        container.innerHTML = '<div class="empty-state"><div class="empty-state-icon"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg></div><p>暂无Token统计数据</p></div>';
         return;
     }
     
@@ -710,10 +710,10 @@ function renderTokenStatsTable(modelStats) {
                 <span id="toggle-all-text">全选</span>
             </button>
             <button class="btn btn-primary btn-sm" onclick="mergeSelectedModelStats()">
-                🔗 合并选中
+                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#link"/></svg> 合并选中
             </button>
             <button class="btn btn-danger btn-sm" onclick="deleteSelectedModelStats()">
-                🗑️ 删除选中
+                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg> 删除选中
             </button>
             <span id="selected-count-display" style="color: var(--text-dim); margin-left: auto;">已选择: 0</span>
         </div>
@@ -905,6 +905,6 @@ function toggleCostCurrency() {
     switchCostCurrency(costCurrencyDisplay === 'USD' ? 'CNY' : 'USD');
     const btn = document.getElementById('toggle-cost-currency-btn');
     if (btn) {
-        btn.textContent = costCurrencyDisplay === 'USD' ? '💱 切换CNY' : '💱 切换USD';
+        btn.textContent = costCurrencyDisplay === 'USD' ? '切换 CNY' : '切换 USD';
     }
 }

@@ -98,11 +98,8 @@ function copyModel(name, config) {
     beginModelEditing();
     
     // 光标放在名称末尾，方便直接接着输入后缀
-    setTimeout(() => {
-        const nameInput = document.getElementById('model-name');
-        nameInput.focus();
-        nameInput.setSelectionRange(nameInput.value.length, nameInput.value.length);
-    }, 100);
+    const nameInput = document.getElementById('model-name');
+    nameInput.setSelectionRange(nameInput.value.length, nameInput.value.length);
 }
 
 function editModel(name, config) {

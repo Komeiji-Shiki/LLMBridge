@@ -51,49 +51,77 @@ let capturePollingInterval = null;
 let modelsSortable = null;
 
 // ==================== 页面切换 ====================
-function initNavigation() {
-    document.querySelectorAll('.nav-item').forEach(item => {
-        item.addEventListener('click', () => {
-            const page = item.dataset.page;
-            
-            document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
-            item.classList.add('active');
-            
-            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-            document.getElementById(page).classList.add('active');
-            
-            loadPageData(page);
-        });
-    });
+// 当前页记在地址栏 # 后面：刷新留在原页，浏览器前进后退可用，也能直接给出某一页的链接。
+// 形如 #models 或 #models/模型名，斜杠后面的部分交给对应页面处理。
+function currentRoute() {
+    const hash = location.hash.slice(1);
+    const cut = hash.indexOf('/');
+    const page = cut < 0 ? hash : hash.slice(0, cut);
+    let detail = cut < 0 ? '' : hash.slice(cut + 1);
+    try { detail = decodeURIComponent(detail); } catch { detail = ''; }
+    if (!document.getElementById(page)?.classList.contains('page')) return { page: 'overview', detail: '' };
+    return { page, detail };
 }
 
-function loadPageData(page) {
-    // 🔧 修复：切离 monitor 页时隐藏 iframe 而非卸载（避免 fetch 被取消导致 TypeError: Failed to fetch）
-    const monitorIframe = document.getElementById('monitor-iframe');
-    const monitorPage = document.getElementById('monitor');
-    
-    if (page === 'monitor') {
-        // 显示监控页面容器（清除内联样式，让 CSS .page.active 控制显示）
-        if (monitorPage) monitorPage.style.display = '';
-        // 首次加载时才设置 src
-        if (monitorIframe && !monitorIframe.getAttribute('data-loaded')) {
-            monitorIframe.src = '/monitor';
-            monitorIframe.setAttribute('data-loaded', '1');
-        }
-    } else {
-        // 隐藏监控页面（保留 iframe 内容，避免 fetch 请求被取消）
-        if (monitorPage) monitorPage.style.display = 'none';
+function routeHash(page, detail = '') {
+    return '#' + page + (detail ? '/' + encodeURIComponent(detail) : '');
+}
+
+function showPage(page, detail = '') {
+    document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.page === page));
+    document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === page));
+    loadPageData(page, detail);
+}
+
+function navigateTo(page, detail = '') {
+    const hash = routeHash(page, detail);
+    if (location.hash !== hash) history.pushState(null, '', hash);
+    showPage(page, detail);
+}
+
+function applyRoute() {
+    // 编辑窗里有没保存的修改、又不想放弃时留在原地，把地址改回去
+    if (document.getElementById('model-modal').classList.contains('active') && !closeModelModal()) {
+        history.pushState(null, '', routeHash('models', currentEditingModel || ''));
+        return;
     }
+    const { page, detail } = currentRoute();
+    showPage(page, detail);
+}
+
+function initNavigation() {
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.addEventListener('click', () => navigateTo(item.dataset.page));
+    });
+    window.addEventListener('hashchange', applyRoute);
+    const { page, detail } = currentRoute();
+    showPage(page, detail);
+}
+
+let _overviewOpened = false;
+
+function loadPageData(page, detail = '') {
+    // 监控和 Token 计算器是整页嵌入的，第一次打开时才加载；切走只是隐藏，里面进行中的请求不会被取消
+    const frame = document.querySelector(`#${page} > iframe[data-src]`);
+    if (frame && !frame.getAttribute('src')) frame.src = frame.dataset.src;
 
     switch(page) {
         case 'gateway-workspace':
             window.gatewayWorkspace?.load();
             break;
         case 'overview':
+            // 请求次数趋势只在第一次打开时读取，之后用它自己的刷新按钮
+            if (!_overviewOpened) {
+                _overviewOpened = true;
+                refreshRequestStats();
+            }
             refreshOverview();
             break;
         case 'models':
-            loadModels();
+            loadModels().then(() => {
+                const editing = document.getElementById('model-modal').classList.contains('active');
+                if (detail && !editing && Object.hasOwn(modelWorkspace.models, detail)) openModelFromList(detail);
+            });
             break;
         case 'tokenizer':
             refreshTokenizerInfo();
@@ -101,16 +129,10 @@ function loadPageData(page) {
             loadCustomTokenizers();
             break;
         case 'config':
-            loadConfig();
-            break;
-        case 'token-calculator':
-            // Token计算器使用iframe加载，不需要额外初始化
+            openConfigPage();
             break;
         case 'api-keys':
-            if (typeof loadApiKeys === 'function') loadApiKeys();
-            break;
-        case 'monitor':
-            // iframe 已在上面处理
+            loadApiKeys();
             break;
     }
 }
@@ -247,17 +269,6 @@ function showQuietMessage(type, message) {
     }, 3000);
 }
 
-function showConfigMessage(type, message) {
-    const msgEl = document.getElementById('config-message');
-    msgEl.innerHTML = `
-        <div class="alert alert-${type}">
-            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${type === 'success' ? 'check' : 'x'}"/></svg>
-            <div>${escapeHtml(message)}</div>
-        </div>
-    `;
-    setTimeout(() => msgEl.innerHTML = '', 5000);
-}
-
 // ==================== JSONC 解析器 ====================
 // parseJsonc / updateJsoncValues are provided by jsonc-utils.js.
 
@@ -377,14 +388,10 @@ async function clearTokenizerCache() {
 
 // ==================== 初始化 ====================
 document.addEventListener('DOMContentLoaded', () => {
-    initNavigation();
     initializeUsageDateRange();
-
-    // 🔧 优化：后端查询已异步化（asyncio.to_thread），所有请求可以并行发起
-    refreshOverview({ includeRates: false });
-    refreshTokenStats();
+    // 按地址栏里的页面加载数据，各请求互不等待
+    initNavigation();
     refreshMemoryInfo();
-    refreshRequestStats();
     
     // 🔧 B7 修复：使用 visibility API，页面不可见时暂停所有定时器
     let _overviewTimer = null;

@@ -353,21 +353,3 @@ async function deleteApiKey(keyId, keyName) {
         alert('删除失败: ' + err.message);
     }
 }
-
-// ==================== 页面初始化 ====================
-
-// 当切换到 api-keys 页面时自动加载
-(function() {
-    // 监听导航点击
-    const origNavHandler = document.querySelector('.nav-item[data-page="api-keys"]');
-    if (origNavHandler) {
-        origNavHandler.addEventListener('click', function() {
-            loadApiKeys();
-        });
-    }
-
-    // 如果页面 hash 指向 api-keys，自动加载
-    if (window.location.hash === '#api-keys') {
-        setTimeout(loadApiKeys, 300);
-    }
-})();

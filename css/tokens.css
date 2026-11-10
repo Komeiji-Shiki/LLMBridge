@@ -89,3 +89,6 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 * { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+
+/* LMArena 网页桥接已弃用：相关入口留在页面里（旧脚本仍会读写这些元素），只是不显示。 */
+.legacy-lmarena { display: none !important; }

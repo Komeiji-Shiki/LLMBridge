@@ -527,8 +527,8 @@ def test_archive_section_stays_open_and_more_menus_close_each_other(ui):
     assert page.locator('#archive-section-body').is_visible()
     menus = page.locator('details.model-more')
     menus.nth(0).locator('summary').click()
-    menus.nth(1).locator('summary').click()
-    assert [menus.nth(0).get_attribute('open'), menus.nth(1).get_attribute('open')] == [None, '']
+    menus.nth(2).locator('summary').click()
+    assert [menus.nth(0).get_attribute('open'), menus.nth(2).get_attribute('open')] == [None, '']
     page.keyboard.press('Escape')
     assert page.locator('details.model-more[open]').count() == 0
 
@@ -578,7 +578,7 @@ def test_config_form_search_filters_sections_and_restores_them(ui):
     page.wait_for_selector('#config-form-content .collapsible-section')
     collapsed = "[...document.querySelectorAll('#config-form-content .collapsible-section')].map(s => s.classList.contains('collapsed'))"
     before = page.evaluate(collapsed)
-    sections = page.locator('#config-form-content .collapsible-section')
+    sections = page.locator('#config-form-content .collapsible-section:not(.legacy-lmarena)')
     visible = page.locator('#config-form-content .collapsible-section:visible')
     status = page.locator('#config-form-search-status')
     search = page.locator('#config-form-search')
@@ -616,10 +616,10 @@ def test_square_spacious_navigation(ui, width):
     page, _, _, _ = ui
     page.set_viewport_size({'width': width, 'height': 1000})
     assert page.locator('.sidebar').bounding_box()['width'] >= 224
-    for link in page.locator('.top-nav a').all():
-        assert link.evaluate("el => el.scrollWidth <= el.clientWidth")
-        assert link.evaluate("el => getComputedStyle(el).whiteSpace") == 'nowrap'
-        assert link.evaluate("el => getComputedStyle(el).borderRadius") == '0px'
+    for item in page.locator('.nav-item:visible').all():
+        assert item.evaluate("el => el.scrollWidth <= el.clientWidth")
+        assert item.evaluate("el => getComputedStyle(el).whiteSpace") == 'nowrap'
+        assert item.evaluate("el => getComputedStyle(el).borderRadius") == '0px'
     assert page.locator('#models > .card').evaluate("el => getComputedStyle(el).borderRadius") == '0px'
 
 
@@ -713,7 +713,7 @@ def test_codex_usage_source_controls_charts_rows_and_export(ui):
         body='来源,模型\ncodex,demo\n', content_type='text/csv',
         headers={'Content-Disposition': 'attachment; filename=token_report.csv'}))
     with page.expect_download(timeout=5000) as download:
-        page.get_by_role('button', name='📥 导出CSV').click()
+        page.locator('#usage-export').click()
     assert parse_qs(urlparse(download.value.url).query)['source'] == ['codex']
     page.locator('#usage-source').select_option('bridge')
     page.wait_for_function("document.getElementById('total-tokens-value').textContent === '45'")
@@ -777,6 +777,7 @@ def test_home_statistics_do_not_wait_for_overview_and_quick_ranges(ui):
         route.fulfill(json={'total_tokens': 12345, 'model_stats': [], 'daily_stats': []})
     page.route('**/api/admin/token_stats?*', stats)
     page.route('**/api/admin/overview', lambda route: pending.append(route))
+    page.evaluate("history.replaceState(null, '', '#overview')")
     page.reload(wait_until='domcontentloaded')
     page.wait_for_function("document.getElementById('total-tokens-value').textContent === '12.3K'")
     assert pending
@@ -872,3 +873,50 @@ def test_manual_refresh_polls_updated_codex_usage_without_restarting_scan(ui):
     assert len(queries) == 2
     assert queries[0]['force'] == ['true']
     assert 'force' not in queries[1]
+
+
+def test_page_and_open_model_survive_reload_and_history(ui):
+    page, _, _, _ = ui
+    assert page.evaluate('location.hash') == '#models'
+    assert not page.locator('[data-page="id-capture"]').is_visible()
+    page.locator('.model-name', has_text='Alpha').click()
+    assert page.evaluate('location.hash') == '#models/Alpha'
+    page.reload()
+    page.wait_for_selector('#model-modal.active')
+    assert page.locator('#model-name').input_value() == 'Alpha'
+    page.keyboard.press('Escape')
+    assert page.evaluate('location.hash') == '#models'
+    page.locator('[data-page="config"]').click()
+    page.wait_for_selector('#form-server_port')
+    page.go_back()
+    page.wait_for_selector('#models.active .model-row')
+    assert page.locator('.nav-item.active').get_attribute('data-page') == 'models'
+
+
+def test_config_edits_survive_leaving_the_page_and_guard_reload(ui):
+    page, _, writes, _ = ui
+    page.locator('[data-page="config"]').click()
+    page.wait_for_selector('#form-server_port')
+    assert '未保存' not in page.locator('#config-save-status').inner_text()
+    page.locator('#form-server_port').fill('5200')
+    assert page.locator('#config-save-status').inner_text() == '有未保存的修改'
+    page.locator('[data-page="models"]').click()
+    page.locator('[data-page="config"]').click()
+    assert page.locator('#form-server_port').input_value() == '5200'
+    page.once('dialog', lambda dialog: dialog.dismiss())
+    page.get_by_role('button', name='重新加载').click()
+    assert page.locator('#form-server_port').input_value() == '5200'
+    page.keyboard.press('Control+s')
+    page.wait_for_function('!configIsDirty()')
+    assert writes[-1]['path'] == '/api/admin/config' and writes[-1]['config']['server_port'] == 5200
+    assert page.locator('#config-save-btn').is_enabled()
+
+
+def test_move_to_top_saves_the_new_order(ui):
+    page, _, writes, _ = ui
+    menu = page.locator('.model-row[data-model-name="Beta"] details.model-more')
+    menu.locator('summary').click()
+    with page.expect_response('**/api/admin/models/reorder'):
+        menu.get_by_role('button', name='移到最前').click()
+    assert writes[-1] == {'path': '/api/admin/models/reorder', 'order': ['Beta', 'Alpha', 'Legacy']}
+    assert menu.get_attribute('open') is None

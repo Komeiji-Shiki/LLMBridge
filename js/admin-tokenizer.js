@@ -1131,7 +1131,7 @@ function showQuickAddTokenizerDialog() {
     let cardsHtml = '';
     for (const tok of POPULAR_TOKENIZERS) {
         const sourceTypeLabel = tok.source_type === 'tiktoken_model' ? 'tiktoken' :
-                                tok.source_type === 'local' ? '📁 本地' : '🤗 HuggingFace';
+                                tok.source_type === 'local' ? '本地' : 'HuggingFace';
         cardsHtml += `
             <div style="padding: 15px; background: var(--surface-2); border: 1px solid var(--line-weak); border-radius: 8px;">
                 <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">

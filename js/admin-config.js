@@ -1,9 +1,55 @@
 // admin-config.js - 配置编辑功能
 
+// ==================== 未保存修改 ====================
+// 表单和源码两种模式各自比对快照；切换模式时把“改过”这件事带过去
+const configEditor = { loaded: false, saving: false, dirty: false, baseline: '' };
+
+function configSnapshot() {
+    if (currentConfigMode === 'jsonc') return document.getElementById('config-editor').value;
+    return JSON.stringify(Array.from(document.querySelectorAll('#config-form-content input, #config-form-content select, #config-form-content textarea'))
+        .map(el => [el.id, el.type === 'checkbox' ? el.checked : el.value]));
+}
+
+function configIsDirty() {
+    return configEditor.loaded && (configEditor.dirty || configSnapshot() !== configEditor.baseline);
+}
+
+function updateConfigSaveStatus() {
+    const status = document.getElementById('config-save-status');
+    const dirty = configIsDirty();
+    status.textContent = dirty ? '有未保存的修改' : '修改后点击保存 · Ctrl / ⌘ + S';
+    status.classList.toggle('is-dirty', dirty);
+}
+
+// 进入配置页：有没保存的修改就保留现场，否则读取最新配置
+function openConfigPage() {
+    if (!configIsDirty()) loadConfig();
+}
+
+function reloadConfig() {
+    if (configIsDirty() && !confirm('配置有未保存的修改，重新加载会丢掉它们。确定继续？')) return;
+    loadConfig();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const page = document.getElementById('config');
+    for (const type of ['input', 'change', 'click']) page.addEventListener(type, updateConfigSaveStatus);
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's') return;
+        if (!page.classList.contains('active') || document.querySelector('.modal.active')) return;
+        event.preventDefault();
+        saveConfig();
+    });
+    window.addEventListener('beforeunload', event => {
+        if (configIsDirty()) { event.preventDefault(); event.returnValue = ''; }
+    });
+});
+
 // ==================== 配置编辑模式切换 ====================
 function switchConfigMode(mode) {
     const previousMode = currentConfigMode;
     if (mode === previousMode) return;
+    configEditor.dirty = configIsDirty();
     currentConfigMode = mode;
     
     // 更新按钮状态
@@ -24,7 +70,7 @@ function switchConfigMode(mode) {
                 currentConfigMode = previousMode;
                 document.getElementById('mode-jsonc-btn').className = 'btn';
                 document.getElementById('mode-form-btn').className = 'btn btn-primary';
-                showConfigMessage('danger', '切换失败: ' + e.message);
+                showMessage('danger', '切换失败: ' + e.message);
                 return;
             }
         }
@@ -39,13 +85,15 @@ function switchConfigMode(mode) {
             document.getElementById('config-jsonc-editor').style.display = 'none';
             document.getElementById('config-form-editor').style.display = 'block';
         } catch (error) {
-            showConfigMessage('danger', '解析配置失败: ' + error.message);
+            showMessage('danger', '解析配置失败: ' + error.message);
             // 切换回JSONC模式
             currentConfigMode = 'jsonc';
             document.getElementById('mode-jsonc-btn').className = 'btn btn-primary';
             document.getElementById('mode-form-btn').className = 'btn';
         }
     }
+    configEditor.baseline = configSnapshot();
+    updateConfigSaveStatus();
 }
 
 // ==================== 构建配置表单 ====================
@@ -96,7 +144,7 @@ function buildConfigForm() {
 function filterConfigForm() {
     const query = document.getElementById('config-form-search').value.trim().toLocaleLowerCase();
     let matched = 0;
-    document.querySelectorAll('#config-form-content .collapsible-section').forEach(section => {
+    document.querySelectorAll('#config-form-content .collapsible-section:not(.legacy-lmarena)').forEach(section => {
         if (section.dataset.collapsedBeforeSearch === undefined) {
             section.dataset.collapsedBeforeSearch = String(section.classList.contains('collapsed'));
         }
@@ -128,9 +176,9 @@ function filterConfigForm() {
 // ==================== 配置卡片构建函数 ====================
 
 // 辅助函数：创建可折叠配置区块
-function buildCollapsibleSection(title, content, collapsed = true) {
+function buildCollapsibleSection(title, content, collapsed = true, extraClass = '') {
     return `
-        <div class="collapsible-section ${collapsed ? 'collapsed' : ''}" style="margin-bottom: 10px;">
+        <div class="collapsible-section ${collapsed ? 'collapsed' : ''} ${extraClass}" style="margin-bottom: 10px;">
             <div class="collapsible-header" onclick="toggleCollapsible(this)">
                 <h4>${title}</h4>
                 <span class="collapsible-toggle">▼</span>
@@ -166,11 +214,11 @@ function buildBasicConfig() {
         buildCompactFormGroup('服务器端口号',
             `<input type="number" class="form-input" id="form-server_port" value="${currentConfigData.server_port ?? 5102}" min="1" max="65535" style="padding: 6px 8px; font-size: 0.85rem;">`,
             '修改后需重启'),
-        buildCompactFormGroup('Session ID',
+        `<div class="legacy-lmarena">${buildCompactFormGroup('Session ID',
             `<input type="text" class="form-input" id="form-session_id" value="${escapeHtml(currentConfigData.session_id || '')}" style="padding: 6px 8px; font-size: 0.85rem;">`,
-            'LMArena 页面的会话 ID')
+            'LMArena 页面的会话 ID')}</div>`
     );
-    return buildCollapsibleSection('📋 基础配置', content, false); // 基础配置默认展开
+    return buildCollapsibleSection('基础配置', content, false); // 基础配置默认展开
 }
 
 function buildIdUpdaterConfig() {
@@ -192,7 +240,7 @@ function buildIdUpdaterConfig() {
                 <option value="ask" ${currentConfigData.id_updater_auto_save_mode === 'ask' ? 'selected' : ''}>ask</option>
             </select>`)
     );
-    return buildCollapsibleSection('🎯 ID 更新器配置', content);
+    return buildCollapsibleSection('ID 更新器配置', content, true, 'legacy-lmarena');
 }
 
 function buildRetryConfig() {
@@ -221,7 +269,7 @@ function buildRetryConfig() {
             向客户端显示重试信息
         </label>
     `;
-    return buildCollapsibleSection('🔄 重试配置', content);
+    return buildCollapsibleSection('重试配置', content);
 }
 
 function buildBypassConfig() {
@@ -251,7 +299,7 @@ function buildBypassConfig() {
             </div>
         </div>
     `;
-    return buildCollapsibleSection('🚀 Bypass 配置', content);
+    return buildCollapsibleSection('Bypass 配置', content);
 }
 
 function buildImageConfig() {
@@ -325,7 +373,7 @@ function buildImageConfig() {
             </div>
         </div>
     `;
-    return buildCollapsibleSection('🖼️ 图像处理配置', content);
+    return buildCollapsibleSection('图像处理配置', content);
 }
 
 function buildMessageConfig() {
@@ -342,7 +390,7 @@ function buildMessageConfig() {
             </div>
         </div>
     `;
-    return buildCollapsibleSection('💬 消息转换配置', content);
+    return buildCollapsibleSection('消息转换配置', content);
 }
 
 function buildFileBedConfig() {
@@ -357,7 +405,7 @@ function buildFileBedConfig() {
         </div>
         <small style="color: var(--text-dim); font-size: 0.75rem;">图床端点配置请使用 JSONC 模式编辑</small>
     `;
-    return buildCollapsibleSection('📤 图床配置', content);
+    return buildCollapsibleSection('图床配置', content);
 }
 
 function buildPerformanceConfig() {
@@ -444,13 +492,13 @@ function buildPerformanceConfig() {
         </div>
     `;
     
-    return buildCollapsibleSection('⏱️ 超时配置', timeoutContent) +
-           buildCollapsibleSection('🖥️ 服务器配置', serverContent) +
-           buildCollapsibleSection('⚙️ 后台任务', bgTaskContent) +
-           buildCollapsibleSection('📥 下载连接', downloadContent) +
-           buildCollapsibleSection('🔗 连接池', poolContent) +
-           buildCollapsibleSection('💾 内存管理', memoryContent) +
-           buildCollapsibleSection('📦 缓存配置', cacheContent);
+    return buildCollapsibleSection('超时配置', timeoutContent) +
+           buildCollapsibleSection('服务器配置', serverContent) +
+           buildCollapsibleSection('后台任务', bgTaskContent) +
+           buildCollapsibleSection('下载连接', downloadContent) +
+           buildCollapsibleSection('连接池', poolContent) +
+           buildCollapsibleSection('内存管理', memoryContent) +
+           buildCollapsibleSection('缓存配置', cacheContent);
 }
 
 function buildReasoningConfig() {
@@ -467,7 +515,7 @@ function buildReasoningConfig() {
             </select>`)}
         </div>
     `;
-    return buildCollapsibleSection('🧠 Reasoning 配置', content);
+    return buildCollapsibleSection('Reasoning 配置', content);
 }
 
 function buildOtherConfig() {
@@ -486,7 +534,7 @@ function buildOtherConfig() {
             ${buildCompactFormGroup('API Key', `<input type="password" class="form-input" id="form-api_key" value="${escapeHtml(currentConfigData.api_key || '')}" placeholder="留空则不启用认证" style="padding: 6px 8px; font-size: 0.85rem;">`, 'Tokenizer 配置请在专门的 Tokenizer 页面配置')}
         </div>
     `;
-    return buildCollapsibleSection('🔧 其他设置', content);
+    return buildCollapsibleSection('其他设置', content);
 }
 
 // ==================== 从表单收集数据 ====================
@@ -648,31 +696,36 @@ async function loadConfig() {
             currentConfigData = parseJsonc(data.content);
         } catch (e) {
             console.error('解析配置失败:', e);
-            showConfigMessage('danger', '解析配置失败，请检查JSON格式');
+            showMessage('danger', '解析配置失败，请检查JSON格式');
         }
         
         if (currentConfigData) {
             buildConfigForm();
         }
+        configEditor.loaded = true;
+        configEditor.dirty = false;
+        configEditor.baseline = configSnapshot();
+        updateConfigSaveStatus();
     } catch (error) {
         console.error('❌ 加载配置失败:', error);
         console.error('错误详情:', error.message);
-        showConfigMessage('danger', '加载配置失败: ' + error.message);
+        showMessage('danger', '加载配置失败: ' + error.message);
     }
 }
 
 async function saveConfig() {
+    if (configEditor.saving) return;
+    const button = document.getElementById('config-save-btn');
+    configEditor.saving = true;
+    button.disabled = true;
+    button.textContent = '保存中…';
     try {
         let payload;
         if (currentConfigMode === 'jsonc') {
             // 源码模式：用户直接编辑文本，原样提交
             payload = { content: document.getElementById('config-editor').value };
         } else {
-            // 表单模式：提交解析后的对象，由服务端在原 config.jsonc 文本上
-            // 定点替换对应的键。
-            // 🔧 旧版这里 JSON.stringify(configObj) 后当 content 提交，等于用
-            // 无注释的纯 JSON 覆盖整个 config.jsonc —— 在配置页点一次保存，
-            // 全部说明性注释就永久丢失了。
+            // 表单模式：提交解析后的对象，由服务端在原 config.jsonc 文本上定点替换对应的键，注释保留
             payload = { config: formToConfig() };
         }
 
@@ -681,7 +734,7 @@ async function saveConfig() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        
+
         if (!response.ok) {
             const errorText = await response.text();
             let errorDetail;
@@ -693,18 +746,16 @@ async function saveConfig() {
             }
             throw new Error(`API错误 (${response.status}): ${errorDetail}`);
         }
-        
-        showConfigMessage('success', '配置已保存并重新加载');
-        await loadConfig();
-        
-    } catch (error) {
-        console.error('❌ 保存配置失败:', error);
-        console.error('错误详情:', error.message);
-        showConfigMessage('danger', '保存失败: ' + error.message);
-    }
-}
 
-// ==================== 监控页面初始化 ====================
-function initMonitorPage() {
-    // iframe会自动加载monitor.html
+        showMessage('success', '配置已保存并重新加载');
+        await loadConfig();
+    } catch (error) {
+        console.error('保存配置失败:', error);
+        showMessage('danger', '保存失败: ' + error.message);
+    } finally {
+        configEditor.saving = false;
+        button.disabled = false;
+        button.textContent = '保存配置';
+        updateConfigSaveStatus();
+    }
 }

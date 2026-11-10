@@ -78,35 +78,6 @@ body {
     height: 16px;
 }
 
-/* 顶部导航 */
-.top-nav {
-    margin: 10px 20px;
-    padding: 10px;
-    background: var(--surface);
-    border: 1px solid var(--line-strong);
-    border-radius: 8px;
-    display: flex;
-    gap: 10px;
-}
-
-.top-nav a {
-    flex: 1;
-    padding: 8px 12px;
-    background: var(--btn-bg);
-    border: 1px solid var(--btn-border);
-    border-radius: 6px;
-    color: var(--text-main);
-    text-decoration: none;
-    text-align: center;
-    font-size: 0.875rem;
-    transition: all 0.2s;
-}
-
-.top-nav a:hover {
-    background: var(--btn-hover);
-    border-color: var(--accent-soft);
-}
-
 /* 主内容区 */
 .main-content {
     flex: 1;

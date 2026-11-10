@@ -247,7 +247,7 @@ async function refreshOverview(options = {}) {
                     `).join('')}
                 </tbody>
             </table>`
-            : '<div class="empty-state"><div class="empty-state-icon">📭</div><p>当前没有活跃请求</p></div>';
+            : '<div class="empty-state"><p>当前没有活跃请求</p></div>';
         
         document.getElementById('active-requests-list').innerHTML = requestsHtml;
         
