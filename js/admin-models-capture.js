@@ -405,16 +405,13 @@ function selectModelFromList() {
 // ==================== 测试当前模型的所有 Key ====================
 
 async function testCurrentModelKeys() {
-    const btn = document.getElementById('test-keys-btn');
-    const resultsDiv = document.getElementById('key-test-results');
-    
     // 收集当前编辑框中的配置
     const apiKeys = getApiKeys();
     if (apiKeys.length === 0) {
         showMessage('warning', '请先填写至少一个 API Key');
         return;
     }
-    
+
     const apiBaseUrl = document.getElementById('api-base-url').value.trim();
     const apiType = document.getElementById('api-type').value;
     const modelId = document.getElementById('model-id').value.trim() || document.getElementById('model-name').value.trim();
@@ -424,44 +421,49 @@ async function testCurrentModelKeys() {
     };
     const defaultEndpoint = defaultEndpoints[apiType] || '/chat/completions';
     const endpointPath = document.getElementById('endpoint-path').value.trim() || defaultEndpoint;
-    
+
     if (apiType !== 'gemini_native' && !apiBaseUrl) {
         showMessage('warning', '请先填写 API Base URL');
         return;
     }
-    
+
+    await runKeyTest(document.getElementById('test-keys-btn'), document.getElementById('key-test-results'), {
+        api_keys: apiKeys,
+        api_base_url: apiBaseUrl,
+        model_id: modelId,
+        api_type: apiType,
+        api_key_auth_mode: document.getElementById('api-key-auth-mode').value,
+        upstream_protocol: document.getElementById('upstream-protocol').value,
+        endpoint_path: endpointPath,
+    });
+}
+
+// 并行测试一组 Key，把每把 Key 的结果画到 resultsDiv。模型编辑窗和渠道编辑窗共用。
+async function runKeyTest(btn, resultsDiv, payload) {
     // 显示加载状态
     const originalContent = btn.innerHTML;
     btn.disabled = true;
     btn.textContent = '测试中...';
     resultsDiv.style.display = 'block';
-    resultsDiv.innerHTML = `<div style="text-align: center; padding: 10px; color: var(--text-dim);">正在并行测试 ${apiKeys.length} 个 Key...</div>`;
-    
+    resultsDiv.innerHTML = `<div style="text-align: center; padding: 10px; color: var(--text-dim);">正在并行测试 ${payload.api_keys.length} 个 Key...</div>`;
+
     try {
         const response = await fetch('/api/admin/test_model_keys', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                api_keys: apiKeys,
-                api_base_url: apiBaseUrl,
-                model_id: modelId,
-                api_type: apiType,
-                api_key_auth_mode: document.getElementById('api-key-auth-mode').value,
-                upstream_protocol: document.getElementById('upstream-protocol').value,
-                endpoint_path: endpointPath,
-            })
+            body: JSON.stringify(payload)
         });
-        
+
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
-        
+
         const data = await response.json();
-        
+
         // 渲染结果
         let html = `<div style="font-size: 0.85rem; margin-bottom: 8px; color: var(--text-dim);">${escapeHtml(data.message)}</div>`;
         html += '<div style="display: flex; flex-direction: column; gap: 6px;">';
-        
+
         for (const r of data.results) {
             let iconName, color, bg;
             if (r.status === 'ok') {
@@ -471,10 +473,10 @@ async function testCurrentModelKeys() {
             } else {
                 iconName = 'x'; color = 'var(--danger)'; bg = 'rgb(var(--danger-rgb) / 0.1)';
             }
-            
+
             const timeStr = r.response_time_ms ? `${r.response_time_ms}ms` : '';
             const errStr = r.error ? ` — ${escapeHtml(r.error)}` : '';
-            
+
             html += `
                 <div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: ${bg}; border-radius: 4px; font-size: 0.8rem;">
                     <span style="color: ${color};"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${iconName}"/></svg></span>
@@ -486,7 +488,7 @@ async function testCurrentModelKeys() {
         }
         html += '</div>';
         resultsDiv.innerHTML = html;
-        
+
     } catch (error) {
         resultsDiv.innerHTML = `<div style="color: var(--danger); font-size: 0.85rem;"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#x"/></svg> 测试失败: ${escapeHtml(error.message)}</div>`;
     } finally {

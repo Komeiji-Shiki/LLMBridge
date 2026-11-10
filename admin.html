@@ -333,7 +333,12 @@
                         <div id="channels-suggest-text"></div>
                         <button class="btn btn-sm" onclick="adoptChannelSuggestions()">查看并整理</button>
                     </div>
+                    <div class="channels-toolbar" hidden>
+                        <input id="channels-query" class="form-input" type="search" placeholder="搜索渠道名、地址、用它的模型或 Key 片段（按 / 搜索）" aria-label="搜索渠道" oninput="renderChannels()">
+                        <div id="channels-summary" class="models-summary" role="status"></div>
+                    </div>
                     <div id="channels-list"></div>
+                    <div id="channels-no-results" class="empty-state" hidden>没有匹配的渠道。换个关键词，或按 Esc 清空搜索。</div>
                 </div>
             </div>
 
@@ -729,10 +734,17 @@
                 <div class="form-group">
                     <label class="form-label">API Key</label>
                     <div id="channel-api-keys-list"></div>
-                    <button class="btn btn-sm" onclick="addApiKeyRow('', 'channel-api-keys-list')" type="button">
-                        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 添加 API Key
-                    </button>
-                    <small class="field-hint">多个 Key 自动轮询；本地反代等不需要认证的可以不填。</small>
+                    <div class="channel-key-actions">
+                        <button class="btn btn-sm" onclick="addApiKeyRow('', 'channel-api-keys-list')" type="button">
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#plus"/></svg> 添加 API Key
+                        </button>
+                        <button class="btn btn-sm btn-success" id="channel-test-keys-btn" onclick="testChannelKeys()" type="button">
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#key"/></svg> 测试所有 Key
+                        </button>
+                        <select class="form-select" id="channel-test-model" aria-label="测试 Key 时请求哪个模型"></select>
+                    </div>
+                    <div id="channel-key-test-results" style="display: none;"></div>
+                    <small class="field-hint">多个 Key 自动轮询，一次粘贴多行会拆成多把 Key；本地反代等不需要认证的可以不填。<span id="channel-test-hint">有模型用上这个渠道后，可以在这里直接测 Key。</span></small>
                 </div>
                 <div class="form-group">
                     <label class="form-label" for="channel-auth-mode">API Key 鉴权方式</label>
@@ -762,6 +774,7 @@
                 <p id="channel-usage-note" class="channel-usage-note"></p>
             </div>
             <div class="modal-footer">
+                <span id="channel-save-status" role="status"></span>
                 <button class="btn" onclick="closeChannelModal()">取消</button>
                 <button class="btn btn-accent" id="channel-save-btn" onclick="saveChannel()">保存渠道</button>
             </div>
@@ -926,7 +939,7 @@
 </div>
 <div id="key-test-results" style="display: none; margin-top: 10px;"></div>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                            可添加多个 API Key 实现自动轮询。本地反代等无需认证的场景可留空
+                            可添加多个 API Key 实现自动轮询，一次粘贴多行会拆成多把 Key。本地反代等无需认证的场景可留空
                         </small>
 </div><div class="form-group" data-channel-field="" data-direct-setting="">
 <label class="form-label" for="api-key-auth-mode">API Key 鉴权方式</label>

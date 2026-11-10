@@ -294,19 +294,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const input = document.getElementById(id);
         input.addEventListener('input', () => checkModelJsonField(input));
     });
-    // 不在输入时按 / 跳到模型搜索，搜索框里按 Esc 清空
-    const query = document.getElementById('models-query');
-    document.addEventListener('keydown', event => {
-        if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
-        if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]')) return;
-        if (!query.getClientRects().length || document.querySelector('.modal.active')) return;
-        event.preventDefault();
-        query.focus();
-        query.select();
-    });
-    query.addEventListener('keydown', event => {
-        if (event.key === 'Escape' && query.value) { event.stopPropagation(); query.value = ''; applyModelFilters(); }
-    });
+    // 按 / 跳到模型搜索，Esc 清空
+    bindSearchShortcut(document.getElementById('models-query'), applyModelFilters);
     modal.addEventListener('change', updateModelSaveStatus);
     modal.addEventListener('click', () => { if (modal.classList.contains('active')) updateModelSaveStatus(); });
     document.addEventListener('keydown', event => {

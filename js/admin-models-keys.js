@@ -264,6 +264,22 @@ function getApiKeys(listId = 'model-api-keys-list') {
     return keys;
 }
 
+// 一次粘贴多行：每行一把 Key，第一把填进当前输入框，其余各加一行；列表里已有的不重复加
+document.addEventListener('paste', event => {
+    const input = event.target instanceof Element ? event.target.closest('.api-key-input') : null;
+    const list = input?.closest('#model-api-keys-list, #channel-api-keys-list');
+    const pasted = (event.clipboardData?.getData('text') || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (!list || pasted.length < 2) return;
+    event.preventDefault();
+    const existing = new Set(getApiKeys(list.id));
+    existing.delete(input.value.trim());
+    const fresh = [...new Set(pasted)].filter(key => !existing.has(key));
+    if (!fresh.length) return;
+    input.value = fresh[0];
+    fresh.slice(1).forEach(key => addApiKeyRow(key, list.id));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+});
+
 // escapeHtmlForAttr 已上移到 admin-core.js（被本文件与 admin-apikeys.js 共用），
 // 顺带补上单引号转义 —— 旧实现不转 ' ，属性用单引号包裹时可被闭合。
 

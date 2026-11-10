@@ -1064,8 +1064,11 @@ def test_channels_page_rotates_keys_and_assigns_selected_models(ui):
         'api_key_auth_mode': 'auto', 'api_key_strategy': 'sticky'}}
     assert page.evaluate('location.hash') == '#channels'
 
-    # 从渠道跳到模型列表，只看它的模型
+    # 展开看是哪些模型，再跳到模型列表只看它们
     row.get_by_role('button', name='1 个模型').click()
+    models_row = page.locator('#channels-list .channel-models-row')
+    assert models_row.get_by_role('button', name='Alpha').count() == 1
+    models_row.get_by_role('button', name='在模型列表里查看').click()
     page.wait_for_function("document.getElementById('models-provider').value === 'ch:ch-main'")
     assert page.evaluate('location.hash') == '#models' and page.locator('.model-row:visible').count() == 1
 
@@ -1086,3 +1089,95 @@ def test_channels_page_rotates_keys_and_assigns_selected_models(ui):
     page.keyboard.press('Enter')
     page.wait_for_selector('#channel-modal.active')
     assert page.locator('#channel-name').input_value() == '主力上游'
+
+
+def channel_order(page):
+    return page.locator('#channels-list tbody tr[data-channel-id]').evaluate_all('rows => rows.map(row => row.dataset.channelId)')
+
+
+def test_channels_sort_search_and_expand(ui):
+    page, models, _, _ = ui
+    channels = {**CHANNELS, 'ch-backup': {'name': '备用上游', 'api_base_url': 'https://backup.example/v1', 'api_keys': ['sk-backup-000111']}}
+    models['Alpha'] = {'api_type': 'direct_api', 'model_id': 'upstream-alpha', 'channel': 'ch-main'}
+    models['Beta'] = {'api_type': 'responses_native', 'channel': 'ch-backup'}
+    models['Archived'] = {'api_type': 'anthropic_native', 'archived': True, 'channel': 'ch-backup'}
+    use_channels(page, models, channels)
+    page.locator('[data-page="channels"]').click()
+    page.wait_for_selector('#channels-list tr[data-channel-id]')
+    assert '2 个渠道 · 3 个模型在用' in page.locator('#channels-summary').inner_text()
+    assert 'sk-bac…0111' in page.locator('tr[data-channel-id="ch-backup"]').inner_text()
+
+    # 点“模型”表头：先多后少，再点一次反向；选择记在浏览器里
+    page.locator('#channels-list th', has_text='模型').click()
+    assert channel_order(page) == ['ch-backup', 'ch-main']
+    assert page.locator('#channels-list th.active').get_attribute('aria-sort') == 'descending'
+    page.locator('#channels-list th', has_text='模型').click()
+    assert channel_order(page) == ['ch-main', 'ch-backup']
+    page.reload()
+    page.wait_for_selector('#channels-list tr[data-channel-id]')
+    assert channel_order(page) == ['ch-main', 'ch-backup']
+    assert '模型 ▲' in page.locator('#channels-list th.active').inner_text()
+
+    # 搜索：渠道名、地址、用它的模型、Key 片段
+    query = page.locator('#channels-query')
+    for text, expected in [('backup.example', ['ch-backup']), ('alpha', ['ch-main']), ('shared-b', ['ch-main']), ('上游', ['ch-main', 'ch-backup'])]:
+        query.fill(text)
+        assert channel_order(page) == expected, text
+    query.fill('不存在')
+    assert page.locator('#channels-no-results').is_visible() and channel_order(page) == []
+    query.press('Escape')
+    assert query.input_value() == '' and len(channel_order(page)) == 2
+    page.locator('#channels h2').click()
+    page.keyboard.press('/')
+    assert query.evaluate('el => el === document.activeElement')
+
+    # 展开看用它的模型，点模型名直接打开设置
+    page.locator('tr[data-channel-id="ch-backup"]').get_by_role('button', name='2 个模型').click()
+    page.locator('.channel-models-row').get_by_role('button', name='Beta').click()
+    page.wait_for_selector('#model-modal.active')
+    assert page.locator('#model-name').input_value() == 'Beta' and page.evaluate('location.hash') == '#models/Beta'
+
+
+def test_channel_copy_pastes_keys_tests_them_and_guards_edits(ui):
+    page, models, writes, _ = ui
+    models['Alpha'] = {'api_type': 'direct_api', 'model_id': 'upstream-alpha', 'channel': 'ch-main'}
+    use_channels(page, models, CHANNELS)
+    tested = []
+
+    def test_route(route):
+        tested.append(route.request.post_data_json)
+        route.fulfill(json={'message': '测试完成: 1 个可用', 'results': [{'index': 0, 'key_preview': 'new-a', 'status': 'ok', 'response_time_ms': 12}]})
+
+    page.route('**/api/admin/test_model_keys', test_route)
+    page.locator('[data-page="channels"]').click()
+    page.locator('#channels-list tr[data-channel-id="ch-main"]').get_by_role('button', name='复制').click()
+    assert page.locator('#channel-modal-title').inner_text() == '复制渠道 · 主力上游'
+    assert page.locator('#channel-name').input_value() == '主力上游 副本'
+    assert page.evaluate('location.hash') == '#channels'
+    assert page.locator('#channel-save-status').inner_text().startswith('修改后点击保存')
+
+    # 一次粘贴多行拆成多把 Key，列表里已有的不重复加
+    page.locator('#channel-api-keys-list .api-key-input').first.evaluate("""input => {
+        const data = new DataTransfer();
+        data.setData('text/plain', 'new-a\\nshared-b\\n\\n new-c \\n');
+        input.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    }""")
+    keys = page.locator('#channel-api-keys-list .api-key-input').evaluate_all('inputs => inputs.map(input => input.value)')
+    assert keys == ['new-a', 'shared-b', 'new-c']
+    assert page.locator('#channel-save-status').inner_text() == '有未保存的修改'
+
+    # 测 Key 借用原渠道里的模型发请求
+    page.locator('#channel-test-keys-btn').click()
+    page.locator('#channel-key-test-results', has_text='测试完成: 1 个可用').wait_for()
+    assert tested == [{'api_keys': keys, 'api_base_url': 'https://shared.example/v1', 'model_id': 'upstream-alpha', 'api_type': 'direct_api',
+                       'api_key_auth_mode': 'auto', 'upstream_protocol': 'generate_content', 'endpoint_path': ''}]
+
+    # 没保存就关会先问；Ctrl+S 存成新渠道
+    page.keyboard.press('Escape')
+    page.locator('.dialog').get_by_role('button', name='继续编辑').click()
+    assert page.locator('#channel-modal.active').count() == 1
+    page.keyboard.press('Control+s')
+    page.wait_for_selector('#channel-modal', state='hidden')
+    assert writes[-1] == {'path': '/api/admin/channels', 'id': None, 'channel': {
+        'name': '主力上游 副本', 'api_base_url': 'https://shared.example/v1', 'api_keys': keys,
+        'api_key_auth_mode': 'auto', 'api_key_strategy': 'sticky'}}

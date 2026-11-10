@@ -179,7 +179,6 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .channel-unused, .channel-usage-note { color: var(--text-dim); font-size: .8rem; }
 .channel-dialog { max-width: 650px; }
 .channel-dialog .modal-body { max-height: 70vh; overflow-y: auto; }
-.channel-dialog #channel-api-keys-list + .btn { margin-top: 2px; }
 .channel-select-row, .channel-strategy-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .channel-select-row select { flex: 1; min-width: 0; }
 .channel-strategy-row select { max-width: 200px; }
@@ -189,3 +188,17 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .channel-locked [data-channel-field] input:disabled, .channel-locked [data-channel-field] select:disabled { opacity: .6; cursor: not-allowed; }
 .channel-locked [data-channel-field] .btn-danger, .channel-locked [data-channel-field] button[onclick="addApiKeyRow()"] { display: none; }
 .dialog .form-select { width: 100%; margin-top: 12px; }
+/* 渠道列表：搜索、排序、展开看模型 */
+.channels-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-bottom: 16px; }
+.channels-toolbar input { flex: 1; min-width: 240px; max-width: 520px; }
+.channel-idle .model-name { color: var(--text-dim); }
+.channel-key-preview { font-family: var(--font-mono); }
+.channel-models-row td { padding-top: 0; }
+.channel-models { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-height: 180px; overflow-y: auto; }
+.channel-models .badge { font-family: inherit; cursor: pointer; }
+.channel-models .badge:hover { color: var(--text-main); border-color: var(--accent-soft); }
+.channel-models .btn { margin-left: auto; }
+.channel-key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.channel-key-actions select { flex: 1; min-width: 160px; max-width: 280px; padding: 6px 10px; font-size: .8rem; }
+#channel-key-test-results { margin-top: 10px; }
+#channel-save-status { margin-right: auto; align-self: center; color: var(--text-dim); font-size: .78rem; }

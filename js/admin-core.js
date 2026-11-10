@@ -85,6 +85,10 @@ async function applyRoute() {
         history.pushState(null, '', routeHash('models', currentEditingModel || ''));
         return;
     }
+    if (document.getElementById('channel-modal').classList.contains('active') && !(await closeChannelModal())) {
+        history.pushState(null, '', routeHash('channels', channelWorkspace.editing || ''));
+        return;
+    }
     const { page, detail } = currentRoute();
     showPage(page, detail);
 }
@@ -334,6 +338,22 @@ function openDialog({ title, message = '', confirmText = '确定', cancelText = 
 
 const confirmDialog = options => openDialog(options);
 const promptDialog = options => openDialog({ ...options, input: options.input || {} });
+
+// ==================== 列表搜索框 ====================
+// 不在输入时按 / 跳到当前页的搜索框，搜索框里按 Esc 清空
+function bindSearchShortcut(input, onClear) {
+    document.addEventListener('keydown', event => {
+        if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey) return;
+        if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]')) return;
+        if (!input.getClientRects().length || document.querySelector('.modal.active')) return;
+        event.preventDefault();
+        input.focus();
+        input.select();
+    });
+    input.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && input.value) { event.stopPropagation(); input.value = ''; onClear(); }
+    });
+}
 
 // ==================== JSONC 解析器 ====================
 // parseJsonc / updateJsoncValues are provided by jsonc-utils.js.
