@@ -2,6 +2,9 @@
  * monitor.js - 监控面板前端逻辑
  * 🔧 重构：从 monitor.html 内嵌 <script> 拆分而来，行为保持不变
  */
+// 嵌在管理面板里时由样式收起品牌栏和返回入口
+if (window.top !== window.self) document.documentElement.classList.add('embedded');
+
 let ws = null;
 let currentTab = 'requests';
 let browserConnected = false;
@@ -136,7 +139,7 @@ function scheduleLogsRefresh() {
         _logsRefreshTimer = null;
         if (!isPageActive()) return;
         refreshStats();
-        refreshLogs(true);
+        refreshLogs('event');
     }, _LOGS_REFRESH_DEBOUNCE_MS);
 }
 
@@ -275,6 +278,8 @@ let _activeRequestSignature = '';
 function updateActiveRequests(requests) {
     const container = document.getElementById('active-requests-list');
     const signature = JSON.stringify(requests || []);
+    // 没有活跃请求时整块收起，顶上的指标卡已经显示了数量
+    document.getElementById('active-section').hidden = !requests?.length;
     if (signature === _activeRequestSignature) {
         container.querySelectorAll('[data-started]').forEach(node => {
             node.textContent = Math.max(0, Date.now() / 1000 - Number(node.dataset.started)).toFixed(1) + 's';

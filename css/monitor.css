@@ -1004,3 +1004,18 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .native-tool-input { margin: 0; padding: 10px 12px; background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.8 Consolas, monospace; }
 .native-message-badge { margin-left: 6px; color: var(--accent); background: var(--surface-3); }
 
+/* 首屏留给请求日志：指标压成一行，没有活跃请求时不占位置 */
+[hidden] { display: none !important; }
+.stats-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.stat-card { padding: 14px 16px; }
+.stat-card h3 { margin-bottom: 8px; }
+.stat-value { font-size: 24px; margin-bottom: 4px; }
+@media (max-width: 620px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+button.tab { font: inherit; font-size: 14px; font-weight: 500; background: none; border-width: 0 0 2px; border-style: solid; border-color: transparent; }
+#log-new-notice { border-color: transparent; background: var(--action); color: var(--on-action); }
+.model-link { color: inherit; text-decoration: none; }
+.model-link:hover { color: var(--accent-hover); text-decoration: underline; }
+/* 嵌在管理面板里时不重复显示品牌和返回入口 */
+.embedded .brand, .embedded .header-link { display: none; }
+.embedded .header { padding: 10px 32px; justify-content: flex-end; }
+.embedded .container { padding-top: 18px; }

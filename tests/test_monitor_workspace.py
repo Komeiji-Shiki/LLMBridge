@@ -360,3 +360,18 @@ def test_lmarena_leftovers_stay_out_of_sight(monitor_ui):
     for selector in ('#current-mode', '#browser-status', '#tabs-grid'):
         assert not page.locator(selector).is_visible()
     assert page.locator('.stat-card:visible').count() == 5
+
+
+def test_auto_refresh_does_not_shift_rows_being_read(monitor_ui):
+    page, _ = monitor_ui
+    notice = page.locator('#log-new-notice')
+    assert notice.is_hidden() and page.locator('#active-section').is_hidden()
+    page.evaluate("currentLogPage = 2; document.querySelector('#request-logs tr').dataset.kept = '1'")
+    page.evaluate("refreshLogs('event')")
+    assert notice.is_visible()
+    assert page.locator('#request-logs tr[data-kept]').count() == 1
+    notice.click()
+    page.wait_for_function("!document.querySelector('#request-logs tr[data-kept]')")
+    assert notice.is_hidden() and page.evaluate('currentLogPage') == 0
+    link = page.locator('#request-logs .model-link').first
+    assert link.get_attribute('target') == '_top' and link.get_attribute('href').startswith('/admin#models/')

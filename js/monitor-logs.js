@@ -5,12 +5,28 @@ async function refreshLogs(automatic = false) {
     if (!logsVisible || (automatic && logRefreshPaused)) {
         return;
     }
+    // 正在翻后面几页，或者把表格往下滚了：整表重绘会把正在看的行挤走，只提示有新请求
+    if (automatic && currentTab === 'requests' && logsHeldInPlace()) {
+        if (automatic === 'event') document.getElementById('log-new-notice').hidden = false;
+        return;
+    }
+    document.getElementById('log-new-notice').hidden = true;
 
     if (currentTab === 'requests') {
         await refreshRequestLogs();
     } else {
         await refreshErrorLogs();
     }
+}
+
+function logsHeldInPlace() {
+    return currentLogPage > 0 || document.querySelector('#requests-tab .table-container').scrollTop > 0;
+}
+
+function showNewestLogs() {
+    currentLogPage = 0;
+    document.querySelector('#requests-tab .table-container').scrollTop = 0;
+    refreshLogs();
 }
 
 // 当前日志限制
@@ -226,7 +242,7 @@ function refreshRequestLogs() {
                     <td><input type="checkbox" class="compare-check" aria-label="加入缓存对比" data-request-id="${escapeHtml(log.request_id || '')}" onchange="MonitorCompare.toggleCompareSelection(this.dataset.requestId, this.checked)" ${log.request_id && MonitorCompare.has(log.request_id) ? 'checked' : ''} ${log.request_id ? '' : 'disabled title="该记录无请求ID"'}></td>
                     <td>${time}</td>
                     <td style="font-family: monospace; font-size: 12px;">${escapeHtml(log.request_id?.substring(0, 8) || 'N/A')}...</td>
-                    <td>${escapeHtml(log.model)}${featureBadges ? ' ' + featureBadges : ''}<div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div></td>
+                    <td><a class="model-link" href="/admin#models/${encodeURIComponent(log.model || '')}" target="_top" title="打开这个模型的设置">${escapeHtml(log.model)}</a>${featureBadges ? ' ' + featureBadges : ''}<div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div></td>
                     <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span>${renderFilteredBadge(stopReason)}</td>
                     <td title="${escapeHtml(renderPhaseTimings(log.timings))}">${duration}${log.timings?.first_business_ms != null ? `<div style="font-size:11px;opacity:.7">首事件 ${(Number(log.timings.first_business_ms) / 1000).toFixed(2)}s</div>` : ""}</td>
                     <td>${inTokens}</td>
