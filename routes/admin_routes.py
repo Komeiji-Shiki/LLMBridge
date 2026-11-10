@@ -36,7 +36,7 @@ from utils.jsonc_edit import (
 )
 from ._direct_api_utils import set_sticky_current_key
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.responses import Response
 
 logger = logging.getLogger(__name__)
@@ -1465,6 +1465,12 @@ async def query_key_balance(request: Request):
 # ============================================================================
 # 端点注册（依赖从模块单例 / AppState 自取）
 # ============================================================================
+
+@router.get("/", include_in_schema=False)
+async def root_endpoint():
+    # 直接打开服务地址时进管理面板，不再是一个 404
+    return RedirectResponse('/admin')
+
 
 @router.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard_endpoint():
