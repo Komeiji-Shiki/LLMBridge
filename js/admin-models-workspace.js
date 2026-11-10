@@ -51,6 +51,31 @@ function modelService(config) {
     return config.api_base_url || (config.api_type === 'gemini_native' ? 'Google 官方默认地址' : '未指定地址');
 }
 
+// 地址栏和监控页给的可能是显示名称，这里换回配置里的模型名
+function resolveModelName(label) {
+    if (Object.hasOwn(modelWorkspace.models, label)) return label;
+    return Object.keys(modelWorkspace.models).find(name => modelPrimaryConfig(modelWorkspace.models[name]).display_name === label);
+}
+
+// 在编辑窗里直接换到列表中的上一个 / 下一个模型（按当前筛选结果），不用关掉再点
+function modelEditorNeighbors() {
+    const names = Array.from(document.querySelectorAll('#models-list .model-row:not([hidden])'), row => row.dataset.modelName);
+    const index = names.indexOf(currentEditingModel);
+    return index < 0 ? [] : [names[index - 1], names[index + 1]];
+}
+
+function updateModelStepper() {
+    const [previous, next] = modelEditorNeighbors();
+    document.getElementById('model-stepper').hidden = !currentEditingModel;
+    document.getElementById('model-prev').disabled = !previous;
+    document.getElementById('model-next').disabled = !next;
+}
+
+async function stepModelEditor(delta) {
+    const target = modelEditorNeighbors()[delta < 0 ? 0 : 1];
+    if (target && await closeModelModal()) openModelFromList(target);
+}
+
 function openModelFromList(name, copy = false) {
     const config = modelWorkspace.models[name];
     if (copy) copyModel(name, config);
@@ -179,12 +204,13 @@ function beginModelEditing() {
     document.body.classList.add('model-editor-open');
     selectModelSettings('connection');
     updateModelSaveStatus();
+    updateModelStepper();
     document.getElementById('model-name').focus();
 }
 
-function endModelEditing(force) {
+async function endModelEditing(force) {
     if (modelEditor.saving && !force) return false;
-    if (!force && modelEditor.snapshot !== modelFormSnapshot() && !confirm('模型设置尚未保存，确定放弃修改吗？')) return false;
+    if (!force && modelEditor.snapshot !== modelFormSnapshot() && !(await confirmDialog({ title: '放弃未保存的修改？', message: '这个模型的设置改过但还没有保存。', confirmText: '放弃修改', cancelText: '继续编辑', danger: true }))) return false;
     document.getElementById('model-modal').classList.remove('active');
     document.body.classList.remove('model-editor-open');
     modelEditor.snapshot = '';
@@ -256,6 +282,11 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('keydown', event => {
         if (!modal.classList.contains('active')) return;
         if (event.key === 'Escape') { event.preventDefault(); closeModelModal(); }
+        // 下拉框里 Alt + 方向键是展开选项，不抢
+        if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && event.target.tagName !== 'SELECT') {
+            event.preventDefault();
+            stepModelEditor(event.key === 'ArrowUp' ? -1 : 1);
+        }
         if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); saveModel(); }
         if (event.key === 'Tab') {
             const focusable = Array.from(modal.querySelectorAll('button, input, select, textarea, a[href]')).filter(el => !el.disabled && el.getClientRects().length);

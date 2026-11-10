@@ -28,6 +28,7 @@
     <script defer src="js/admin-config.js"></script>
     <script defer src="js/admin-apikeys.js"></script>
     <script defer src="js/admin-gateway.js"></script>
+    <script defer src="js/admin-palette.js"></script>
     
 </head>
 <body>
@@ -37,6 +38,7 @@
             <div class="sidebar-header">
                 <h1><span class="brand-mark" aria-hidden="true">B</span> LLMBridge</h1>
                 <p>网关管理面板</p>
+                <button type="button" class="palette-trigger" onclick="commandPalette.open()"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#search"/></svg> 快速跳转 <kbd>Ctrl K</kbd></button>
             </div>
 
             <ul class="nav-menu">
@@ -57,7 +59,7 @@
 
             <div id="memory-widget" class="memory-widget">
                 <div class="memory-head">
-                    <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#chip"/></svg> 内存占用</span>
+                    <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#chip"/></svg> 内存</span>
                     <strong id="memory-value">--</strong>
                     <button type="button" class="icon-btn" onclick="refreshMemoryInfo()" title="刷新内存信息" aria-label="刷新内存信息"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg></button>
                 </div>
@@ -713,6 +715,10 @@
 <div class="modal-content" style="">
 <div class="modal-header">
 <h3 id="modal-title">添加模型</h3>
+<div class="model-stepper" id="model-stepper">
+<button type="button" class="btn btn-sm" id="model-prev" onclick="stepModelEditor(-1)" title="列表里的上一个模型（Alt + ↑）">上一个</button>
+<button type="button" class="btn btn-sm" id="model-next" onclick="stepModelEditor(1)" title="列表里的下一个模型（Alt + ↓）">下一个</button>
+</div>
 <button aria-label="关闭模型设置" class="close-btn" onclick="closeModelModal()">×</button>
 </div>
 <nav aria-label="模型设置分组" class="model-settings-nav"><button aria-controls="settings-connection" data-settings-page="connection" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">连接与身份</button><button aria-controls="settings-generation" data-settings-page="generation" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">生成与思考</button><button aria-controls="settings-messages" data-settings-page="messages" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">消息与兼容</button><button aria-controls="settings-reliability" data-settings-page="reliability" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">重试与图片</button><button aria-controls="settings-pricing" data-settings-page="pricing" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">计费与统计</button><button aria-controls="settings-advanced" data-settings-page="advanced" onclick="selectModelSettings(this.dataset.settingsPage)" type="button">自定义参数</button></nav><div class="modal-body" style="">

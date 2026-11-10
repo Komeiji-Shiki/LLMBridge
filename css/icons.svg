@@ -107,4 +107,8 @@
     <symbol id="grip" viewBox="0 0 24 24">
         <path stroke-width="3" d="M9 5h.1m6 0h.1M9 12h.1m6 0h.1M9 19h.1m6 0h.1"/>
     </symbol>
+    <symbol id="search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="6"/>
+        <path d="m20 20-4.5-4.5"/>
+    </symbol>
 </svg>

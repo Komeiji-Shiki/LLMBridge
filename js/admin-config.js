@@ -26,8 +26,8 @@ function openConfigPage() {
     if (!configIsDirty()) loadConfig();
 }
 
-function reloadConfig() {
-    if (configIsDirty() && !confirm('配置有未保存的修改，重新加载会丢掉它们。确定继续？')) return;
+async function reloadConfig() {
+    if (configIsDirty() && !(await confirmDialog({ title: '放弃未保存的修改？', message: '重新加载会用服务器上的配置覆盖当前表单。', confirmText: '重新加载', cancelText: '继续编辑', danger: true }))) return;
     loadConfig();
 }
 
@@ -677,17 +677,7 @@ async function loadConfig() {
     try {
         const response = await fetch('/api/admin/config');
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         const data = await response.json();
         document.getElementById('config-editor').value = data.content;
@@ -735,17 +725,7 @@ async function saveConfig() {
             body: JSON.stringify(payload)
         });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
 
         showMessage('success', '配置已保存并重新加载');
         await loadConfig();

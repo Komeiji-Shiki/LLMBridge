@@ -299,7 +299,7 @@ async function saveModel() {
     const configType = document.getElementById('config-type').value;
     
     if (!modelName) {
-        alert('请输入模型名称');
+        showMessage('warning', '请输入模型名称');
         return;
     }
     
@@ -318,23 +318,19 @@ async function saveModel() {
                 responses_native: 'Responses 原生格式',
                 anthropic_native: 'Anthropic原生格式',
             };
-            alert(`${labels[apiType]}需要填写 API Base URL`);
+            showMessage('warning', `${labels[apiType]}需要填写 API Base URL`);
             return;
         }
         
         // 🔧 多 API Key 轮询：至少要有一个有效 key
         if (apiKeys.length === 0) {
-            if (!confirm('未填写任何 API Key，将使用无认证模式访问上游 API。确定继续？')) {
-                return;
-            }
+            if (!(await confirmDialog({ title: '没有填写 API Key', message: '未填写任何 API Key，将使用无认证模式访问上游 API。确定继续？', confirmText: '继续保存' }))) return;
         }
         
         // Gemini原生格式既不需要api_base_url也不需要api_key（可以使用默认地址）
         // 但如果两者都没填，给个警告
         if (apiType === 'gemini_native' && !apiBaseUrl && apiKeys.length === 0) {
-            if (!confirm('未填写API Base URL和API Key，将使用Google官方地址。确定继续？')) {
-                return;
-            }
+            if (!(await confirmDialog({ title: '使用 Google 官方地址', message: '未填写API Base URL和API Key，将使用Google官方地址。确定继续？', confirmText: '继续保存' }))) return;
         }
         
         const thinkingSeparator = document.getElementById('thinking-separator').value.trim();
@@ -581,7 +577,7 @@ async function saveModel() {
         const mode = document.getElementById('mode').value;
         
         if (!sessionId) {
-            alert('请填写Session ID');
+            showMessage('warning', '请填写Session ID');
             return;
         }
         
@@ -644,17 +640,7 @@ async function saveModel() {
             body: JSON.stringify(body)
         });
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         closeModelModal(true);
         loadModels();

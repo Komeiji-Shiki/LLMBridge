@@ -22,7 +22,7 @@ async function loadApiKeys() {
 
     try {
         const resp = await fetch('/api/admin/api_keys');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await ensureOk(resp);
         const data = await resp.json();
         const keys = data.keys || [];
 
@@ -120,7 +120,7 @@ async function editApiKey(keyId) {
 
     try {
         const resp = await fetch(`/api/admin/api_keys/${keyId}`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await ensureOk(resp);
         const data = await resp.json();
         const key = data.key;
 
@@ -133,7 +133,7 @@ async function editApiKey(keyId) {
         await loadModelsForApiKeyModal(key.allowed_models || []);
         document.getElementById('apikey-modal').classList.add('active');
     } catch (err) {
-        alert('加载 API Key 详情失败: ' + err.message);
+        showMessage('danger', '加载 API Key 详情失败: ' + err.message);
     }
 }
 
@@ -166,7 +166,7 @@ async function loadModelsForApiKeyModal(selectedModels) {
 
     try {
         const resp = await fetch('/api/admin/models');
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await ensureOk(resp);
         const data = await resp.json();
         const endpointMap = data.model_endpoint_map || {};
 
@@ -242,7 +242,7 @@ function apiKeyDeselectAllModels() {
 async function saveApiKey() {
     const name = document.getElementById('apikey-name').value.trim();
     if (!name) {
-        alert('请输入 API Key 名称');
+        showMessage('warning', '请输入 API Key 名称');
         return;
     }
 
@@ -277,10 +277,7 @@ async function saveApiKey() {
             });
         }
 
-        if (!resp.ok) {
-            const errData = await resp.json().catch(() => ({}));
-            throw new Error(errData.detail || `HTTP ${resp.status}`);
-        }
+        await ensureOk(resp);
 
         const data = await resp.json();
         closeApiKeyModal();
@@ -292,7 +289,7 @@ async function saveApiKey() {
 
         loadApiKeys();
     } catch (err) {
-        alert('保存失败: ' + err.message);
+        showMessage('danger', '保存失败: ' + err.message);
     }
 }
 
@@ -333,23 +330,23 @@ async function toggleApiKeyEnabled(keyId, newState) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: newState }),
         });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await ensureOk(resp);
         loadApiKeys();
     } catch (err) {
-        alert('操作失败: ' + err.message);
+        showMessage('danger', '操作失败: ' + err.message);
     }
 }
 
 // ==================== 删除 ====================
 
 async function deleteApiKey(keyId, keyName) {
-    if (!confirm(`确定要删除 API Key "${keyName}" 吗？此操作不可恢复。`)) return;
+    if (!(await confirmDialog({ title: '删除 API Key', message: `确定要删除 API Key "${keyName}" 吗？此操作不可恢复。`, confirmText: '删除', danger: true }))) return;
 
     try {
         const resp = await fetch(`/api/admin/api_keys/${keyId}`, { method: 'DELETE' });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await ensureOk(resp);
         loadApiKeys();
     } catch (err) {
-        alert('删除失败: ' + err.message);
+        showMessage('danger', '删除失败: ' + err.message);
     }
 }

@@ -207,18 +207,23 @@ function resetFakeConvRows() {
 /**
  * 从 JSON 数组导入伪造对话（支持直接粘贴 DeepSeek 官方 messages 片段）
  */
-function importFakeConversationFromJson() {
-    const raw = prompt('请粘贴伪造对话的 JSON 数组，例如：\n[{"role":"user","content":"..."},{"role":"assistant","content":"...","reasoning_content":"..."}]');
+async function importFakeConversationFromJson() {
+    const raw = await promptDialog({
+        title: '导入伪造对话',
+        message: '粘贴 JSON 数组，例如：\n[{"role":"user","content":"..."},{"role":"assistant","content":"...","reasoning_content":"..."}]',
+        confirmText: '导入',
+        input: { multiline: true },
+    });
     if (raw === null) return;
     let parsed;
     try {
         parsed = JSON.parse(raw);
     } catch (e) {
-        alert('JSON 解析失败：' + e.message);
+        showMessage('danger', 'JSON 解析失败：' + e.message);
         return;
     }
     if (!Array.isArray(parsed)) {
-        alert('请粘贴一个 JSON 数组');
+        showMessage('warning', '请粘贴一个 JSON 数组');
         return;
     }
     let added = 0;
@@ -231,7 +236,7 @@ function importFakeConversationFromJson() {
         addFakeConvRow(role, content, reasoning, toolId);
         added++;
     }
-    if (added === 0) alert('未导入任何有效消息');
+    if (added === 0) showMessage('warning', '未导入任何有效消息');
 }
 
 /**

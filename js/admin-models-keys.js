@@ -17,7 +17,7 @@ function addApiKeyRow(value = '') {
     const container = document.getElementById('model-api-keys-list');
     if (!container) {
         console.error('[API-Key] 容器 #model-api-keys-list 未找到！请刷新页面重试。');
-        alert('API Key 输入容器未找到，请刷新页面重试。');
+        showMessage('warning', 'API Key 输入容器未找到，请刷新页面重试。');
         return;
     }
 
@@ -96,11 +96,11 @@ async function queryKeyBalances() {
     const keys = keyRows.map(row => row.querySelector('.api-key-input').value.trim());
 
     if (!keys.length) {
-        alert('请先添加至少一个 API Key');
+        showMessage('warning', '请先添加至少一个 API Key');
         return;
     }
     if (!apiBaseUrl) {
-        alert('请先填写 API Base URL');
+        showMessage('warning', '请先填写 API Base URL');
         return;
     }
 
@@ -127,12 +127,12 @@ async function queryKeyBalances() {
         const data = await resp.json();
 
         if (data.status === 'unsupported') {
-            alert(data.message || '当前 API 不支持余额查询');
+            showMessage('warning', data.message || '当前 API 不支持余额查询');
             return;
         }
 
         if (data.status === 'error') {
-            alert('查询失败: ' + (data.message || '未知错误'));
+            showMessage('danger', '查询失败: ' + (data.message || '未知错误'));
             return;
         }
 
@@ -170,7 +170,7 @@ async function queryKeyBalances() {
         await autoStickyToBestBalanceKey(keys, data.results || [], rows);
 
     } catch (e) {
-        alert('查询余额请求失败: ' + e.message);
+        showMessage('danger', '查询余额请求失败: ' + e.message);
     } finally {
         if (btn) { btn.textContent = origText; btn.disabled = false; }
     }

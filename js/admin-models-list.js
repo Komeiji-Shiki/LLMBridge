@@ -42,17 +42,7 @@ async function loadModels() {
     try {
         const response = await fetch('/api/admin/models');
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         const data = await response.json();
         if (request !== modelWorkspace.request) return;
@@ -238,19 +228,9 @@ async function saveModelsOrder() {
             body: JSON.stringify({ order: newOrder })
         });
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
-        showQuietMessage('success', '顺序已保存');
+        showMessage('success', '顺序已保存');
         
     } catch (error) {
         console.error('❌ 保存模型顺序失败:', error);
@@ -277,17 +257,7 @@ async function setModelsArchived(modelNames, archived) {
             body: JSON.stringify({ model_names: modelNames, archived: archived })
         });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
 
         const result = await response.json();
         loadModels();
@@ -299,27 +269,27 @@ async function setModelsArchived(modelNames, archived) {
     }
 }
 
-function toggleModelArchive(name) {
+async function toggleModelArchive(name) {
     // 从当前渲染的配置判断状态（行内按钮只带模型名，重新拉一次配置最稳妥）
     const row = document.querySelector(`.model-row[data-model-name="${CSS.escape(name)}"]`);
     const isArchived = row ? row.classList.contains('model-row-archived') : false;
-    if (!confirm(`确定要${isArchived ? '恢复' : '归档'}模型 "${name}" 吗？\n\n${isArchived ? '恢复后模型可重新请求、出现在模型列表。' : '归档后模型无法请求、从模型列表隐藏，可在"已归档模型"区恢复。'}`)) return;
+    if (!(await confirmDialog({ title: isArchived ? '恢复模型' : '归档模型', message: `确定要${isArchived ? '恢复' : '归档'}模型 "${name}" 吗？\n\n${isArchived ? '恢复后模型可重新请求、出现在模型列表。' : '归档后模型无法请求、从模型列表隐藏，可在"已归档模型"区恢复。'}`, confirmText: isArchived ? '恢复' : '归档' }))) return;
     setModelsArchived([name], !isArchived);
 }
 
-function archiveSelectedModels() {
+async function archiveSelectedModels() {
     const checked = Array.from(document.querySelectorAll('#models-tbody .model-row input[type="checkbox"]:checked'))
         .map(cb => cb.closest('.model-row').getAttribute('data-model-name'));
     if (checked.length === 0) return;
-    if (!confirm(`确定要归档选中的 ${checked.length} 个模型吗？\n\n归档后模型无法请求、从模型列表隐藏，可在"已归档模型"区恢复。`)) return;
+    if (!(await confirmDialog({ title: '归档所选模型', message: `确定要归档选中的 ${checked.length} 个模型吗？\n\n归档后模型无法请求、从模型列表隐藏，可在"已归档模型"区恢复。`, confirmText: '归档' }))) return;
     setModelsArchived(checked, true);
 }
 
-function restoreSelectedModels() {
+async function restoreSelectedModels() {
     const checked = Array.from(document.querySelectorAll('#archived-models-tbody .model-row input[type="checkbox"]:checked'))
         .map(cb => cb.closest('.model-row').getAttribute('data-model-name'));
     if (checked.length === 0) return;
-    if (!confirm(`确定要恢复选中的 ${checked.length} 个模型吗？`)) return;
+    if (!(await confirmDialog({ title: '恢复所选模型', message: `确定要恢复选中的 ${checked.length} 个模型吗？`, confirmText: '恢复' }))) return;
     setModelsArchived(checked, false);
 }
 
@@ -341,7 +311,7 @@ async function runAutoArchive(forceDays) {
             console.warn('读取自动归档配置失败，使用默认 30 天:', e);
         }
     }
-    if (!confirm(`将扫描所有模型，归档超过 ${days} 天未调用的模型（无调用记录的新模型不受影响）。确定继续？`)) return;
+    if (!(await confirmDialog({ title: '自动归档', message: `将扫描所有模型，归档超过 ${days} 天未调用的模型（无调用记录的新模型不受影响）。确定继续？`, confirmText: '开始扫描' }))) return;
 
     try {
         const response = await fetch('/api/admin/models/auto_archive', {
@@ -349,17 +319,7 @@ async function runAutoArchive(forceDays) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ days: days })
         });
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         const result = await response.json();
         loadModels();
         const archivedNames = (result.archived || []);
@@ -404,7 +364,7 @@ async function saveArchiveSettings() {
     const enabled = document.getElementById('archive-auto-enabled').checked;
     const days = parseInt(document.getElementById('archive-auto-days').value || '30', 10);
     if (!(days >= 1)) {
-        alert('天数必须为正整数');
+        showMessage('warning', '天数必须为正整数');
         return;
     }
     try {
@@ -413,17 +373,7 @@ async function saveArchiveSettings() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enabled, days: days })
         });
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         const result = await response.json();
         closeArchiveSettings();
         loadModels();
@@ -446,7 +396,7 @@ function toggleBattleTarget() {
     document.getElementById('battle-target-group').style.display = mode === 'battle' ? 'block' : 'none';
 }
 async function deleteModel(name) {
-    if (!confirm(`确定要删除模型 "${name}" 吗？`)) return;
+    if (!(await confirmDialog({ title: '删除模型', message: `确定要删除模型 "${name}" 吗？\n\n删除后无法恢复；只是暂时不用的话，归档就够了。`, confirmText: '删除', danger: true }))) return;
     
     try {
         const response = await fetch('/api/admin/models/delete', {
@@ -455,24 +405,14 @@ async function deleteModel(name) {
             body: JSON.stringify({ model_name: name })
         });
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         loadModels();
         showMessage('success', `模型 ${name} 已删除`);
         
     } catch (error) {
         console.error('删除模型失败:', error);
-        alert('删除失败: ' + error.message);
+        showMessage('danger', '删除失败: ' + error.message);
     }
 }
 

@@ -5,17 +5,7 @@ async function refreshTokenizerInfo() {
         // 获取详细的分词器状态
         const response = await fetch('/api/admin/tokenizers_status');
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         const status = await response.json();
         
@@ -414,7 +404,7 @@ async function installAllTokenizers() {
 // 复制到剪贴板
 function copyToClipboard(text) {
     navigator.clipboard.writeText(text).then(() => {
-        showQuietMessage('success', '已复制到剪贴板');
+        showMessage('success', '已复制到剪贴板');
     }).catch(err => {
         // 降级方案
         const textarea = document.createElement('textarea');
@@ -425,7 +415,7 @@ function copyToClipboard(text) {
         textarea.select();
         try {
             document.execCommand('copy');
-            showQuietMessage('success', '已复制到剪贴板');
+            showMessage('success', '已复制到剪贴板');
         } catch (e) {
             showMessage('danger', '复制失败');
         }
@@ -442,29 +432,9 @@ async function loadTokenizerMappings() {
             fetch('/api/admin/custom_tokenizers')
         ]);
         
-        if (!modelsResponse.ok) {
-            const errorText = await modelsResponse.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${modelsResponse.status}): ${errorDetail}`);
-        }
+        await ensureOk(modelsResponse);
         
-        if (!tokenizerResponse.ok) {
-            const errorText = await tokenizerResponse.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${tokenizerResponse.status}): ${errorDetail}`);
-        }
+        await ensureOk(tokenizerResponse);
         
         const modelsData = await modelsResponse.json();
         const tokenizerConfig = await tokenizerResponse.json();
@@ -603,17 +573,7 @@ async function saveAllTokenizerSettings() {
             body: JSON.stringify({ tokenizer_config: newConfig })
         });
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         showMessage('success', '所有分词器设置已保存');
         loadTokenizerMappings();
@@ -644,17 +604,7 @@ async function deleteTokenizerConfig(modelName) {
             body: JSON.stringify({ tokenizer_config: newConfig })
         });
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         showMessage('success', `已删除 ${modelName} 的分词器配置`);
         loadTokenizerMappings();
@@ -1035,9 +985,7 @@ async function submitCustomTokenizer() {
 
 // 删除自定义分词器
 async function deleteCustomTokenizer(name) {
-    if (!confirm(`确定要删除分词器 "${name}" 吗？`)) {
-        return;
-    }
+    if (!(await confirmDialog({ title: '删除分词器', message: `确定要删除分词器 "${name}" 吗？`, confirmText: '删除', danger: true }))) return;
     
     try {
         const response = await fetch(`/api/admin/custom_tokenizers/${encodeURIComponent(name)}`, {

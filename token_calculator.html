@@ -354,6 +354,19 @@
                 padding: 10px 0;
             }
         }
+
+        .notice {
+            margin-bottom: 16px;
+            padding: 10px 14px;
+            border: 1px solid rgb(var(--warn-rgb) / 0.3);
+            background: rgb(var(--warn-rgb) / 0.1);
+            color: var(--warn);
+            font-size: 0.875rem;
+        }
+
+        .notice[hidden], .embedded .header-actions {
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -361,7 +374,7 @@
         <div class="header">
             <h1><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#calculator"/></svg> Token 计算器</h1>
             <div class="header-actions">
-                <a href="/admin" class="btn">← 返回管理面板</a>
+                <a href="/admin" target="_top" class="btn">← 返回管理面板</a>
             </div>
         </div>
 
@@ -370,6 +383,8 @@
             <button class="tab active" onclick="switchTab('calculate')"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#dashboard"/></svg> 计算Token</button>
             <button class="tab" onclick="switchTab('compare')"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#compare"/></svg> 对比分词器</button>
         </div>
+
+        <div id="notice" class="notice" role="status" hidden></div>
 
         <!-- 计算Token标签页 -->
         <div id="tab-calculate" class="tab-content active">
@@ -505,11 +520,23 @@
             document.getElementById('tab-' + tabName).classList.add('active');
         }
 
+        if (window.top !== window.self) document.documentElement.classList.add('embedded');
+
+        // 输入不全或请求失败时在页面里提示，过几秒自己消失
+        let noticeTimer = null;
+        function notify(message) {
+            const notice = document.getElementById('notice');
+            notice.textContent = message;
+            notice.hidden = false;
+            clearTimeout(noticeTimer);
+            noticeTimer = setTimeout(() => { notice.hidden = true; }, 6000);
+        }
+
         // 计算Token
         async function calculateTokens() {
             const text = document.getElementById('input-text').value;
             if (!text.trim()) {
-                alert('请输入文本');
+                notify('请输入文本');
                 return;
             }
 
@@ -584,7 +611,7 @@
 
             } catch (error) {
                 loadingDiv.style.display = 'none';
-                alert('计算失败: ' + error.message);
+                notify('计算失败: ' + error.message);
             }
         }
 
@@ -595,12 +622,12 @@
             const tokenizer2 = document.getElementById('tokenizer2').value;
 
             if (!text.trim()) {
-                alert('请输入文本');
+                notify('请输入文本');
                 return;
             }
 
             if (tokenizer1 === tokenizer2) {
-                alert('请选择不同的分词器进行对比');
+                notify('请选择不同的分词器进行对比');
                 return;
             }
 
@@ -689,7 +716,7 @@
 
             } catch (error) {
                 loadingDiv.style.display = 'none';
-                alert('对比失败: ' + error.message);
+                notify('对比失败: ' + error.message);
             }
         }
 

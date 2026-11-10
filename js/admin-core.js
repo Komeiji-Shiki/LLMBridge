@@ -79,9 +79,9 @@ function navigateTo(page, detail = '') {
     showPage(page, detail);
 }
 
-function applyRoute() {
+async function applyRoute() {
     // 编辑窗里有没保存的修改、又不想放弃时留在原地，把地址改回去
-    if (document.getElementById('model-modal').classList.contains('active') && !closeModelModal()) {
+    if (document.getElementById('model-modal').classList.contains('active') && !(await closeModelModal())) {
         history.pushState(null, '', routeHash('models', currentEditingModel || ''));
         return;
     }
@@ -120,7 +120,8 @@ function loadPageData(page, detail = '') {
         case 'models':
             loadModels().then(() => {
                 const editing = document.getElementById('model-modal').classList.contains('active');
-                if (detail && !editing && Object.hasOwn(modelWorkspace.models, detail)) openModelFromList(detail);
+                const name = detail && resolveModelName(detail);
+                if (name && !editing) openModelFromList(name);
             });
             break;
         case 'tokenizer':
@@ -178,8 +179,22 @@ function generateColors(count) {
     return colors.slice(0, count);
 }
 
+// ==================== 请求 ====================
+// 非 2xx 时把服务端给的 detail / message 取出来抛出，调用方只处理成功的情况
+async function ensureOk(response) {
+    if (response.ok) return response;
+    const text = await response.text();
+    let detail = text;
+    try {
+        const data = JSON.parse(text);
+        detail = data.detail || data.message || text;
+    } catch { /* 不是 JSON 就用原文 */ }
+    throw new Error(`API错误 (${response.status}): ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+}
+
 // ==================== 消息提示 ====================
 // 同样的消息再出现时只累加次数；点击关闭，鼠标停留时不消失，错误多留一会
+const TOAST_ICONS = { success: 'check', warning: 'warning', info: 'info' };
 const _toasts = new Map();
 
 // HTML转义（防止错误消息/服务端回显内容注入HTML）
@@ -227,7 +242,7 @@ function showMessage(type, message) {
         element.className = `alert alert-${type}`;
         element.title = '点击关闭';
         element.innerHTML = `
-        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${type === 'success' ? 'check' : 'x'}"/></svg>
+        <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${TOAST_ICONS[type] || 'x'}"/></svg>
         <div>${escapeHtml(message)}</div>
         <span class="toast-count"></span>
     `;
@@ -240,34 +255,80 @@ function showMessage(type, message) {
         stack.appendChild(element);
     }
     clearTimeout(toast.timer);
-    toast.timer = setTimeout(toast.dismiss, type === 'success' ? 4000 : 8000);
+    toast.timer = setTimeout(toast.dismiss, type === 'danger' ? 8000 : 4500);
 }
 
-function showQuietMessage(type, message) {
-    const notification = document.createElement('div');
-    notification.style.cssText = `
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        z-index: 2000;
-        padding: 10px 20px;
-        background: ${type === 'success' ? 'rgb(var(--ok-rgb) / 0.9)' : 'rgb(var(--danger-rgb) / 0.9)'};
-        color: white;
-        border-radius: 6px;
-        font-size: 0.875rem;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-        opacity: 0;
-        transition: opacity 0.3s;
-    `;
-    notification.textContent = message;
-    document.body.appendChild(notification);
-    
-    setTimeout(() => notification.style.opacity = '1', 10);
-    setTimeout(() => {
-        notification.style.opacity = '0';
-        setTimeout(() => notification.remove(), 300);
-    }, 3000);
+// ==================== 确认与输入对话框 ====================
+// 代替浏览器自带的 confirm / prompt：样式跟界面一致，Esc 取消，Enter 确认，关掉后焦点回到原处。
+// 确认框返回 true / false；带 input 时返回输入的文字，取消返回 null。
+function openDialog({ title, message = '', confirmText = '确定', cancelText = '取消', danger = false, input = null }) {
+    return new Promise(resolve => {
+        const opener = document.activeElement;
+        const overlay = document.createElement('div');
+        overlay.className = 'modal active dialog-overlay';
+        overlay.innerHTML = `
+            <div class="modal-content dialog" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-message">
+                <div class="modal-header"><h3 id="dialog-title"></h3></div>
+                <div class="modal-body"><p id="dialog-message"></p></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn" data-dialog="cancel"></button>
+                    <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-accent'}" data-dialog="confirm"></button>
+                </div>
+            </div>`;
+        const cancelButton = overlay.querySelector('[data-dialog="cancel"]');
+        const confirmButton = overlay.querySelector('[data-dialog="confirm"]');
+        overlay.querySelector('#dialog-title').textContent = title;
+        overlay.querySelector('#dialog-message').textContent = message;
+        cancelButton.textContent = cancelText;
+        confirmButton.textContent = confirmText;
+        let field = null;
+        if (input) {
+            field = document.createElement(input.multiline ? 'textarea' : 'input');
+            field.className = 'form-input';
+            field.value = input.value || '';
+            field.placeholder = input.placeholder || '';
+            field.setAttribute('aria-labelledby', 'dialog-title');
+            overlay.querySelector('.modal-body').append(field);
+        }
+        const close = result => {
+            document.removeEventListener('keydown', onKey, true);
+            overlay.remove();
+            if (opener?.isConnected) opener.focus();
+            resolve(result);
+        };
+        const cancel = () => close(input ? null : false);
+        const accept = () => close(input ? field.value : true);
+        // 在捕获阶段接管按键，下面的编辑窗不会同时响应 Esc 和 Ctrl+S
+        const onKey = event => {
+            event.stopImmediatePropagation();
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                cancel();
+            } else if (event.key === 'Enter' && event.target.tagName !== 'TEXTAREA' && event.target !== cancelButton) {
+                event.preventDefault();
+                accept();
+            } else if (event.key === 'Tab') {
+                event.preventDefault();
+                const focusable = Array.from(overlay.querySelectorAll('button, input, textarea'));
+                const index = focusable.indexOf(document.activeElement);
+                focusable[(index + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
+            }
+        };
+        document.addEventListener('keydown', onKey, true);
+        overlay.addEventListener('click', event => {
+            const action = event.target.closest('[data-dialog]')?.dataset.dialog;
+            if (action === 'confirm') accept();
+            else if (action === 'cancel' || event.target === overlay) cancel();
+        });
+        document.body.append(overlay);
+        // 不可恢复的操作默认停在取消上，随手按回车不会误删
+        (field || (danger ? cancelButton : confirmButton)).focus();
+        field?.select();
+    });
 }
+
+const confirmDialog = options => openDialog(options);
+const promptDialog = options => openDialog({ ...options, input: options.input || {} });
 
 // ==================== JSONC 解析器 ====================
 // parseJsonc / updateJsoncValues are provided by jsonc-utils.js.
@@ -373,15 +434,15 @@ async function clearTokenizerCache() {
         const data = await response.json();
         
         if (data.error) {
-            showQuietMessage('error', data.error);
+            showMessage('danger', data.error);
         } else {
             const clearedCount = data.cleared_count || 0;
             const freedMb = data.memory_freed_mb || 0;
-            showQuietMessage('success', `已清理 ${clearedCount} 个分词器，释放 ${freedMb.toFixed(1)} MB`);
+            showMessage('success', `已清理 ${clearedCount} 个分词器，释放 ${freedMb.toFixed(1)} MB`);
             refreshMemoryInfo();
         }
     } catch (error) {
-        showQuietMessage('error', '清理缓存请求失败');
+        showMessage('danger', '清理缓存请求失败');
         console.error('清理分词器缓存失败:', error);
     }
 }

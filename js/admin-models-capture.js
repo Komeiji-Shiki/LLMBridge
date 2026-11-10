@@ -142,7 +142,7 @@ async function saveCapturedModel() {
     const modelType = document.getElementById('capture-model-type').value;
     
     if (!modelName) {
-        alert('请输入模型名称');
+        showMessage('warning', '请输入模型名称');
         return;
     }
     
@@ -168,7 +168,7 @@ async function saveCapturedModel() {
         }
     } catch (error) {
         console.error('保存模型配置失败:', error);
-        alert('保存失败: ' + error.message);
+        showMessage('danger', '保存失败: ' + error.message);
     }
 }
 
@@ -184,13 +184,13 @@ async function fetchModelsFromAPI(event) {
     const apiKey = apiKeys.length > 0 ? apiKeys[0] : '';
     
     if (!apiBaseUrl) {
-        alert('请先填写API Base URL');
+        showMessage('warning', '请先填写API Base URL');
         return;
     }
 
     // 浏览器拿不到 OAuth 令牌，凭据也不能直接发给上游
     if (document.getElementById('api-key-auth-mode').value === 'google-oauth') {
-        alert('Google OAuth 凭据只能由网关换取令牌，请直接填写模型 ID');
+        showMessage('warning', 'Google OAuth 凭据只能由网关换取令牌，请直接填写模型 ID');
         return;
     }
     
@@ -310,7 +310,7 @@ async function fetchModelsFromAPI(event) {
         }
         
         if (models.length === 0) {
-            alert('未获取到任何模型，请检查API是否返回了模型列表');
+            showMessage('warning', '未获取到任何模型，请检查API是否返回了模型列表');
             return;
         }
         
@@ -344,7 +344,7 @@ async function fetchModelsFromAPI(event) {
         
     } catch (error) {
         console.error('获取模型列表失败:', error);
-        alert(error.message);
+        showMessage('danger', error.message);
     } finally {
         button.innerHTML = originalContent;
         button.disabled = false;
@@ -411,7 +411,7 @@ async function testCurrentModelKeys() {
     // 收集当前编辑框中的配置
     const apiKeys = getApiKeys();
     if (apiKeys.length === 0) {
-        alert('请先填写至少一个 API Key');
+        showMessage('warning', '请先填写至少一个 API Key');
         return;
     }
     
@@ -426,7 +426,7 @@ async function testCurrentModelKeys() {
     const endpointPath = document.getElementById('endpoint-path').value.trim() || defaultEndpoint;
     
     if (apiType !== 'gemini_native' && !apiBaseUrl) {
-        alert('请先填写 API Base URL');
+        showMessage('warning', '请先填写 API Base URL');
         return;
     }
     

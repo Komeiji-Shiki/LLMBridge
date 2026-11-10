@@ -181,17 +181,7 @@ async function refreshOverview(options = {}) {
     try {
         const response = await fetch('/api/admin/overview' + (force ? '?force=true' : ''));
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         const data = await response.json();
         if (serial !== overviewRefresh.serial) return;
@@ -292,7 +282,7 @@ function applyDateFilter() {
     const endDate = document.getElementById('token-end-date').value;
     
     if (startDate && endDate && startDate > endDate) {
-        alert('开始日期不能晚于结束日期');
+        showMessage('warning', '开始日期不能晚于结束日期');
         return;
     }
     
@@ -333,17 +323,7 @@ async function refreshTokenStats(force = false) {
         
         const response = await fetch(url, { signal: tokenStatsRefresh.controller.signal });
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         const data = await response.json();
         // 来源切换后忽略旧请求，避免较慢的扫描覆盖当前选择。
@@ -427,7 +407,7 @@ function applyRequestDateFilter() {
     const endDate = document.getElementById('request-end-date').value;
     
     if (startDate && endDate && startDate > endDate) {
-        alert('开始日期不能晚于结束日期');
+        showMessage('warning', '开始日期不能晚于结束日期');
         return;
     }
     
@@ -456,17 +436,7 @@ async function refreshRequestStats() {
         
         const response = await fetch(url);
         
-        if (!response.ok) {
-            const errorText = await response.text();
-            let errorDetail;
-            try {
-                const errorJson = JSON.parse(errorText);
-                errorDetail = errorJson.detail || errorJson.message || errorText;
-            } catch {
-                errorDetail = errorText;
-            }
-            throw new Error(`API错误 (${response.status}): ${errorDetail}`);
-        }
+        await ensureOk(response);
         
         const data = await response.json();
         
@@ -549,16 +519,17 @@ async function mergeSelectedModelStats() {
     const selectedModels = Array.from(checkboxes).map(cb => cb.getAttribute('data-model'));
     
     if (selectedModels.length < 2) {
-        alert('请至少选择两个模型进行合并');
+        showMessage('warning', '请至少选择两个模型进行合并');
         return;
     }
     
-    const targetName = prompt(`请输入合并后的模型名称（将合并 ${selectedModels.length} 个模型）:`, selectedModels[0]);
+    const targetName = await promptDialog({
+        title: '合并模型统计',
+        message: `下面 ${selectedModels.length} 个模型的统计会并到这个名称下，原来各自的统计数据随之删除：\n\n${selectedModels.join('\n')}`,
+        confirmText: '合并',
+        input: { value: selectedModels[0], placeholder: '合并后的模型名称' },
+    });
     if (!targetName || !targetName.trim()) return;
-    
-    if (!confirm(`确定要将以下模型合并为 "${targetName.trim()}" 吗？\n\n${selectedModels.join('\n')}\n\n合并后原模型的统计数据将被删除。`)) {
-        return;
-    }
     
     try {
         const response = await fetch('/api/admin/merge_model_stats', {
@@ -589,13 +560,11 @@ async function deleteSelectedModelStats() {
     const selectedModels = Array.from(checkboxes).map(cb => cb.getAttribute('data-model'));
     
     if (selectedModels.length === 0) {
-        alert('请至少选择一个模型');
+        showMessage('warning', '请至少选择一个模型');
         return;
     }
     
-    if (!confirm(`确定要删除以下 ${selectedModels.length} 个模型的统计数据吗？\n\n${selectedModels.join('\n')}\n\n此操作不可恢复！`)) {
-        return;
-    }
+    if (!(await confirmDialog({ title: '删除统计数据', message: `确定要删除以下 ${selectedModels.length} 个模型的统计数据吗？\n\n${selectedModels.join('\n')}\n\n此操作不可恢复！`, confirmText: '删除', danger: true }))) return;
     
     try {
         const response = await fetch('/api/admin/delete_model_stats', {
@@ -619,9 +588,7 @@ async function deleteSelectedModelStats() {
 }
 
 async function deleteModelStats(modelName) {
-    if (!confirm(`确定要删除模型 "${modelName}" 的统计数据吗？\n\n此操作不可恢复！`)) {
-        return;
-    }
+    if (!(await confirmDialog({ title: '删除统计数据', message: `确定要删除模型 "${modelName}" 的统计数据吗？\n\n此操作不可恢复！`, confirmText: '删除', danger: true }))) return;
     
     try {
         const response = await fetch('/api/admin/delete_model_stats', {

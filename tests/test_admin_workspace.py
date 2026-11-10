@@ -345,11 +345,11 @@ def test_dirty_guard_and_fresh_defaults(ui):
     page, _, _, _ = ui
     page.locator('.model-name', has_text='Alpha').click()
     page.locator('#model-name').fill('Changed')
-    page.once('dialog', lambda dialog: dialog.dismiss())
     page.keyboard.press('Escape')
+    page.locator('.dialog').get_by_role('button', name='继续编辑').click()
     assert page.locator('#model-modal').is_visible()
-    page.once('dialog', lambda dialog: dialog.accept())
     page.keyboard.press('Escape')
+    page.locator('.dialog').get_by_role('button', name='放弃修改').click()
     page.get_by_role('button', name='添加模型').click()
     page.locator('[data-settings-page="messages"]').click()
     assert page.locator('#sanitize-recursive-schemas').count() == 0
@@ -416,8 +416,8 @@ def test_archive_visible_selection_and_safe_rendering(ui):
     assert page.locator('#models-list [data-model-config]').count() == 0
     page.locator('#models-query').fill('Alpha')
     page.locator('#select-all-active').check()
-    page.once('dialog', lambda dialog: dialog.accept())
     page.locator('#archive-selected-btn').click()
+    page.locator('.dialog').get_by_role('button', name='归档').click()
     page.wait_for_timeout(100)
     assert writes[-1]['model_names'] == ['Alpha']
 
@@ -452,8 +452,7 @@ def test_protocol_defaults_custom_endpoint_and_archived_save(ui):
 
 def test_google_oauth_vertex_interactions_configuration(ui):
     page, _, writes, _ = ui
-    dialogs, requested = [], []
-    page.on('dialog', lambda dialog: (dialogs.append(dialog.message), dialog.accept()))
+    requested = []
     page.on('request', lambda request: requested.append(request.url))
     page.evaluate("openModelFromList('Alpha')")
     page.locator('#api-type').select_option('gemini_native')
@@ -468,7 +467,7 @@ def test_google_oauth_vertex_interactions_configuration(ui):
     assert 'vertex-sa.json' in page.locator('#model-api-keys-list .api-key-input').last.get_attribute('placeholder')
     # 浏览器不能拿凭据去请求上游
     page.locator('button[onclick="fetchModelsFromAPI(event)"]').click()
-    assert any('Google OAuth' in message for message in dialogs)
+    assert 'Google OAuth' in page.locator('#toast-stack .alert-warning').inner_text()
     assert not any('aiplatform' in url for url in requested)
     with page.expect_request('**/api/admin/test_model_keys') as test_request:
         page.locator('#test-keys-btn').click()
@@ -903,8 +902,8 @@ def test_config_edits_survive_leaving_the_page_and_guard_reload(ui):
     page.locator('[data-page="models"]').click()
     page.locator('[data-page="config"]').click()
     assert page.locator('#form-server_port').input_value() == '5200'
-    page.once('dialog', lambda dialog: dialog.dismiss())
     page.get_by_role('button', name='重新加载').click()
+    page.locator('.dialog').get_by_role('button', name='继续编辑').click()
     assert page.locator('#form-server_port').input_value() == '5200'
     page.keyboard.press('Control+s')
     page.wait_for_function('!configIsDirty()')
@@ -920,3 +919,61 @@ def test_move_to_top_saves_the_new_order(ui):
         menu.get_by_role('button', name='移到最前').click()
     assert writes[-1] == {'path': '/api/admin/models/reorder', 'order': ['Beta', 'Alpha', 'Legacy']}
     assert menu.get_attribute('open') is None
+
+
+def test_dialogs_replace_native_prompts_and_take_over_the_keyboard(ui):
+    page, _, writes, _ = ui
+    native = []
+    page.on('dialog', lambda dialog: (native.append(dialog.message), dialog.dismiss()))
+    menu = page.locator('.model-row[data-model-name="Beta"] details.model-more')
+    menu.locator('summary').click()
+    menu.get_by_role('button', name='删除模型').click()
+    dialog = page.locator('.dialog')
+    assert dialog.get_by_role('button', name='取消').evaluate('el => el === document.activeElement')
+    page.keyboard.press('Escape')
+    assert dialog.count() == 0
+    assert not any(write.get('path') == '/api/admin/models/delete' for write in writes)
+    menu.locator('summary').click()
+    menu.get_by_role('button', name='删除模型').click()
+    with page.expect_response('**/api/admin/models/delete'):
+        dialog.get_by_role('button', name='删除', exact=True).click()
+    assert writes[-1] == {'path': '/api/admin/models/delete', 'model_name': 'Beta'}
+    page.locator('.model-name', has_text='Alpha').click()
+    page.locator('#model-name').fill('')
+    page.locator('#model-save-btn').click()
+    assert page.locator('#toast-stack .alert-warning').count() == 1
+    assert native == []
+
+
+def test_quick_jump_opens_pages_and_models(ui):
+    page, _, _, _ = ui
+    page.locator('[data-page="overview"]').click()
+    page.keyboard.press('Control+k')
+    page.locator('.palette input').fill('配置编辑')
+    page.keyboard.press('Enter')
+    assert page.evaluate('location.hash') == '#config'
+    page.wait_for_selector('#form-server_port')
+    page.locator('.palette-trigger').click()
+    page.locator('.palette input').fill('upstream-alpha')
+    assert page.locator('.palette-item').count() == 1
+    page.keyboard.press('Enter')
+    page.wait_for_selector('#model-modal.active')
+    assert page.locator('#model-name').input_value() == 'Alpha'
+    assert page.locator('.palette').count() == 0
+
+
+def test_editor_steps_to_neighbouring_models(ui):
+    page, _, _, _ = ui
+    page.locator('.model-name', has_text='Alpha').click()
+    assert page.locator('#model-prev').is_disabled()
+    page.locator('#model-next').click()
+    page.wait_for_function("document.getElementById('model-name').value === 'Beta'")
+    assert page.evaluate('location.hash') == '#models/Beta'
+    page.locator('#model-name').fill('Beta2')
+    page.keyboard.press('Alt+ArrowUp')
+    page.locator('.dialog').get_by_role('button', name='继续编辑').click()
+    assert page.locator('#model-name').input_value() == 'Beta2'
+    page.keyboard.press('Escape')
+    page.locator('.dialog').get_by_role('button', name='放弃修改').click()
+    page.get_by_role('button', name='添加模型').click()
+    assert page.locator('#model-stepper').is_hidden()
