@@ -129,6 +129,14 @@ function renderInputTokens(log) {
     return `${main}<div style="font-size:11px;color:${cacheRateColor(rawRate, input)};opacity:.85;" title="${escapeHtml(title)}">${cached.toLocaleString()} (${rate}%)</div>`;
 }
 
+function renderOutputTokens(log) {
+    const output = Number(log.output_tokens) || 0;
+    const reasoning = Number(log.reasoning_tokens) || 0;
+    const main = output ? output.toLocaleString() : '-';
+    if (reasoning <= 0) return main;
+    return `${main}<div style="font-size:11px;color:var(--text-dim);opacity:.85;">思考 ${reasoning.toLocaleString()}</div>`;
+}
+
 // 刷新请求日志
 let _requestLogsSequence = 0;
 function refreshRequestLogs() {
@@ -190,7 +198,7 @@ function refreshRequestLogs() {
             const stopReason = log.stop_reason || (log.cost_info && log.cost_info.stop_reason);
             const duration = log.duration ? formatDuration(log.duration) : '-';
             const inTokens = renderInputTokens(log);
-            const outTokens = log.output_tokens ? log.output_tokens.toLocaleString() : '-';
+            const outTokens = renderOutputTokens(log);
             // 按记录自身的货币显示符号，CNY 计价的费用不再被误标成美元
             const costCurrency = log.currency || 'USD';
             const costSymbol = costCurrency === 'CNY' ? '¥' : '$';

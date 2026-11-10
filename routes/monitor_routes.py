@@ -122,6 +122,8 @@ async def query_request_logs(monitoring_service, limit: int = 50, offset: int = 
                              include_models=True):
     """分页 + 过滤查询请求日志（监控面板增强版）"""
     import asyncio
+    from utils.usage_tokens import extract_reasoning_tokens
+
     try:
         result = await asyncio.to_thread(
             monitoring_service.log_manager.query_request_logs,
@@ -129,8 +131,11 @@ async def query_request_logs(monitoring_service, limit: int = 50, offset: int = 
             start_date, end_date, include_models)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
-    # 附带汇率：前端展示 CNY 计价模型的费用时可换算出 USD 参考值
     if isinstance(result, dict):
+        # 复用已保存的上游用量，历史记录也能显示思考 token。
+        for item in result['items']:
+            item['reasoning_tokens'] = extract_reasoning_tokens(item.get('upstream_usage'))
+        # 附带汇率：前端展示 CNY 计价模型的费用时可换算出 USD 参考值
         from core.db_stats import get_exchange_rates
         usd_to_cny, cny_to_usd = get_exchange_rates()
         result['exchange_rate'] = {'USD_TO_CNY': usd_to_cny, 'CNY_TO_USD': cny_to_usd}
