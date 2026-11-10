@@ -64,6 +64,7 @@ LLMBridge/
 ├── api_server_new.py          # FastAPI 主服务器入口
 ├── config.jsonc               # 主配置文件（支持注释、热更新）
 ├── model_endpoint_map.json    # 模型端点映射配置
+├── model_channels.json        # 渠道：多个模型共用的地址和 Key（可选）
 ├── models.json                # 模型列表
 │
 ├── core/                      # 核心模块
@@ -265,6 +266,33 @@ pip install tiktoken     # GPT tokenizer
 ```
 total_cost = (uncached_input × input_price + cached_input × cached_input_price + output × output_price) ÷ unit
 ```
+
+### 渠道：多个模型共用地址和 Key
+
+很多模型接的是同一个上游。把地址和 Key 放进渠道（`model_channels.json`），模型里只写 `channel`，换 Key 时只改渠道一处：
+
+```jsonc
+// model_channels.json
+{
+  "ch-1a2b3c4d": {
+    "name": "OpenAI 官方",
+    "api_base_url": "https://api.openai.com/v1",
+    "api_keys": ["sk-key1", "sk-key2"],
+    "api_key_strategy": "sticky"
+  }
+}
+```
+
+```jsonc
+// model_endpoint_map.json
+{
+  "gpt-4o": { "api_type": "direct_api", "channel": "ch-1a2b3c4d", "model_id": "gpt-4o" }
+}
+```
+
+- 接了渠道的模型，`api_base_url`、`api_key` / `api_keys`、`api_key_auth_mode`、`api_key_strategy`、`api_key_cooldown_seconds` 以渠道为准。
+- 一般不用手写：管理面板的“上游渠道”页可以新建渠道，也可以把地址和 Key 完全相同的现有模型一键整理成渠道（整理前自动备份到 `.migration_backups`）。
+- 两个文件都会热更新。引用的渠道不存在时，模型按自己的配置加载，并在日志里给出警告。
 
 ### WorkBuddy 上游
 
