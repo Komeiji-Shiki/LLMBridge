@@ -126,7 +126,7 @@ function connectWebSocket() {
     };
 }
 
-// 日志刷新节流：密集的 request_end 事件合并成一次查询
+// 请求结束后刷新统计和日志：密集的 request_end 事件合并成一次查询
 let _logsRefreshTimer = null;
 const _LOGS_REFRESH_DEBOUNCE_MS = 1500;
 
@@ -134,7 +134,9 @@ function scheduleLogsRefresh() {
     if (_logsRefreshTimer) return;
     _logsRefreshTimer = setTimeout(() => {
         _logsRefreshTimer = null;
-        if (isPageActive()) refreshLogs(true);
+        if (!isPageActive()) return;
+        refreshStats();
+        refreshLogs(true);
     }, _LOGS_REFRESH_DEBOUNCE_MS);
 }
 
@@ -163,10 +165,6 @@ function handleWebSocketMessage(data) {
             break;
         case 'browser_status':
             updateBrowserStatus(data.connected);
-            break;
-        case 'tab_connection':
-            // 标签页连接状态变化时刷新
-            refreshTabConnections();
             break;
     }
 }
@@ -245,6 +243,15 @@ function formatNumber(num) {
     return num.toString();
 }
 
+// 运行时间在两次统计之间按本地时钟推算，不必为了它频繁请求
+let _uptimeBase = null;
+function renderUptime() {
+    if (!_uptimeBase) return;
+    const uptime = formatDuration(_uptimeBase.seconds + (Date.now() - _uptimeBase.at) / 1000);
+    document.getElementById('uptime').textContent = uptime;
+    if (_uptimeBase.seconds) document.getElementById('server-info').textContent = `服务器运行时间: ${uptime}`;
+}
+
 // 更新统计数据
 function updateStats(stats) {
     if (!stats) return;
@@ -254,17 +261,13 @@ function updateStats(stats) {
     document.getElementById('total-requests').textContent = (stats.total_requests || 0).toLocaleString();
     document.getElementById('avg-duration').textContent = formatDuration(stats.avg_duration || 0);
     document.getElementById('error-count').textContent = stats.failed_requests || 0;
-    document.getElementById('uptime').textContent = formatDuration(stats.uptime || 0);
+    _uptimeBase = { seconds: stats.uptime || 0, at: Date.now() };
+    renderUptime();
 
     const successRate = stats.total_requests > 0
         ? ((stats.successful_requests / stats.total_requests) * 100).toFixed(1)
         : 0;
     document.getElementById('success-rate-text').textContent = `成功率: ${successRate}%`;
-
-    if (stats.uptime) {
-        document.getElementById('server-info').textContent =
-            `服务器运行时间: ${formatDuration(stats.uptime)}`;
-    }
 }
 
 // 更新活跃请求列表
@@ -456,7 +459,8 @@ function refreshData() {
 setInterval(() => {
     if (!isPageActive()) return;
     refreshStats();
-}, 5000); // 每5秒刷新统计
+    refreshActiveRequests();
+}, 30000); // 兜底：请求结束时已经会刷新一次
 
 setInterval(() => {
     if (!isPageActive()) return;
@@ -465,13 +469,14 @@ setInterval(() => {
 
 setInterval(() => {
     if (!isPageActive()) return;
-    // 仅当存在活跃请求时才刷新计时器
-    const activeContainer = document.getElementById('active-requests-list');
-    if (activeContainer && activeContainer.children.length > 0 &&
-        !activeContainer.querySelector('.empty-state')) {
-        refreshActiveRequests();
-    }
-}, 1000); // 每秒刷新活跃请求计时器
+    renderUptime();
+    // 活跃请求的计时在本地走；列表本身由请求开始和结束的推送触发刷新，推送断开时才靠轮询
+    const timers = document.querySelectorAll('#active-requests-list [data-started]');
+    timers.forEach(node => {
+        node.textContent = Math.max(0, Date.now() / 1000 - Number(node.dataset.started)).toFixed(1) + 's';
+    });
+    if (timers.length && ws?.readyState !== 1) refreshActiveRequests();
+}, 1000);
 
 // HTML转义函数 - 防止XSS攻击和渲染问题
 function escapeHtml(unsafe) {
@@ -956,17 +961,6 @@ function updateTabConnectionsUI(data) {
         `;
     }).join('');
 }
-
-// 初始化时加载标签页状态
-setTimeout(() => {
-    refreshTabConnections();
-}, 1000);
-
-// 定期刷新标签页状态（每3秒；页面不可见时跳过）
-setInterval(() => {
-    if (!isPageActive()) return;
-    refreshTabConnections();
-}, 3000);
 
 // 从后台/隐藏状态回到前台时立即补一次刷新，避免看到过期数据
 document.addEventListener('visibilitychange', () => {

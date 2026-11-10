@@ -323,13 +323,13 @@ def test_cache_rate_color_tiers(monitor_ui):
             .match(/color:([^;]+);/)[1];
         return {colors, colorsAt10000};
     }''')
-    assert result['colors'] == {'90': '#22c55e', '89.9': '#f97316', '80': '#f97316',
-                                '79.9': '#facc15', '50': '#facc15', '49.9': '#ef4444'}
+    assert result['colors'] == {'90': 'var(--ok)', '89.9': '#f97316', '80': '#f97316',
+                                '79.9': '#facc15', '50': '#facc15', '49.9': 'var(--danger)'}
     # 9999 与 10000 是边界两侧，前者灰、后者照常分档
     assert result['colorsAt10000'] == {'9999_49': 'var(--text-dim)', '9999_99': 'var(--text-dim)'}
     assert page.evaluate(
         "renderInputTokens({input_tokens: 10000, cached_tokens: 4900}).match(/color:([^;]+);/)[1]"
-    ) == '#ef4444'
+    ) == 'var(--danger)'
 
 
 def test_gemini_signatures_render_from_provider_metadata(monitor_ui):
@@ -353,3 +353,10 @@ def test_gemini_signatures_render_from_provider_metadata(monitor_ui):
     assert 'gemini-text-signature' in history.inner_text()
     assert boxes.nth(2).get_by_text('含思维链签名', exact=True).count() == 0
     assert 'second-signature' in boxes.last.inner_text()
+
+
+def test_lmarena_leftovers_stay_out_of_sight(monitor_ui):
+    page, _ = monitor_ui
+    for selector in ('#current-mode', '#browser-status', '#tabs-grid'):
+        assert not page.locator(selector).is_visible()
+    assert page.locator('.stat-card:visible').count() == 5

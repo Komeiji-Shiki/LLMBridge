@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Bridge · 监控中心</title>
+<link rel="icon" type="image/svg+xml" href="/css/favicon.svg">
 <link rel="stylesheet" href="/css/tokens.css">
 <link rel="stylesheet" href="/css/monitor.css">
 </head>
@@ -12,7 +13,7 @@
         <div class="brand"><span class="brand-mark" aria-hidden="true">B</span><div><p class="eyebrow">LLM GATEWAY / OBSERVABILITY</p><h1>Bridge <span>监控中心</span></h1><p>实时请求 · 用量统计 · 缓存诊断</p></div></div>
         <div class="header-info">
             <a href="#request-log-section" class="header-link">查看请求 ↓</a>
-            <a href="/admin" class="header-link">管理面板 ↗</a>
+            <a href="/admin" target="_top" class="header-link">管理面板</a>
             <div class="info-text" id="server-info">正在连接...</div>
             <div class="status-indicator">
                 <span class="status-dot" id="ws-status"></span>
@@ -26,7 +27,8 @@
             <div class="stat-card">
                 <h3>活跃请求</h3>
                 <div class="stat-value" id="active-requests">0</div>
-                <div class="stat-subtitle" id="browser-status">浏览器未连接</div>
+                <div class="stat-subtitle">正在处理</div>
+                <div class="legacy-lmarena" id="browser-status"></div>
             </div>
             <div class="stat-card">
                 <h3>总请求数</h3>
@@ -48,7 +50,7 @@
                 <div class="stat-value" id="uptime">0h</div>
                 <div class="stat-subtitle">服务器运行时长</div>
             </div>
-            <div class="stat-card">
+            <div class="stat-card legacy-lmarena">
                 <h3>当前模式</h3>
                 <div class="stat-value" id="current-mode">-</div>
                 <div class="stat-subtitle" id="mode-details">-</div>
@@ -413,7 +415,7 @@
 
         <!-- 统计卡片 -->
         <!-- 标签页连接状态 -->
-        <div class="section">
+        <div class="section legacy-lmarena">
             <div class="section-header">
                 <h2 class="section-title">标签页连接状态</h2>
                 <button class="refresh-btn" onclick="refreshTabConnections()">刷新</button>
