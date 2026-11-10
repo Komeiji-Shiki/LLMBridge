@@ -117,7 +117,7 @@ function buildChannelRow(id, channel) {
     const open = users.length > 0 && channelWorkspace.expanded.has(id);
     const address = escapeHtml(channel.api_base_url || '协议默认地址');
     const previews = keys.slice(0, 2).map(channelKeyPreview).join('、') + (keys.length > 2 ? ' 等' : '');
-    const row = `<tr data-channel-id="${attr}"${users.length ? '' : ' class="channel-idle"'}>
+    const row = `<tr data-channel-id="${attr}"${users.length ? (open ? ' class="channel-open"' : '') : ' class="channel-idle"'}>
         <td><button class="model-name" data-channel-id="${attr}" onclick="openChannelModal(this.dataset.channelId)">${escapeHtml(channel.name)}</button></td>
         <td class="channel-address" title="${address}">${address}</td>
         <td>${channelKeySummary(channel)}${keys.length ? `<div class="model-subtitle channel-key-preview">${escapeHtml(previews)}</div>` : ''}</td>
@@ -132,7 +132,7 @@ function buildChannelRow(id, channel) {
     if (!open) return row;
     return row + `<tr class="channel-models-row"><td colspan="5"><div class="channel-models">
         ${users.map(name => `<button class="badge badge-info" data-model-name="${escapeHtml(name)}" onclick="navigateTo('models', this.dataset.modelName)" title="打开这个模型的设置">${escapeHtml(name)}</button>`).join('')}
-        <button class="btn btn-sm" data-channel-id="${attr}" onclick="showChannelModels(this.dataset.channelId)">在模型列表里查看</button>
+        <button class="channel-models-link" data-channel-id="${attr}" onclick="showChannelModels(this.dataset.channelId)">在模型列表里查看 →</button>
     </div></td></tr>`;
 }
 

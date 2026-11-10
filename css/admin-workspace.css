@@ -193,11 +193,15 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .channels-toolbar input { flex: 1; min-width: 240px; max-width: 520px; }
 .channel-idle .model-name { color: var(--text-dim); }
 .channel-key-preview { font-family: var(--font-mono); }
-.channel-models-row td { padding-top: 0; }
-.channel-models { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-height: 180px; overflow-y: auto; }
-.channel-models .badge { font-family: inherit; cursor: pointer; }
+/* 展开的模型名贴在所属渠道下面，是这一行的一部分：中间不画分隔线，缩进成一块浅底的小面板 */
+#channels-list tr.channel-open td { border-bottom: 0; }
+#channels-list tr.channel-models-row:hover { background: none; }
+.channel-models-row td { padding: 0 12px 14px; }
+.channel-models { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; max-height: 180px; overflow-y: auto; padding: 10px 12px; background: var(--surface-2); border-left: 2px solid var(--line-strong); }
+.channel-models .badge { background: var(--surface); font-family: inherit; cursor: pointer; }
 .channel-models .badge:hover { color: var(--text-main); border-color: var(--accent-soft); }
-.channel-models .btn { margin-left: auto; }
+.channel-models-link { margin-left: 6px; padding: 2px 4px; border: 0; background: none; color: var(--text-dim); font: inherit; font-size: .75rem; white-space: nowrap; cursor: pointer; }
+.channel-models-link:hover { color: var(--text-main); text-decoration: underline; }
 .channel-key-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .channel-key-actions select { flex: 1; min-width: 160px; max-width: 280px; padding: 6px 10px; font-size: .8rem; }
 #channel-key-test-results { margin-top: 10px; }
