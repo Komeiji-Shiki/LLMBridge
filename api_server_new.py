@@ -262,6 +262,8 @@ app.include_router(auth_routes.router)        # /login、/auth/*
 app.include_router(apikey_routes.router)      # /api/admin/api_keys*
 from routes.gateway_workspace import router as gateway_workspace_router
 app.include_router(gateway_workspace_router)
+from routes.admin_channels import router as admin_channels_router
+app.include_router(admin_channels_router)     # /api/admin/channels*
 from routes.gateway_mcp import router as gateway_mcp_router
 app.include_router(gateway_mcp_router)
 

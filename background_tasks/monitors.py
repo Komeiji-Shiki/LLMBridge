@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+from core.model_channels import CHANNELS_FILE
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -244,7 +245,9 @@ async def config_monitor(CONFIG, CONFIG_FILE_MTIMES, load_config_func, load_mode
             
             try:
                 map_mtime = os.path.getmtime('model_endpoint_map.json')
-                if map_mtime != CONFIG_FILE_MTIMES.get('model_endpoint_map.json', 0):
+                channels_mtime = os.path.getmtime(CHANNELS_FILE) if os.path.exists(CHANNELS_FILE) else 0.0
+                if (map_mtime != CONFIG_FILE_MTIMES.get('model_endpoint_map.json', 0)
+                        or channels_mtime != CONFIG_FILE_MTIMES.get(CHANNELS_FILE, 0.0)):
                     await asyncio.to_thread(load_model_endpoint_map_func)
                     config_changes.append(f"model_endpoint_map.json (修改于 {datetime.fromtimestamp(map_mtime).strftime('%H:%M:%S')})")
             except FileNotFoundError:

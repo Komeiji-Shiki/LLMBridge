@@ -60,6 +60,7 @@ node_modules/
 api_keys.json
 /.migration_backups/
 model_endpoint_map.json
+model_channels.json
 custom_tokenizers.json
 config.jsonc
 models.json

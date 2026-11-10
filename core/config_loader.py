@@ -7,12 +7,15 @@ import re
 from pathlib import Path
 from threading import Lock
 
+from core.model_channels import CHANNELS_FILE, expand_model_map
+
 logger = logging.getLogger(__name__)
 
 # 配置文件修改时间跟踪（用于热更新）
 CONFIG_FILE_MTIMES = {
     'config.jsonc': 0.0,
     'model_endpoint_map.json': 0.0,
+    CHANNELS_FILE: 0.0,
     'models.json': 0.0
 }
 CONFIG_LOCK = Lock()  # 保护配置重载的线程锁
@@ -189,33 +192,54 @@ def load_model_map():
         logger.warning(f"'models.json' 解析失败: {e}。保留当前模型列表。")
 
 
+def _read_channels() -> dict:
+    """读取渠道表；文件不存在等于没有渠道，内容不是对象则按解析失败处理。"""
+    try:
+        with open(CHANNELS_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except FileNotFoundError:
+        return {}
+    channels = json.loads(content) if content.strip() else {}
+    if not isinstance(channels, dict):
+        raise ValueError(f"'{CHANNELS_FILE}' 根节点必须是 JSON 对象")
+    return channels
+
+
 def load_model_endpoint_map(force_reload=False):
-    """从 model_endpoint_map.json 加载模型到端点的映射。
-    
+    """从 model_endpoint_map.json 加载模型到端点的映射，并按 model_channels.json 展开渠道引用。
+
     Args:
         force_reload: 是否强制重新加载，忽略文件修改时间检查
     """
     global MODEL_ENDPOINT_MAP, CONFIG_FILE_MTIMES
-    
+
     config_file = 'model_endpoint_map.json'
-    
-    # 检查文件是否被修改
+
+    # 检查文件是否被修改；渠道文件改了（比如换 Key）同样要重新展开
     try:
         current_mtime = os.path.getmtime(config_file)
-        if not force_reload and current_mtime == CONFIG_FILE_MTIMES[config_file]:
-            # 文件未修改，无需重新加载
-            return
     except FileNotFoundError:
         logger.warning(f"'{config_file}' 文件未找到。将使用空映射。")
         # 编辑器保存或文件暂时不可见时继续使用最后一次有效配置。
         return
-    
+    try:
+        channels_mtime = os.path.getmtime(CHANNELS_FILE)
+    except FileNotFoundError:
+        channels_mtime = 0.0
+
+    def unchanged():
+        return (not force_reload and current_mtime == CONFIG_FILE_MTIMES[config_file]
+                and channels_mtime == CONFIG_FILE_MTIMES.get(CHANNELS_FILE, 0.0))
+
+    if unchanged():
+        # 文件未修改，无需重新加载
+        return
+
     # 使用锁保护配置重载
     with CONFIG_LOCK:
         # 🔧 竞态修复：锁内二次确认 mtime，避免多线程重复重载
-        if not force_reload and current_mtime == CONFIG_FILE_MTIMES[config_file]:
+        if unchanged():
             return
-        loaded_new_mtime = None
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -224,9 +248,12 @@ def load_model_endpoint_map(force_reload=False):
                     new_map = {}
                 else:
                     new_map = json.loads(content)
+            if not isinstance(new_map, dict):
+                raise ValueError("配置根节点必须是 JSON 对象")
             # 无空窗替换，保持字典对象不变（见 _replace_dict_no_gap）
-            _replace_dict_no_gap(MODEL_ENDPOINT_MAP, new_map)
+            _replace_dict_no_gap(MODEL_ENDPOINT_MAP, expand_model_map(new_map, _read_channels()))
             CONFIG_FILE_MTIMES[config_file] = current_mtime
+            CONFIG_FILE_MTIMES[CHANNELS_FILE] = channels_mtime
             logger.info(f"✅ 已{'重新' if not force_reload else ''}加载 'model_endpoint_map.json' ({len(MODEL_ENDPOINT_MAP)} 个模型端点)")
         except FileNotFoundError:
             # 🔧 修复：不再清空运行中映射（避免文件短暂不可见时模型列表瞬间清空），
@@ -236,7 +263,7 @@ def load_model_endpoint_map(force_reload=False):
                 CONFIG_FILE_MTIMES[config_file] = current_mtime
         except ValueError as e:
             # 🔧 修复：解析失败（文件被改坏）保留旧映射继续运行
-            logger.error(f"加载或解析 'model_endpoint_map.json' 失败: {e}。保留当前映射。")
+            logger.error(f"加载或解析 'model_endpoint_map.json' 或渠道表失败: {e}。保留当前映射。")
 
 
 def save_config():

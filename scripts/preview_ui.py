@@ -83,6 +83,10 @@ def prepare_runtime(port: int, days: int) -> Path:
         (runtime / 'model_endpoint_map.json').write_text(json.dumps(models, ensure_ascii=False, indent=2), encoding='utf-8')
     else:
         shutil.copy(REPO / 'model_endpoint_map.example.json', runtime / 'model_endpoint_map.json')
+    channels = REPO / 'model_channels.json'
+    if channels.exists():
+        scrubbed = _scrub(json.loads(channels.read_text(encoding='utf-8')))
+        (runtime / 'model_channels.json').write_text(json.dumps(scrubbed, ensure_ascii=False, indent=2), encoding='utf-8')
     for name in ('models.json', 'custom_tokenizers.json'):
         if (REPO / name).exists():
             shutil.copy(REPO / name, runtime / name)

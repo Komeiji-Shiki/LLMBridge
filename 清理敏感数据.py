@@ -65,14 +65,30 @@ def clean_model_endpoint_map():
             for key, value in d.items():
                 if key in sensitive_fields and isinstance(value, str):
                     d[key] = placeholders.get(key, 'REDACTED')
+                elif key == 'api_keys' and isinstance(value, list):
+                    # 多 Key 轮询的数组同样是密钥，逐个换成占位符
+                    d[key] = [placeholders['api_key'] for _ in value]
                 elif isinstance(value, (dict, list)):
                     clean_dict(value)
         elif isinstance(d, list):
             for item in d:
                 clean_dict(item)
     
+    # 接了渠道的模型先展开，示例文件里每个模型都带着完整的（已脱敏的）连接配置
+    channels_path = SCRIPT_DIR / "model_channels.json"
+    if channels_path.exists():
+        from core.model_channels import expand_model_map
+        with open(channels_path, 'r', encoding='utf-8') as f:
+            data = expand_model_map(data, json.load(f))
+        for config in data.values():
+            for endpoint in config if isinstance(config, list) else [config]:
+                if isinstance(endpoint, dict):
+                    endpoint.pop('channel', None)
+        with open(channels_path, 'w', encoding='utf-8') as f:
+            json.dump({}, f, indent=2)
+
     clean_dict(data)
-    
+
     # 保存为示例文件
     example_path = SCRIPT_DIR / "model_endpoint_map.example.json"
     with open(example_path, 'w', encoding='utf-8') as f:

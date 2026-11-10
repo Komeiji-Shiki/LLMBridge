@@ -18,6 +18,7 @@ from core.model_archive import (
     is_model_archived, set_archive_flags,
     find_inactive_models, build_last_used_map,
 )
+from core.model_channels import CHANNELS_FILE, apply_channel_refs
 from core.app_state import get_app_state
 from core.constants import PROJECT_ROOT
 from core.upstream_auth import apply_upstream_auth
@@ -83,6 +84,15 @@ async def read_json_file(path: str):
     return json.loads(await read_text_file(path))
 
 
+async def read_channels_file() -> dict:
+    """渠道表；文件不存在等于没有渠道。"""
+    try:
+        channels = await read_json_file(CHANNELS_FILE)
+    except FileNotFoundError:
+        return {}
+    return channels if isinstance(channels, dict) else {}
+
+
 async def write_json_file(path: str, data) -> None:
     await asyncio.to_thread(atomic_write_json, path, data)
 
@@ -145,10 +155,16 @@ async def get_models_config(
     MODEL_NAME_TO_ID_MAP: dict,
     load_model_endpoint_map_func
 ):
-    """获取所有模型配置"""
+    """获取所有模型配置（文件里的原样，渠道引用不展开）和渠道表"""
     load_model_endpoint_map_func()
+    try:
+        model_map = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+    except (FileNotFoundError, ValueError):
+        # 文件暂时读不到时退回内存里最后一次有效的配置
+        model_map = MODEL_ENDPOINT_MAP
     return {
-        "model_endpoint_map": MODEL_ENDPOINT_MAP,
+        "model_endpoint_map": model_map,
+        "channels": await read_channels_file(),
         "models": MODEL_NAME_TO_ID_MAP
     }
 
@@ -182,6 +198,10 @@ async def update_model_config(
         async with _MODEL_ENDPOINT_MAP_LOCK:
             # 读取现有配置
             current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+            try:
+                config = apply_channel_refs(config, await read_channels_file())
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
 
             if old_model_name:
                 if old_model_name not in current_config:
