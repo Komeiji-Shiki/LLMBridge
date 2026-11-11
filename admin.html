@@ -783,6 +783,11 @@
                             <select class="form-select" data-channel-default="convert_system_to_user" data-kind="boolean"><option value="">各模型自己定</option><option value="true">开</option><option value="false">关</option></select>
                             <small class="field-hint" data-default-note="convert_system_to_user"></small>
                         </label>
+                        <label>移除 Claude Agent SDK 前缀（Gemini）
+                            <select class="form-select" data-channel-default="strip_claude_agent_sdk_prefix" data-kind="boolean"><option value="">各模型自己定</option><option value="true">开</option><option value="false">关</option></select>
+                            <small class="field-hint">删除系统提示开头的固定句子：You are a Claude agent, built on Anthropic's Claude Agent SDK.</small>
+                            <small class="field-hint" data-default-note="strip_claude_agent_sdk_prefix"></small>
+                        </label>
                         <label>Prefix 续写（DeepSeek）
                             <select class="form-select" data-channel-default="enable_prefix" data-kind="boolean"><option value="">各模型自己定</option><option value="true">开</option><option value="false">关</option></select>
                             <small class="field-hint" data-default-note="enable_prefix"></small>
@@ -1355,6 +1360,13 @@
                                     将所有 <code>role: "system"</code> 的消息转换为 <code>role: "user"</code>。
                                     适用于不支持 system 角色的模型（如某些开源模型或特定API）
                                 </small>
+</div>
+<div class="form-group" style="margin-top: 15px; margin-bottom: 0;">
+<label class="form-label">
+<input id="strip-claude-agent-sdk-prefix" style="margin-right: 8px;" type="checkbox"/>
+                                    移除 Claude Agent SDK 前缀（Gemini）
+</label>
+<small class="field-hint">删除系统提示开头的固定句子：You are a Claude agent, built on Anthropic's Claude Agent SDK. 后续提示词保留。</small>
 </div>
 </div>
 </div><div class="settings-block" data-direct-setting="" style="margin-top: 10px;">

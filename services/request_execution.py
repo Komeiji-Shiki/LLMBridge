@@ -12,6 +12,7 @@ import logging
 import time
 from core.request_context import current_request, credential_identity, endpoint_identity
 from services.gemini_signature_recovery import GeminiTextSignatureRecovery
+from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.model_replacements import apply_known_replacement, learn_replacement
 from services.protocol_events import payloads, error_status, is_business_event, is_terminal
 from services.provider_capabilities import apply_native_tool_defaults, protocol_name
@@ -63,6 +64,7 @@ def retry_before_output(method=None, *, output_bytes=False):
         body = bound.arguments.get('request_body') or {}
         if 'request_body' in bound.arguments:
             body = apply_native_tool_defaults(body, context.endpoint)
+            strip_claude_agent_sdk_prefix(body, context.endpoint)
             bound.arguments['request_body'] = body
         stream = bound.arguments.get('stream_override')
         if stream is None:

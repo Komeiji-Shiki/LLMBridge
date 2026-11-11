@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 2026-11-11：渠道可清理 Claude Agent SDK 身份前缀
+
+- 渠道的模型默认设置新增“移除 Claude Agent SDK 前缀（Gemini）”。开启后，发送到 Gemini 前只删除系统提示开头的固定句子 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`，保留后续提示词和内容块属性；系统提示只剩这句话时移除整个字段。
+- generateContent、Interactions 和 Gemini 原生透传共用此规则，流式、非流式和重试均生效；模型的消息转换设置也可通过同名开关单独覆盖渠道默认值。其他渠道默认关闭。
+
 ### 2026-11-10：渠道，多个模型共用一组上游地址和 Key
 
 - 新增渠道：地址、Key、鉴权方式和轮询策略存在 `model_channels.json`，模型配置里只留 `channel` 引用，加载时展开，请求链路读到的配置和以前一样。换 Key 只改渠道一处，保存后立即生效；只改渠道文件也会触发重新加载。
