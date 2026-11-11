@@ -24,6 +24,21 @@ def payloads(chunk):
     return values
 
 
+def upstream_response_model(values):
+    """从原始响应或流式事件中取模型标识，不从请求或回复正文推断。"""
+    for event in reversed(values):
+        if not isinstance(event, dict) or event.get('error'):
+            continue
+        for response in (event.get('response'), event.get('message'), event.get('interaction'), event):
+            if not isinstance(response, dict):
+                continue
+            for field in ('modelVersion', 'model_version', 'model', 'model_id'):
+                model = response.get(field)
+                if isinstance(model, str) and model.strip():
+                    return model.strip()
+    return None
+
+
 # Gemini 结束原因的唯一语义表：表内是正常结束，值为对应的 OpenAI finish_reason；
 # 表外的值（含以后新增的）一律按异常终止上报，不能伪装成正常结束。
 GEMINI_NORMAL_FINISH = {

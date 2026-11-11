@@ -623,6 +623,12 @@ async function viewRequestDetails(requestId) {
                     <div class="detail-label">模型:</div>
                     <div class="detail-value">${escapeHtml(details.model)}</div>
                 </div>
+                ${details.upstream_model ? `
+                <div class="detail-item">
+                    <div class="detail-label">上游返回模型:</div>
+                    <div class="detail-value">${escapeHtml(details.upstream_model)}</div>
+                </div>
+                ` : ''}
                 <div class="detail-item">
                     <div class="detail-label">状态:</div>
                     <div class="detail-value"><span class="status-badge ${details.status === 'success' ? 'success' : 'failed'}">${escapeHtml(details.status)}</span>${renderFilteredBadge(details.stop_reason || (details.cost_info && details.cost_info.stop_reason))}</div>

@@ -26,7 +26,7 @@ def log_store(tmp_path):
                  'caller_id': 'caller', 'conversation_id': 'conversation',
                  'cost_info': {'total_cost': 3.5, 'currency': 'CNY'}}
         if index == 2:
-            entry.update(reasoning_content='思考' * 30000,
+            entry.update(reasoning_content='思考' * 30000, upstream_model='gemini-real-version',
                          request_messages=[{'role': 'assistant', 'tool_calls': [{'function': {'name': 'search'}}]}])
         records.append(entry)
         store.write_request(entry)
@@ -39,10 +39,12 @@ def test_filters_and_feature_flags_across_all_sqlite_read_paths(log_store):
     result = store.query_requests(start_date='2026-09-09', end_date='2026-09-09', search='_%')
     assert result['total'] == 2
     assert [row['request_id'] for row in result['items']] == ['log-2', 'log-1']
+    assert [row['request_id'] for row in store.query_requests(search='gemini-real-version')['items']] == ['log-2']
     assert store.query_requests(limit=1, offset=1, start_date='2026-09-09', end_date='2026-09-09')['items'][0]['request_id'] == 'log-1'
     for record in (store.get_request_details('log-2'), store.get_recent_requests()[1], result['items'][0]):
         assert record['has_reasoning'] is True and record['has_tool_calls'] is True
         assert record['total_cost'] == 3.5 and record['currency'] == 'CNY'
+        assert record['upstream_model'] == 'gemini-real-version'
         assert 'reasoning_content' not in record and 'request_messages' not in record
         assert len(json.dumps(record)) < 2000
     # 替换同一请求时标记也要同步更新，不能留下先前的 True。

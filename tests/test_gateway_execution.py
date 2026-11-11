@@ -103,7 +103,8 @@ def test_retry_holds_prelude_but_never_replays_business_events(business):
     @retry_before_output
     async def upstream(api_key='', request_body=None):
         calls.append(api_key)
-        yield b'data: {"type":"response.created","response":{"id":"start"}}\n\n'
+        response = {'id': 'start', **({'model': 'upstream-first'} if len(calls) == 1 else {})}
+        yield ('data: ' + json.dumps({'type': 'response.created', 'response': response}) + '\n\n').encode()
         if business:
             yield b'data: {"type":"response.output_text.delta","delta":"hello"}\n\n'
         if len(calls) == 1:
@@ -114,13 +115,15 @@ def test_retry_holds_prelude_but_never_replays_business_events(business):
         context = RequestContext(model='test', endpoint={'auto_retry': {'enabled': True, 'max_retries': 1, 'retry_delay_seconds': 0}})
         token = current_request.set(context)
         try:
-            return b''.join([chunk async for chunk in upstream(request_body={'stream': True})])
+            result = b''.join([chunk async for chunk in upstream(request_body={'stream': True})])
+            return result, context.outcome.get('upstream_model')
         finally:
             current_request.reset(token)
-    result = asyncio.run(run())
+    result, upstream_model = asyncio.run(run())
     assert len(calls) == (1 if business else 2)
     assert result.count(b'response.created') == 1
     assert (b'503' in result) == business
+    assert upstream_model == ('upstream-first' if business else None)
 
 
 @pytest.mark.parametrize('stream', [True, False])

@@ -102,6 +102,7 @@ class RequestInfo:
     conversation_id: Optional[str] = None
     gateway_request_id: Optional[str] = None
     endpoint_model: Optional[str] = None
+    upstream_model: Optional[str] = None
     timings: Optional[dict] = None
     pricing_snapshot: Optional[dict] = None
 
@@ -775,6 +776,7 @@ class MonitoringService:
             request_info.duration = current_time - request_info.timestamp
             request_info.error = error
             request_info.stop_reason = stop_reason
+            request_info.upstream_model = outcome.get('upstream_model')
             
             request_info.response_preview = (response_content[:500] + "...") if response_content and len(response_content) > 500 else response_content
             request_info.reasoning_preview = (reasoning_content[:500] + "...") if reasoning_content and len(reasoning_content) > 500 else reasoning_content
@@ -832,7 +834,9 @@ class MonitoringService:
 
         log_entry = {
             'type': 'request_end',
-            **{name: request_dict_for_recent[name] for name in ('caller_id', 'caller_name', 'conversation_id', 'gateway_request_id', 'endpoint_model', 'timings', 'pricing_snapshot')},
+            **{name: request_dict_for_recent[name] for name in (
+                'caller_id', 'caller_name', 'conversation_id', 'gateway_request_id',
+                'endpoint_model', 'upstream_model', 'timings', 'pricing_snapshot')},
             'timestamp': _original_timestamp,
             'end_timestamp': time.time(),
             'request_id': request_id,

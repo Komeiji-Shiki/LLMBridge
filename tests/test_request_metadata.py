@@ -15,6 +15,7 @@ def test_migration_preserves_old_amounts_and_covers_every_field():
               'cache_write_tokens': 12, 'cache_write_1h_tokens': 3,
               'cache_write_cost': .2, 'cache_write_extra_cost': .05, 'cache_mode': 'explicit',
               'gateway_request_id': 'logical', 'endpoint_model': 'demo_vertex', 'timings': {'total_ms': 123},
+              'upstream_model': 'gemini-real-version',
               'safety_details': {'blocked': {'reason': 'SAFETY'}, 'response_ratings': {}},
               'conversion_notes': [{'field': 'top_k', 'applied': False, 'message': '未发送'}],
               'model_replaced': {'from': 'old', 'to': 'new'},

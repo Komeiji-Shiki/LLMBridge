@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 2026-11-11：监控显示上游返回的模型标识
+
+- 从上游的 `model`、`modelVersion` 等响应字段记录模型标识，显示在请求日志的模型列和请求详情中，也可用于搜索。只有上游返回标识时才显示，网关配置的模型名称仍独立保留。
+
 ### 2026-11-11：渠道可清理 Claude Agent SDK 身份前缀
 
 - 渠道的模型默认设置新增“移除 Claude Agent SDK 前缀（Gemini）”。开启后，发送到 Gemini 前只删除系统提示开头的固定句子 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`，保留后续提示词和内容块属性；系统提示只剩这句话时移除整个字段。

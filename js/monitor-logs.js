@@ -215,6 +215,7 @@ function refreshRequestLogs() {
             const duration = log.duration ? formatDuration(log.duration) : '-';
             const inTokens = renderInputTokens(log);
             const outTokens = renderOutputTokens(log);
+            const upstreamModel = log.upstream_model ? escapeHtml(log.upstream_model) : '';
             // 按记录自身的货币显示符号，CNY 计价的费用不再被误标成美元
             const costCurrency = log.currency || 'USD';
             const costSymbol = costCurrency === 'CNY' ? '¥' : '$';
@@ -242,7 +243,10 @@ function refreshRequestLogs() {
                     <td><input type="checkbox" class="compare-check" aria-label="加入缓存对比" data-request-id="${escapeHtml(log.request_id || '')}" onchange="MonitorCompare.toggleCompareSelection(this.dataset.requestId, this.checked)" ${log.request_id && MonitorCompare.has(log.request_id) ? 'checked' : ''} ${log.request_id ? '' : 'disabled title="该记录无请求ID"'}></td>
                     <td>${time}</td>
                     <td style="font-family: monospace; font-size: 12px;">${escapeHtml(log.request_id?.substring(0, 8) || 'N/A')}...</td>
-                    <td><a class="model-link" href="/admin#models/${encodeURIComponent(log.model || '')}" target="_top" title="打开这个模型的设置">${escapeHtml(log.model)}</a>${featureBadges ? ' ' + featureBadges : ''}<div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div></td>
+                    <td><a class="model-link" href="/admin#models/${encodeURIComponent(log.model || '')}" target="_top" title="打开这个模型的设置">${escapeHtml(log.model)}</a>${featureBadges ? ' ' + featureBadges : ''}
+                        ${upstreamModel ? `<div style="font-size:11px;opacity:.7;overflow-wrap:anywhere">上游返回：${upstreamModel}</div>` : ''}
+                        <div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div>
+                    </td>
                     <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span>${renderFilteredBadge(stopReason)}</td>
                     <td title="${escapeHtml(renderPhaseTimings(log.timings))}">${duration}${log.timings?.first_business_ms != null ? `<div style="font-size:11px;opacity:.7">首事件 ${(Number(log.timings.first_business_ms) / 1000).toFixed(2)}s</div>` : ""}</td>
                     <td>${inTokens}</td>

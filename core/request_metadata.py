@@ -11,6 +11,8 @@ COLUMNS = {
     'conversation_id': 'TEXT', 'gateway_request_id': 'TEXT', 'timings': 'TEXT', 'pricing_snapshot': 'TEXT',
     # model 列存显示名，多条线路同名时只有这里能区分实际走的端点
     'endpoint_model': 'TEXT',
+    # 上游响应主动返回的型号，与配置中的端点和模型 ID 分开保存。
+    'upstream_model': 'TEXT',
     # Gemini 过滤依据：被拦的来源和原因，以及各类别评分
     'safety_details': 'TEXT',
     # 协议转换时没能保留的内容，以及上游要求换型号的记录

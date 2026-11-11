@@ -52,7 +52,7 @@ class LogQuery:
                 params.append(bound)
         if self.search:
             escaped = self.search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            fields = ('request_id', 'model', 'error', 'caller_id', 'caller_name', 'conversation_id')
+            fields = ('request_id', 'model', 'upstream_model', 'error', 'caller_id', 'caller_name', 'conversation_id')
             clauses.append('(' + ' OR '.join(f"{field} LIKE ? ESCAPE '\\'" for field in fields) + ')')
             params.extend([f'%{escaped}%'] * len(fields))
         return (' WHERE ' + ' AND '.join(clauses) if clauses else ''), params
@@ -68,6 +68,6 @@ class LogQuery:
         if self.end is not None and timestamp >= self.end:
             return False
         if self.search:
-            fields = ('request_id', 'model', 'error', 'caller_id', 'caller_name', 'conversation_id')
+            fields = ('request_id', 'model', 'upstream_model', 'error', 'caller_id', 'caller_name', 'conversation_id')
             return any(self.search.lower() in str(entry.get(key) or '').lower() for key in fields)
         return True

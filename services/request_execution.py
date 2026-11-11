@@ -14,7 +14,7 @@ from core.request_context import current_request, credential_identity, endpoint_
 from services.gemini_signature_recovery import GeminiTextSignatureRecovery
 from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.model_replacements import apply_known_replacement, learn_replacement
-from services.protocol_events import payloads, error_status, is_business_event, is_terminal
+from services.protocol_events import payloads, error_status, is_business_event, is_terminal, upstream_response_model
 from services.provider_capabilities import apply_native_tool_defaults, protocol_name
 from core.constants import RetryDefaults
 
@@ -113,6 +113,8 @@ def retry_before_output(method=None, *, output_bytes=False):
                 info = {'attempt': len(context.attempts) + 1,
                         'started_ms': round((time.perf_counter() - context.started) * 1000, 2)}
                 context.attempts.append(info)
+                # 每次重试只记录本次响应里的型号，避免沿用已放弃的上游尝试。
+                context.outcome.pop('upstream_model', None)
                 context.mark('upstream_start')
                 prefix, total, committed, terminal = [], 0, False, False
                 values = []
@@ -135,6 +137,8 @@ def retry_before_output(method=None, *, output_bytes=False):
                         if not stream:
                             prefix.append(chunk)
                             continue
+                        if response_model := upstream_response_model(values):
+                            context.outcome['upstream_model'] = response_model
                         if not committed:
                             prefix.append(chunk)
                             total += len(chunk) if isinstance(chunk, (bytes, str)) else len(json.dumps(chunk))
@@ -158,6 +162,8 @@ def retry_before_output(method=None, *, output_bytes=False):
                         values = payloads(raw) if raw is not None else prefix
                         failed = next((error_status(value) for value in values if error_status(value) is not None), None)
                         error_text = str(values) if failed else ''
+                        if not failed and (response_model := upstream_response_model(values)):
+                            context.outcome['upstream_model'] = response_model
                         if not failed and signature_recovery is not None and any(is_business_event(value) for value in values):
                             signature_recovery.confirm()
                     if stream and failed is None and not terminal:
