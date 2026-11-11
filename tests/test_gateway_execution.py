@@ -127,13 +127,17 @@ def test_retry_holds_prelude_but_never_replays_business_events(business):
 
 
 @pytest.mark.parametrize('stream', [True, False])
-def test_gemini_rejected_text_signatures_are_remembered_per_endpoint(stream, monkeypatch):
-    select_key = AsyncMock(side_effect=['original-key', 'new-key', 'vertex-key'])
+@pytest.mark.parametrize(('provider', 'error'), [
+    ('ai-studio', {'message': 'Corrupted thought signature.', 'code': 400}),
+    ('vertex', {'message': 'Invalid thought signature.', 'code': 400, 'status': 'INVALID_ARGUMENT'}),
+], ids=['ai-studio', 'vertex'])
+def test_gemini_rejected_text_signatures_are_remembered_per_endpoint(stream, provider, error, monkeypatch):
+    select_key = AsyncMock(side_effect=['original-key', 'new-key', 'other-endpoint-key'])
     monkeypatch.setattr('routes._direct_api_utils.get_api_key', select_key)
     calls = []
     fresh_parts = [{'text': '继续回答', 'thoughtSignature': 'fresh-signature'}]
     reply = {'candidates': [{'content': {'parts': fresh_parts}, 'finishReason': 'STOP'}]}
-    rejection = {'error': {'message': 'Corrupted thought signature.', 'code': 400}, '_http_status': 400}
+    rejection = {'error': error, '_http_status': 400}
     body = {'contents': [
         {'role': 'user', 'parts': [{'text': '之前的问题'}]},
         {'role': 'model', 'parts': [{'text': '历史回答', 'thoughtSignature': 'vertex-text'},
@@ -168,26 +172,26 @@ def test_gemini_rejected_text_signatures_are_remembered_per_endpoint(stream, mon
         return context
 
     async def run():
-        xtt = f'https://xtt-{stream}.example.test'
-        initial = await send(body, xtt)
+        endpoint = f'https://{provider}-{stream}.example.test'
+        initial = await send(body, endpoint)
         assert [item['status'] for item in initial.attempts] == [400, 200]
         assert initial.attempts[1]['omitted_thought_signatures'] == 2
         assert initial.upstream_request == expected
         select_key.assert_awaited_once()
 
-        warm = await send(continued, xtt)
+        warm = await send(continued, endpoint)
         assert [item['status'] for item in warm.attempts] == [200]
         assert warm.attempts[0]['omitted_thought_signatures'] == 2
         assert warm.upstream_request == expected_continued
 
-        vertex = await send(body, 'https://vertex.example.test')
-        assert [item['status'] for item in vertex.attempts] == [200]
-        assert vertex.upstream_request == body
+        other_endpoint = await send(body, 'https://other.example.test')
+        assert [item['status'] for item in other_endpoint.attempts] == [200]
+        assert other_endpoint.upstream_request == body
 
     asyncio.run(run())
     assert 'thoughtSignature' in body['contents'][1]['parts'][0]
     assert calls == [('original-key', body), ('original-key', expected),
-                     ('new-key', expected_continued), ('vertex-key', body)]
+                     ('new-key', expected_continued), ('other-endpoint-key', body)]
 
 
 @pytest.mark.parametrize('output_bytes', [False, True])

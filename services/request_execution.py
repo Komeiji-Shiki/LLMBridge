@@ -42,7 +42,11 @@ def _is_gemini_signature_rejection(value):
     if not isinstance(value, dict) or value.get('_http_status') != 400:
         return False
     error = value.get('error')
-    return isinstance(error, dict) and 'corrupted thought signature' in str(error.get('message', '')).lower()
+    if not isinstance(error, dict):
+        return False
+    # Vertex 和 Gemini API 对无效思考签名返回不同的错误文案。
+    message = str(error.get('message', '')).lower()
+    return 'invalid thought signature' in message or 'corrupted thought signature' in message
 
 
 def retry_before_output(method=None, *, output_bytes=False):
