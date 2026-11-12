@@ -20,7 +20,7 @@ def test_metadata_sqlite_all_read_paths_and_history(tmp_path):
               'cache_write_extra_cost': 0, 'cache_mode': None,
               'cost_info': {'total_cost': 3.5, 'currency': 'CNY'},
               'caller_id': 'stable-key', 'caller_name': '用户', 'conversation_id': 'conversation',
-              'gateway_request_id': 'wire-id', 'endpoint_model': 'demo_vertex',
+              'gateway_request_id': 'wire-id', 'endpoint_model': 'demo_vertex', 'upstream_model': 'demo-001',
               'safety_details': {'blocked': {'reason': 'SAFETY'}},
               'conversion_notes': [{'field': 'top_k', 'applied': False, 'message': '未发送'}],
               'model_replaced': {'from': 'old', 'to': 'new'},
