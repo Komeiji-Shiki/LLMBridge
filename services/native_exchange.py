@@ -300,6 +300,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
     """api_key 不为空时固定用这把密钥：续接上游保存的对象必须回到创建它的项目。"""
     from routes._direct_api_utils import get_api_key
     from converters.gemini_interactions import convert_gemini_gc_to_interactions, convert_interactions_to_gemini_gc, interaction_failure, InteractionsToGeminiGCConverter
+    from converters.interactions_thought_strip import InteractionsNativeStreamStripper, strip_interactions_response_thoughts
     from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler
     context = context or current_request.get() or RequestContext()
     context.model, context.endpoint = model, copy.deepcopy(config)
@@ -451,9 +452,11 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         if not stream:
             raw = b''.join([chunk async for chunk in iterator])
             value = json.loads(raw)
+            status = error_status(value) or 200
+            if protocol == 'interactions' and not gemini_response and status == 200:
+                value = strip_interactions_response_thoughts(value)
             observe(value)
             await finish()
-            status = error_status(value) or 200
             if protocol == 'interactions' and gemini_response and status == 200:
                 value = convert_interactions_to_gemini_gc(value)
             if generation_error:
@@ -473,21 +476,29 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         async def generate():
             nonlocal failure
             converter = InteractionsToGeminiGCConverter() if gemini_response and protocol == 'interactions' else None
+            native_stripper = InteractionsNativeStreamStripper() if (not gemini_response and protocol == 'interactions') else None
             async def chunks():
                 yield first
                 async for chunk in iterator:
                     yield chunk
             try:
                 async for chunk in chunks():
-                    values = payloads(chunk)
-                    for value in values:
-                        observe(value)
-                    if converter:
+                    if native_stripper:
+                        values, out_chunk = native_stripper.process_chunk(chunk)
                         for value in values:
-                            for converted in converter.feed(value):
-                                yield ('data: ' + json.dumps(converted, ensure_ascii=False) + '\n\n').encode()
+                            observe(value)
+                        if out_chunk:
+                            yield out_chunk
                     else:
-                        yield chunk
+                        values = payloads(chunk)
+                        for value in values:
+                            observe(value)
+                        if converter:
+                            for value in values:
+                                for converted in converter.feed(value):
+                                    yield ('data: ' + json.dumps(converted, ensure_ascii=False) + '\n\n').encode()
+                        else:
+                            yield chunk
                     if generation_error:
                         # 保留原始结束事件，并明确告知客户端实际失败原因。
                         yield ('data: ' + json.dumps({'error': generation_error}, ensure_ascii=False) + '\n\n').encode()

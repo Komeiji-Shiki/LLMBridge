@@ -26,6 +26,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from converters.audio import extract_audio, separate_tool_audio
 from converters.gemini_generate import TOOL_ERROR_PREFIX
+from converters.interactions_thought_strip import (
+    ThoughtSummaryStreamStripper,
+    strip_summarizer_leaked_thoughts,
+    strip_thought_step,
+)
 from converters.media import FILE_PART_TYPES, file_to_interactions, gemini_code_text
 from core.conversion_report import note_loss
 from core.request_context import current_request
@@ -88,7 +93,11 @@ def cache_thought_signatures(fragments: List[Tuple[str, str]]) -> None:
     valid = [(text, signature) for text, signature in fragments if text and signature]
     if valid:
         cache = signature_cache()
-        cache["".join(text for text, _ in valid)] = valid
+        raw_key = "".join(text for text, _ in valid)
+        cache[raw_key] = valid
+        stripped_key = "".join(strip_summarizer_leaked_thoughts(text) for text, _ in valid)
+        if stripped_key and stripped_key != raw_key:
+            cache[stripped_key] = valid
         _trim_cache(cache)
 
 
@@ -756,7 +765,9 @@ def convert_interactions_to_openai_response(
             for block in step.get("content") or []:
                 _merge_delta(message, _block_delta(block))
         elif stype == "thought":
-            text = _extract_text_from_content_block(step.get("summary"))
+            text = strip_summarizer_leaked_thoughts(
+                _extract_text_from_content_block(step.get("summary"))
+            )
             if text:
                 reasoning_parts.append(text)
         elif stype == "function_call":
@@ -904,6 +915,7 @@ class InteractionsStreamConverter:
         self.request_id = request_id
         self.completion_tokens_mode = completion_tokens_mode
         self.assembler = _StepAssembler()
+        self.thought_stripper = ThoughtSummaryStreamStripper()
         self.tool_calls = 0
         # 正在输出参数的工具调用序号
         self.call_index: Optional[int] = None
@@ -919,6 +931,12 @@ class InteractionsStreamConverter:
         chunk["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
         return chunk
 
+    def _flush_thought(self) -> List[dict]:
+        if not self.thought_stripper.active:
+            return []
+        flushed = self.thought_stripper.finish_thought()
+        return [self._chunk({"reasoning_content": flushed})] if flushed else []
+
     def _save_turn(self) -> None:
         if self._turn_saved:
             return
@@ -929,12 +947,13 @@ class InteractionsStreamConverter:
         remember_turn_steps(steps)
 
     def _on_step_start(self, step: dict) -> List[dict]:
+        chunks: List[dict] = self._flush_thought()
         started = self.assembler.start(step)
-        chunks: List[dict] = []
         if started.get("type") == "thought":
             text = _extract_text_from_content_block(started.get("summary"))
-            if text:
-                chunks.append(self._chunk({"reasoning_content": text}))
+            out = self.thought_stripper.start_thought(text)
+            if out:
+                chunks.append(self._chunk({"reasoning_content": out}))
         elif started.get("type") == "model_output":
             for block in started.get("content") or []:
                 delta = _block_delta(block)
@@ -955,46 +974,58 @@ class InteractionsStreamConverter:
     def _on_step_delta(self, delta: dict) -> List[dict]:
         self.assembler.delta(delta)
         kind = delta.get("type")
+        if kind in ("thought_summary", "thought"):
+            text = _extract_text_from_content_block(delta.get("content")) or str(delta.get("text", "") or "")
+            out = self.thought_stripper.feed_thought(text)
+            return [self._chunk({"reasoning_content": out})] if out else []
+        if kind == "thought_signature":
+            return []
+        chunks: List[dict] = self._flush_thought()
         if kind in ("arguments_delta", "arguments"):
             piece = _argument_piece(delta)
             if piece and self.call_index is not None:
-                return [self._chunk({"tool_calls": [{"index": self.call_index, "function": {"arguments": piece}}]})]
-            return []
+                chunks.append(self._chunk({"tool_calls": [{"index": self.call_index, "function": {"arguments": piece}}]}))
+            return chunks
         if kind == "text":
-            return [self._chunk({"content": delta["text"]})] if delta.get("text") else []
+            if delta.get("text"):
+                chunks.append(self._chunk({"content": delta["text"]}))
+            return chunks
         if kind == "text_annotation_delta":
             annotations = _chat_annotations(delta.get("annotations"))
-            return [self._chunk({"annotations": annotations})] if annotations else []
-        if kind in ("thought_summary", "thought"):
-            text = _extract_text_from_content_block(delta.get("content")) or str(delta.get("text", "") or "")
-            return [self._chunk({"reasoning_content": text})] if text else []
+            if annotations:
+                chunks.append(self._chunk({"annotations": annotations}))
+            return chunks
         if kind in ("image", "audio", "video", "document"):
             converted = _block_delta(delta)
-            return [self._chunk(converted)] if converted else []
-        return []
+            if converted:
+                chunks.append(self._chunk(converted))
+            return chunks
+        return chunks
 
     def _on_step_stop(self) -> List[dict]:
+        chunks = self._flush_thought()
         step = self.assembler.stop()
         self.call_index = None
         if step is None or step.get("type") == "function_call":
-            return []
+            return chunks
         code = _code_step_text(step)
         if code:
-            return [self._chunk({"content": code})]
+            chunks.append(self._chunk({"content": code}))
+            return chunks
         _note_step_loss(step)
-        return []
+        return chunks
 
     def _on_completed(self, interaction: dict) -> List[dict]:
+        chunks: List[dict] = self._flush_thought()
         self.status = interaction.get("status", self.status)
         self.usage = interaction.get("usage") if isinstance(interaction.get("usage"), dict) else None
         self.completed = True
         failure = interaction_failure({**interaction, "status": self.status})
         if failure:
-            return [failure]
+            return chunks + [failure]
         self._save_turn()
         if self.status == "requires_continuation":
             note_loss("continuation", _CONTINUATION_STOPPED)
-        chunks: List[dict] = []
         if self.signatures:
             # 客户端保留元数据时可以原样回放；丢了也能按调用 ID 或思考文本找回。
             chunks.append(self._chunk({"provider_metadata": {"interactions_steps": copy.deepcopy(self.assembler.steps)}}))
@@ -1030,9 +1061,10 @@ class InteractionsStreamConverter:
         return []
 
     def finalize(self) -> List[dict]:
-        """上游没有发送 completed 事件时也保存已收到的步骤。"""
+        """上游没有发送 completed 事件时也保存已收到的步骤，并交还缓冲的思考摘要。"""
+        chunks = self._flush_thought()
         self._save_turn()
-        return []
+        return chunks
 
 
 # ============================================================================
@@ -1288,14 +1320,15 @@ def _gc_function_result(response: dict, call_id: str) -> dict:
 
 def _append_thought_parts(parts: List[dict], step: dict) -> None:
     """将一个 thought step 追加为带 thoughtSignature 的 Gemini Parts。"""
-    summary = step.get("summary")
+    cleaned_step = strip_thought_step(step)
+    summary = cleaned_step.get("summary")
     blocks = summary if isinstance(summary, list) else ([summary] if summary else [])
     thought_parts: List[dict] = []
     for block in blocks:
         part = _interactions_block_to_gemini_part(block, thought=True)
         if part:
             thought_parts.append(part)
-    signature = step.get("signature")
+    signature = cleaned_step.get("signature")
     if signature:
         if thought_parts:
             thought_parts[-1]["thoughtSignature"] = signature
@@ -1580,6 +1613,7 @@ class InteractionsToGeminiGCConverter:
         self.grounding = _Grounding()
         # 步骤类型、签名和工具参数都由组装器累积，generateContent 没有参数分片，调用收齐才发
         self.assembler = _StepAssembler()
+        self.thought_stripper = ThoughtSummaryStreamStripper()
 
     @staticmethod
     def _chunk(parts: Optional[List[dict]] = None) -> dict:
@@ -1589,10 +1623,17 @@ class InteractionsToGeminiGCConverter:
             }]
         }
 
+    def _flush_thought_chunks(self) -> List[dict]:
+        if not self.thought_stripper.active:
+            return []
+        flushed = self.thought_stripper.finish_thought()
+        return [self._chunk([{"text": flushed, "thought": True}])] if flushed else []
+
     def _on_step_stop(self) -> List[dict]:
+        chunks = self._flush_thought_chunks()
         step = self.assembler.stop()
         if step is None:
-            return []
+            return chunks
         if step.get("type") == "function_call":
             fc: dict = {"name": step.get("name", ""), "args": step["arguments"]}
             if step.get("id"):
@@ -1601,14 +1642,19 @@ class InteractionsToGeminiGCConverter:
             # 签名属于 part，不属于 functionCall 对象。
             if step.get("signature"):
                 part["thoughtSignature"] = step["signature"]
-            return [self._chunk([part])]
+            chunks.append(self._chunk([part]))
+            return chunks
         if step.get("type") == "thought":
             # 摘要已经逐段发出，这里只补签名。
             signature = step.get("signature")
-            return [self._chunk([{"thought": True, "thoughtSignature": signature}])] if signature else []
+            if signature:
+                chunks.append(self._chunk([{"thought": True, "thoughtSignature": signature}]))
+            return chunks
         self.grounding.add_step(step)
         parts = _server_step_parts(step)
-        return [self._chunk(parts)] if parts else []
+        if parts:
+            chunks.append(self._chunk(parts))
+        return chunks
 
     def feed(self, event: dict) -> List[dict]:
         if not isinstance(event, dict):
@@ -1623,17 +1669,29 @@ class InteractionsToGeminiGCConverter:
             self.status = event.get("status", self.status)
 
         elif event_type == "step.start":
+            chunks.extend(self._flush_thought_chunks())
             step = event.get("step") or {}
             if not isinstance(step, dict):
-                return []
+                return chunks
             self.assembler.start(step)
             if step.get("type") == "thought":
                 summary = step.get("summary")
                 blocks = summary if isinstance(summary, list) else ([summary] if summary else [])
-                parts = [_interactions_block_to_gemini_part(block, thought=True)
-                         for block in blocks if isinstance(block, dict)]
-                if any(parts):
-                    chunks.append(self._chunk([part for part in parts if part]))
+                initial_texts = []
+                other_parts = []
+                for block in blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text":
+                        initial_texts.append(str(block.get("text", "")))
+                    else:
+                        part = _interactions_block_to_gemini_part(block, thought=True)
+                        if part:
+                            other_parts.append(part)
+                out = self.thought_stripper.start_thought("".join(initial_texts))
+                parts = ([{"text": out, "thought": True}] if out else []) + other_parts
+                if parts:
+                    chunks.append(self._chunk(parts))
             elif step.get("type") == "model_output":
                 for block in step.get("content", []) or []:
                     if isinstance(block, dict):
@@ -1647,28 +1705,36 @@ class InteractionsToGeminiGCConverter:
                 return []
             delta_type = delta.get("type")
             self.assembler.delta(delta)
-            if delta_type == "text":
-                text = delta.get("text", "")
-                if text:
-                    chunks.append(self._chunk([{"text": text}]))
-            elif delta_type in ("image", "audio", "video", "document"):
-                block = dict(delta)
-                part = _interactions_block_to_gemini_part(block)
-                if part:
-                    chunks.append(self._chunk([part]))
-            elif delta_type in ("thought_summary", "thought"):
+            if delta_type in ("thought_summary", "thought"):
                 block = delta.get("content")
-                if not isinstance(block, dict):
+                if isinstance(block, dict) and block.get("type") != "text":
+                    part = _interactions_block_to_gemini_part(block, thought=True)
+                    if part:
+                        chunks.append(self._chunk([part]))
+                else:
+                    text = (block.get("text", "") if isinstance(block, dict) else delta.get("text", "")) or ""
+                    out = self.thought_stripper.feed_thought(str(text))
+                    if out:
+                        chunks.append(self._chunk([{"text": out, "thought": True}]))
+            elif delta_type == "thought_signature":
+                pass
+            else:
+                chunks.extend(self._flush_thought_chunks())
+                if delta_type == "text":
                     text = delta.get("text", "")
-                    block = {"type": "text", "text": text} if text else None
-                part = _interactions_block_to_gemini_part(block, thought=True)
-                if part:
-                    chunks.append(self._chunk([part]))
+                    if text:
+                        chunks.append(self._chunk([{"text": text}]))
+                elif delta_type in ("image", "audio", "video", "document"):
+                    block = dict(delta)
+                    part = _interactions_block_to_gemini_part(block)
+                    if part:
+                        chunks.append(self._chunk([part]))
 
         elif event_type == "step.stop":
             chunks.extend(self._on_step_stop())
 
         elif event_type == "interaction.completed":
+            chunks.extend(self._flush_thought_chunks())
             interaction = event.get("interaction") or {}
             if not isinstance(interaction, dict):
                 interaction = {}
@@ -1678,7 +1744,7 @@ class InteractionsToGeminiGCConverter:
             self.completed = True
             if self.status in ("failed", "cancelled"):
                 # 错误由 forward_native_exchange 统一发出，这里再发客户端会收到两次。
-                return []
+                return chunks
             candidate: dict = {"finishReason": _interactions_to_gemini_finish_reason(self.status)}
             if self.grounding.metadata():
                 candidate["groundingMetadata"] = self.grounding.metadata()
@@ -1688,6 +1754,7 @@ class InteractionsToGeminiGCConverter:
             chunks.append({"usageMetadata": _gc_usage_metadata(self.usage or {})})
 
         elif event_type == "error":
+            chunks.extend(self._flush_thought_chunks())
             chunks.append({"error": event.get("error") or {"message": "Unknown interactions error"}})
 
         return chunks
