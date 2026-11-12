@@ -1,4 +1,4 @@
-"""Restore exact OpenRouter reasoning signatures within a scoped conversation."""
+"""Restore exact OpenRouter reasoning signatures and Anthropic thinking blocks within a caller and route."""
 import hashlib
 import logging
 from collections import OrderedDict
@@ -11,15 +11,14 @@ def _text_key(reasoning_text: str) -> str:
 
 
 def store_reasoning_details(reasoning_text: str, reasoning_details: list) -> None:
-    from core.request_context import current_request, endpoint_identity
+    from core.request_context import current_request
     from core.conversation_store import conversation_store
     context = current_request.get()
     if not context or not context.authenticated or not reasoning_details or not reasoning_text:
         return
     try:
-        session = context.cache_session()
-        conversation_store.touch(context.owner_id, session, context.model, endpoint_identity(context.endpoint), context.credential_fingerprint)
-        conversation_store.put(context.owner_id, session, 'reasoning:' + _text_key(reasoning_text), reasoning_details)
+        conversation_store.remember_response_prefixes(
+            context.owner_id, context.cache_session(), ['reasoning:' + _text_key(reasoning_text)], reasoning_details)
     except Exception:
         logger.exception('思考签名缓存保存失败，客户端原始响应仍继续返回')
 
@@ -30,8 +29,9 @@ def lookup_reasoning_details(reasoning_text: str):
     context = current_request.get()
     if not context or not context.authenticated or not reasoning_text:
         return None
+    key = 'reasoning:' + _text_key(reasoning_text)
     try:
-        return conversation_store.get(context.owner_id, context.cache_session(), 'reasoning:' + _text_key(reasoning_text))
+        return conversation_store.response_prefixes(context.owner_id, context.cache_session(), [key]).get(key)
     except Exception:
         logger.exception('思考签名缓存读取失败，保持客户端请求原样')
         return None
@@ -42,7 +42,7 @@ def store_anthropic_thinking(blocks: list) -> None:
 
     工具调用 ID 是 Chat 客户端一定会回传的字段，而思考块和 provider_metadata 经常被丢掉。
     """
-    from core.request_context import current_request, endpoint_identity
+    from core.request_context import current_request
     from core.conversation_store import conversation_store
     context = current_request.get()
     thinking = [block for block in blocks if block.get('type') in ('thinking', 'redacted_thinking')]
@@ -50,16 +50,14 @@ def store_anthropic_thinking(blocks: list) -> None:
     if not context or not context.authenticated or not thinking or not tool_ids:
         return
     try:
-        session = context.cache_session()
-        conversation_store.touch(context.owner_id, session, context.model, endpoint_identity(context.endpoint), context.credential_fingerprint)
-        for tool_id in tool_ids:
-            conversation_store.put(context.owner_id, session, 'anthropic_thinking:' + tool_id, thinking)
+        conversation_store.remember_response_prefixes(
+            context.owner_id, context.cache_session(), ['anthropic_thinking:' + tool_id for tool_id in tool_ids], thinking)
     except Exception:
         logger.exception('思考块保存失败，客户端原始响应仍继续返回')
 
 
 def restore_anthropic_thinking(messages: list) -> list:
-    """给当前工具循环里缺思考块的 assistant 消息补回原始块，返回新的消息列表。
+    """给当前工具循环里缺思考块的 assistant 消息补回原始块；有补回时返回新的消息列表。
 
     只处理最后一条 user 消息之后的轮次：更早的思考块 Anthropic 会自行忽略。
     """
@@ -70,7 +68,7 @@ def restore_anthropic_thinking(messages: list) -> list:
         return messages
     start = next((index + 1 for index in range(len(messages) - 1, -1, -1)
                   if isinstance(messages[index], dict) and messages[index].get('role') == 'user'), 0)
-    restored = list(messages)
+    wanted = {}
     for index in range(start, len(messages)):
         message = messages[index]
         if not isinstance(message, dict) or message.get('role') != 'assistant' or not message.get('tool_calls'):
@@ -79,13 +77,21 @@ def restore_anthropic_thinking(messages: list) -> list:
         if isinstance(metadata, dict) and metadata.get('anthropic_blocks'):
             continue
         tool_id = next((call.get('id') for call in message['tool_calls'] if isinstance(call, dict) and call.get('id')), None)
-        try:
-            blocks = conversation_store.get(context.owner_id, context.cache_session(), 'anthropic_thinking:' + tool_id) if tool_id else None
-        except Exception:
-            logger.exception('思考块读取失败，保持客户端请求原样')
-            continue
+        if tool_id:
+            wanted[index] = 'anthropic_thinking:' + tool_id
+    if not wanted:
+        return messages
+    try:
+        records = conversation_store.response_prefixes(context.owner_id, context.cache_session(), list(wanted.values()))
+    except Exception:
+        logger.exception('思考块读取失败，保持客户端请求原样')
+        return messages
+    restored = list(messages)
+    for index, key in wanted.items():
+        blocks = records.get(key)
         if blocks:
-            restored[index] = {**message, 'provider_metadata': {**(metadata or {}), 'anthropic_blocks': blocks}}
+            metadata = messages[index].get('provider_metadata')
+            restored[index] = {**messages[index], 'provider_metadata': {**(metadata or {}), 'anthropic_blocks': blocks}}
     return restored
 
 

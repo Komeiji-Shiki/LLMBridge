@@ -32,7 +32,7 @@ from core.config_loader import CONFIG
 from core.constants import GeminiDefaults, TimeoutDefaults
 from core.conversion_report import ConversionRejected, raise_if_strict
 from converters.gemini_generate import GeminiRequestError, build_gemini_contents
-from converters.gemini_interactions import build_interactions_request_body, interaction_failure
+from converters.gemini_interactions import build_interactions_request_body, interaction_failure, load_signature_history
 from converters.gemini_partial_args import PartialCallMerger
 from converters.media import gemini_code_text
 from services.model_capabilities import limits_for
@@ -1019,6 +1019,7 @@ class DirectAPIService:
         configured_base = (base_url or GeminiDefaults.BASE_URL).rstrip("/")
         endpoint = f"{configured_base}/interactions{sse_param}"
 
+        await load_signature_history(messages)
         request_body = build_interactions_request_body(
             model=model,
             messages=messages,

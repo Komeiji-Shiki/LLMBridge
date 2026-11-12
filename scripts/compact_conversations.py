@@ -40,15 +40,15 @@ def verify_database(path: Path) -> None:
     connection = sqlite3.connect(path, timeout=30)
     try:
         integrity = connection.execute('PRAGMA integrity_check').fetchone()[0]
-        conversations = connection.execute(
-            'SELECT COUNT(*) FROM conversations'
+        records = connection.execute(
+            'SELECT COUNT(*) FROM response_prefixes'
         ).fetchone()[0]
-        artifacts = connection.execute('SELECT COUNT(*) FROM artifacts').fetchone()[0]
+        objects = connection.execute('SELECT COUNT(*) FROM stored_objects').fetchone()[0]
         auto_vacuum = connection.execute('PRAGMA auto_vacuum').fetchone()[0]
         free_pages = connection.execute('PRAGMA freelist_count').fetchone()[0]
         print(
-            f"verify: integrity={integrity} conversations={conversations} "
-            f"artifacts={artifacts} auto_vacuum={auto_vacuum} "
+            f"verify: integrity={integrity} records={records} "
+            f"objects={objects} auto_vacuum={auto_vacuum} "
             f"free_pages={free_pages}"
         )
     finally:

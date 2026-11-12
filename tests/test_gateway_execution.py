@@ -83,18 +83,17 @@ def test_auth_observer_does_not_turn_failure_into_success():
 def test_conversation_isolation_and_idle_expiry(tmp_path, monkeypatch):
     store = ConversationStore(tmp_path / 'state.db')
     monkeypatch.setattr('core.conversation_store.time.time', lambda: 1000000)
-    store.touch('a', 'same', 'm', 'endpoint')
-    store.put('a', 'same', 'signature', {'data': 'secret'})
-    assert store.get('b', 'same', 'signature') is None
+    store.remember_response_prefixes('a', 'scope', ['old', 'kept'], {'data': 'secret'})
+    assert store.response_prefixes('b', 'scope', ['old']) == {}
     reloaded = ConversationStore(tmp_path / 'state.db')
-    assert reloaded.get('a', 'same', 'signature') == {'data': 'secret'}
+    assert reloaded.response_prefixes('a', 'scope', ['old']) == {'old': {'data': 'secret'}}
+    # 每条记录按自己的读写时间过期，同一命名空间里别的记录活跃不会让它续命
     monkeypatch.setattr('core.conversation_store.time.time', lambda: 1000000 + 2 * 86400)
-    store.touch('a', 'same', 'm', 'endpoint')
+    assert store.response_prefixes('a', 'scope', ['kept']) == {'kept': {'data': 'secret'}}
     monkeypatch.setattr('core.conversation_store.time.time', lambda: 1000000 + 4 * 86400)
-    assert store.cleanup() == 0
-    monkeypatch.setattr('core.conversation_store.time.time', lambda: 1000000 + 5 * 86400)
-    assert store.get('a', 'same', 'signature') is None
+    assert store.response_prefixes('a', 'scope', ['old']) == {}
     assert store.cleanup() == 1
+    assert store.response_prefixes('a', 'scope', ['kept']) == {'kept': {'data': 'secret'}}
 
 
 @pytest.mark.parametrize('business', [False, True])
@@ -310,10 +309,12 @@ def test_request_cache_requires_auth_and_excludes_auth_headers(tmp_path, monkeyp
     monkeypatch.setattr(api_routes.api_key_manager, 'has_keys', lambda: False)
     app = FastAPI()
     app.add_middleware(GatewayRequestMiddleware)
+    sessions = []
     @app.post('/v1/chat/completions')
     async def route(request: Request):
         api_routes._validate_request_api_key(request, 'demo')
         context = current_request.get()
+        sessions.append((context.session_id, context.explicit_session))
         context.model = 'demo'
         context.endpoint = {'api_type': 'direct_api', 'api_base_url': 'https://example.test'}
         context.request_body = await request.json()
@@ -326,18 +327,18 @@ def test_request_cache_requires_auth_and_excludes_auth_headers(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.headers['x-bridge-session-id'] == 'conversation'
     from pathlib import Path
-    import sqlite3
     from core.exchange_archive import load_exchange
     request_id = response.headers['x-bridge-request-id']
     archive = next(Path('logs/exchanges').glob('*/*/' + request_id + '.json.gz'))
     saved = load_exchange(archive)
     assert 'do-not-store-this-secret' not in json.dumps(saved)
     assert json.loads(gzip.decompress(base64.b64decode(saved['wire_gzip_base64'])))['id'] == 'reply'
-    # 会话库只记录会话绑定，不再保存完整交换副本
-    connection = sqlite3.connect(store.path)
-    try:
-        assert [row[0] for row in connection.execute('SELECT owner FROM conversations')] == ['admin']
-        assert connection.execute('SELECT COUNT(*) FROM artifacts').fetchone()[0] == 0
-    finally:
-        connection.close()
+    # 会话库只保存后续请求会读取的签名，不保存完整交换副本；这次没有签名，库不会建立
+    assert not store.path.exists()
+    # Claude Code 的会话 ID 只进日志：回退后换了 ID 仍要读到同一批签名
+    response = client.post('/v1/chat/completions', json={'model': 'demo'}, headers={
+        'Authorization': 'Bearer do-not-store-this-secret', 'X-Claude-Code-Session-Id': 'cli-session'})
+    archive = next(Path('logs/exchanges').glob('*/*/' + response.headers['x-bridge-request-id'] + '.json.gz'))
+    assert load_exchange(archive)['conversation_id'] == 'cli-session'
+    assert sessions == [('conversation', True), ('cli-session', False)]
     assert current_request.get() is None

@@ -10,21 +10,24 @@ from services.stream_processor import _handle_client_disconnect, _handle_non_str
 
 def test_signature_archive_failure_is_logged_and_request_still_runs(caplog):
     upstream = MagicMock(status=200)
-    upstream.json = AsyncMock(return_value={'candidates': [{'content': {'parts': [{'text': 'ok'}]}, 'finishReason': 'STOP'}]})
+    upstream.json = AsyncMock(return_value={'id': 'i', 'status': 'completed', 'usage': {},
+                                            'steps': [{'type': 'model_output', 'content': [{'type': 'text', 'text': 'ok'}]}]})
     session = MagicMock()
     session.post.return_value.__aenter__ = AsyncMock(return_value=upstream)
     session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+    history = [{'role': 'user', 'content': 'hi'}, {'role': 'assistant', 'content': 'a', 'reasoning_content': 'think'},
+               {'role': 'user', 'content': 'again'}]
 
     async def run():
         context = RequestContext(authenticated=True)
         token = current_request.set(context)
         try:
-            return [item async for item in DirectAPIService(session).call_gemini_native_api(
-                'test-key', 'demo', [{'role': 'user', 'content': 'hi'}], stream=False)]
+            return [item async for item in DirectAPIService(session).call_gemini_interactions_api(
+                'test-key', 'demo', history, stream=False)]
         finally:
             current_request.reset(token)
 
-    with caplog.at_level(logging.WARNING), patch('core.conversation_store.conversation_store.get',
+    with caplog.at_level(logging.WARNING), patch('core.conversation_store.conversation_store.response_prefixes',
                                                  side_effect=OSError('签名库被锁')):
         result = asyncio.run(run())
     assert 'error' not in result[0]

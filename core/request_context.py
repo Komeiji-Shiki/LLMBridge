@@ -66,11 +66,10 @@ class RequestContext:
     def cache_session(self):
         # Never use an artifact to choose a route. Each selected upstream has
         # its own cache namespace even when the external conversation ID matches.
-        # 没带会话 ID 时 session_id 每个请求都不同，用它做键下一轮永远读不到，这里退到
-        # “调用方 + 线路”这一级；签名按原文精确匹配，共用命名空间不会串到别的对话。
+        # 只有 X-Bridge-Session-ID 进一步隔离；其余请求共用“调用方 + 线路”这一级，
+        # 签名按原文或调用 ID 精确匹配，共用命名空间不会串到别的对话。
         session = self.session_id if self.explicit_session else None
-        value = [session, self.model, endpoint_identity(self.endpoint), self.credential_fingerprint]
-        return hashlib.sha256(json.dumps(value).encode()).hexdigest()
+        return cache_scope(session, self.model, endpoint_identity(self.endpoint), self.credential_fingerprint)
 
     def mark(self, name):
         self.marks.setdefault(name, time.perf_counter())
@@ -103,6 +102,11 @@ current_request: ContextVar[RequestContext | None] = ContextVar('bridge_request'
 def endpoint_identity(config: dict) -> str:
     fields = {key: config.get(key) for key in ('api_type', 'api_base_url', 'endpoint_path', 'model_id', 'provider', 'upstream_protocol')}
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
+
+
+def cache_scope(session, model, endpoint, credential) -> str:
+    """缓存命名空间；endpoint 和 credential 是 endpoint_identity / credential_identity 的结果。"""
+    return hashlib.sha256(json.dumps([session, model, endpoint, credential]).encode()).hexdigest()
 
 
 def credential_identity(key: str) -> str:

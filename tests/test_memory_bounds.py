@@ -168,8 +168,7 @@ def test_tokenizer_cache_is_lru_bounded(monkeypatch):
 def _fill_store(store, sessions=40, size=20000):
     import os
     for index in range(sessions):
-        store.touch('owner', f's{index}', 'm', 'endpoint')
-        store.put('owner', f's{index}', 'signatures', {'blob': os.urandom(size).hex()})
+        store.remember_response_prefixes('owner', 'scope', [f'k{index}'], {'blob': os.urandom(size).hex()})
 
 
 def _freelist(path):
@@ -181,9 +180,12 @@ def _freelist(path):
         connection.close()
 
 
-def test_conversation_store_purges_legacy_exchange_snapshots(tmp_path):
+def test_conversation_store_migrates_session_artifacts_to_shared_records(tmp_path):
     import gzip
     import sqlite3
+    import time
+    from core.conversation_store import interactions_thought_key, interactions_turn_key
+    from core.request_context import cache_scope
 
     path = tmp_path / 'conversations.db'
     legacy = sqlite3.connect(path)
@@ -195,33 +197,52 @@ def test_conversation_store_purges_legacy_exchange_snapshots(tmp_path):
         CREATE TABLE artifacts (
             owner TEXT NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL,
             PRIMARY KEY(owner, session, key));
+        PRAGMA user_version=2;
     ''')
-    payload = gzip.compress(json.dumps({'kept': True}).encode())
-    legacy.execute("INSERT INTO conversations VALUES('owner','session','m','endpoint','',9e18)")
+    now = time.time()
+    signatures = {'gemini_thoughts': {'想一想': [['想一想', 'sig']]},
+                  'interaction_turns': {'call_1': [{'type': 'thought', 'signature': 'only'}]}}
+    legacy.executemany('INSERT INTO conversations VALUES(?,?,?,?,?,?)', [
+        ('owner', 'cli-a', 'm', 'endpoint', 'key', now),
+        ('owner', 'cli-b', 'm', 'endpoint', 'key', now),
+        ('owner', 'stale', 'm', 'endpoint', 'key', now - 10 * 86400),
+    ])
     legacy.executemany('INSERT INTO artifacts VALUES(?,?,?,?)', [
-        ('owner', 'session', key, payload)
-        for key in ('last_exchange', 'response:abc', 'signatures', 'reasoning:x')
+        (owner, session, key, gzip.compress(json.dumps(value).encode()))
+        for owner, session, key, value in (
+            ('owner', 'cli-a', 'signatures', signatures),
+            ('owner', 'cli-a', 'last_exchange', {'dropped': True}),
+            ('owner', 'cli-b', 'reasoning:x', {'same': 1}),
+            ('owner', 'cli-a', 'anthropic_thinking:t', [{'type': 'thinking'}]),
+            ('owner', 'cli-b', 'anthropic_thinking:t', [{'type': 'redacted_thinking'}]),
+            ('owner', 'stale', 'reasoning:old', {'expired': True}),
+        )
     ])
     legacy.commit()
     legacy.close()
 
     store = ConversationStore(path)
-    assert store.get('owner', 'session', 'signatures') == {'kept': True}
+    scope = cache_scope(None, 'm', 'endpoint', 'key')
+    thought, turn = interactions_thought_key('想一想'), interactions_turn_key('call_1')
+    records = store.response_prefixes('owner', scope, [thought, turn, 'reasoning:x', 'anthropic_thinking:t', 'reasoning:old'])
+    # 两个旧会话的记录并进同一命名空间；同一个键内容不同时标为歧义，不挑其中一个
+    assert records == {thought: [['想一想', 'sig']], turn: [{'type': 'thought', 'signature': 'only'}],
+                       'reasoning:x': {'same': 1}}
     connection = sqlite3.connect(path)
     try:
-        keys = {row[0] for row in connection.execute('SELECT key FROM artifacts')}
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = connection.execute('PRAGMA user_version').fetchone()[0]
     finally:
         connection.close()
-    assert keys == {'signatures', 'reasoning:x'}
-    assert version >= 1
+    assert not {'conversations', 'artifacts'} & tables
+    assert version == 3
 
 
 def test_reclaim_returns_free_pages_to_filesystem(tmp_path):
     store = ConversationStore(tmp_path / 'conversations.db')
     _fill_store(store)
     with store.connection() as connection:
-        connection.execute('DELETE FROM conversations')
+        connection.execute('DELETE FROM response_prefixes')
     before = _freelist(store.path)
     assert before > 100
 
@@ -235,7 +256,7 @@ def test_reclaim_respects_batch_budget(tmp_path):
     store = ConversationStore(tmp_path / 'conversations.db')
     _fill_store(store)
     with store.connection() as connection:
-        connection.execute('DELETE FROM conversations')
+        connection.execute('DELETE FROM response_prefixes')
     before = _freelist(store.path)
     assert store.reclaim(pages=10, max_batches=2) == 20
     assert _freelist(store.path) == before - 20
@@ -243,15 +264,14 @@ def test_reclaim_respects_batch_budget(tmp_path):
 
 def test_compact_copy_is_valid_and_enables_incremental_vacuum(tmp_path):
     store = ConversationStore(tmp_path / 'conversations.db')
-    store.touch('owner', 'session', 'm', 'endpoint')
-    store.put('owner', 'session', 'signatures', {'data': 'x' * 5000})
+    store.remember_response_prefixes('owner', 'scope', ['key'], {'data': 'x' * 5000})
 
     target = store.compact_copy(tmp_path / 'compacted.db')
     copied = ConversationStore(target)
     stats = copied.storage_stats()
     assert stats['auto_vacuum'] == 2
     assert stats['free_bytes'] == 0
-    assert copied.get('owner', 'session', 'signatures') == {'data': 'x' * 5000}
+    assert copied.response_prefixes('owner', 'scope', ['key']) == {'key': {'data': 'x' * 5000}}
 
 
 def test_exchange_archive_stores_shared_request_fields_once(tmp_path):

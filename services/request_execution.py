@@ -98,13 +98,6 @@ def retry_before_output(method=None, *, output_bytes=False):
                     bound.arguments['api_key'] = await get_api_key(context.model, keys, strategy=strategy, cooldown_seconds=cooldown)
                 key = bound.arguments.get('api_key') or ''
                 context.credential_fingerprint = credential_identity(key)
-                if context.authenticated:
-                    from core.conversation_store import conversation_store
-                    try:
-                        context.artifacts = await asyncio.to_thread(conversation_store.get, context.owner_id, context.cache_session(), 'signatures') or {}
-                    except Exception as error:
-                        logger.warning(f"[RETRY] 读取思考签名存档失败，本次请求不带历史签名: {error}", exc_info=True)
-                        context.artifacts = {}
                 if 'request_body' in bound.arguments:
                     if context.responses_history is not None:
                         prepared = copy.deepcopy(body)

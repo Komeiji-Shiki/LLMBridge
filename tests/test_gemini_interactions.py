@@ -718,12 +718,59 @@ class InteractionsAuditRegressionTests(unittest.TestCase):
             {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}])
         self.assertNotIn("thought", [step["type"] for step in steps])
 
-    def test_turn_cache_is_bounded(self):
+    def test_each_turn_is_queued_as_its_own_record(self):
+        # 长对话不能有条数上限：淘汰最早的签名会改写历史开头，之后每轮都打不中上游缓存
         for index in range(80):
             remember_turn_steps([{"type": "thought", "signature": "s"},
                                  {"type": "function_call", "id": f"c{index}", "name": "f", "arguments": {}}])
         from core.request_context import current_request
-        self.assertLessEqual(len(current_request.get().artifacts["interaction_turns"]), 64)
+        pending = current_request.get().artifacts["pending_signatures"]
+        self.assertEqual([keys for keys, _ in pending], [[f"interactions-turn:c{index}"] for index in range(80)])
+
+    def test_rewound_session_restores_signatures_saved_by_the_original_session(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.conversation_store import ConversationStore
+        from core.request_context import RequestContext, current_request
+        from converters.gemini_interactions import load_signature_history
+
+        history = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": '{"a": 1}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "content": "答", "reasoning_content": "想一想"},
+            {"role": "user", "content": "继续"},
+        ]
+
+        def context(**fields):
+            return RequestContext(authenticated=True, owner_id="admin", model="m", **fields)
+
+        def restored(request_context):
+            token = current_request.set(request_context)
+            try:
+                asyncio.run(load_signature_history(history))
+                steps, _ = convert_oai_messages_to_interactions(history)
+            finally:
+                current_request.reset(token)
+            return [step["signature"] for step in steps if step["type"] == "thought"]
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = ConversationStore(Path(folder) / "state.db")
+            with patch("converters.gemini_interactions.conversation_store", store):
+                original = context(session_id="cli-original")
+                token = current_request.set(original)
+                try:
+                    _feed_all(InteractionsStreamConverter("m", "r"), self._signed_call_turn())
+                    cache_thought_signatures([("想一想", "sig_text")])
+                finally:
+                    current_request.reset(token)
+                store.remember_entries("admin", original.cache_session(), original.artifacts["pending_signatures"])
+
+                self.assertEqual(restored(context(session_id="cli-after-rewind")), ["only_sig", "sig_text"])
+                # 客户端显式要求的 X-Bridge-Session-ID 仍然隔离
+                self.assertEqual(restored(context(session_id="bridge", explicit_session=True)), [])
 
     def test_visible_output_is_identical_for_stream_and_non_stream(self):
         annotation = {"type": "url_citation", "url": "https://a.test", "title": "A"}

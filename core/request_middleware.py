@@ -10,7 +10,7 @@ import re
 from starlette.responses import JSONResponse
 from core.config_loader import get_setting
 from core.conversion_report import WARNINGS_HEADER, warnings_header_value
-from core.request_context import CLIENT_TRACE_HEADERS, RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request, endpoint_identity
+from core.request_context import CLIENT_TRACE_HEADERS, RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request
 from core.conversation_store import conversation_store
 from services.protocol_events import payloads, is_business_event
 
@@ -45,12 +45,14 @@ class GatewayRequestMiddleware:
             for name, value in headers.items()
             if _should_capture_upstream_header(name.decode('ascii'))
         }
-        if not session:
-            # 客户端自带的会话 ID 格式不对时不算错误，只是不用它做隔离。
-            client_session = headers.get(b'x-claude-code-session-id', b'').decode('ascii', errors='replace')
-            session = client_session if re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', client_session) else ''
         if session:
             context.session_id, context.explicit_session = session, True
+        else:
+            # Claude Code 的会话 ID 只作为日志里的对话标识，不参与缓存隔离：回退、分叉和
+            # 恢复会换一个新 ID，历史却原样回传，按它隔离会让新会话找不回之前的思考签名。
+            client_session = headers.get(b'x-claude-code-session-id', b'').decode('ascii', errors='replace')
+            if re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', client_session):
+                context.session_id = client_session
         trace = {field: context.upstream_headers[name] for name, field in CLIENT_TRACE_HEADERS.items()
                  if name in context.upstream_headers}
         if trace:
@@ -140,7 +142,6 @@ class GatewayRequestMiddleware:
             try:
                 if context.authenticated and context.endpoint and context.model:
                     def persist():
-                        session_key = context.cache_session()
                         record = {'request': context.request_body, 'upstream_request': context.upstream_request, 'response': response_object, 'status': status,
                                   'external_session_id': context.session_id,
                                   'wire_gzip_base64': base64.b64encode(wire_archive).decode(),
@@ -148,10 +149,9 @@ class GatewayRequestMiddleware:
                         from core.exchange_archive import save_exchange
                         # 完整交换只写入归档；会话库仅保存后续请求会读取的状态
                         save_exchange(context, record)
-                        conversation_store.touch(context.owner_id, session_key, context.model,
-                                                 endpoint_identity(context.endpoint), context.credential_fingerprint)
-                        if context.artifacts:
-                            conversation_store.put(context.owner_id, session_key, 'signatures', context.artifacts)
+                        pending = context.artifacts.get('pending_signatures')
+                        if pending:
+                            conversation_store.remember_entries(context.owner_id, context.cache_session(), pending)
                     await asyncio.shield(asyncio.to_thread(persist))
             except Exception:
                 logger.exception('会话缓存保存失败；完整请求日志仍由独立记录器保存')

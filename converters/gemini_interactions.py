@@ -16,6 +16,7 @@ Gemini Interactions API ↔ OpenAI / Gemini generateContent 协议转换模块
   因此响应侧捕获 (summary 片段 → signature)，请求侧对客户端 reasoning_content 做前缀匹配，
   命中后把对应 signature 注入回传的 thought steps。
 """
+import asyncio
 import json
 import copy
 import logging
@@ -32,6 +33,7 @@ from converters.interactions_thought_strip import (
     strip_thought_step,
 )
 from converters.media import FILE_PART_TYPES, file_to_interactions, gemini_code_text
+from core.conversation_store import conversation_store, interactions_thought_key, interactions_turn_key
 from core.conversion_report import note_loss
 from core.request_context import current_request
 from services.model_capabilities import (
@@ -45,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "cache_thought_signatures",
+    "load_signature_history",
     "match_and_inject_thought_signatures",
     "convert_oai_messages_to_interactions",
     "build_interactions_request_body",
@@ -56,8 +59,6 @@ __all__ = [
     "interaction_failure",
 ]
 
-# 按对话缓存，存档随每个请求读写，必须有上限。
-_MAX_CACHED_TURNS = 64
 # 服务端工具的结果模型已经写进正文，步骤本身不需要给 Chat 客户端看。
 _SERVER_TOOL_STEPS = frozenset({
     "google_search_call", "google_search_result", "url_context_call", "url_context_result",
@@ -74,7 +75,7 @@ _BLOCKED_CODES = frozenset({"safety", "jailbreak", "prohibited_content", "blockl
 # ============================================================================
 
 def signature_cache():
-    """Request-local signatures, loaded and persisted by the scoped transport."""
+    """本次请求读到和新产生的签名，键是思考摘要原文。"""
     context = current_request.get()
     return context.artifacts.setdefault('gemini_thoughts', {}) if context and context.authenticated else {}
 
@@ -84,9 +85,51 @@ def _turn_cache():
     return context.artifacts.setdefault('interaction_turns', {}) if context and context.authenticated else {}
 
 
-def _trim_cache(cache: dict) -> None:
-    while len(cache) > _MAX_CACHED_TURNS:
-        cache.pop(next(iter(cache)))
+def _remember(keys: List[str], value: Any) -> None:
+    """新签名由请求中间件在响应结束后逐条写入会话库。"""
+    context = current_request.get()
+    if context and context.authenticated:
+        context.artifacts.setdefault('pending_signatures', []).append((keys, value))
+
+
+def _first_call_id(message: dict) -> Optional[str]:
+    tool_calls = message.get("tool_calls")
+    calls = [call.get("id") for call in tool_calls if isinstance(call, dict)] if isinstance(tool_calls, list) else []
+    return calls[0] if calls and isinstance(calls[0], str) and calls[0] else None
+
+
+async def load_signature_history(messages: Any) -> None:
+    """按历史里的思考原文和调用 ID 读取签名，每次尝试按当时的凭据重新读取。
+
+    不按会话分开存：Claude Code 回退或分叉后换了会话 ID，历史原样回传仍然能对上。
+    """
+    context = current_request.get()
+    if not context:
+        return
+    context.artifacts = {}
+    if not context.authenticated or not isinstance(messages, list):
+        return
+    wanted: Dict[str, Tuple[str, str]] = {}
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            wanted[interactions_thought_key(str(reasoning))] = ("gemini_thoughts", str(reasoning))
+        call_id = _first_call_id(message)
+        if call_id:
+            wanted[interactions_turn_key(call_id)] = ("interaction_turns", call_id)
+    if not wanted:
+        return
+    try:
+        records = await asyncio.to_thread(conversation_store.response_prefixes,
+                                          context.owner_id, context.cache_session(), list(wanted))
+    except Exception as error:
+        logger.warning(f"[GEMINI_INTERACTIONS] 读取思考签名存档失败，本次请求不带历史签名: {error}", exc_info=True)
+        return
+    for key, value in records.items():
+        cache, name = wanted[key]
+        context.artifacts.setdefault(cache, {})[name] = value
 
 
 def cache_thought_signatures(fragments: List[Tuple[str, str]]) -> None:
@@ -94,11 +137,11 @@ def cache_thought_signatures(fragments: List[Tuple[str, str]]) -> None:
     if valid:
         cache = signature_cache()
         raw_key = "".join(text for text, _ in valid)
-        cache[raw_key] = valid
         stripped_key = "".join(strip_summarizer_leaked_thoughts(text) for text, _ in valid)
-        if stripped_key and stripped_key != raw_key:
-            cache[stripped_key] = valid
-        _trim_cache(cache)
+        texts = list(dict.fromkeys(text for text in (raw_key, stripped_key) if text))
+        for text in texts:
+            cache[text] = valid
+        _remember([interactions_thought_key(text) for text in texts], valid)
 
 
 def match_and_inject_thought_signatures(reasoning_content: str) -> List[dict]:
@@ -150,16 +193,16 @@ def remember_turn_steps(steps: List[dict]) -> None:
                 kept.append({**step, "content": blocks})
         else:
             kept.append(step)
-    cache = _turn_cache()
-    cache[calls[0]] = copy.deepcopy(kept)
-    _trim_cache(cache)
+    _turn_cache()[calls[0]] = copy.deepcopy(kept)
+    _remember([interactions_turn_key(calls[0])], kept)
 
 
 def _restored_turn(message: dict) -> Optional[List[dict]]:
     """客户端没带元数据时按调用 ID 找回整轮；调用或正文对不上就不恢复。"""
     tool_calls = message.get("tool_calls")
     calls = [call.get("id") for call in tool_calls if isinstance(call, dict)] if isinstance(tool_calls, list) else []
-    stored = _turn_cache().get(calls[0]) if calls else None
+    call_id = _first_call_id(message)
+    stored = _turn_cache().get(call_id) if call_id else None
     if not stored:
         return None
     stored_calls = [step.get("id") for step in stored if step.get("type") == "function_call"]

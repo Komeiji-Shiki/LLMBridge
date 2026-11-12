@@ -1,6 +1,6 @@
-"""Compressed conversation cache, scoped by caller and explicit conversation ID.
+"""Compressed conversation cache, scoped by caller, route and explicit conversation ID.
 
-Only cache records expire. Historical request logs are not deleted here.
+Every record expires on its own idle time. Historical request logs are not deleted here.
 
 磁盘空洞治理：
 - 新库创建时启用 incremental auto-vacuum；
@@ -9,6 +9,7 @@ Only cache records expire. Historical request logs are not deleted here.
 """
 from contextlib import contextmanager
 import gzip
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -16,13 +17,20 @@ import sqlite3
 import threading
 import time
 
+from core.request_context import cache_scope
+
 logger = logging.getLogger(__name__)
 
 # PRAGMA user_version 记录的库结构版本。
 # 1：清除旧版写入的 last_exchange / response:<id>。它们从未被读取，
 #    同样的完整交换永久保存在 logs/exchanges。
 # 2：新增 stored_objects，记录上游保存的对象属于哪条线路。
-_SCHEMA_VERSION = 2
+# 3：签名和推理缓存改为在 response_prefixes 里逐条保存、逐条过期。按会话
+#    整块保存的 conversations / artifacts 迁入不带会话 ID 的命名空间后删除。
+_SCHEMA_VERSION = 3
+# 迁移时保留的旧键；其余旧键（含版本 1 清理的交换快照）没有读取方。
+_LEGACY_ENTRY_PREFIXES = ('reasoning:', 'anthropic_thinking:')
+
 # 上游保存的对象可以在几周后被查询或续接，记录比会话缓存保留得久。
 _OBJECT_RETENTION_SECONDS = 30 * 86400
 # 每批回收的页数（每页 4KB，4096 页约 16MB）。批次之间释放写锁，
@@ -31,6 +39,16 @@ _RECLAIM_PAGES_PER_BATCH = 4096
 _RECLAIM_MAX_BATCHES = 256
 # TRUNCATE checkpoint 等待读者期间会挡住新写入，只给很短的等待时间。
 _CHECKPOINT_BUSY_TIMEOUT_MS = 2000
+
+
+def interactions_thought_key(summary: str) -> str:
+    """Interactions 思考摘要原文对应的签名记录。"""
+    return 'interactions-thought:' + hashlib.sha256(summary.encode('utf-8')).hexdigest()
+
+
+def interactions_turn_key(call_id: str) -> str:
+    """以首个函数调用 ID 保存的整轮 Interactions 步骤。"""
+    return 'interactions-turn:' + call_id
 
 
 class ConversationStore:
@@ -49,15 +67,6 @@ class ConversationStore:
             connection.execute('PRAGMA auto_vacuum=INCREMENTAL')
         connection.execute('PRAGMA journal_mode=WAL')
         connection.executescript('''
-            CREATE TABLE IF NOT EXISTS conversations (
-                owner TEXT NOT NULL, session TEXT NOT NULL, model TEXT NOT NULL,
-                endpoint TEXT NOT NULL, credential TEXT NOT NULL DEFAULT '',
-                touched REAL NOT NULL, PRIMARY KEY(owner, session));
-            CREATE TABLE IF NOT EXISTS artifacts (
-                owner TEXT NOT NULL, session TEXT NOT NULL, key TEXT NOT NULL, payload BLOB NOT NULL,
-                PRIMARY KEY(owner, session, key),
-                FOREIGN KEY(owner, session) REFERENCES conversations(owner, session) ON DELETE CASCADE);
-            CREATE INDEX IF NOT EXISTS idx_conversations_idle ON conversations(touched);
             CREATE TABLE IF NOT EXISTS response_prefixes (
                 owner TEXT NOT NULL, scope TEXT NOT NULL, prefix TEXT NOT NULL,
                 payload BLOB, digest TEXT NOT NULL, touched REAL NOT NULL,
@@ -70,15 +79,41 @@ class ConversationStore:
             CREATE INDEX IF NOT EXISTS idx_stored_objects_idle ON stored_objects(touched);
         ''')
         version = connection.execute('PRAGMA user_version').fetchone()[0]
-        if version < 1:
-            deleted = connection.execute(
-                "DELETE FROM artifacts WHERE key='last_exchange' OR key LIKE 'response:%'"
-            ).rowcount
-            if deleted:
-                logger.info('[CONV_CACHE] 已清除 %s 条无人读取的旧版交换快照', deleted)
+        if version < 3:
+            self._migrate_session_artifacts(connection)
         if version < _SCHEMA_VERSION:
             connection.execute(f'PRAGMA user_version={_SCHEMA_VERSION}')
         connection.commit()
+
+    def _migrate_session_artifacts(self, connection):
+        """把旧版按会话整块保存的签名拆成逐条记录，进行中的对话升级后不丢历史签名。"""
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {'conversations', 'artifacts'} <= tables:
+            return
+        cutoff = time.time() - self.idle_seconds
+        entries = []
+        for row in connection.execute('''SELECT a.owner, a.key, a.payload, c.model, c.endpoint, c.credential, c.touched
+                FROM artifacts a JOIN conversations c USING(owner, session) WHERE c.touched>?''', (cutoff,)):
+            owner, key, payload, model, endpoint, credential, touched = row
+            scope = cache_scope(None, model, endpoint, credential)
+            try:
+                value = json.loads(gzip.decompress(payload))
+            except (OSError, ValueError):
+                continue
+            if key == 'signatures' and isinstance(value, dict):
+                for text, fragments in (value.get('gemini_thoughts') or {}).items():
+                    entries.append((owner, scope, interactions_thought_key(text), fragments, touched))
+                for call_id, steps in (value.get('interaction_turns') or {}).items():
+                    entries.append((owner, scope, interactions_turn_key(call_id), steps, touched))
+            elif key.startswith(_LEGACY_ENTRY_PREFIXES):
+                entries.append((owner, scope, key, value, touched))
+        # 按时间顺序写入，同一个键在不同会话里内容不同时照常标记为歧义。
+        for owner, scope, key, value, touched in sorted(entries, key=lambda entry: entry[4]):
+            self._upsert_prefixes(connection, owner, scope, [key], value, touched)
+        connection.execute('DROP TABLE artifacts')
+        connection.execute('DROP TABLE conversations')
+        if entries:
+            logger.info('[CONV_CACHE] 已把 %s 条按会话保存的签名迁入共用命名空间', len(entries))
 
     @contextmanager
     def connection(self):
@@ -96,40 +131,11 @@ class ConversationStore:
         finally:
             connection.close()
 
-    def touch(self, owner, session, model, endpoint, credential=''):
-        now = time.time()
-        with self.connection() as connection:
-            row = connection.execute('SELECT * FROM conversations WHERE owner=? AND session=?', (owner, session)).fetchone()
-            if row and row['touched'] <= now - self.idle_seconds:
-                connection.execute('DELETE FROM conversations WHERE owner=? AND session=?', (owner, session))
-                row = None
-            if row and (row['model'] != model or row['endpoint'] != endpoint):
-                raise ValueError('同一会话不能切换模型或上游；请创建新会话')
-            if row:
-                connection.execute('UPDATE conversations SET touched=?, credential=CASE WHEN ? != ? THEN ? ELSE credential END WHERE owner=? AND session=?',
-                                   (now, credential, '', credential, owner, session))
-            else:
-                connection.execute('INSERT INTO conversations VALUES(?,?,?,?,?,?)', (owner, session, model, endpoint, credential, now))
-
-    def put(self, owner, session, key, payload):
-        compressed = gzip.compress(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode(), compresslevel=6)
-        with self.connection() as connection:
-            connection.execute('INSERT INTO artifacts VALUES(?,?,?,?) ON CONFLICT(owner,session,key) DO UPDATE SET payload=excluded.payload',
-                               (owner, session, key, compressed))
-
-    def get(self, owner, session, key):
-        with self.connection() as connection:
-            row = connection.execute('''SELECT a.payload FROM artifacts a JOIN conversations c USING(owner,session)
-                WHERE a.owner=? AND a.session=? AND a.key=? AND c.touched>?''',
-                (owner, session, key, time.time() - self.idle_seconds)).fetchone()
-            return json.loads(gzip.decompress(row['payload'])) if row else None
-
     def cleanup(self):
         cutoff = time.time() - self.idle_seconds
         with self.connection() as connection:
-            connection.execute('DELETE FROM response_prefixes WHERE touched<=?', (cutoff,))
+            deleted = connection.execute('DELETE FROM response_prefixes WHERE touched<=?', (cutoff,)).rowcount
             connection.execute('DELETE FROM stored_objects WHERE touched<=?', (time.time() - _OBJECT_RETENTION_SECONDS,))
-            deleted = connection.execute('DELETE FROM conversations WHERE touched<=?', (cutoff,)).rowcount
         self.reclaim()
         return deleted
 
@@ -220,23 +226,31 @@ class ConversationStore:
 
         A conflicting output makes that key ambiguous until it expires.
         """
-        import hashlib
+        self.remember_entries(owner, scope, [(prefixes, output)])
+
+    def remember_entries(self, owner, scope, entries):
+        """Store several (keys, output) pairs in one transaction."""
+        now = time.time()
+        with self.connection() as connection:
+            for prefixes, output in entries:
+                self._upsert_prefixes(connection, owner, scope, prefixes, output, now)
+
+    def _upsert_prefixes(self, connection, owner, scope, prefixes, output, touched):
         raw = json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
         digest = hashlib.sha256(raw).hexdigest()
         payload = gzip.compress(raw, compresslevel=6)
-        now = time.time()
-        with self.connection() as connection:
-            connection.executemany('''INSERT INTO response_prefixes VALUES(?,?,?,?,?,?)
-                ON CONFLICT(owner,scope,prefix) DO UPDATE SET
-                    payload=CASE WHEN response_prefixes.touched<=? THEN excluded.payload
-                                 WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.payload
-                                 ELSE NULL END,
-                    digest=CASE WHEN response_prefixes.touched<=? THEN excluded.digest
-                                WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.digest
-                                ELSE '' END,
-                    touched=excluded.touched''',
-                [(owner, scope, prefix, payload, digest, now, now - self.idle_seconds, now - self.idle_seconds)
-                 for prefix in dict.fromkeys(prefixes)])
+        expired = time.time() - self.idle_seconds
+        connection.executemany('''INSERT INTO response_prefixes VALUES(?,?,?,?,?,?)
+            ON CONFLICT(owner,scope,prefix) DO UPDATE SET
+                payload=CASE WHEN response_prefixes.touched<=? THEN excluded.payload
+                             WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.payload
+                             ELSE NULL END,
+                digest=CASE WHEN response_prefixes.touched<=? THEN excluded.digest
+                            WHEN response_prefixes.digest=excluded.digest THEN response_prefixes.digest
+                            ELSE '' END,
+                touched=excluded.touched''',
+            [(owner, scope, prefix, payload, digest, touched, expired, expired)
+             for prefix in dict.fromkeys(prefixes)])
 
     def remember_object(self, owner, kind, object_id, payload, settled):
         """记下上游对象属于哪条线路。同一个 id 再次出现时覆盖。"""
