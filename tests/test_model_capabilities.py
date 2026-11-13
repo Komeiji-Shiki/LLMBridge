@@ -52,6 +52,10 @@ def test_adaptive_thinking_starts_at_claude_46():
 @pytest.mark.parametrize('model, requested, expected', [
     ('gemini-3.8-flash', 'minimal', 'low'),
     ('gemini-4-argon', 'minimal', 'low'),
+    ('gemini-4-hydrogen', 'minimal', 'low'),
+    ('gemini-4-hydrogen', 'xhigh', 'xhigh'),
+    ('gemini-4-carbon', 'xhigh', 'high'),
+    ('gemini-3.8-flash', 'xhigh', 'high'),
     ('gemini-3.6-flash', 'minimal', 'minimal'),
     ('gemini-3-pro-preview', 'medium', 'high'),
     ('gemini-3.1-flash-lite-image', 'low', 'minimal'),

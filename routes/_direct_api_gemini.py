@@ -254,7 +254,7 @@ async def handle_gemini_native_direct(
                 "low": "LOW",
                 "medium": "MEDIUM",
                 "high": "HIGH",
-                "xhigh": "HIGH",
+                "xhigh": "XHIGH",
                 "max": "HIGH",
             }
             effort = str(reasoning_effort).lower()

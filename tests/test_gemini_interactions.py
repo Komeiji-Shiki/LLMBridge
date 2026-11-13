@@ -272,6 +272,16 @@ class BuildRequestBodyTests(unittest.TestCase):
             thinking_config={"thinkingLevel": "MINIMAL"})
         self.assertEqual(body["generation_config"]["thinking_level"], "low")
 
+    def test_xhigh_passes_only_on_hydrogen(self):
+        body = build_interactions_request_body(
+            "gemini-4-hydrogen", [{"role": "user", "content": "x"}],
+            thinking_config={"thinkingLevel": "XHIGH", "includeThoughts": True})
+        self.assertEqual(body["generation_config"]["thinking_level"], "xhigh")
+        body = build_interactions_request_body(
+            "gemini-4-carbon", [{"role": "user", "content": "x"}],
+            thinking_config={"thinkingLevel": "XHIGH", "includeThoughts": True})
+        self.assertEqual(body["generation_config"]["thinking_level"], "high")
+
     def test_allowed_tools_use_plain_names(self):
         tools = [{"type": "function", "name": "f", "parameters": {"type": "object"}}]
         body = build_interactions_request_body(
@@ -867,6 +877,14 @@ class GenerateContentAuditRegressionTests(unittest.TestCase):
         self.assertEqual(body["safety_settings"], [{"type": "harassment", "threshold": "off"}])
         from core.conversion_report import conversion_notes
         self.assertIn("generationConfig.temperature", [note["field"] for note in conversion_notes()])
+
+    def test_thinking_config_xhigh_survives_generate_content_bridge(self):
+        body = convert_gemini_gc_to_interactions({
+            "contents": "hi",
+            "generationConfig": {"thinkingConfig": {"thinkingLevel": "XHIGH", "includeThoughts": True}},
+        }, "gemini-4-hydrogen")
+        self.assertEqual(body["generation_config"]["thinking_level"], "xhigh")
+        self.assertEqual(body["generation_config"]["thinking_summaries"], "auto")
 
     def test_mode_none_keeps_tools(self):
         body = convert_gemini_gc_to_interactions({

@@ -1,9 +1,9 @@
-"""各模型家族的请求限制，按官方文档整理（核对日期 2026-11-05）。
+"""各模型家族的请求限制，按官方文档整理（核对日期 2026-11-13）。
 
 只记录会导致上游报错或行为变化的差异，表外的模型一律按没有限制处理，原样转发。
 来源：
 - Claude: platform.claude.com/docs/en/build-with-claude/thinking，working-with-messages
-- Gemini: ai.google.dev/gemini-api/docs/thinking，whats-new-gemini-3.6
+- Gemini: ai.google.dev/gemini-api/docs/thinking，whats-new-gemini-4-hydrogen，whats-new-gemini-3.6
 - OpenAI: developers.openai.com/api/docs/guides/latest-model
 """
 from dataclasses import dataclass
@@ -15,7 +15,7 @@ from typing import Optional, Tuple
 from core.conversion_report import note_loss
 
 SAMPLING_FIELDS = ('temperature', 'top_p', 'top_k')
-_THINKING_LEVEL_ORDER = ('minimal', 'low', 'medium', 'high')
+_THINKING_LEVEL_ORDER = ('minimal', 'low', 'medium', 'high', 'xhigh')
 _EFFORT_ORDER = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 
@@ -69,6 +69,8 @@ def _claude_limits(name: str) -> Optional[ModelLimits]:
 # 顺序敏感：更具体的型号放前面。
 _GEMINI_LEVELS = (
     (r'gemini-3\.1-flash-lite-image', ('minimal', 'high')),
+    # 4 Hydrogen 是 4 系里唯一支持 xhigh 的型号，Carbon/Argon 仍封顶 high。
+    (r'gemini-4-hydrogen', ('low', 'medium', 'high', 'xhigh')),
     (r'gemini-3-pro', ('low', 'high')),
     (r'gemini-3\.1-pro', ('low', 'medium', 'high')),
     (r'gemini-3\.5-flash-lite', ('minimal', 'low', 'medium', 'high')),
