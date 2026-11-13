@@ -3,7 +3,7 @@
 只记录会导致上游报错或行为变化的差异，表外的模型一律按没有限制处理，原样转发。
 来源：
 - Claude: platform.claude.com/docs/en/build-with-claude/thinking，working-with-messages
-- Gemini: ai.google.dev/gemini-api/docs/thinking，whats-new-gemini-4-hydrogen，whats-new-gemini-3.6
+- Gemini: ai.google.dev/gemini-api/docs/thinking，whats-new-gemini-3.6
 - OpenAI: developers.openai.com/api/docs/guides/latest-model
 """
 from dataclasses import dataclass
@@ -15,7 +15,6 @@ from typing import Optional, Tuple
 from core.conversion_report import note_loss
 
 SAMPLING_FIELDS = ('temperature', 'top_p', 'top_k')
-_THINKING_LEVEL_ORDER = ('minimal', 'low', 'medium', 'high', 'xhigh')
 _EFFORT_ORDER = ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
 ANTHROPIC_EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 
@@ -38,7 +37,6 @@ class ModelLimits:
     thinking_disable: bool = True      # 可以关闭思考
     adaptive_thinking: bool = True     # Claude 接受 thinking.type=adaptive
     between_tools: bool = False        # Claude 用 thinking.type=between_tools 关闭前置思考
-    thinking_levels: Optional[Tuple[str, ...]] = None  # Gemini 支持的 thinking_level，None 表示未知
     efforts: Optional[Tuple[str, ...]] = None          # 支持的 effort，None 表示未知
     chat_tools: str = CHAT_TOOLS_FREE
     # 非 none 强度下不接受采样参数；'default_on' 表示未指定强度时也按开启处理。
@@ -66,30 +64,14 @@ def _claude_limits(name: str) -> Optional[ModelLimits]:
     )
 
 
-# 顺序敏感：更具体的型号放前面。
-_GEMINI_LEVELS = (
-    (r'gemini-3\.1-flash-lite-image', ('minimal', 'high')),
-    # 4 Hydrogen 是 4 系里唯一支持 xhigh 的型号，Carbon/Argon 仍封顶 high。
-    (r'gemini-4-hydrogen', ('low', 'medium', 'high', 'xhigh')),
-    (r'gemini-3-pro', ('low', 'high')),
-    (r'gemini-3\.1-pro', ('low', 'medium', 'high')),
-    (r'gemini-3\.5-flash-lite', ('minimal', 'low', 'medium', 'high')),
-    (r'gemini-3\.6', ('minimal', 'low', 'medium', 'high')),
-    (r'gemini-3-flash', ('minimal', 'low', 'medium', 'high')),
-    (r'gemini-(3\.[7-9]|[4-9])', ('low', 'medium', 'high')),
-    (r'gemini-2\.5', ('low', 'medium', 'high')),
-)
-
-
 def _gemini_limits(name: str) -> Optional[ModelLimits]:
     if 'gemini-' not in name:
         return None
-    levels = next((levels for pattern, levels in _GEMINI_LEVELS if re.search(pattern, name)), None)
     # 3.6 Flash、3.5 Flash-Lite 起：采样参数被忽略（以后的型号报 400），预填充直接 400，预算换成等级。
     strict = bool(re.search(r'gemini-(3\.[6-9]|3\.5-flash-lite|[4-9])', name))
     modern = bool(re.search(r'gemini-(3|[4-9])', name))
     return ModelLimits(sampling=not strict, prefill=not strict, thinking_budget=not strict,
-                       thinking_levels=levels, function_response_media=modern)
+                       function_response_media=modern)
 
 
 def _openai_limits(name: str) -> Optional[ModelLimits]:
@@ -128,17 +110,6 @@ def _nearest(value: str, allowed, order) -> str:
     position = order.index(value)
     return min((item for item in allowed if item in order),
                key=lambda item: (abs(order.index(item) - position), -order.index(item)))
-
-
-def supported_thinking_level(model_id: str, level: Optional[str]) -> Optional[str]:
-    """把 Gemini thinking_level（小写）调到模型支持的最近一档。"""
-    allowed = limits_for(model_id).thinking_levels
-    if not level or not allowed:
-        return level
-    adjusted = _nearest(str(level).lower(), allowed, _THINKING_LEVEL_ORDER)
-    if adjusted != str(level).lower():
-        note_loss('thinking_level', f'{model_id} 不支持 {level}，已改用 {adjusted}')
-    return adjusted
 
 
 def supported_effort(model_id: str, effort: Optional[str], default_levels: Optional[Tuple[str, ...]] = None) -> Optional[str]:

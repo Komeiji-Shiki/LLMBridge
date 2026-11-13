@@ -32,7 +32,6 @@ from services.model_capabilities import (
     budget_to_effort,
     drop_unsupported_sampling,
     limits_for,
-    supported_thinking_level,
 )
 from services.thinking_split_cache import (
     remember_split_original,
@@ -248,18 +247,10 @@ async def handle_gemini_native_direct(
         thinking_config = {"includeThoughts": True}
         if reasoning_effort:
             # 按用户选择的控制方式传参，不根据模型名称把强度换算成预算。
-            level_map = {
-                "none": "MINIMAL",
-                "minimal": "MINIMAL",
-                "low": "LOW",
-                "medium": "MEDIUM",
-                "high": "HIGH",
-                "xhigh": "XHIGH",
-                "max": "HIGH",
-            }
+            # Gemini 的档位原样透传，只有其他协议的 none/max 需要换成最接近的档。
+            level_map = {"none": "MINIMAL", "max": "HIGH"}
             effort = str(reasoning_effort).lower()
-            level = level_map.get(effort, effort.upper())
-            thinking_config["thinkingLevel"] = supported_thinking_level(target_model_id, level.lower()).upper()
+            thinking_config["thinkingLevel"] = level_map.get(effort, effort.upper())
             if effort == "none":
                 # Gemini 没有“关闭”这一档：取最低档，并且不要思考摘要。
                 thinking_config["includeThoughts"] = False
@@ -268,8 +259,7 @@ async def handle_gemini_native_direct(
                 f"映射为 thinkingLevel={thinking_config['thinkingLevel']}"
             )
         elif endpoint_config.get("thinking_level"):
-            level = str(endpoint_config["thinking_level"]).lower()
-            thinking_config["thinkingLevel"] = supported_thinking_level(target_model_id, level).upper()
+            thinking_config["thinkingLevel"] = str(endpoint_config["thinking_level"]).upper()
         elif endpoint_config.get("thinking_budget") is not None:
             budget = endpoint_config["thinking_budget"]
             if limits.thinking_budget:
@@ -277,7 +267,7 @@ async def handle_gemini_native_direct(
             else:
                 # 3.6 起用等级取代预算，配置还没改时取最接近的一档，不让请求失败。
                 level = {"none": "minimal"}.get(budget_to_effort(budget), budget_to_effort(budget))
-                thinking_config["thinkingLevel"] = supported_thinking_level(target_model_id, level).upper()
+                thinking_config["thinkingLevel"] = level.upper()
                 note_loss("thinking_budget", f"{target_model_id} 不接受思考预算，已换成 {level} 等级")
         logger.info(
             f"[GEMINI_NATIVE] 已启用思维链模式 "

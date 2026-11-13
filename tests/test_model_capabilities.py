@@ -13,7 +13,6 @@ from core.request_context import RequestContext, current_request
 from services.model_capabilities import (
     budget_to_effort, drop_unsupported_sampling, gemini_route_target, limits_for, sanitize_anthropic_body,
     supported_effort,
-    supported_thinking_level,
 )
 
 
@@ -47,22 +46,6 @@ def test_claude_limits_follow_thinking_table(model, sampling, prefill, budget, d
 def test_adaptive_thinking_starts_at_claude_46():
     assert limits_for('claude-sonnet-4-5').adaptive_thinking is False
     assert limits_for('claude-sonnet-4-6').adaptive_thinking is True
-
-
-@pytest.mark.parametrize('model, requested, expected', [
-    ('gemini-3.8-flash', 'minimal', 'low'),
-    ('gemini-4-argon', 'minimal', 'low'),
-    ('gemini-4-hydrogen', 'minimal', 'low'),
-    ('gemini-4-hydrogen', 'xhigh', 'xhigh'),
-    ('gemini-4-carbon', 'xhigh', 'high'),
-    ('gemini-3.8-flash', 'xhigh', 'high'),
-    ('gemini-3.6-flash', 'minimal', 'minimal'),
-    ('gemini-3-pro-preview', 'medium', 'high'),
-    ('gemini-3.1-flash-lite-image', 'low', 'minimal'),
-    ('unknown-model', 'minimal', 'minimal'),
-])
-def test_thinking_level_moves_to_nearest_supported(context, model, requested, expected):
-    assert supported_thinking_level(model, requested) == expected
 
 
 def test_gemini_generation_limits():
@@ -236,4 +219,3 @@ def test_gemini_25_limits_switch_on_the_routing_date(monkeypatch):
     monkeypatch.setattr('services.model_capabilities.date', After)
     routed = limits_for('gemini-2.5-pro')
     assert not routed.thinking_budget and not routed.prefill and not routed.sampling
-    assert routed.thinking_levels == ('low', 'medium', 'high')

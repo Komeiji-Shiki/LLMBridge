@@ -1170,7 +1170,7 @@
 <option value="effort">强度等级（reasoning_effort）</option>
 </select>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            Token 预算适用于 Gemini 2.5/旧模型、Anthropic/OpenRouter；强度等级（low/medium/high/xhigh）适用于 OpenAI 兼容上游和 Gemini 3/4（映射为 thinkingLevel，xhigh 仅 Gemini 4 Hydrogen 支持）
+                                            Token 预算适用于 Gemini 2.5/旧模型、Anthropic/OpenRouter；强度等级（low/medium/high/xhigh）适用于 OpenAI 兼容上游和 Gemini 3/4（映射为 thinkingLevel，原样透传，支持范围由上游决定）
                                         </small>
 </div>
 <div class="form-group" id="thinking-budget-config" style="margin-bottom: 0;">
@@ -1193,7 +1193,7 @@
 <option value="max">max（最大，Opus 4.6+）</option>
 </select>
 <small style="color: var(--text-dim); display: block; margin-top: 5px;">
-                                            启用思考时注入 reasoning_effort（OAI 兼容）/ reasoning.effort（OpenRouter）/ output_config.effort（Anthropic）；Gemini 3/4 会映射为 generationConfig.thinkingConfig.thinkingLevel，xhigh 仅 Gemini 4 Hydrogen 支持，其余型号自动回落到 high；自适应模式下留空则不注入
+                                            启用思考时注入 reasoning_effort（OAI 兼容）/ reasoning.effort（OpenRouter）/ output_config.effort（Anthropic）；Gemini 3/4 会映射为 generationConfig.thinkingConfig.thinkingLevel 并原样透传，网关不改写档位；自适应模式下留空则不注入
                                         </small>
 </div>
 <div class="form-group" id="thinking-display-config" style="margin-bottom: 0; display: none;">

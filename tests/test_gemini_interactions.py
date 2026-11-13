@@ -266,21 +266,18 @@ class BuildRequestBodyTests(unittest.TestCase):
             thinking_config={"thinkingBudget": -1, "includeThoughts": True})
         self.assertNotIn("thinking_level", dynamic["generation_config"])
 
-    def test_thinking_level_follows_model_limits(self):
+    def test_thinking_level_passes_through_unmodified(self):
         body = build_interactions_request_body(
             "gemini-3.8-flash", [{"role": "user", "content": "x"}],
             thinking_config={"thinkingLevel": "MINIMAL"})
-        self.assertEqual(body["generation_config"]["thinking_level"], "low")
+        self.assertEqual(body["generation_config"]["thinking_level"], "minimal")
 
-    def test_xhigh_passes_only_on_hydrogen(self):
-        body = build_interactions_request_body(
-            "gemini-4-hydrogen", [{"role": "user", "content": "x"}],
-            thinking_config={"thinkingLevel": "XHIGH", "includeThoughts": True})
-        self.assertEqual(body["generation_config"]["thinking_level"], "xhigh")
-        body = build_interactions_request_body(
-            "gemini-4-carbon", [{"role": "user", "content": "x"}],
-            thinking_config={"thinkingLevel": "XHIGH", "includeThoughts": True})
-        self.assertEqual(body["generation_config"]["thinking_level"], "high")
+    def test_xhigh_passes_through_on_any_model(self):
+        for model in ("gemini-4-hydrogen", "gemini-4-carbon", "gemini-3.8-flash"):
+            body = build_interactions_request_body(
+                model, [{"role": "user", "content": "x"}],
+                thinking_config={"thinkingLevel": "XHIGH", "includeThoughts": True})
+            self.assertEqual(body["generation_config"]["thinking_level"], "xhigh")
 
     def test_allowed_tools_use_plain_names(self):
         tools = [{"type": "function", "name": "f", "parameters": {"type": "object"}}]
@@ -882,7 +879,7 @@ class GenerateContentAuditRegressionTests(unittest.TestCase):
         body = convert_gemini_gc_to_interactions({
             "contents": "hi",
             "generationConfig": {"thinkingConfig": {"thinkingLevel": "XHIGH", "includeThoughts": True}},
-        }, "gemini-4-hydrogen")
+        }, "gemini-4-carbon")
         self.assertEqual(body["generation_config"]["thinking_level"], "xhigh")
         self.assertEqual(body["generation_config"]["thinking_summaries"], "auto")
 

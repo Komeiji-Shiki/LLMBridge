@@ -40,7 +40,6 @@ from core.request_context import current_request
 from services.model_capabilities import (
     budget_to_effort,
     limits_for,
-    supported_thinking_level,
 )
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage
 
@@ -515,8 +514,8 @@ def convert_oai_messages_to_interactions(
     return steps, "\n".join(system_parts)
 
 
-def map_thinking_config_to_level(thinking_config: Optional[dict], model: Optional[str] = None) -> Optional[str]:
-    """将 thinkingLevel 或 thinkingBudget 映射为模型支持的 Interactions thinking_level。"""
+def map_thinking_config_to_level(thinking_config: Optional[dict]) -> Optional[str]:
+    """将 thinkingLevel 或 thinkingBudget 映射为 Interactions thinking_level（档位原样透传）。"""
     if not isinstance(thinking_config, dict):
         return None
     level = thinking_config.get("thinkingLevel")
@@ -527,7 +526,7 @@ def map_thinking_config_to_level(thinking_config: Optional[dict], model: Optiona
         note_loss("thinkingBudget", f"Interactions 不接受思考预算，已换成 {level} 等级")
     if not level:
         return None
-    return supported_thinking_level(model, str(level).lower()) if model else str(level).lower()
+    return str(level).lower()
 
 
 def map_thinking_config_to_summaries(thinking_config: Optional[dict]) -> Optional[str]:
@@ -603,7 +602,7 @@ def build_interactions_request_body(
         gen_config["max_output_tokens"] = max_tokens
     if isinstance(stop_sequences, list) and stop_sequences:
         gen_config["stop_sequences"] = stop_sequences
-    thinking_level = map_thinking_config_to_level(thinking_config, model)
+    thinking_level = map_thinking_config_to_level(thinking_config)
     if thinking_level:
         gen_config["thinking_level"] = thinking_level
     thinking_summaries = map_thinking_config_to_summaries(thinking_config)
@@ -1342,7 +1341,7 @@ def _gc_response_format(config: dict) -> Optional[Any]:
     return formats
 
 
-def _gc_generation_config(config: dict, model: str) -> dict:
+def _gc_generation_config(config: dict) -> dict:
     converted: Dict[str, Any] = {}
     for source, target in (("maxOutputTokens", "max_output_tokens"), ("seed", "seed")):
         if config.get(source) is not None:
@@ -1351,7 +1350,7 @@ def _gc_generation_config(config: dict, model: str) -> dict:
         converted["stop_sequences"] = config["stopSequences"]
     thinking = config.get("thinkingConfig")
     if isinstance(thinking, dict):
-        level = map_thinking_config_to_level(thinking, model)
+        level = map_thinking_config_to_level(thinking)
         if level:
             converted["thinking_level"] = level
         summaries = map_thinking_config_to_summaries(thinking)
@@ -1498,7 +1497,7 @@ def convert_gemini_gc_to_interactions(gc_req: dict, model: str) -> dict:
         body["system_instruction"] = "\n".join(system_parts)
 
     gc = gc_req.get("generationConfig") if isinstance(gc_req.get("generationConfig"), dict) else {}
-    gen_config = _gc_generation_config(gc, model)
+    gen_config = _gc_generation_config(gc)
     response_format = _gc_response_format(gc)
     if response_format:
         body["response_format"] = response_format
