@@ -23,12 +23,18 @@ from converters.anthropic_responses_signatures import (
     responses_items_from_anthropic,
     responses_reasoning_text,
     responses_segments,
+    thinking_carrier,
 )
 from converters.cache_warnings import warning_headers
 from converters.gemini_anthropic_signatures import (
     decode_signature,
     gemini_parts_from_anthropic,
     gemini_segments,
+)
+from converters.interactions_anthropic_signatures import (
+    interactions_segments,
+    interactions_signature_segments,
+    interactions_steps_from_anthropic,
 )
 from core.conversion_report import note_cache_diagnostics, note_loss
 from services.error_translation import translate_anthropic_error
@@ -436,6 +442,9 @@ def convert_anthropic_to_openai_request(anthropic_req: Dict[str, Any]) -> Dict[s
             responses_items = responses_items_from_anthropic(raw_content)
             if responses_items is not None:
                 metadata["responses_items"] = responses_items
+            interactions_steps = interactions_steps_from_anthropic(raw_content)
+            if interactions_steps is not None:
+                metadata["interactions_steps"] = interactions_steps
             if metadata:
                 msg["provider_metadata"] = metadata
             openai_messages.append(msg)
@@ -861,8 +870,8 @@ def convert_openai_usage_to_anthropic(usage: Optional[Dict[str, Any]]) -> Dict[s
 def sanitize_anthropic_thinking_blocks(messages: Any) -> Any:
     """剔除历史消息中缺失签名的 thinking / redacted_thinking block（透传前清洗）。
 
-    本网关为 Gemini 签发的 thinking 签名（gemini.v1. 前缀）对 Anthropic 无效，
-    客户端中途切回 Claude 模型时一并剔除。
+    本网关为其他协议签发的 thinking 签名（gemini.v1. / responses.v1. /
+    interactions.v1. 前缀）对 Anthropic 无效，客户端中途切回 Claude 模型时一并剔除。
 
     OpenRouter 等上游对 /messages 请求体做严格 schema 校验：thinking block
     必须携带字符串 signature、redacted_thinking 必须携带 data，否则整个
@@ -893,7 +902,8 @@ def sanitize_anthropic_thinking_blocks(messages: Any) -> Any:
             if isinstance(block, dict):
                 btype = block.get("type")
                 if btype == "thinking" and (not block.get("signature")
-                                            or decode_signature(block.get("signature"))[0]):
+                                            or decode_signature(block.get("signature"))[0]
+                                            or thinking_carrier(block.get("signature"))):
                     removed_blocks += 1
                     continue
                 if btype == "redacted_thinking" and not block.get("data"):
@@ -973,6 +983,8 @@ async def convert_openai_non_stream_response_to_anthropic(
         return JSONResponse(status_code=502, content=build_anthropic_error_payload({"type": "api_error", "message": str(exc)}))
     if segments is None:
         segments = gemini_segments(message)
+    if segments is None:
+        segments = interactions_segments(message)
     if segments is None:
         segments = _flat_segments(extract_openai_message_reasoning(first_choice),
                                   extract_openai_message_text(first_choice) or message.get("refusal"),
@@ -1372,14 +1384,17 @@ def build_anthropic_streaming_response(
                     prev_delta_type = None
                     continue
 
-            # Gemini 链路按原生 parts 顺序展开（签名随 thinking 块下发），其余来源按
-            # 思考 → 正文 → 调用展开；同一 chunk 混有多种内容时逐段发送，不再只取一种
+            # Gemini 链路按原生 parts 顺序展开（签名随 thinking 块下发），Interactions
+            # 在每段思考结束时单独下发签名，其余来源按 思考 → 正文 → 调用展开；
+            # 同一 chunk 混有多种内容时逐段发送，不再只取一种
             if isinstance(delta.get("refusal"), str):
                 refusal_parts.append(delta["refusal"])
             if isinstance(delta.get("annotations"), list):
                 annotations.extend(delta["annotations"])
             saw_images = saw_images or bool(delta.get("images"))
             segments = gemini_segments(delta)
+            if segments is None:
+                segments = interactions_signature_segments(delta)
             if segments is None:
                 segments = _flat_segments(delta.get("reasoning_content") or delta.get("reasoning"),
                                           delta.get("content") or delta.get("refusal"),

@@ -12,6 +12,7 @@ Gemini Interactions API ↔ OpenAI / Gemini generateContent 协议转换模块
 - Gemini generateContent 请求/响应 ↔ interactions（gemini_v1beta_api 链路用）
 - 思考签名缓存 + 前缀匹配注入：
   Gemini 3 默认思考，无状态模式下 thought 步骤必须带签名原样回传才能保持推理连续性。
+  Anthropic 客户端把签名随 thinking 块带回（见 interactions_anthropic_signatures）。
   OAI 客户端历史里没有 signature 字段，但保留了 reasoning_content（= thought_summary 文本）。
   因此响应侧捕获 (summary 片段 → signature)，请求侧对客户端 reasoning_content 做前缀匹配，
   命中后把对应 signature 注入回传的 thought steps。
@@ -57,6 +58,8 @@ __all__ = [
     "convert_interactions_to_gemini_gc",
     "InteractionsToGeminiGCConverter",
     "interaction_failure",
+    "code_step_text",
+    "thought_summary_text",
 ]
 
 # 服务端工具的结果模型已经写进正文，步骤本身不需要给 Chat 客户端看。
@@ -113,6 +116,10 @@ async def load_signature_history(messages: Any) -> None:
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
+        metadata = message.get("provider_metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("interactions_steps"), list):
+            # 整轮步骤随历史带回，不用查库
+            continue
         reasoning = message.get("reasoning_content")
         if reasoning:
             wanted[interactions_thought_key(str(reasoning))] = ("gemini_thoughts", str(reasoning))
@@ -151,7 +158,7 @@ def match_and_inject_thought_signatures(reasoning_content: str) -> List[dict]:
              "summary": [{"type": "text", "text": text}]} for text, signature in fragments]
 
 
-def _code_step_text(step: dict) -> Optional[str]:
+def code_step_text(step: dict) -> Optional[str]:
     """代码执行步骤显示给 Chat 客户端的 Markdown，其他步骤返回 None。"""
     kind = step.get("type")
     if kind == "code_execution_call":
@@ -163,6 +170,11 @@ def _code_step_text(step: dict) -> Optional[str]:
     return None
 
 
+def thought_summary_text(step: dict) -> str:
+    """thought 步骤的摘要原文（未剥离泄露思考）。"""
+    return _extract_text_from_content_block(step.get("summary"))
+
+
 def _visible_text(steps: List[dict]) -> str:
     """整轮步骤里 Chat 客户端能看到的正文，回传时据此判断内容有没有被改过。"""
     parts: List[str] = []
@@ -171,7 +183,7 @@ def _visible_text(steps: List[dict]) -> str:
             parts.extend(str(block.get("text", "")) for block in step.get("content") or []
                          if isinstance(block, dict) and block.get("type") == "text")
         else:
-            parts.append(_code_step_text(step) or "")
+            parts.append(code_step_text(step) or "")
     return "".join(parts)
 
 
@@ -212,7 +224,7 @@ def _restored_turn(message: dict) -> Optional[List[dict]]:
 
 
 def _thought_fragments(steps: List[dict]) -> List[Tuple[str, str]]:
-    return [(_extract_text_from_content_block(step.get("summary")), step.get("signature"))
+    return [(thought_summary_text(step), step.get("signature"))
             for step in steps if step.get("type") == "thought"]
 
 
@@ -808,9 +820,7 @@ def convert_interactions_to_openai_response(
             for block in step.get("content") or []:
                 _merge_delta(message, _block_delta(block))
         elif stype == "thought":
-            text = strip_summarizer_leaked_thoughts(
-                _extract_text_from_content_block(step.get("summary"))
-            )
+            text = strip_summarizer_leaked_thoughts(thought_summary_text(step))
             if text:
                 reasoning_parts.append(text)
         elif stype == "function_call":
@@ -825,8 +835,8 @@ def convert_interactions_to_openai_response(
                     "arguments": json.dumps(args, ensure_ascii=False),
                 },
             })
-        elif _code_step_text(step):
-            _merge_delta(message, {"content": _code_step_text(step)})
+        elif code_step_text(step):
+            _merge_delta(message, {"content": code_step_text(step)})
         else:
             _note_step_loss(step)
 
@@ -1051,7 +1061,12 @@ class InteractionsStreamConverter:
         self.call_index = None
         if step is None or step.get("type") == "function_call":
             return chunks
-        code = _code_step_text(step)
+        if step.get("type") == "thought":
+            if step.get("signature"):
+                # 签名紧跟这段思考下发，Anthropic 客户端随 thinking 块原样带回
+                chunks.append(self._chunk({"provider_metadata": {"interactions_thought": copy.deepcopy(step)}}))
+            return chunks
+        code = code_step_text(step)
         if code:
             chunks.append(self._chunk({"content": code}))
             return chunks

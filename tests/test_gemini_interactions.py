@@ -687,8 +687,9 @@ class InteractionsAuditRegressionTests(unittest.TestCase):
 
     def test_stream_metadata_matches_non_stream_steps(self):
         chunks = _feed_all(InteractionsStreamConverter("m", "r"), self._thought_turn())
+        # 每段思考结束时另有单独的签名片段，整轮步骤在完成时下发
         steps = next(delta["provider_metadata"]["interactions_steps"] for delta in _deltas(chunks)
-                     if delta.get("provider_metadata"))
+                     if "interactions_steps" in (delta.get("provider_metadata") or {}))
         self.assertEqual([step["type"] for step in steps], ["thought", "thought", "model_output"])
         self.assertEqual(steps[1]["summary"], [{"type": "text", "text": "第二段"}])
         self.assertEqual(steps[2]["content"], [{"type": "text", "text": "答"}])

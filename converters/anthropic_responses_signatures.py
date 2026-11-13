@@ -1,4 +1,4 @@
-"""在 Anthropic 与 Responses 之间携带各自的原始思考块。"""
+"""在 Anthropic 与 Responses、Interactions 之间携带各自的原始思考块。"""
 
 import base64
 import json
@@ -7,7 +7,18 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.conversion_report import note_loss
 
 
-_PREFIXES = {"anthropic": "anthropic.v1.", "responses": "responses.v1."}
+_PREFIXES = {"anthropic": "anthropic.v1.", "responses": "responses.v1.", "interactions": "interactions.v1."}
+_ITEM_TYPES = {"anthropic": ("thinking", "redacted_thinking"), "responses": ("reasoning",),
+               "interactions": ("thought",)}
+
+
+def thinking_carrier(value: Any) -> Optional[str]:
+    """返回本网关思考载体所属的协议；不是本网关签发的返回 None。"""
+    if isinstance(value, str):
+        for protocol, prefix in _PREFIXES.items():
+            if value.startswith(prefix):
+                return protocol
+    return None
 
 
 def encode_thinking_item(protocol: str, item: Dict[str, Any]) -> str:
@@ -26,8 +37,7 @@ def decode_thinking_item(protocol: str, value: Any) -> Optional[Dict[str, Any]]:
         item = json.loads(payload.decode("utf-8"))
     except (ValueError, UnicodeError) as exc:
         raise ValueError(f"无效的 {protocol} 思考状态载体") from exc
-    expected = ("thinking", "redacted_thinking") if protocol == "anthropic" else ("reasoning",)
-    if not isinstance(item, dict) or item.get("type") not in expected:
+    if not isinstance(item, dict) or item.get("type") not in _ITEM_TYPES[protocol]:
         raise ValueError(f"无效的 {protocol} 思考状态类型")
     return item
 
@@ -75,9 +85,7 @@ def responses_items_from_anthropic(blocks: Any) -> Optional[List[Dict[str, Any]]
     """从客户端回传的签名和内容块重建 Responses 助手输出。"""
     if not isinstance(blocks, list):
         return None
-    if not any(block.get("type") == "thinking" and
-               isinstance(block.get("signature"), str) and
-               block["signature"].startswith(_PREFIXES["responses"])
+    if not any(block.get("type") == "thinking" and thinking_carrier(block.get("signature")) == "responses"
                for block in blocks if isinstance(block, dict)):
         return None
     items: List[Dict[str, Any]] = []

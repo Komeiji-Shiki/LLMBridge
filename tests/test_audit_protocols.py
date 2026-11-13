@@ -271,6 +271,146 @@ def test_foreign_thinking_signatures_never_reach_gemini():
     # 反过来切回 Claude 时，Gemini 签名也不能交给 Anthropic 校验
     cleaned = sanitize_anthropic_thinking_blocks([{'role': 'assistant', 'content': TOOL_TURN_BLOCKS}])
     assert cleaned[0]['content'] == TOOL_TURN_BLOCKS[1:]
+    # Responses 与 Interactions 的载体同样不是 Anthropic 签名
+    carried = [{'type': 'thinking', 'thinking': '想', 'signature': 'responses.v1.e30'},
+               {'type': 'thinking', 'thinking': '', 'signature': 'interactions.v1.e30'},
+               {'type': 'text', 'text': '好'}]
+    assert sanitize_anthropic_thinking_blocks([{'role': 'assistant', 'content': carried}])[0]['content'] == carried[2:]
+
+
+# 总结小模型泄露的思考：客户端看到剥离后的摘要，回放给上游的仍是原文
+LEAKED_SUMMARY = (
+    "Thinking Process:\n\n"
+    "1.  **Analyze the Request:**\n"
+    "    *   **Goal:** Summarize the provided thoughts in the first person (\"I\").\n"
+    "    *   **Format:** Header 3-7 words, starts with a verb, wrapped in double asterisks (`**Header**`).\n\n"
+    "**Checking both cities**\n\nI am querying the weather for both cities.\n\n"
+)
+INTERACTION_TOOL_STEPS = [
+    {'type': 'thought', 'summary': [{'type': 'text', 'text': LEAKED_SUMMARY}], 'signature': 'sig-thought'},
+    {'type': 'function_call', 'id': 'call_1', 'name': 'get_weather', 'arguments': {'city': '北京'}},
+    {'type': 'function_call', 'id': 'call_2', 'name': 'get_weather', 'arguments': {'city': '上海'}},
+]
+# 只有签名、没有摘要的思考，真实会话里约占一半
+INTERACTION_TEXT_STEPS = [
+    {'type': 'thought', 'signature': 'sig-quiet'},
+    {'type': 'model_output', 'content': [{'type': 'text', 'text': '北京晴，上海雨。'}]},
+]
+
+
+def interaction_events(steps):
+    events = []
+    for index, step in enumerate(steps):
+        if step['type'] == 'thought':
+            events.append({'event_type': 'step.start', 'index': index, 'step': {'type': 'thought'}})
+            text = step.get('summary', [{}])[0].get('text', '')
+            for piece in (text[:40], text[40:]):
+                if piece:
+                    events.append({'event_type': 'step.delta', 'index': index,
+                                   'delta': {'type': 'thought_summary', 'content': {'type': 'text', 'text': piece}}})
+            events.append({'event_type': 'step.delta', 'index': index,
+                           'delta': {'type': 'thought_signature', 'signature': step['signature']}})
+        elif step['type'] == 'function_call':
+            events.append({'event_type': 'step.start', 'index': index, 'step': {
+                'type': 'function_call', 'id': step['id'], 'name': step['name'], 'arguments': {}}})
+            events.append({'event_type': 'step.delta', 'index': index, 'delta': {
+                'type': 'arguments_delta', 'partial_arguments': json.dumps(step['arguments'], ensure_ascii=False)}})
+        else:
+            events.append({'event_type': 'step.start', 'index': index, 'step': {'type': 'model_output'}})
+            events.append({'event_type': 'step.delta', 'index': index,
+                           'delta': {'type': 'text', 'text': step['content'][0]['text']}})
+        events.append({'event_type': 'step.stop', 'index': index})
+    status = 'requires_action' if any(step['type'] == 'function_call' for step in steps) else 'completed'
+    events.append({'event_type': 'interaction.completed', 'interaction': {'id': 'i1', 'status': status, 'usage': {}}})
+    return events
+
+
+def decoded_blocks(blocks):
+    """把 interactions.v1 载体解成原始步骤，比较时不受 JSON 键顺序影响。"""
+    from converters.anthropic_responses_signatures import decode_thinking_item
+    return [{**block, 'signature': decode_thinking_item('interactions', block['signature'])}
+            if 'signature' in block else block for block in blocks]
+
+
+INTERACTION_TOOL_BLOCKS = [
+    {'type': 'thinking', 'thinking': '**Checking both cities**\n\nI am querying the weather for both cities.\n\n',
+     'signature': INTERACTION_TOOL_STEPS[0]},
+    {'type': 'tool_use', 'id': 'call_1', 'name': 'get_weather', 'input': {'city': '北京'}},
+    {'type': 'tool_use', 'id': 'call_2', 'name': 'get_weather', 'input': {'city': '上海'}},
+]
+INTERACTION_TEXT_BLOCKS = [
+    {'type': 'thinking', 'thinking': '', 'signature': INTERACTION_TEXT_STEPS[0]},
+    {'type': 'text', 'text': '北京晴，上海雨。'},
+]
+
+
+@pytest.mark.parametrize('steps, expected', [
+    (INTERACTION_TOOL_STEPS, INTERACTION_TOOL_BLOCKS), (INTERACTION_TEXT_STEPS, INTERACTION_TEXT_BLOCKS)])
+def test_interactions_signatures_ride_anthropic_thinking_blocks(steps, expected):
+    """每段思考的签名随 thinking 块下发，流式和非流式结果一致。"""
+    from fastapi.responses import JSONResponse
+    from converters.anthropic_openai import convert_openai_non_stream_response_to_anthropic
+    from converters.gemini_interactions import InteractionsStreamConverter, convert_interactions_to_openai_response
+    converter = InteractionsStreamConverter('demo', 'r')
+    chunks = [chunk for event in interaction_events(steps) for chunk in converter.feed(event)]
+    assert decoded_blocks(anthropic_stream_blocks(chunks)) == expected
+    status = 'requires_action' if any(step['type'] == 'function_call' for step in steps) else 'completed'
+    openai = convert_interactions_to_openai_response({'id': 'i1', 'status': status, 'steps': steps}, 'demo', 'r')
+    response = asyncio.run(convert_openai_non_stream_response_to_anthropic(JSONResponse(openai), 'demo'))
+    assert decoded_blocks(json.loads(response.body)['content']) == expected
+
+
+def interactions_history(tool_blocks, text_blocks):
+    from converters.anthropic_responses_signatures import encode_thinking_item
+
+    def encoded(blocks):
+        return [{**block, 'signature': encode_thinking_item('interactions', block['signature'])}
+                if 'signature' in block else block for block in blocks]
+    return {'model': 'demo', 'messages': [
+        {'role': 'user', 'content': '北京和上海天气？'},
+        {'role': 'assistant', 'content': encoded(tool_blocks)},
+        {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'call_1', 'content': '晴'},
+            {'type': 'tool_result', 'tool_use_id': 'call_2', 'content': '雨'}]},
+        {'role': 'assistant', 'content': encoded(text_blocks)},
+        {'role': 'user', 'content': '谢谢'}]}
+
+
+def test_anthropic_thinking_signatures_restore_interactions_steps_without_store(monkeypatch):
+    """Claude Code 带回的签名直接还原整轮步骤，不读会话库，回退换会话也不受影响。"""
+    from core.request_context import RequestContext, current_request
+    from converters.gemini_interactions import convert_oai_messages_to_interactions, load_signature_history
+    store = MagicMock()
+    monkeypatch.setattr('converters.gemini_interactions.conversation_store', store)
+    messages = convert_anthropic_to_openai_request(
+        interactions_history(INTERACTION_TOOL_BLOCKS, INTERACTION_TEXT_BLOCKS))['messages']
+    token = current_request.set(RequestContext(authenticated=True, owner_id='admin', model='demo'))
+    try:
+        asyncio.run(load_signature_history(messages))
+        steps, _ = convert_oai_messages_to_interactions(messages)
+    finally:
+        current_request.reset(token)
+    store.response_prefixes.assert_not_called()
+    assert [step for step in steps if step['type'] not in ('user_input', 'function_result')] == \
+        INTERACTION_TOOL_STEPS + INTERACTION_TEXT_STEPS
+
+
+def test_edited_interactions_thinking_is_not_replayed_with_its_signature():
+    from core.conversion_report import conversion_notes
+    from core.request_context import RequestContext, current_request
+    from converters.gemini_interactions import convert_oai_messages_to_interactions
+    edited = [{**INTERACTION_TOOL_BLOCKS[0], 'thinking': '改过的思考'}, *INTERACTION_TOOL_BLOCKS[1:]]
+    token = current_request.set(RequestContext())
+    try:
+        messages = convert_anthropic_to_openai_request(
+            interactions_history(edited, INTERACTION_TEXT_BLOCKS))['messages']
+        steps, _ = convert_oai_messages_to_interactions(messages)
+        notes = [note['field'] for note in conversion_notes()]
+    finally:
+        current_request.reset(token)
+    assert [step for step in steps if step['type'] not in ('user_input', 'function_result')] == \
+        INTERACTION_TOOL_STEPS[1:] + INTERACTION_TEXT_STEPS
+    assert 'thinking' in notes
 
 
 def test_anthropic_responses_report_requested_model():
