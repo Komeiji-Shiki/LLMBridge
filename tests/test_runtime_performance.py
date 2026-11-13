@@ -116,8 +116,10 @@ def test_message_token_count_does_not_rescan_the_vocabulary(monkeypatch):
 
     class Backend:
         vocab_scans = 0
-        def encode(self, text, add_special_tokens=True):
-            return type('Encoding', (), {'ids': text.split()})()
+        batch_calls = 0
+        def encode_batch_fast(self, texts, add_special_tokens=True):
+            Backend.batch_calls += 1
+            return [text.split() for text in texts]
         def get_vocab_size(self):
             Backend.vocab_scans += 1
             return 262144
@@ -125,12 +127,70 @@ def test_message_token_count_does_not_rescan_the_vocabulary(monkeypatch):
     tokenizer = LocalFastTokenizer('gemma', Backend())
     monkeypatch.setattr(_counting, 'get_tokenizer_for_model', lambda model: 'google')
     monkeypatch.setattr(_counting, 'get_gemma_tokenizer', lambda: tokenizer)
-    messages = [{'role': 'user', 'content': 'one two three'}] * 50
-    total, _ = _counting.count_messages_tokens(messages, 'gemini-test')
+    messages = [{'role': 'user', 'content': 'one two three'}] * 50 + [{'role': 'assistant', 'content': ''}]
+    total, details = _counting.count_messages_tokens(messages, 'gemini-test')
+    assert details['user'] == 150 and details['assistant'] == 0
     assert total >= 150
+    # 整段对话一次批量编码，不逐条调用
+    assert Backend.batch_calls == 1
     assert Backend.vocab_scans == 0
     assert len(tokenizer) == len(tokenizer) == 262144
     assert Backend.vocab_scans == 1
+
+
+def test_local_tokenizer_cold_load_happens_once_under_concurrency(monkeypatch):
+    import threading
+    import time
+    from modules.token_counter import _tokenizers
+
+    loads = []
+    def slow_load(path):
+        loads.append(path)
+        time.sleep(0.05)
+        return _tokenizers.LocalFastTokenizer(path, object())
+
+    monkeypatch.setattr(_tokenizers, '_gemma_tokenizer', None)
+    monkeypatch.setattr(_tokenizers, '_load_local_fast_tokenizer', slow_load)
+    monkeypatch.setattr(_tokenizers.os.path, 'exists', lambda path: True)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(_tokenizers.get_gemma_tokenizer())) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(loads) == 1
+    assert len({id(result) for result in results}) == 1
+
+
+def test_idle_cleanup_keeps_local_fast_tokenizers_resident(monkeypatch):
+    from modules.token_counter import _tokenizers
+
+    resident = _tokenizers.LocalFastTokenizer('gemma', object())
+    heavy = object()
+    monkeypatch.setattr(_tokenizers, '_gemma_tokenizer', resident)
+    monkeypatch.setattr(_tokenizers, '_deepseek_tokenizer', heavy)
+    monkeypatch.setattr(_tokenizers, 'get_tokenizer_idle_timeout', lambda: 0)
+    monkeypatch.setitem(_tokenizers._tokenizer_last_used, 'gemma', 0)
+    monkeypatch.setitem(_tokenizers._tokenizer_last_used, 'deepseek', 0)
+
+    result = _tokenizers.clear_tokenizer_cache()
+    assert result['cleared'] == ['deepseek']
+    assert _tokenizers._gemma_tokenizer is resident
+    assert _tokenizers.clear_tokenizer_cache(force=True)['cleared'] == ['gemma']
+
+
+def test_batch_count_matches_single_encode_on_real_tokenizer():
+    import pytest
+    from pathlib import Path
+    from modules.token_counter._tokenizers import _load_local_fast_tokenizer
+
+    path = Path(__file__).resolve().parent.parent / 'tokenizers' / 'gemma3-27b-it'
+    if not (path / 'tokenizer.json').exists():
+        pytest.skip('本地 Gemma tokenizer 不存在')
+    tokenizer = _load_local_fast_tokenizer(str(path))
+    texts = ['Hello world', '今天天气很好，我们去公园散步。', '<start_of_turn>user\n多 轮  空格\t', 'x' * 5000]
+    assert tokenizer.count_batch(texts) == [len(tokenizer._tokenizer.encode(text).ids) for text in texts]
+    assert len(tokenizer.encode(texts[1])) == tokenizer.count_batch([texts[1]])[0]
 
 
 def test_heavy_gc_waits_for_growth_when_resident_memory_exceeds_threshold():

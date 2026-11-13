@@ -18,6 +18,7 @@ from ._tokenizers import (
     get_tiktoken_encoding,
     get_anthropic_count_tokens,
     get_tokenizer_for_model,
+    count_tokens_batch,
 )
 from utils.usage_tokens import rough_token_count
 
@@ -26,9 +27,23 @@ logger = logging.getLogger(__name__)
 
 def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
     """计算文本的token数量（优先使用原生tokenizer，否则使用校准系数）"""
-    from ._types import _gemini_api_count_failed
     if not text:
         return 0
+    return _count_nonempty_texts([text], model_name)[0]
+
+
+def count_texts_tokens(texts: List[str], model_name: str = "gpt-4") -> List[int]:
+    """批量计算多段文本的 token 数，结果与逐段调用 count_text_tokens 相同。"""
+    counts = [0] * len(texts)
+    indexes = [i for i, text in enumerate(texts) if text]
+    if indexes:
+        for i, count in zip(indexes, _count_nonempty_texts([texts[i] for i in indexes], model_name)):
+            counts[i] = count
+    return counts
+
+
+def _count_nonempty_texts(texts: List[str], model_name: str) -> List[int]:
+    from ._types import _gemini_api_count_failed
     tokenizer_type = get_tokenizer_for_model(model_name)
     logger.debug(f"[TOKEN_COUNTER] 模型 {model_name} 配置的 tokenizer 类型: {tokenizer_type}")
 
@@ -36,10 +51,9 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
         deepseek_tokenizer = get_deepseek_tokenizer()
         if deepseek_tokenizer is not None:
             try:
-                tokens = deepseek_tokenizer.encode(text)
-                token_count = len(tokens)
-                logger.debug(f"[TOKEN_COUNTER] ✅ 使用DeepSeek官方tokenizer（模型: {model_name}）: {token_count} tokens")
-                return token_count
+                counts = count_tokens_batch(deepseek_tokenizer, texts)
+                logger.debug(f"[TOKEN_COUNTER] ✅ 使用DeepSeek官方tokenizer（模型: {model_name}）: {sum(counts)} tokens")
+                return counts
             except Exception as e:
                 logger.warning(f"[TOKEN_COUNTER] DeepSeek tokenizer失败，回退到tiktoken: {e}")
 
@@ -47,20 +61,18 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
         gemma_tokenizer = get_gemma_tokenizer()
         if gemma_tokenizer is not None:
             try:
-                tokens = gemma_tokenizer.encode(text)
-                token_count = len(tokens)
-                logger.debug(f"[TOKEN_COUNTER] ✅ 使用Gemma tokenizer（模型: {model_name}）: {token_count} tokens")
-                return token_count
+                counts = count_tokens_batch(gemma_tokenizer, texts)
+                logger.debug(f"[TOKEN_COUNTER] ✅ 使用Gemma tokenizer（模型: {model_name}）: {sum(counts)} tokens")
+                return counts
             except Exception as e:
                 logger.warning(f"[TOKEN_COUNTER] Gemma tokenizer失败，尝试Gemini官方tokenizer: {e}")
         if not _gemini_api_count_failed:
             gemini_model = get_gemini_model()
             if gemini_model:
                 try:
-                    result = gemini_model.count_tokens(text)
-                    token_count = result.total_tokens
-                    logger.debug(f"[TOKEN_COUNTER] ✅ 使用Gemini官方tokenizer（模型: {model_name}）: {token_count} tokens")
-                    return token_count
+                    counts = [gemini_model.count_tokens(text).total_tokens for text in texts]
+                    logger.debug(f"[TOKEN_COUNTER] ✅ 使用Gemini官方tokenizer（模型: {model_name}）: {sum(counts)} tokens")
+                    return counts
                 except Exception as e:
                     logger.warning(f"[TOKEN_COUNTER] Gemini官方tokenizer首次失败: {e}")
                     from . import _types as _tc_types
@@ -74,12 +86,11 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
         if custom_tokenizer is not None:
             try:
                 if is_tiktoken_model:
-                    tokens = custom_tokenizer.encode(text, allowed_special="all")
+                    counts = [len(custom_tokenizer.encode(text, allowed_special="all")) for text in texts]
                 else:
-                    tokens = custom_tokenizer.encode(text)
-                token_count = len(tokens)
-                logger.debug(f"[TOKEN_COUNTER] ✅ 使用自定义tokenizer（{custom_name}, 模型: {model_name}）: {token_count} tokens")
-                return token_count
+                    counts = count_tokens_batch(custom_tokenizer, texts)
+                logger.debug(f"[TOKEN_COUNTER] ✅ 使用自定义tokenizer（{custom_name}, 模型: {model_name}）: {sum(counts)} tokens")
+                return counts
             except Exception as e:
                 logger.warning(f"[TOKEN_COUNTER] 自定义tokenizer({custom_name})失败，回退到tiktoken: {e}")
         else:
@@ -89,30 +100,28 @@ def count_text_tokens(text: str, model_name: str = "gpt-4") -> int:
         count_tokens_func = get_anthropic_count_tokens()
         if count_tokens_func:
             try:
-                token_count = count_tokens_func(text)
-                logger.debug(f"[TOKEN_COUNTER] ✅ 使用Anthropic tokenizer（模型: {model_name}）: {token_count} tokens")
-                return token_count
+                counts = [count_tokens_func(text) for text in texts]
+                logger.debug(f"[TOKEN_COUNTER] ✅ 使用Anthropic tokenizer（模型: {model_name}）: {sum(counts)} tokens")
+                return counts
             except Exception as e:
                 logger.warning(f"[TOKEN_COUNTER] Anthropic tokenizer失败，回退到tiktoken: {e}")
 
-    # 回退到 tiktoken
+    # 回退到 tiktoken（它的 encode 本身会放 GIL），编码失败的那段退到字符估算
     multiplier = get_model_multiplier(model_name)
     encoding = get_tiktoken_encoding(model_name)
     if encoding:
-        try:
-            tokens = encoding.encode(text)
-            base_count = len(tokens)
-            adjusted_count = int(base_count * multiplier)
-            if multiplier != 1.0 and logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"[TOKEN_COUNTER] ✅ 使用Tiktoken（模型: {model_name}, 校准系数{multiplier}）: {base_count} -> {adjusted_count} tokens")
-            else:
-                logger.debug(f"[TOKEN_COUNTER] ✅ 使用Tiktoken（模型: {model_name}）: {adjusted_count} tokens")
-            return adjusted_count
-        except Exception as e:
-            logger.error(f"[TOKEN_COUNTER] tiktoken编码失败: {e}")
+        counts = [_tiktoken_count(encoding, text, multiplier) for text in texts]
+        logger.debug(f"[TOKEN_COUNTER] ✅ 使用Tiktoken（模型: {model_name}, 校准系数{multiplier}）: {sum(counts)} tokens")
+        return counts
+    return [int(rough_token_count(text) * multiplier) for text in texts]
 
-    # 最终回退到字符估算
-    return int(rough_token_count(text) * multiplier)
+
+def _tiktoken_count(encoding: Any, text: str, multiplier: float) -> int:
+    try:
+        return int(len(encoding.encode(text)) * multiplier)
+    except Exception as e:
+        logger.error(f"[TOKEN_COUNTER] tiktoken编码失败: {e}")
+        return int(rough_token_count(text) * multiplier)
 
 
 def count_messages_tokens(messages: List[Dict[str, Any]], model_name: str = "gpt-4") -> Tuple[int, Dict[str, int]]:
@@ -122,8 +131,8 @@ def count_messages_tokens(messages: List[Dict[str, Any]], model_name: str = "gpt
         'messages': 0, 'system': 0, 'user': 0, 'assistant': 0,
         'overhead': 0, 'multiplier': get_model_multiplier(model_name)
     }
+    texts = []
     for message in messages:
-        role = message.get('role', 'user')
         content = message.get('content', '')
         text_content = ''
         if isinstance(content, str):
@@ -147,8 +156,11 @@ def count_messages_tokens(messages: List[Dict[str, Any]], model_name: str = "gpt
                             text_content += str(func.get('name', ''))
                             args = func.get('arguments', '')
                             text_content += (args if isinstance(args, str) else json.dumps(args))
-        content_tokens = count_text_tokens(text_content, model_name)
-        overhead_per_message = int(4 * details['multiplier'])
+        texts.append(text_content)
+    # 整段对话一次批量编码：多条消息并行，且全程不占 GIL
+    overhead_per_message = int(4 * details['multiplier'])
+    for message, content_tokens in zip(messages, count_texts_tokens(texts, model_name)):
+        role = message.get('role', 'user')
         message_tokens = content_tokens + overhead_per_message
         total_tokens += message_tokens
         details['messages'] += message_tokens

@@ -11,6 +11,7 @@
 #   3. 服务器启动（Hypercorn / HTTP/2）
 
 import asyncio
+import gc
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 from modules.monitoring import monitoring_service  # noqa: E402
 from utils.task_registry import spawn, cancel_background_tasks  # noqa: E402
 from utils import loop_watchdog  # noqa: E402
+from modules.token_counter import preload_tokenizers  # noqa: E402
 
 # Core模块
 from core.config_loader import (  # noqa: E402
@@ -83,6 +85,8 @@ async def lifespan(app: FastAPI):
 
     server_state.main_event_loop = asyncio.get_running_loop()
     load_config()
+    # 本地分词器冷加载全程占着 GIL，趁还没接请求、看门狗没起来时加载并常驻
+    preload_tokenizers()
 
     # 🔧 用 CONFIG 中的值重建图片缓存（app_state 中是硬编码默认值）。
     # 条数上限之外再加总字节上限：base64 图片单条可能几 MB，只限条数
@@ -205,6 +209,10 @@ async def lifespan(app: FastAPI):
 
     # 🔥 预热 admin 首屏缓存（异步后台，不阻塞启动）
     spawn(admin_routes.warmup_admin_cache(), name="warmup-admin-cache")
+
+    # 启动期留下的模块、配置、分词器包装对象移出分代回收，之后每次全代 GC 不再遍历它们
+    gc.collect()
+    gc.freeze()
 
     try:
         yield

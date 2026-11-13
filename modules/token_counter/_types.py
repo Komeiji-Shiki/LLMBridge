@@ -208,7 +208,8 @@ except ImportError:
 
 
 def get_tokenizer_idle_timeout() -> float:
-    """tokenizer 空闲卸载阈值（秒）。
+    """tokenizer 空闲卸载阈值（秒）。只对 transformers 加载的重分词器生效，
+    tokenizers 直接加载的分词器常驻不卸载。
 
     🔧 配置接线：config.jsonc 与管理面板暴露 tokenizer_idle_timeout_seconds
     （实际值 600），但旧版各清理点直接引用 TimeoutDefaults.TOKENIZER_IDLE_TIMEOUT

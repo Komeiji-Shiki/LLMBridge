@@ -4,9 +4,9 @@ Token计数模块 - 分词器加载与缓存管理
 
 from __future__ import annotations
 
-import gc
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 _anthropic_count_tokens_func = None
 
+# 冷加载全程不放 GIL；不加锁时并发请求会各自加载一份（实测启动后 6 个 count_tokens 同时进来，
+# Gemma 被读了 6 遍，事件循环停 7 秒、内存涨到 565MB）
+_load_lock = threading.RLock()
+
 
 class LocalFastTokenizer:
     """本地 tokenizer.json 的轻量包装。
@@ -47,9 +51,15 @@ class LocalFastTokenizer:
         self._vocab_size = None
 
     def encode(self, text: str, *, add_special_tokens: bool = True, **_: Any):
-        return self._tokenizer.encode(
-            text, add_special_tokens=add_special_tokens
-        ).ids
+        return self._tokenizer.encode_batch_fast(
+            [text], add_special_tokens=add_special_tokens
+        )[0].ids
+
+    def count_batch(self, texts: List[str]) -> List[int]:
+        # 单条 encode 全程不放 GIL（46 万字符 180ms，期间其他线程和事件循环全停）；
+        # encode_batch_fast 进 Rust 就放 GIL、多条用 rayon 并行、不算 offsets，
+        # token 数与 encode 一致。len(Encoding) 也免去构造十几万个 int 的 ids 列表
+        return [len(e) for e in self._tokenizer.encode_batch_fast(texts)]
 
     def __call__(self, text: str, **kwargs: Any):
         return self.encode(text, **kwargs)
@@ -67,6 +77,21 @@ class LocalFastTokenizer:
         # 没有它时 `if tokenizer:` 会落到 __len__：逐条消息计数时每条都统计一遍词表，
         # 19 万 token 的对话要 13 秒，其中编码本身只占 0.2 秒
         return True
+
+
+def count_tokens_batch(tokenizer: Any, texts: List[str]) -> List[int]:
+    """用 HF 系分词器批量计数；transformers fast tokenizer 也走同一个 Rust 后端。"""
+    if isinstance(tokenizer, LocalFastTokenizer):
+        return tokenizer.count_batch(texts)
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        return [len(e) for e in backend.encode_batch_fast(texts)]
+    return [len(tokenizer.encode(text)) for text in texts]
+
+
+def _is_resident(tokenizer: Any) -> bool:
+    """tokenizers 直接加载的分词器常驻：Gemma 只占 68MB，重新加载却要 0.75 秒且全程不放 GIL。"""
+    return isinstance(tokenizer, LocalFastTokenizer)
 
 
 def _load_local_fast_tokenizer(local_path: str) -> Optional[LocalFastTokenizer]:
@@ -103,11 +128,16 @@ def _load_deepseek_with_transformers(local_tokenizer_path: str):
 
 def get_deepseek_tokenizer():
     """获取DeepSeek tokenizer实例"""
-    global _deepseek_tokenizer
-    if _deepseek_tokenizer is not None:
-        _update_tokenizer_last_used('deepseek')
-        return _deepseek_tokenizer
+    if _deepseek_tokenizer is None:
+        with _load_lock:
+            if _deepseek_tokenizer is None:
+                return _load_deepseek_tokenizer()
+    _update_tokenizer_last_used('deepseek')
+    return _deepseek_tokenizer
 
+
+def _load_deepseek_tokenizer():
+    global _deepseek_tokenizer
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     local_tokenizer_paths = [
         os.path.join(project_root, "deepseek_v3_tokenizer"),
@@ -251,11 +281,16 @@ def get_anthropic_client():
 
 def get_gemma_tokenizer():
     """获取Gemma tokenizer实例"""
-    global _gemma_tokenizer
-    if _gemma_tokenizer is not None:
-        _update_tokenizer_last_used('gemma')
-        return _gemma_tokenizer
+    if _gemma_tokenizer is None:
+        with _load_lock:
+            if _gemma_tokenizer is None:
+                return _load_gemma_tokenizer()
+    _update_tokenizer_last_used('gemma')
+    return _gemma_tokenizer
 
+
+def _load_gemma_tokenizer():
+    global _gemma_tokenizer
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     local_tokenizer_paths = [
         os.path.join(project_root, "tokenizers", "gemma3-27b-it"),
@@ -298,6 +333,19 @@ def get_gemma_tokenizer():
 
     logger.debug("[TOKEN_COUNTER] Gemma tokenizer不可用，将使用tiktoken估算（这是正常的，不影响使用）")
     return None
+
+
+def preload_tokenizers() -> None:
+    """启动时加载 tokenizer_config 里用到的本地分词器，不把 0.75 秒的冷加载留给第一个请求。"""
+    used = set(load_tokenizer_config().values())
+    if 'google' in used:
+        get_gemma_tokenizer()
+    if 'deepseek' in used:
+        get_deepseek_tokenizer()
+    from ._custom import get_custom_tokenizer
+    for tokenizer_type in used:
+        if isinstance(tokenizer_type, str) and tokenizer_type.startswith('custom_'):
+            get_custom_tokenizer(tokenizer_type[len('custom_'):])
 
 
 def get_gemini_model():
@@ -403,20 +451,22 @@ def clear_tokenizer_cache(tokenizer_name: str = None, force: bool = False) -> Di
             del _tiktoken_model_cache[tokenizer_name]
             cleared.append(f'tiktoken_model_{tokenizer_name}')
     else:
-        if _gemma_tokenizer is not None:
+        if _gemma_tokenizer is not None and (force or not _is_resident(_gemma_tokenizer)):
             last_used = _tokenizer_last_used.get('gemma', 0)
             if force or (current_time - last_used > idle_timeout):
                 _gemma_tokenizer = None
                 cleared.append('gemma')
                 logger.info("[TOKEN_COUNTER] 🧹 清理空闲的Gemma tokenizer")
-        if _deepseek_tokenizer is not None:
+        if _deepseek_tokenizer is not None and (force or not _is_resident(_deepseek_tokenizer)):
             last_used = _tokenizer_last_used.get('deepseek', 0)
             if force or (current_time - last_used > idle_timeout):
                 _deepseek_tokenizer = None
                 cleared.append('deepseek')
                 logger.info("[TOKEN_COUNTER] 🧹 清理空闲的DeepSeek tokenizer")
         to_remove = []
-        for name in _custom_tokenizers:
+        for name, tokenizer in _custom_tokenizers.items():
+            if not force and _is_resident(tokenizer):
+                continue
             last_used = _tokenizer_last_used.get(f'custom_{name}', 0)
             if force or (current_time - last_used > idle_timeout):
                 to_remove.append(name)
@@ -433,8 +483,8 @@ def clear_tokenizer_cache(tokenizer_name: str = None, force: bool = False) -> Di
             del _tiktoken_model_cache[name]
             cleared.append(f'tiktoken_model_{name}')
     if cleared:
-        gc.collect()
-        logger.info(f"[TOKEN_COUNTER] 🧹 已清理 {len(cleared)} 个tokenizer缓存，执行GC")
+        # 分词器靠引用计数即时释放，不再跟一次全代 gc.collect（它独占 GIL，堆大时停顿数秒）
+        logger.info(f"[TOKEN_COUNTER] 🧹 已清理 {len(cleared)} 个tokenizer缓存")
     
     # 清理未映射模型名警告缓存（防止无限增长）
     if len(_unmapped_model_warned) > _MAX_UNMAPPED_WARNED:

@@ -21,10 +21,11 @@ from ._tokenizers import (
     get_anthropic_count_tokens, get_anthropic_client,
     get_gemma_tokenizer, get_gemini_model, get_tiktoken_encoding,
     get_token_counter_info, clear_tokenizer_cache, get_tokenizer_memory_info,
+    preload_tokenizers,
 )
 
 from ._counting import (
-    count_text_tokens, count_messages_tokens, count_response_tokens,
+    count_text_tokens, count_texts_tokens, count_messages_tokens, count_response_tokens,
     smart_token_estimate, estimate_tokens, estimate_message_tokens,
 )
 

@@ -423,7 +423,8 @@ async def _handle_request_failure(request_id: str, model_name: Optional[str], op
     # 即使失败也计算输入tokens
     partial_input_tokens = 0
     try:
-        partial_input_tokens = estimate_message_tokens(
+        partial_input_tokens = await asyncio.to_thread(
+            estimate_message_tokens,
             openai_req.get('messages', []),
             model=model_name or "unknown"
         )

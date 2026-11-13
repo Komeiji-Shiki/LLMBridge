@@ -564,6 +564,25 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
                 logger.error(f"[STREAM_LIFECYCLE] 兜底 request_end 失败: {cleanup_err}")
 
 
+async def _estimate_failure_usage(estimate_message_tokens, estimate_tokens, full_messages, text, model):
+    """失败分支同样会碰上长对话，本地分词放进线程池，不占着事件循环。"""
+    def _estimate():
+        input_tokens, output_tokens = 0, 0
+        if full_messages:
+            try:
+                input_tokens = estimate_message_tokens(full_messages, model)
+            except Exception:
+                input_tokens = rough_message_tokens(full_messages)
+        if text:
+            try:
+                output_tokens = estimate_tokens(text, model)
+            except Exception:
+                output_tokens = rough_token_count(text)
+        return input_tokens, output_tokens
+
+    return await asyncio.to_thread(_estimate)
+
+
 async def _handle_client_disconnect(request_id, exception, collected_content, reasoning_content, model,
                                      monitoring_service, estimate_message_tokens, estimate_tokens,
                                      request_metadata, browser_connections,
@@ -576,18 +595,8 @@ async def _handle_client_disconnect(request_id, exception, collected_content, re
 
     # 🔧 字段修复：RequestInfo 已删除 request_messages（只留 200 字预览），
     # 改从调用方作用域的 full_messages 估算输入 token
-    input_tokens, output_tokens = 0, 0
-    if full_messages:
-        try:
-            input_tokens = estimate_message_tokens(full_messages, model)
-        except Exception:
-            input_tokens = rough_message_tokens(full_messages)
-    
-    if partial_response:
-        try:
-            output_tokens = estimate_tokens(partial_response, model)
-        except Exception:
-            output_tokens = rough_token_count(partial_response)
+    input_tokens, output_tokens = await _estimate_failure_usage(
+        estimate_message_tokens, estimate_tokens, full_messages, partial_response, model)
     
     monitoring_service.request_end(
         request_id, success=False, error=f"Client disconnected: {type(exception).__name__}",
@@ -609,18 +618,8 @@ async def _handle_stream_error(request_id, error_data, collected_content, reason
     error_reasoning = "".join(reasoning_content) if reasoning_content else None
 
     # 🔧 字段修复：RequestInfo 已无 request_messages，改用 full_messages
-    input_tokens, output_tokens = 0, 0
-    if full_messages:
-        try:
-            input_tokens = estimate_message_tokens(full_messages, model)
-        except Exception:
-            input_tokens = rough_message_tokens(full_messages)
-    
-    if error_response:
-        try:
-            output_tokens = estimate_tokens(error_response, model)
-        except Exception:
-            output_tokens = rough_token_count(error_response)
+    input_tokens, output_tokens = await _estimate_failure_usage(
+        estimate_message_tokens, estimate_tokens, full_messages, error_response, model)
     
     monitoring_service.request_end(
         request_id, success=False, error=str(error_data),
@@ -814,20 +813,10 @@ async def _handle_non_stream_error(request_id, error_data, full_content, reasoni
     logger.error(f"NON-STREAM [ID: {request_id[:8]}]: 处理时发生错误: {error_data}")
 
     error_content = "".join(full_content) if full_content else None
-    input_tokens, output_tokens = 0, 0
 
     # 🔧 字段修复：RequestInfo 已无 request_messages，改用 full_messages
-    if full_messages:
-        try:
-            input_tokens = estimate_message_tokens(full_messages, model)
-        except Exception:
-            input_tokens = rough_message_tokens(full_messages)
-    
-    if error_content:
-        try:
-            output_tokens = estimate_tokens(error_content, model)
-        except Exception:
-            output_tokens = rough_token_count(error_content)
+    input_tokens, output_tokens = await _estimate_failure_usage(
+        estimate_message_tokens, estimate_tokens, full_messages, error_content, model)
     
     monitoring_service.request_end(
         request_id, success=False, error=str(error_data),

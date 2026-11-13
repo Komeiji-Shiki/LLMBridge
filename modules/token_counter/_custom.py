@@ -225,6 +225,14 @@ def delete_custom_tokenizer(name:str)->Dict[str,Any]:
 
 
 def get_custom_tokenizer(name:str):
+    if name in _custom_tokenizers:
+        _update_tokenizer_last_used(f'custom_{name}')
+        return _custom_tokenizers[name],False
+    from ._tokenizers import _load_lock
+    with _load_lock:
+        return _get_custom_tokenizer_locked(name)
+
+def _get_custom_tokenizer_locked(name:str):
     global _custom_tokenizers,_tiktoken_model_cache
     if name in _custom_tokenizers:
         _update_tokenizer_last_used(f'custom_{name}')
