@@ -79,6 +79,16 @@ class GatewayRequestMiddleware:
                 context.mark('body_received')
             return message
 
+        async def save_signatures():
+            # 客户端收到结束事件就可能立刻发下一轮，签名要先于后续字节写进会话库
+            entries = context.artifacts.pop('pending_signatures', None)
+            if entries:
+                try:
+                    await asyncio.shield(asyncio.to_thread(
+                        conversation_store.remember_entries, context.owner_id, context.cache_session(), entries))
+                except Exception:
+                    logger.exception('思考签名保存失败，后续请求无法从会话库找回这些签名')
+
         async def observe(message):
             nonlocal status, streaming, pending, response_object
             if message['type'] == 'http.response.start':
@@ -101,6 +111,7 @@ class GatewayRequestMiddleware:
                                          (b'x-bridge-request-id', context.request_id.encode())])
                 message = {**message, 'headers': response_headers}
             elif message['type'] == 'http.response.body':
+                await save_signatures()
                 body = message.get('body', b'')
                 if len(body) > 65536:
                     write_task = asyncio.create_task(asyncio.to_thread(compressor.write, body))
@@ -140,6 +151,7 @@ class GatewayRequestMiddleware:
             compressor.close()
             wire_archive = archive.getvalue()
             try:
+                await save_signatures()
                 if context.authenticated and context.endpoint and context.model:
                     def persist():
                         record = {'request': context.request_body, 'upstream_request': context.upstream_request, 'response': response_object, 'status': status,
@@ -147,11 +159,8 @@ class GatewayRequestMiddleware:
                                   'wire_gzip_base64': base64.b64encode(wire_archive).decode(),
                                   'timings': context.snapshot()}
                         from core.exchange_archive import save_exchange
-                        # 完整交换只写入归档；会话库仅保存后续请求会读取的状态
+                        # 完整交换只写入归档，不进会话库
                         save_exchange(context, record)
-                        pending = context.artifacts.get('pending_signatures')
-                        if pending:
-                            conversation_store.remember_entries(context.owner_id, context.cache_session(), pending)
                     await asyncio.shield(asyncio.to_thread(persist))
             except Exception:
                 logger.exception('会话缓存保存失败；完整请求日志仍由独立记录器保存')

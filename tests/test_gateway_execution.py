@@ -342,3 +342,36 @@ def test_request_cache_requires_auth_and_excludes_auth_headers(tmp_path, monkeyp
     assert load_exchange(archive)['conversation_id'] == 'cli-session'
     assert sessions == [('conversation', True), ('cli-session', False)]
     assert current_request.get() is None
+
+
+def test_signatures_are_saved_before_the_client_receives_more_bytes(tmp_path, monkeypatch):
+    """客户端收到结束事件就可能立刻发下一轮，签名不能等整个响应和归档写完才落库。"""
+    from fastapi import FastAPI, Request
+    from fastapi.responses import StreamingResponse
+    from fastapi.testclient import TestClient
+    from core.request_middleware import GatewayRequestMiddleware
+    from routes import api_routes
+    store = ConversationStore(tmp_path / 'cache.db')
+    monkeypatch.setattr('core.request_middleware.conversation_store', store)
+    monkeypatch.setattr(api_routes, 'CONFIG', {'api_key': 'secret'})
+    monkeypatch.setattr(api_routes.api_key_manager, 'has_keys', lambda: False)
+    app = FastAPI()
+    app.add_middleware(GatewayRequestMiddleware)
+    seen = []
+
+    @app.post('/v1/chat/completions')
+    async def route(request: Request):
+        api_routes._validate_request_api_key(request, 'demo')
+        context = current_request.get()
+
+        async def body():
+            context.artifacts.setdefault('pending_signatures', []).append((['turn'], {'signature': 'sig'}))
+            yield 'data: [DONE]\n\n'
+            # 走到这里时上一块已经发给客户端
+            seen.append(store.response_prefixes(context.owner_id, context.cache_session(), ['turn']))
+        return StreamingResponse(body(), media_type='text/event-stream')
+
+    response = TestClient(app).post('/v1/chat/completions', json={'model': 'demo'},
+                                    headers={'Authorization': 'Bearer secret'})
+    assert response.status_code == 200
+    assert seen == [{'turn': {'signature': 'sig'}}]
