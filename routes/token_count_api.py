@@ -15,6 +15,7 @@ from converters.responses_openai import (
 )
 from core.constants import RetryDefaults
 from modules.token_counter import estimate_message_tokens, estimate_tokens
+from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.protocol_events import error_status
 from . import api_routes as _chat_api
 from ._direct_api_utils import get_api_key
@@ -72,6 +73,7 @@ def _estimate(messages: List[Dict[str, Any]], tools: Optional[List[Any]], model:
 @router.post("/v1/messages/count_tokens")
 async def anthropic_count_tokens(request: Request):
     body, model, config = await _load_request(request)
+    strip_claude_agent_sdk_prefix(body, config, model, fields=('system',))
     if config.get("api_type") == "anthropic_native":
         value, status = await _forward(body, model, config, "/messages", "/count_tokens")
         if status not in _UNSUPPORTED_STATUS:

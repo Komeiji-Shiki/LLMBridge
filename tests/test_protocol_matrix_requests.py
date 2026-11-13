@@ -11,6 +11,7 @@ from protocol_harness import (
 CELLS = [(client, upstream) for client in CLIENTS for upstream in UPSTREAMS]
 SCHEMA = {'type': 'object', 'properties': {'x': {'type': 'number'}}}
 PDF = 'JVBERi0xLjQK'
+CLAUDE_SDK_IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
 
 
 def cell_id(cell):
@@ -84,6 +85,29 @@ def test_conversation_shape_survives_every_path(gateway, cell):
     system, turns = WIRE_READERS[upstream](body)
     assert system == '开头'
     assert [tuple(item) for item in turns] == expected_loop(client)
+
+
+@pytest.mark.parametrize('upstream', UPSTREAMS)
+def test_claude_sdk_identity_is_removed_from_gemini_system_prompt(gateway, upstream):
+    body = {
+        'model': MODEL, 'max_tokens': 16,
+        'system': [{'type': 'text', 'text': 'x-anthropic-billing-header: cc_version=test'},
+                   {'type': 'text', 'text': f'{CLAUDE_SDK_IDENTITY}\n保留系统提示'}],
+        'messages': [{'role': 'user', 'content': CLAUDE_SDK_IDENTITY}],
+    }
+    _, wire = send(gateway, 'anthropic', upstream, body, {
+        'model_id': 'gemini-3.8-flash', 'strip_claude_agent_sdk_prefix': False,
+    })
+    system, turns = WIRE_READERS[upstream](wire)
+    assert system.endswith('保留系统提示') and CLAUDE_SDK_IDENTITY not in system
+    assert turns == [('user', 'text', CLAUDE_SDK_IDENTITY)]
+
+
+def test_claude_sdk_identity_is_preserved_on_gemini_named_claude_relay(gateway):
+    body = {'model': MODEL, 'max_tokens': 16, 'system': CLAUDE_SDK_IDENTITY,
+            'messages': [{'role': 'user', 'content': '你好'}]}
+    _, wire = send(gateway, 'anthropic', 'anthropic', body, {'model_id': 'gemini-claude-opus-4-6'})
+    assert wire['system'] == CLAUDE_SDK_IDENTITY
 
 
 PRIVATE_KEYS = {'_anthropic_thinking', 'provider_metadata', 'provider_event', '_thought_signature', '_http_status'}

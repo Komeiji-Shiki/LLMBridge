@@ -1,47 +1,64 @@
-"""按渠道设置清理 Gemini 系统提示词中的客户端身份前缀。"""
+"""清理发往 Gemini 的系统提示词中的 Claude Agent SDK 身份句。"""
 import logging
+import re
+
+from services.provider_capabilities import model_family
 
 logger = logging.getLogger(__name__)
 
 _CLAUDE_AGENT_SDK_PREFIX = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+_CLAUDE_AGENT_SDK_LINE = re.compile(
+    r'^[ \t]*' + re.escape(_CLAUDE_AGENT_SDK_PREFIX) + r'(?=\s|$)[ \t]*(?:\r?\n)?', re.MULTILINE)
 
 
-def strip_claude_agent_sdk_prefix(body: dict, config: dict) -> dict:
-    """只删除系统提示开头的固定句子，保留其余文本和内容块属性。"""
-    if not config.get('strip_claude_agent_sdk_prefix'):
-        return body
+def _targets_gemini(config: dict, alias: str) -> bool:
+    if config.get('model_family'):
+        return model_family(config) == 'gemini'
+    target = str(config.get('model_id') or alias).lower()
+    # 有些中转把 Claude 命名为 gemini-claude-*，Gemma 也能使用 Gemini 原生协议。
+    if 'claude-' in target or 'gemma-' in target:
+        return False
+    return config.get('api_type') == 'gemini_native' or model_family(config, target) == 'gemini'
 
-    # generateContent 接受两种字段拼写；Interactions 的同名字段直接使用字符串。
-    for field in ('systemInstruction', 'system_instruction'):
-        instruction = body.get(field)
-        if isinstance(instruction, str):
-            text = instruction
-            parts = None
-        elif isinstance(instruction, dict) and isinstance(instruction.get('parts'), list):
-            parts = instruction['parts']
-            for index, part in enumerate(parts):
-                text = part.get('text') if isinstance(part, dict) else None
-                if not isinstance(text, str) or text.strip():
-                    break
-            else:
-                continue
-        else:
+
+def _strip_instruction(instruction):
+    if isinstance(instruction, str):
+        if _CLAUDE_AGENT_SDK_PREFIX in instruction:
+            return _CLAUDE_AGENT_SDK_LINE.sub('', instruction)
+        return instruction
+    if isinstance(instruction, dict) and isinstance(instruction.get('parts'), list):
+        parts = instruction['parts']
+        cleaned = _strip_instruction(parts)
+        if cleaned != parts:
+            return {**instruction, 'parts': cleaned} if cleaned else None
+    if not isinstance(instruction, list):
+        return instruction
+
+    # Claude Code 的计费头可能在身份句前面。只删除命中的文本，保留其他块及其属性。
+    cleaned = []
+    for block in instruction:
+        value = block.get('text') if isinstance(block, dict) else None
+        text = _strip_instruction(value) if isinstance(value, str) else value
+        if text == value:
+            cleaned.append(block)
+        elif text.strip():
+            cleaned.append({**block, 'text': text})
+    return cleaned
+
+
+def strip_claude_agent_sdk_prefix(body: dict, config: dict, alias: str, *,
+                                  fields=('systemInstruction', 'system_instruction')) -> None:
+    """就地清理系统提示，固定身份句可识别经中转转发的 Claude Code 请求。"""
+    if not any(field in body for field in fields) or not _targets_gemini(config, alias):
+        return
+
+    for field in fields:
+        original = body.get(field)
+        cleaned = _strip_instruction(original)
+        if cleaned == original:
             continue
-
-        if not isinstance(text, str) or not text.lstrip().startswith(_CLAUDE_AGENT_SDK_PREFIX):
-            continue
-        remaining = text.lstrip()[len(_CLAUDE_AGENT_SDK_PREFIX):].lstrip()
-        if parts is None:
-            if remaining:
-                body[field] = remaining
-            else:
-                del body[field]
+        if cleaned and (not isinstance(cleaned, str) or cleaned.strip()):
+            body[field] = cleaned
         else:
-            # 句子单独占一块时删除该块，避免发送空 text；其余块维持原顺序。
-            updated = ([{**parts[index], 'text': remaining}] if remaining else []) + parts[index + 1:]
-            if updated:
-                body[field] = {**instruction, 'parts': updated}
-            else:
-                del body[field]
-        logger.info('[SYSTEM_PROMPT] 已移除 Gemini 系统提示开头的 Claude Agent SDK 身份句')
-    return body
+            del body[field]
+        logger.info('[SYSTEM_PROMPT] 已移除 Gemini 系统提示中的 Claude Agent SDK 身份句')

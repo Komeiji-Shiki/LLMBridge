@@ -68,7 +68,7 @@ def retry_before_output(method=None, *, output_bytes=False):
         body = bound.arguments.get('request_body') or {}
         if 'request_body' in bound.arguments:
             body = apply_native_tool_defaults(body, context.endpoint)
-            strip_claude_agent_sdk_prefix(body, context.endpoint)
+            strip_claude_agent_sdk_prefix(body, context.endpoint, context.model)
             bound.arguments['request_body'] = body
         stream = bound.arguments.get('stream_override')
         if stream is None:

@@ -90,7 +90,13 @@ async def read_channels_file() -> dict:
         channels = await read_json_file(CHANNELS_FILE)
     except FileNotFoundError:
         return {}
-    return channels if isinstance(channels, dict) else {}
+    if not isinstance(channels, dict):
+        return {}
+    for channel in channels.values():
+        defaults = channel.get('defaults') if isinstance(channel, dict) else None
+        if isinstance(defaults, dict):
+            defaults.pop('strip_claude_agent_sdk_prefix', None)
+    return channels
 
 
 async def write_json_file(path: str, data) -> None:

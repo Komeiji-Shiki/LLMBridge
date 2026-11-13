@@ -31,13 +31,11 @@ _DIRECT_TYPES = ('direct_api', 'responses_native', 'anthropic_native', 'gemini_n
 
 # 渠道可以统一给默认值的模型设置：模型自己写了用自己的，没写就跟渠道走，写成 null 表示明确不设置
 DEFAULT_FIELDS = ('passthrough', 'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream',
-                  'first_chunk_timeout_seconds', 'cached_tokens_mode', 'auto_retry', 'image_compression',
-                  'strip_claude_agent_sdk_prefix')
-_BOOLEAN_DEFAULTS = ('passthrough', 'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream',
-                     'strip_claude_agent_sdk_prefix')
+                  'first_chunk_timeout_seconds', 'cached_tokens_mode', 'auto_retry', 'image_compression')
+_BOOLEAN_DEFAULTS = ('passthrough', 'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream')
 # 这些项不写时请求链路实际采用的取值，用来判断模型的值和渠道默认值是不是一回事
 _BUILTIN_VALUES = {'passthrough': False, 'convert_system_to_user': False, 'enable_prefix': False, 'enable_partial': False,
-                   'cached_tokens_mode': 'reverse', 'strip_claude_agent_sdk_prefix': False}
+                   'cached_tokens_mode': 'reverse'}
 
 
 def endpoint_keys(endpoint: dict) -> List[str]:
@@ -81,6 +79,9 @@ def _normalize_defaults(data) -> dict:
         raise ValueError('defaults 必须是 JSON 对象')
     defaults = {}
     for field, value in data.items():
+        # Gemini 的身份句清理已自动生效，旧版面板保存渠道时丢弃这个字段。
+        if field == 'strip_claude_agent_sdk_prefix':
+            continue
         if field not in DEFAULT_FIELDS:
             raise ValueError(f'渠道不能统一设置 {field}')
         if value is None:

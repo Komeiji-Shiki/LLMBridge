@@ -844,7 +844,7 @@ class DirectAPIService:
             if context:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'gemini')
                 omit_configured_fields(request_body, context.endpoint)
-                strip_claude_agent_sdk_prefix(request_body, context.endpoint)
+                strip_claude_agent_sdk_prefix(request_body, context.endpoint, model)
                 # 客户端回传的签名优先（已带签名的轮次不会被覆盖），缺失时按服务端历史补回
                 history = GeminiThoughtHistory(context, context.endpoint, request_body)
                 assembler = GeminiTurnAssembler()
@@ -1056,7 +1056,7 @@ class DirectAPIService:
             if context:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'interactions')
                 omit_configured_fields(request_body, context.endpoint)
-                strip_claude_agent_sdk_prefix(request_body, context.endpoint)
+                strip_claude_agent_sdk_prefix(request_body, context.endpoint, model)
                 context.upstream_request = await asyncio.to_thread(upstream_snapshot, request_body)
             upstream_body = request_body
             headers = {

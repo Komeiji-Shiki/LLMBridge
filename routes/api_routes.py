@@ -34,6 +34,7 @@ from ._direct_api_anthropic import apply_auto_cache_control
 from converters.cache_warnings import anthropic_cache_warnings
 from core.constants import resolve_heartbeat_interval
 from services.error_translation import translate_openai_error
+from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.model_capabilities import sanitize_anthropic_body
 from utils.upstream_fields import omission_warnings, omit_configured_fields
 from ._direct_api_utils import (
@@ -505,6 +506,9 @@ async def anthropic_messages(request: Request):
 
     # 先解析端点配置，支持 Claude /messages 原样透传
     endpoint_config = await _select_endpoint_config_for_model(model_name)
+    # 在系统提示转换或改写角色之前清理，兼容 Gemini 的各类上游协议。
+    strip_claude_agent_sdk_prefix(
+        anthropic_req, endpoint_config if isinstance(endpoint_config, dict) else {}, model_name, fields=('system',))
 
     _endpoint_api_type = endpoint_config.get("api_type") if isinstance(endpoint_config, dict) else None
     is_direct_api = _endpoint_api_type in _DIRECT_API_TYPES

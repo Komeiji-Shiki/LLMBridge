@@ -8,7 +8,6 @@ function toggleCollapsible(headerElement) {
 const MODEL_DEFAULT_FILLERS = {
     passthrough: value => { document.getElementById('passthrough').checked = value !== false; },
     convert_system_to_user: value => { document.getElementById('convert-system-to-user').checked = value || false; },
-    strip_claude_agent_sdk_prefix: value => { document.getElementById('strip-claude-agent-sdk-prefix').checked = value || false; },
     enable_prefix: value => { document.getElementById('enable-prefix').checked = value || false; },
     enable_partial: value => { document.getElementById('enable-partial').checked = value || false; },
     force_stream: value => { document.getElementById('force-stream').value = value !== undefined ? String(value) : ''; },
@@ -50,7 +49,6 @@ function showAddModelModal() {
     document.getElementById('passthrough').checked = true;
     document.getElementById('force-stream').value = '';
     document.getElementById('convert-system-to-user').checked = false;
-    document.getElementById('strip-claude-agent-sdk-prefix').checked = false;
     document.getElementById('enable-prefix').checked = false;
     document.getElementById('enable-partial').checked = false;
     document.getElementById('prefill-content').value = '';
@@ -356,7 +354,6 @@ async function saveModel() {
             native_tools: document.getElementById('model-native-tools').value.split(',').map(value => value.trim()).filter(Boolean),
             native_tool_options: JSON.parse(document.getElementById('model-native-tool-options').value.trim() || '{}'),
             convert_system_to_user: document.getElementById('convert-system-to-user').checked,
-            strip_claude_agent_sdk_prefix: document.getElementById('strip-claude-agent-sdk-prefix').checked,
             enable_prefix: document.getElementById('enable-prefix').checked,
             enable_partial: document.getElementById('enable-partial').checked,
         };

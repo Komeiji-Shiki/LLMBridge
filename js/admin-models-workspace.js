@@ -28,7 +28,7 @@ function mergeModelEditorConfig(config) {
         'api_type', 'model_id', 'display_name', 'passthrough', 'sanitize_recursive_schemas',
         'provider', 'model_family', 'first_chunk_timeout_seconds', 'native_tools', 'native_tool_options',
         'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream',
-        'strip_claude_agent_sdk_prefix',
+        'strip_claude_agent_sdk_prefix', // 保存旧模型时清除已废弃的开关。
         'enable_thinking', 'reasoning_effort', 'thinking_budget', 'thinking_effort', 'thinking_display',
         'responses_store', 'responses_reasoning_summary', 'auto_cache', 'tool_name_rewrite', 'verbosity',
         'oai_thinking_type', 'oai_thinking_effort', 'prefill_content', 'prefill_reasoning_content', 'endpoint_path', 'upstream_protocol',
