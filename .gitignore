@@ -70,6 +70,7 @@ secrets.*
 # 运行时状态文件（含 session token / key 信息，不应提交）
 api_key_sticky_state.json
 web_session_state.json
+model_usage.json
 *.secret.*
 credentials.*
 *credentials*.json
