@@ -667,24 +667,33 @@ function renderEndpointCacheTable(endpointStats) {
 }
 
 function renderTokenStatsTable(modelStats) {
-    const container = document.getElementById('token-stats-table');
+    const container = document.getElementById('token-stats-body');
     if (!container) return;
-    
+
     modelStats = Array.isArray(modelStats) ? modelStats : [];
     latestModelStatsCache = modelStats;
-    
+    document.getElementById('token-stats-actions').hidden = modelStats.length === 0;
+
     if (modelStats.length === 0) {
         container.innerHTML = '<div class="empty-state"><div class="empty-state-icon"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#activity"/></svg></div><p>暂无Token统计数据</p></div>';
         return;
     }
-    
+
     // 记录当前勾选状态，重新渲染后恢复（排序/切换货币不丢失选中）
     const checkedModels = new Set(
         Array.from(container.querySelectorAll('.model-stat-checkbox:checked')).map(cb => cb.dataset.model)
     );
-    
+
+    // 搜索按模型显示名和 ID 过滤，空格分隔的多个词需全部命中。
+    // 被筛掉的行不再保留勾选，避免合并或删除时动到看不见的模型
+    const words = document.getElementById('token-stats-query').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const matchedStats = modelStats.filter(stat => {
+        const text = `${stat.display_name || ''} ${stat.model}`.toLowerCase();
+        return words.every(word => text.includes(word));
+    });
+
     // 按当前排序状态生成排序副本（不修改原数组）
-    const sortedStats = [...modelStats];
+    const sortedStats = [...matchedStats];
     if (tokenStatsSortKey) {
         const dir = tokenStatsSortDir === 'asc' ? 1 : -1;
         sortedStats.sort((a, b) => {
@@ -705,18 +714,6 @@ function renderTokenStatsTable(modelStats) {
     }).join('');
     
     container.innerHTML = `
-        <div class="stat-actions">
-            <button class="btn btn-sm" onclick="toggleAllModelStats()">
-                <span id="toggle-all-text">全选</span>
-            </button>
-            <button class="btn btn-primary btn-sm" onclick="mergeSelectedModelStats()">
-                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#link"/></svg> 合并选中
-            </button>
-            <button class="btn btn-danger btn-sm" onclick="deleteSelectedModelStats()">
-                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg> 删除选中
-            </button>
-            <span id="selected-count-display" style="color: var(--text-dim); margin-left: auto;">已选择: 0</span>
-        </div>
         <div class="table-scroll" tabindex="0" aria-label="模型用量明细，可横向滚动"><table class="table">
             <thead>
                 <tr>
@@ -728,6 +725,7 @@ function renderTokenStatsTable(modelStats) {
                 </tr>
             </thead>
             <tbody>
+                ${sortedStats.length === 0 ? `<tr><td colspan="${TOKEN_STATS_COLUMNS.length + 2}"><div class="empty-state">没有匹配的模型。换个关键词，或按 Esc 清空搜索。</div></td></tr>` : ''}
                 ${sortedStats.map(stat => {
                     const external = stat.source === 'codex' || stat.source === 'claude_code';
                     const sourceLabel = stat.source === 'claude_code' ? 'Claude Code' : 'Codex';
@@ -821,6 +819,8 @@ function renderTokenStatsTable(modelStats) {
     }
     updateSelectedCount();
 }
+// 按 / 跳到模型用量搜索，Esc 清空
+bindSearchShortcut(document.getElementById('token-stats-query'), () => renderTokenStatsTable(latestModelStatsCache));
 // ==================== 成本趋势图 ====================
 let costTrendChart = null;
 let costCurrencyDisplay = 'USD'; // 默认显示 USD
