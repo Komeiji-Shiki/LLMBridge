@@ -19,6 +19,8 @@ import secrets
 from typing import Callable, List, Optional
 from urllib.parse import urlsplit
 
+from core.usage_quota import normalize_quota
+
 logger = logging.getLogger(__name__)
 
 CHANNELS_FILE = 'model_channels.json'
@@ -127,6 +129,8 @@ def normalize_channel(data) -> dict:
         raise ValueError('api_key_auth_mode 必须是字符串')
 
     defaults = _normalize_defaults(data.get('defaults'))
+    # 渠道额度是渠道下所有模型共用的一份，不展开到模型上（见 core.model_quota）
+    quota = normalize_quota(data.get('quota'))
 
     channel = {'name': name.strip(), 'api_base_url': url.strip(), 'api_keys': keys}
     if auth_mode != 'auto':
@@ -138,6 +142,8 @@ def normalize_channel(data) -> dict:
             channel['api_key_cooldown_seconds'] = int(cooldown)
     if defaults:
         channel['defaults'] = defaults
+    if quota:
+        channel['quota'] = quota
     return channel
 
 

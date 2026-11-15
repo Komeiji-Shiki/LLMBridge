@@ -139,18 +139,20 @@ async def _pack_old_logs() -> None:
 
 
 async def api_key_stats_saver(interval_seconds: int = 60):
-    """周期性把 API Key 使用统计落盘。
+    """周期性把 API Key 使用统计、模型和渠道的额度用量落盘。
 
     validate_request 属于热路径，只更新内存统计不写盘；
     旧版只在优雅关闭时 save_now()，强杀进程会丢失全部统计。
     用量额度依赖这些计数，间隔取一分钟，强杀最多少记一分钟用量。
     """
     from core.api_key_manager import api_key_manager
+    from core.model_quota import model_quota
     logger.info("[APIKEY_SAVER] API Key 统计落盘任务已启动")
     while True:
         await asyncio.sleep(interval_seconds)
         try:
             await asyncio.to_thread(api_key_manager.save_if_dirty)
+            await asyncio.to_thread(model_quota.save_if_dirty)
         except Exception as e:
             logger.error(f"[APIKEY_SAVER] 落盘失败: {e}", exc_info=True)
 

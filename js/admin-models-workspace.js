@@ -36,7 +36,7 @@ function mergeModelEditorConfig(config) {
         'thinking_separator', 'custom_params', 'extra_body_params', 'pricing', 'max_temperature',
         'max_tokens', 'cached_tokens_mode', 'token_stats_mode', 'completion_tokens_mode',
         'image_compression', 'system_prompt_injection', 'auto_retry', 'session_id', 'mode',
-        'type', 'battle_target', 'archived'
+        'type', 'battle_target', 'archived', 'quota'
     ];
     for (const field of managedFields) delete primary[field];
     Object.assign(primary, config);
@@ -168,7 +168,7 @@ function modelFormSnapshot() {
     // Transient API model picker / search controls are not part of the saved configuration.
     return JSON.stringify(Array.from(document.querySelectorAll('#model-modal input, #model-modal select, #model-modal textarea'))
         .filter(el => !['model-search', 'model-select'].includes(el.id))
-        .map(el => [el.id, el.type === 'checkbox' ? el.checked : el.value]));
+        .map(el => [el.id || el.name, el.type === 'checkbox' || el.type === 'radio' ? el.checked : el.value]));
 }
 
 function resetModelEditorForm() {
@@ -180,6 +180,8 @@ function resetModelEditorForm() {
         } else el.value = el.defaultValue;
     });
     for (const id of ['model-select-container', 'key-test-results']) document.getElementById(id).style.display = 'none';
+    fillQuotaForm('model', null);
+    showQuotaUsage('model-quota-usage', '', null);
     // 渠道可能刚改过，选项每次重建；先回到不用渠道并解锁，填表时再按模型的配置选上
     refreshModelChannelOptions();
     applyModelChannel();

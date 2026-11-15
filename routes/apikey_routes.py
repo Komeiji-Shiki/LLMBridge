@@ -11,7 +11,8 @@ import math
 
 from fastapi import APIRouter, HTTPException, Request
 
-from core.api_key_manager import api_key_manager, KeyPersistenceError, QUOTA_PERIODS, COST_CURRENCIES
+from core.api_key_manager import api_key_manager, KeyPersistenceError
+from core.usage_quota import normalize_quota
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["api-keys"])
@@ -49,21 +50,20 @@ def _validate_key_payload(data: dict, *, require_name: bool = True) -> dict:
             raise HTTPException(status_code=400, detail="allowed_models 必须是一个列表")
         cleaned["allowed_models"] = allowed_models
 
-    for field, cast in (("rpm_limit", int), ("token_limit", int), ("request_limit", int), ("cost_limit", float)):
-        if field in data:
-            try:
-                value = cast(data[field])
-                if value < 0 or not math.isfinite(value):
-                    raise ValueError()
-            except (ValueError, TypeError):
-                raise HTTPException(status_code=400, detail=f"{field} 必须是非负数")
-            cleaned[field] = value
+    if "rpm_limit" in data:
+        try:
+            rpm_limit = int(data["rpm_limit"])
+            if rpm_limit < 0:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="rpm_limit 必须是非负整数")
+        cleaned["rpm_limit"] = rpm_limit
 
-    for field, choices in (("quota_period", QUOTA_PERIODS), ("cost_currency", COST_CURRENCIES)):
-        if field in data:
-            if data[field] not in choices:
-                raise HTTPException(status_code=400, detail=f"{field} 只能是 {', '.join(choices)}")
-            cleaned[field] = data[field]
+    if "quota" in data:
+        try:
+            cleaned["quota"] = normalize_quota(data["quota"])
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     if "expires_at" in data:
         expires_at = data["expires_at"]

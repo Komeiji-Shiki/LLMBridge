@@ -62,6 +62,9 @@ class RequestContext:
     outcome: dict = field(default_factory=dict)
     responses_history: object | None = None
     gemini_signature_recovery: object | None = None
+    # 模型和渠道额度：本请求已检查过，以及占用的并发名额（见 core.model_quota）
+    quota_checked: bool = False
+    quota_holds: list = field(default_factory=list)
 
     def cache_session(self):
         # Never use an artifact to choose a route. Each selected upstream has

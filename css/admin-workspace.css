@@ -219,28 +219,32 @@ body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
 .channel-default-row label { display: grid; gap: 4px; color: var(--text-dim); font-size: .8rem; }
 .channel-default-check { display: flex; align-items: center; gap: 8px; font-size: .85rem; }
 @media (max-width: 760px) { .channel-defaults-grid { grid-template-columns: 1fr; } }
-/* 访客 Key：用量额度 */
+/* 用量额度：访客 Key、模型、渠道共用（js/admin-quota.js） */
 .badge-warning { background: rgb(var(--warn-rgb) / .2); color: var(--warn); border-color: rgb(var(--warn-rgb) / .3); }
-.apikey-quota { border: 0; padding: 0; margin-inline: 0; min-inline-size: 0; }
-.apikey-quota legend { padding: 0; }
-.apikey-period { display: inline-flex; margin-bottom: 12px; }
-.apikey-period label { position: relative; cursor: pointer; }
-.apikey-period input { position: absolute; opacity: 0; pointer-events: none; }
-.apikey-period span { display: block; padding: 6px 16px; font-size: .85rem; color: var(--text-dim); border: 1px solid var(--line-strong); margin-left: -1px; }
-.apikey-period input:checked + span { position: relative; color: var(--accent); background: var(--accent-faint); border-color: var(--accent); }
-.apikey-period input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
-.apikey-quota-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.apikey-quota-grid .form-label { font-weight: 400; color: var(--text-dim); font-size: .8rem; margin-bottom: 4px; }
-.apikey-cost-input { display: flex; }
-.apikey-cost-input .form-input { min-width: 0; }
-.apikey-cost-input .form-select { width: auto; margin-left: -1px; }
-.apikey-quota-cell { display: grid; gap: 6px; min-width: 180px; font-size: .78rem; }
-.apikey-quota-head { color: var(--text-dim); font-size: .7rem; }
-.apikey-quota-row { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
-.apikey-quota-row > span:nth-child(2) { text-align: right; font-variant-numeric: tabular-nums; }
-.apikey-quota-row meter { grid-column: 1 / -1; inline-size: 100%; block-size: 4px; }
-.apikey-quota-row meter::-webkit-meter-bar { background: var(--line-strong); border: 0; border-radius: 0; block-size: 4px; }
-.apikey-quota-row meter::-webkit-meter-optimum-value { background: var(--ok); }
-.apikey-quota-row meter::-webkit-meter-suboptimum-value { background: var(--warn); }
-.apikey-quota-row meter::-webkit-meter-even-less-good-value { background: var(--danger); }
-@media (max-width: 760px) { .apikey-quota-grid { grid-template-columns: 1fr; } }
+.quota-form { border: 0; padding: 0; margin: 0; min-inline-size: 0; }
+.quota-form legend { padding: 0; }
+.quota-period { display: inline-flex; margin-bottom: 12px; }
+.quota-period label { position: relative; cursor: pointer; }
+.quota-period input { position: absolute; opacity: 0; pointer-events: none; }
+.quota-period span { display: block; padding: 6px 16px; font-size: .85rem; color: var(--text-dim); border: 1px solid var(--line-strong); margin-left: -1px; }
+.quota-period input:checked + span { position: relative; color: var(--accent); background: var(--accent-faint); border-color: var(--accent); }
+.quota-period input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.quota-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.quota-grid .form-label { font-weight: 400; color: var(--text-dim); font-size: .8rem; margin-bottom: 4px; }
+.quota-cost-input { display: flex; }
+.quota-cost-input .form-input { min-width: 0; }
+.quota-cost-input .form-select { width: auto; margin-left: -1px; }
+.quota-usage { display: grid; gap: 6px; min-width: 180px; font-size: .78rem; }
+.quota-usage-head { color: var(--text-dim); font-size: .7rem; }
+.quota-usage-row { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
+.quota-usage-row > span:nth-child(2) { text-align: right; font-variant-numeric: tabular-nums; }
+.quota-usage-row meter { grid-column: 1 / -1; inline-size: 100%; block-size: 4px; }
+.quota-usage-row meter::-webkit-meter-bar { background: var(--line-strong); border: 0; border-radius: 0; block-size: 4px; }
+.quota-usage-row meter::-webkit-meter-optimum-value { background: var(--ok); }
+.quota-usage-row meter::-webkit-meter-suboptimum-value { background: var(--warn); }
+.quota-usage-row meter::-webkit-meter-even-less-good-value { background: var(--danger); }
+/* 编辑窗里的本期用量：用量条和重置按钮并排，放在表单上方 */
+#model-quota-usage:not(:empty), #channel-quota-usage:not(:empty) { display: flex; align-items: flex-start; gap: 16px; margin: 12px 0 16px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--line-weak); }
+#model-quota-usage .quota-usage, #channel-quota-usage .quota-usage { flex: 1; max-width: 360px; }
+.model-identity .model-flags .badge-warning, .model-identity .model-flags .badge-danger { white-space: nowrap; }
+@media (max-width: 760px) { .quota-grid { grid-template-columns: 1fr; } }

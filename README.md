@@ -436,11 +436,7 @@ Vertex AI 的项目接口用 OAuth 访问令牌鉴权。把 `api_key_auth_mode` 
     "rpm_limit": 35,
     "enabled": true,
     "description": "",
-    "quota_period": "month",
-    "cost_limit": 5,
-    "cost_currency": "USD",
-    "token_limit": 0,
-    "request_limit": 0,
+    "quota": {"period": "month", "cost_limit": 5, "cost_currency": "USD", "token_limit": 0, "request_limit": 0},
     "expires_at": 1796083200,
     "created_at": 1772218824.7140331,
     "last_used_at": 1774750312.9903347,
@@ -459,11 +455,7 @@ Vertex AI 的项目接口用 OAuth 访问令牌鉴权。把 `api_key_auth_mode` 
 | `rpm_limit` | int | 每分钟最大请求数限制 |
 | `enabled` | bool | 是否启用该访客 |
 | `description` | string | 备注描述 |
-| `quota_period` | string | 额度统计周期：`total`（累计，手动重置）、`day`、`week`（周一起）、`month`，按服务器本地时间切分 |
-| `cost_limit` | number | 本周期费用上限，`0` 不限制 |
-| `cost_currency` | string | 费用上限的货币，`USD` 或 `CNY`；另一种货币的用量按 `exchange_rate.USD_TO_CNY` 折算 |
-| `token_limit` | int | 本周期 Token 上限（输入 + 输出），`0` 不限制 |
-| `request_limit` | int | 本周期请求次数上限，`0` 不限制 |
+| `quota` | object \| null | 用量额度，格式见下方“额度格式”；`null` 不限额 |
 | `expires_at` | number \| null | 过期时间（Unix 秒），`null` 永不过期 |
 | `total_requests` | int | 累计请求次数（自动统计） |
 | `usage` | object | 当前周期用量（自动统计，跨入新周期时清零） |
@@ -476,9 +468,32 @@ Vertex AI 的项目接口用 OAuth 访问令牌鉴权。把 `api_key_auth_mode` 
 4. 检查 RPM 是否超限（429）
 5. 通过后转发到上游，请求结束时把 Token 和费用计入本周期用量
 
-额度在请求进入时检查，进行中的请求会照常算完，因此最终用量可能略超上限。费用按模型定价计算；没到上游或被上游拒绝的失败请求不计 Token，中途失败但已产生费用的请求照常计入。用量每分钟落盘一次。
+额度在请求进入时检查，进行中的请求会照常算完，因此最终用量可能略超上限。费用按模型定价计算；失败的请求只有上游已经开始输出（中途断开）才计入 Token 和费用，没到上游或被上游拒绝的只算一次请求。用量每分钟落盘一次。
 
 > 管理面板 → API Keys Tab 可直接增删改查访客 Key、查看本周期用量，并一键重置用量，无需手动编辑 JSON。
+
+### 额度格式
+访客 Key、模型和渠道的额度都写成同一个对象：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `period` | string | 统计周期：`total`（累计，手动重置）、`day`、`week`（周一起）、`month`，按服务器本地时间切分 |
+| `cost_limit` | number | 本周期费用上限，`0` 不限制 |
+| `cost_currency` | string | 费用上限的货币，`USD` 或 `CNY`；另一种货币的用量按 `exchange_rate.USD_TO_CNY` 折算 |
+| `token_limit` | int | 本周期 Token 上限（输入 + 输出），`0` 不限制 |
+| `request_limit` | int | 本周期请求次数上限，`0` 不限制 |
+
+切换统计周期会从新周期的起点重新计数；累计额度没有上限时等于不设。
+
+## 💰 模型与渠道额度
+
+在模型设置的“计费与统计”页或渠道设置里填写额度，分别写进 `model_endpoint_map.json` 端点的 `quota` 和 `model_channels.json` 渠道的 `quota`，格式同上：
+
+- **模型额度**按模型别名统计；**渠道额度**是渠道下所有模型共用的一份总预算。一个请求要同时满足两层。
+- 所有调用方（包括管理员）的用量加在一起算。任一层用完，请求在发往上游之前就返回 **402**，只能在管理面板调高上限或点“重置用量”恢复。
+- 费用和 Token 要等请求结束才知道。用到上限的 90% 以后，同一份额度同一时间只放行一个请求，其余返回 **429** 让客户端稍后重试，避免并发请求把用量冲出上限太多。请求次数在放行时计入，不会超出。
+- 用量存在 `model_usage.json`，与访客 Key 一起每分钟落盘。新设或取消额度、删除模型或渠道时旧用量清零；模型改名时用量跟着走。
+- 模型列表和渠道列表会标出“额度 xx%”或“额度用尽”。Token 计数接口和上游保存对象的查询、删除不受额度限制。
 
 ## 🧮 Token 计算器
 

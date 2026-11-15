@@ -17,6 +17,7 @@ from core.model_channels import (
     CHANNELS_FILE, adopt_suggestions, assign_channel, channel_usage,
     new_channel_id, normalize_channel, remove_channel, settle_channel_defaults, suggest_channels,
 )
+from core.model_quota import model_quota
 from routes import admin_routes
 from routes.admin_routes import MODEL_ENDPOINT_MAP_FILE, _read_admin_json
 
@@ -96,6 +97,9 @@ async def save_channel(request: Request):
         if conflicts and override is None:
             return {"status": "conflict", "conflicts": conflicts}
         channel_id = channel_id or new_channel_id(channels)
+        # 新设或取消渠道额度时旧用量作废，重新设置的额度从零开始
+        if ("quota" in channels.get(channel_id, {})) != ("quota" in channel):
+            model_quota.forget("channel:" + channel_id)
         channels[channel_id] = channel
         # 有默认值被取消时模型要先拿到抄回去的值，其余情况先写渠道：中途被热重载读到，模型的效果也不变
         channels_first = all(field in new_defaults for field in old_defaults)
@@ -117,6 +121,7 @@ async def delete_channel(request: Request):
         name = channels[channel_id].get("name", channel_id)
         new_map, new_channels, detached = remove_channel(model_map, channels, channel_id)
         await _write_both(new_map if detached else None, new_channels, channels_first=False)
+        model_quota.forget("channel:" + channel_id)
 
     logger.info(f"✅ 渠道已删除: {name}，{len(detached)} 个模型改为自带地址和 Key")
     return {"status": "success", "detached": detached, "message": f"渠道 {name} 已删除"}

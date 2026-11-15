@@ -43,6 +43,7 @@ from core.config_loader import (  # noqa: E402
     load_config, load_model_map, load_model_endpoint_map
 )
 from core.api_key_manager import api_key_manager  # noqa: E402
+from core.model_quota import model_quota  # noqa: E402
 from core.db_stats import stats_db  # noqa: E402
 from core.app_state import get_app_state, AppState  # noqa: E402
 from core.constants import CacheDefaults, PROJECT_ROOT, ServerDefaults  # noqa: E402
@@ -221,6 +222,7 @@ async def lifespan(app: FastAPI):
         await cancel_background_tasks()
         try:
             await asyncio.to_thread(api_key_manager.save_now)
+            await asyncio.to_thread(model_quota.save_if_dirty)
         finally:
             if server_state.direct_api_service:
                 await server_state.direct_api_service.close()
@@ -272,6 +274,8 @@ from routes.gateway_workspace import router as gateway_workspace_router
 app.include_router(gateway_workspace_router)
 from routes.admin_channels import router as admin_channels_router
 app.include_router(admin_channels_router)     # /api/admin/channels*
+from routes.admin_quotas import router as admin_quotas_router
+app.include_router(admin_quotas_router)       # /api/admin/quotas*
 from routes.gateway_mcp import router as gateway_mcp_router
 app.include_router(gateway_mcp_router)
 

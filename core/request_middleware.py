@@ -10,6 +10,7 @@ import re
 from starlette.responses import JSONResponse
 from core.config_loader import get_setting
 from core.conversion_report import WARNINGS_HEADER, warnings_header_value
+from core.model_quota import model_quota
 from core.request_context import CLIENT_TRACE_HEADERS, RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request
 from core.conversation_store import conversation_store
 from services.protocol_events import payloads, is_business_event
@@ -166,4 +167,5 @@ class GatewayRequestMiddleware:
                 logger.exception('会话缓存保存失败；完整请求日志仍由独立记录器保存')
             finally:
                 archive.close()
+                model_quota.release(context)
                 current_request.reset(token)

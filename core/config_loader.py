@@ -24,6 +24,8 @@ CONFIG_LOCK = Lock()  # 保护配置重载的线程锁
 CONFIG = {}
 MODEL_NAME_TO_ID_MAP = {}
 MODEL_ENDPOINT_MAP = {}
+# 设了额度的渠道：{渠道 id: {"name": 名称, "quota": 额度配置}}，随端点表一起重新加载
+CHANNEL_QUOTAS = {}
 DEFAULT_MODEL_ID = None
 
 # 🔧 鉴权 fail-closed：仅在首次成功解析 config.jsonc 后置 True。
@@ -251,7 +253,12 @@ def load_model_endpoint_map(force_reload=False):
             if not isinstance(new_map, dict):
                 raise ValueError("配置根节点必须是 JSON 对象")
             # 无空窗替换，保持字典对象不变（见 _replace_dict_no_gap）
-            _replace_dict_no_gap(MODEL_ENDPOINT_MAP, expand_model_map(new_map, _read_channels()))
+            channels = _read_channels()
+            _replace_dict_no_gap(MODEL_ENDPOINT_MAP, expand_model_map(new_map, channels))
+            _replace_dict_no_gap(CHANNEL_QUOTAS, {
+                channel_id: {'name': channel.get('name') or channel_id, 'quota': channel['quota']}
+                for channel_id, channel in channels.items()
+                if isinstance(channel, dict) and isinstance(channel.get('quota'), dict)})
             CONFIG_FILE_MTIMES[config_file] = current_mtime
             CONFIG_FILE_MTIMES[CHANNELS_FILE] = channels_mtime
             logger.info(f"✅ 已{'重新' if not force_reload else ''}加载 'model_endpoint_map.json' ({len(MODEL_ENDPOINT_MAP)} 个模型端点)")

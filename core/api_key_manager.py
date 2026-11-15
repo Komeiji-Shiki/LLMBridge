@@ -15,10 +15,11 @@ import logging
 import os
 import secrets
 import time
-from datetime import datetime, timedelta
 from threading import Lock, RLock
 from functools import wraps
 from typing import Dict, List, NamedTuple, Optional, Any, Tuple
+
+from core import usage_quota
 
 logger = logging.getLogger(__name__)
 
@@ -26,23 +27,15 @@ logger = logging.getLogger(__name__)
 API_KEYS_FILE = "api_keys.json"
 
 # 管理面板可编辑的配置项及默认值；创建、更新和保存失败回滚都以这张表为准
+# quota 的格式见 core.usage_quota，None 表示不限额
 KEY_CONFIG_DEFAULTS: Dict[str, Any] = {
     "allowed_models": [],
     "rpm_limit": 0,
     "enabled": True,
     "description": "",
-    "quota_period": "total",
-    "cost_limit": 0,
-    "cost_currency": "USD",
-    "token_limit": 0,
-    "request_limit": 0,
+    "quota": None,
     "expires_at": None,
 }
-QUOTA_PERIODS = ("total", "day", "week", "month")
-COST_CURRENCIES = ("USD", "CNY")
-_LIMIT_FIELDS = {"cost": "cost_limit", "tokens": "token_limit", "requests": "request_limit"}
-_PERIOD_LABELS = {"total": "累计", "day": "今日", "week": "本周", "month": "本月"}
-_QUOTA_LABELS = {"cost": "费用", "tokens": "Token", "requests": "请求次数"}
 
 
 class KeyPersistenceError(RuntimeError):
@@ -55,43 +48,6 @@ class KeyCheck(NamedTuple):
     key_id: Optional[str]
     error: Optional[str] = None
     reason: Optional[str] = None  # invalid / disabled / expired / model / quota / rate
-
-
-def _period_bounds(period: str, now: float) -> Tuple[Optional[float], Optional[float]]:
-    """按服务器本地时间切分自然周期，返回 (起点, 下次重置)；累计周期没有自动边界。"""
-    if period not in ("day", "week", "month"):
-        return None, None
-    today = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
-    if period == "day":
-        start, end = today, today + timedelta(days=1)
-    elif period == "week":
-        start = today - timedelta(days=today.weekday())
-        end = start + timedelta(days=7)
-    else:
-        start = today.replace(day=1)
-        end = (start + timedelta(days=32)).replace(day=1)
-    return start.timestamp(), end.timestamp()
-
-
-def _cost_in(currency: str, costs: Dict[str, float]) -> float:
-    """把按货币分开累计的费用折算成额度货币，汇率取当前配置。"""
-    other = "CNY" if currency == "USD" else "USD"
-    total = costs.get(currency, 0.0)
-    if costs.get(other):
-        from core.db_stats import get_exchange_rates
-        usd_to_cny, cny_to_usd = get_exchange_rates()
-        total += costs[other] * (usd_to_cny if other == "USD" else cny_to_usd)
-    return total
-
-
-def _format_quota(kind: str, value: float, currency: str) -> str:
-    if kind == "cost":
-        return ("¥" if currency == "CNY" else "$") + f"{value:.4f}".rstrip("0").rstrip(".")
-    return f"{int(value):,}"
-
-
-def _format_time(timestamp: float) -> str:
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
 
 
 def _expired(key_data: Dict[str, Any], now: float) -> bool:
@@ -426,45 +382,22 @@ class APIKeyManager:
             "total_requests": key_data.get("total_requests", 0),
             "current_rpm": self._rate_limiter.get_usage(key_id),
             "expired": _expired(key_data, now),
-            "quota": self._quota_unsafe(key_data, now),
+            # quota 是额度设置，usage 是按它算出的本期用量（格式见 core.usage_quota.snapshot）
+            "usage": self._quota_unsafe(key_data, now),
         }
 
     def _usage_unsafe(self, key_data: Dict[str, Any], now: float) -> Dict[str, Any]:
         """锁内调用：取当前周期的用量计数，跨入新周期时清零。"""
-        start, _ = _period_bounds(key_data.get("quota_period", "total"), now)
-        usage = key_data.get("usage")
-        if not usage or (start is not None and usage.get("period_start") != start):
-            usage = key_data["usage"] = {"period_start": start or now, "requests": 0, "tokens": 0, "cost": {}}
+        period = (key_data.get("quota") or {}).get("period", "total")
+        usage = usage_quota.current_usage(key_data.get("usage"), period, now)
+        if usage is not key_data.get("usage"):
+            key_data["usage"] = usage
             self._dirty = True
         return usage
 
     def _quota_unsafe(self, key_data: Dict[str, Any], now: float) -> Dict[str, Any]:
-        """锁内调用：当前周期的用量、上限和已用尽的项目。费用按额度货币折算。"""
-        period = key_data.get("quota_period", "total")
-        usage = self._usage_unsafe(key_data, now)
-        currency = key_data.get("cost_currency", "USD")
-        used = {"cost": _cost_in(currency, usage["cost"]), "tokens": usage["tokens"], "requests": usage["requests"]}
-        limits = {kind: key_data.get(field) or 0 for kind, field in _LIMIT_FIELDS.items()}
-        return {
-            "period": period,
-            "period_start": usage["period_start"],
-            "resets_at": _period_bounds(period, now)[1],
-            "currency": currency,
-            "used": used,
-            "limits": limits,
-            "exhausted": [kind for kind, limit in limits.items() if limit and used[kind] >= limit],
-        }
-
-    @staticmethod
-    def _quota_message(quota: Dict[str, Any]) -> str:
-        currency = quota["currency"]
-        details = "，".join(
-            f"{_QUOTA_LABELS[kind]} {_format_quota(kind, quota['used'][kind], currency)}"
-            f" / {_format_quota(kind, quota['limits'][kind], currency)}"
-            for kind in quota["exhausted"]
-        )
-        when = f"将于 {_format_time(quota['resets_at'])} 恢复" if quota["resets_at"] else "请联系管理员调整额度"
-        return f"此 API Key {_PERIOD_LABELS.get(quota['period'], '')}额度已用完（{details}），{when}。"
+        """锁内调用：当前周期的用量、上限和已用尽的项目。"""
+        return usage_quota.snapshot(key_data.get("quota"), self._usage_unsafe(key_data, now), now)
 
     def list_keys(self) -> List[Dict[str, Any]]:
         """列出所有 API Key（不包含 secret）"""
@@ -502,7 +435,8 @@ class APIKeyManager:
             if not key_data.get("enabled", True):
                 return KeyCheck(False, key_id, "此 API Key 已被禁用。", "disabled")
             if _expired(key_data, now):
-                return KeyCheck(False, key_id, f"此 API Key 已于 {_format_time(key_data['expires_at'])} 过期。", "expired")
+                return KeyCheck(False, key_id, f"此 API Key 已于 {usage_quota.format_time(key_data['expires_at'])} 过期。",
+                                "expired")
 
             # 检查模型权限
             allowed_models = key_data.get("allowed_models", [])
@@ -523,10 +457,10 @@ class APIKeyManager:
                 return KeyCheck(True, key_id)
 
             # 额度只在请求进入时检查：进行中的请求照常算完，最终用量可能略超上限
-            if any(key_data.get(field) for field in _LIMIT_FIELDS.values()):
+            if usage_quota.has_limits(key_data.get("quota")):
                 quota = self._quota_unsafe(key_data, now)
                 if quota["exhausted"]:
-                    return KeyCheck(False, key_id, self._quota_message(quota), "quota")
+                    return KeyCheck(False, key_id, usage_quota.exhausted_message("此 API Key", quota), "quota")
 
         # RPM 检查（在锁外进行，因为 rate_limiter 有自己的锁）
         allowed, remaining = self._rate_limiter.check_and_consume(key_id, rpm_limit)
@@ -547,25 +481,21 @@ class APIKeyManager:
         return KeyCheck(True, key_id)
 
     def record_usage(
-        self, key_id: str, tokens: int, cost_info: Optional[Dict[str, Any]], *, success: bool = True
+        self, key_id: str, tokens: int, cost_info: Optional[Dict[str, Any]], *, billable: bool = True
     ) -> None:
         """请求结束后把 Token 和费用计入当前周期；管理员、本机等非访客调用方直接忽略。
 
-        失败请求只有产生了费用（上游已计费，如流式中途断开）才计入，
-        没到上游或上游拒绝的请求不消耗访客的 Token 额度。
+        billable 为假（失败且上游没有产出内容）时不计：失败请求的费用是网关按本地估算算的，
+        没到上游或被上游拒绝的请求不能消耗额度。
         """
-        cost = float((cost_info or {}).get("total_cost") or 0)
-        currency = "CNY" if (cost_info or {}).get("currency") == "CNY" else "USD"
-        if not cost and (not tokens or not success):
+        cost, currency = usage_quota.cost_of(cost_info)
+        if not billable or (not tokens and not cost):
             return
         with self._lock:
             key_data = self._keys.get(key_id)
             if key_data is None:
                 return
-            usage = self._usage_unsafe(key_data, time.time())
-            usage["tokens"] += tokens
-            if cost:
-                usage["cost"][currency] = usage["cost"].get(currency, 0.0) + cost
+            usage_quota.add_usage(self._usage_unsafe(key_data, time.time()), tokens, cost, currency)
             self._dirty = True
 
     def get_allowed_models(self, provided_secret: str) -> Optional[List[str]]:

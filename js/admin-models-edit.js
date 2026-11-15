@@ -126,6 +126,7 @@ function editModel(name, config) {
     document.getElementById('model-name').disabled = false;
     
     fillModelForm(config);
+    showQuotaUsage('model-quota-usage', 'model:' + name, quotaOverview.models[name]);
     
     beginModelEditing();
 }
@@ -136,6 +137,7 @@ function fillModelForm(config) {
     modelEditor.originalConfig = structuredClone(config);
     // 表单按生效的配置填：没单独改过的项显示渠道的默认值
     config = modelEffective(modelPrimaryConfig(config));
+    fillQuotaForm('model', config.quota);
     
     if (config.api_type === 'direct_api' || config.api_type === 'responses_native' || config.api_type === 'gemini_native' || config.api_type === 'anthropic_native') {
         document.getElementById('config-type').value = 'direct_api';
@@ -522,6 +524,11 @@ async function saveModel() {
         const extraBodyParamsStr = document.getElementById('extra-body-params').value.trim();
         if (extraBodyParamsStr) {
             config.extra_body_params = JSON.parse(extraBodyParamsStr);
+        }
+        
+        const quota = readQuotaForm('model');
+        if (quota) {
+            config.quota = quota;
         }
         
         const pricingInput = document.getElementById('pricing-input').value;

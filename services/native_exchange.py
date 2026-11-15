@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from core.config_loader import CONFIG
 from core.conversion_report import ConversionRejected, raise_if_strict
+from core.endpoint_observer import bind_endpoint
 from core.request_context import RequestContext, current_request, credential_identity
 from services.protocol_events import payloads, error_status, gemini_termination, merge_gemini_safety
 from services import stored_objects
@@ -303,7 +304,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
     from converters.interactions_thought_strip import InteractionsNativeStreamStripper, strip_interactions_response_thoughts
     from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler
     context = context or current_request.get() or RequestContext()
-    context.model, context.endpoint = model, copy.deepcopy(config)
+    bind_endpoint(context, model, config)
     if not context.request_body:
         context.request_body = copy.deepcopy(body)
     token = current_request.set(context)

@@ -53,7 +53,7 @@ async function loadApiKeys() {
                 ? new Date(key.last_used_at * 1000).toLocaleString('zh-CN')
                 : '<span style="color: var(--text-dim);">从未使用</span>';
             const expiry = key.expires_at
-                ? `<div style="font-size: 0.7rem; color: ${key.expired ? 'var(--danger)' : 'var(--text-dim)'};">到期: ${formatApiKeyTime(key.expires_at)}</div>`
+                ? `<div style="font-size: 0.7rem; color: ${key.expired ? 'var(--danger)' : 'var(--text-dim)'};">到期: ${formatQuotaTime(key.expires_at)}</div>`
                 : '';
 
             html += `<tr data-key-name="${escapeHtmlForAttr(key.name || '')}">
@@ -66,7 +66,7 @@ async function loadApiKeys() {
                 <td><code style="font-size: 0.8rem; background: var(--surface-2); padding: 2px 6px; border-radius: 3px;">${escapeHtml(key.secret_masked)}</code></td>
                 <td>${modelsDisplay}</td>
                 <td style="white-space: nowrap;">${rpmDisplay}</td>
-                <td>${renderApiKeyQuota(key.quota)}</td>
+                <td>${renderQuotaUsage(key.usage)}</td>
                 <td>${key.total_requests || 0}</td>
                 <td>${renderApiKeyStatus(key)}</td>
                 <td>
@@ -98,54 +98,12 @@ async function loadApiKeys() {
 // escapeHtml 统一使用 admin-core.js 的全局实现（转义 &<>"'，属性上下文也安全）。
 // 旧版这里用 createTextNode+innerHTML 重复定义，不转义引号且会覆盖正确实现。
 
-const API_KEY_PERIOD_LABELS = { total: '累计', day: '今日', week: '本周', month: '本月' };
-const API_KEY_QUOTA_LABELS = { cost: '费用', tokens: 'Token', requests: '请求' };
-
-function formatApiKeyTime(timestamp) {
-    return new Date(timestamp * 1000).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-}
-
-function formatApiKeyQuota(kind, value, currency) {
-    if (kind === 'cost') {
-        return (currency === 'CNY' ? '¥' : '$') + Number(value || 0).toFixed(4).replace(/\.?0+$/, '');
-    }
-    return Math.round(value || 0).toLocaleString('en-US');
-}
-
-// 每个设了上限的项目一根用量条；没设上限的只把本期已用的费用和 Token 列在下面
-function renderApiKeyQuota(quota) {
-    if (!quota) return '';
-    const { used, limits, currency } = quota;
-    const head = quota.resets_at
-        ? `${API_KEY_PERIOD_LABELS[quota.period]} · ${formatApiKeyTime(quota.resets_at)} 重置`
-        : `累计 · 自 ${formatApiKeyTime(quota.period_start)} 起`;
-    let rows = '';
-    const extras = [];
-    for (const kind of ['cost', 'tokens', 'requests']) {
-        const limit = limits[kind] || 0;
-        const value = formatApiKeyQuota(kind, used[kind], currency);
-        if (!limit) {
-            if (kind !== 'requests' && used[kind] > 0) extras.push(`${API_KEY_QUOTA_LABELS[kind]} ${value}`);
-            continue;
-        }
-        // Chromium 把恰好等于 high 的值算作次优（黄色），用尽时把 high 压到 low，整根变红
-        const high = used[kind] >= limit ? limit * 0.8 : limit;
-        rows += `<div class="apikey-quota-row">
-            <span>${API_KEY_QUOTA_LABELS[kind]}</span>
-            <span>${value} / ${formatApiKeyQuota(kind, limit, currency)}</span>
-            <meter min="0" max="${limit}" low="${limit * 0.8}" high="${high}" optimum="0" value="${Math.min(used[kind], limit)}"
-                aria-label="${API_KEY_QUOTA_LABELS[kind]}用量"></meter>
-        </div>`;
-    }
-    if (!rows) rows = '<div style="color: var(--text-dim);">不限</div>';
-    const extra = extras.length ? `<div class="apikey-quota-head">已用 ${extras.join(' · ')}</div>` : '';
-    return `<div class="apikey-quota-cell"><div class="apikey-quota-head">${head}</div>${rows}${extra}</div>`;
-}
+// 额度表单和用量条来自 admin-quota.js，与模型、渠道共用
 
 function renderApiKeyStatus(key) {
     if (!key.enabled) return '<span class="badge badge-danger">禁用</span>';
     if (key.expired) return '<span class="badge badge-danger">已过期</span>';
-    if (key.quota && key.quota.exhausted.length) return '<span class="badge badge-warning">额度用尽</span>';
+    if (key.usage && key.usage.exhausted.length) return '<span class="badge badge-warning">额度用尽</span>';
     return '<span class="badge badge-success">启用</span>';
 }
 
@@ -158,12 +116,7 @@ function toApiKeyDateInput(timestamp) {
 }
 
 function fillApiKeyQuotaForm(key) {
-    const period = key.quota_period || 'total';
-    document.querySelector(`input[name="apikey-quota-period"][value="${period}"]`).checked = true;
-    document.getElementById('apikey-cost-limit').value = key.cost_limit || 0;
-    document.getElementById('apikey-cost-currency').value = key.cost_currency || 'USD';
-    document.getElementById('apikey-token-limit').value = key.token_limit || 0;
-    document.getElementById('apikey-request-limit').value = key.request_limit || 0;
+    fillQuotaForm('apikey', key.quota);
     document.getElementById('apikey-expires-at').value = toApiKeyDateInput(key.expires_at);
 }
 
@@ -332,11 +285,7 @@ async function saveApiKey() {
         rpm_limit: rpm,
         enabled,
         allowed_models: allowedModels,
-        quota_period: document.querySelector('input[name="apikey-quota-period"]:checked').value,
-        cost_limit: parseFloat(document.getElementById('apikey-cost-limit').value) || 0,
-        cost_currency: document.getElementById('apikey-cost-currency').value,
-        token_limit: parseInt(document.getElementById('apikey-token-limit').value) || 0,
-        request_limit: parseInt(document.getElementById('apikey-request-limit').value) || 0,
+        quota: readQuotaForm('apikey'),
         expires_at: expiresInput ? new Date(expiresInput).getTime() / 1000 : null,
     };
 

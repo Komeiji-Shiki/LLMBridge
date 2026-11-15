@@ -126,7 +126,7 @@ function buildChannelRow(id, channel) {
     const previews = keys.slice(0, 2).map(channelKeyPreview).join('、') + (keys.length > 2 ? ' 等' : '');
     const unified = Object.keys(channel.defaults || {}).map(field => CHANNEL_DEFAULT_LABELS[field] || field).join('、');
     const row = `<tr data-channel-id="${attr}"${users.length ? (open ? ' class="channel-open"' : '') : ' class="channel-idle"'}>
-        <td><button class="model-name" data-channel-id="${attr}" onclick="openChannelModal(this.dataset.channelId)">${escapeHtml(channel.name)}</button>${unified ? `<div class="model-subtitle">统一设置：${escapeHtml(unified)}</div>` : ''}</td>
+        <td><button class="model-name" data-channel-id="${attr}" onclick="openChannelModal(this.dataset.channelId)">${escapeHtml(channel.name)}</button>${quotaListBadge(quotaOverview.channels[id])}${unified ? `<div class="model-subtitle">统一设置：${escapeHtml(unified)}</div>` : ''}</td>
         <td class="channel-address" title="${address}">${address}</td>
         <td>${channelKeySummary(channel)}${keys.length ? `<div class="model-subtitle channel-key-preview">${escapeHtml(previews)}</div>` : ''}</td>
         <td>${users.length
@@ -218,7 +218,7 @@ function toggleChannelStrategyOptions() {
 function channelFormSnapshot() {
     // 测 Key 用哪个模型不属于渠道内容
     return JSON.stringify(Array.from(document.querySelectorAll('#channel-modal input, #channel-modal select'))
-        .filter(el => el.id !== 'channel-test-model').map(el => el.type === 'checkbox' ? el.checked : el.value));
+        .filter(el => el.id !== 'channel-test-model').map(el => el.type === 'checkbox' || el.type === 'radio' ? el.checked : el.value));
 }
 
 function updateChannelSaveStatus() {
@@ -244,6 +244,8 @@ function openChannelModal(id = null, copyFrom = null) {
     document.getElementById('channel-key-cooldown').value = channel.api_key_cooldown_seconds || '';
     toggleChannelStrategyOptions();
     fillChannelDefaults(channel.defaults || {});
+    fillQuotaForm('channel', channel.quota);
+    showQuotaUsage('channel-quota-usage', 'channel:' + id, id ? quotaOverview.channels[id] : null);
     clearApiKeyRows('channel-api-keys-list');
     const keys = channel.api_keys || [];
     (keys.length ? keys : ['']).forEach(key => addApiKeyRow(key, 'channel-api-keys-list'));
@@ -344,6 +346,8 @@ async function saveChannel() {
     if (cooldown > 0) channel.api_key_cooldown_seconds = cooldown;
     const defaults = readChannelDefaults();
     if (Object.keys(defaults).length) channel.defaults = defaults;
+    const quota = readQuotaForm('channel');
+    if (quota) channel.quota = quota;
 
     button.disabled = true;
     try {

@@ -12,7 +12,9 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from core.config_loader import get_setting
 from core.constants import RetryDefaults, TimeoutDefaults, resolve_first_chunk_timeout
+from core.endpoint_observer import bind_endpoint
 from core.model_archive import is_model_archived
+from core.model_quota import model_quota
 from core.request_context import RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request
 from core.upstream_auth import apply_api_key_auth
 from services.provider_capabilities import apply_native_tool_defaults
@@ -172,8 +174,8 @@ async def responses_websocket(websocket: WebSocket):
         config = await api._select_endpoint_config_for_model(alias)
         if not isinstance(config, dict) or config.get("api_type") != "responses_native":
             raise HTTPException(400, "当前模型需要配置 responses_native 端点才能使用 WebSocket。")
-        config = copy.deepcopy(config)
-        context.model, context.endpoint = alias, config
+        bind_endpoint(context, alias, config)
+        config = context.endpoint
         context.request_body = copy.deepcopy(first)
         service = api._app_state.server.direct_api_service
         if not service or not service.session:
@@ -199,6 +201,10 @@ async def responses_websocket(websocket: WebSocket):
                 try:
                     if event.get("type") in ("response.create", "response.steer"):
                         api._validate_request_api_key(websocket, alias)
+                    if event.get("type") == "response.create":
+                        # 同一连接上的响应依次进行，新一轮开始时归还上一轮的并发名额再检查额度
+                        model_quota.release(context)
+                        model_quota.enforce(alias, config, context)
                     prepared = prepare_event(event, alias, config)
                 except HTTPException as exc:
                     await send_error(websocket, exc.status_code, str(exc.detail), event)
@@ -256,4 +262,5 @@ async def responses_websocket(websocket: WebSocket):
             except (RuntimeError, WebSocketDisconnect):
                 pass
         finally:
+            model_quota.release(context)
             current_request.reset(token)

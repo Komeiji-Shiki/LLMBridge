@@ -19,6 +19,8 @@ from core.model_archive import (
     find_inactive_models, build_last_used_map,
 )
 from core.model_channels import CHANNELS_FILE, apply_channel_refs
+from core.model_quota import model_quota
+from core.usage_quota import normalize_quota
 from core.app_state import get_app_state
 from core.constants import PROJECT_ROOT
 from core.upstream_auth import apply_upstream_auth
@@ -175,6 +177,12 @@ async def get_models_config(
     }
 
 
+def _model_quota(config):
+    """模型额度按第一个端点的设置展示；多端点轮询时每个端点仍按自己的设置检查。"""
+    endpoint = config[0] if isinstance(config, list) and config else config
+    return endpoint.get('quota') if isinstance(endpoint, dict) else None
+
+
 async def update_model_config(
     request: Request,
     load_model_endpoint_map_func
@@ -197,13 +205,19 @@ async def update_model_config(
         for endpoint in config if isinstance(config, list) else [config]:
             try:
                 validate_tool_config(endpoint)
+                quota = normalize_quota(endpoint.get('quota'))
             except ValueError as error:
                 raise HTTPException(400, str(error)) from error
             endpoint['sanitize_recursive_schemas'] = False
+            if quota:
+                endpoint['quota'] = quota
+            else:
+                endpoint.pop('quota', None)
 
         async with _MODEL_ENDPOINT_MAP_LOCK:
             # 读取现有配置
             current_config = await read_json_file(MODEL_ENDPOINT_MAP_FILE)
+            previous_quota = _model_quota(current_config.get(old_model_name or model_name))
             try:
                 config = apply_channel_refs(config, await read_channels_file())
             except ValueError as error:
@@ -237,6 +251,12 @@ async def update_model_config(
             # 写入文件（原子写，避免半截文件毁掉整套模型配置）
             await write_json_file(MODEL_ENDPOINT_MAP_FILE, current_config)
 
+            # 额度跟着模型改名；新设或取消额度时旧用量作废，重新设置的额度从零开始
+            if old_model_name and old_model_name != model_name:
+                model_quota.rename_model(old_model_name, model_name)
+            if (previous_quota is None) != (_model_quota(config) is None):
+                model_quota.forget('model:' + model_name)
+
             # 重新加载配置
             await asyncio.to_thread(load_model_endpoint_map_func)
 
@@ -267,6 +287,7 @@ async def delete_model_config(
                 raise HTTPException(status_code=404, detail=f"模型 {model_name} 不存在")
             del current_config[model_name]
             await write_json_file(MODEL_ENDPOINT_MAP_FILE, current_config)
+            model_quota.forget('model:' + model_name)
             await asyncio.to_thread(load_model_endpoint_map_func)
 
         await _invalidate_admin_stats_cache()

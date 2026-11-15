@@ -45,7 +45,7 @@ async function loadModels() {
     const request = ++modelWorkspace.request;
     document.getElementById('models-summary').textContent = '正在加载模型…';
     try {
-        const response = await fetch('/api/admin/models');
+        const [response] = await Promise.all([fetch('/api/admin/models'), loadQuotaOverview()]);
         
         await ensureOk(response);
         
@@ -87,7 +87,7 @@ function buildModelsRow(name, cfg, isArchived) {
         <td class="drag-handle" title="拖动调整模型顺序"><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#grip"/></svg></td>
         <td class="model-identity" title="${attr}"><button class="model-name" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">${attr}</button>
             <div class="model-subtitle">${escapeHtml(cfg.display_name && cfg.display_name !== name ? cfg.display_name : cfg.model_id || name)}</div>
-            <div class="model-flags"><span class="badge ${isArchived ? 'badge-info' : 'badge-success'}">${isArchived ? '已归档' : '可用'}</span>${flags.map(flag => `<span class="badge badge-info">${flag}</span>`).join('')}</div></td>
+            <div class="model-flags"><span class="badge ${isArchived ? 'badge-info' : 'badge-success'}">${isArchived ? '已归档' : '可用'}</span>${flags.map(flag => `<span class="badge badge-info">${flag}</span>`).join('')}${quotaListBadge(quotaOverview.models[name])}</div></td>
         <td class="model-connection"><span class="badge badge-info">${labels[protocol]}</span>${channel ? `<button class="badge badge-channel" data-channel-id="${escapeHtml(cfg.channel)}" onclick="navigateTo('channels', this.dataset.channelId)" title="地址和 Key 来自这个渠道，点击去编辑">${escapeHtml(channel.name)}</button>` : ''}
             <div class="model-subtitle" title="${escapeHtml(modelService(cfg))}">${escapeHtml(modelService(cfg))}</div><div class="model-subtitle">${escapeHtml(endpoint)} · ${keyCount ? keyCount + ' 个 Key' : '无需认证'}</div></td>
         <td><div class="model-actions"><button class="btn btn-sm" data-model-name="${attr}" onclick="openModelFromList(this.dataset.modelName)">设置</button>
