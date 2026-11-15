@@ -614,7 +614,7 @@
                         <span><svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#info"/></svg></span>
                         <div>
                             <strong>访客 Key 说明：</strong>这些 Key 只能调用 API（聊天补全、模型列表），无法访问管理面板。
-                            每个 Key 可以限制允许使用的模型和每分钟请求数(RPM)。
+                            每个 Key 可以限制允许使用的模型、每分钟请求数(RPM)、过期时间，以及按周期统计的费用、Token 和请求次数上限，任一额度用完即暂停访问。
                         </div>
                     </div>
                     <div id="api-keys-list">
@@ -648,6 +648,46 @@
                             <input type="number" id="apikey-rpm" class="form-input" value="0" min="0" placeholder="0 = 不限制">
                             <small style="color: var(--text-dim); display: block; margin-top: 5px;">
                                 设为 0 表示不限制。建议设置合理的值以防止滥用。
+                            </small>
+                        </div>
+                        <fieldset class="form-group apikey-quota">
+                            <legend class="form-label">用量额度</legend>
+                            <div class="apikey-period" role="radiogroup" aria-label="统计周期">
+                                <label><input type="radio" name="apikey-quota-period" value="total" checked><span>累计</span></label>
+                                <label><input type="radio" name="apikey-quota-period" value="day"><span>每天</span></label>
+                                <label><input type="radio" name="apikey-quota-period" value="week"><span>每周</span></label>
+                                <label><input type="radio" name="apikey-quota-period" value="month"><span>每月</span></label>
+                            </div>
+                            <div class="apikey-quota-grid">
+                                <div>
+                                    <label class="form-label" for="apikey-cost-limit">费用上限</label>
+                                    <div class="apikey-cost-input">
+                                        <input type="number" id="apikey-cost-limit" class="form-input" value="0" min="0" step="0.01">
+                                        <select id="apikey-cost-currency" class="form-select" aria-label="费用货币">
+                                            <option value="USD">USD</option>
+                                            <option value="CNY">CNY</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="form-label" for="apikey-token-limit">Token 上限</label>
+                                    <input type="number" id="apikey-token-limit" class="form-input" value="0" min="0" step="1">
+                                </div>
+                                <div>
+                                    <label class="form-label" for="apikey-request-limit">请求次数上限</label>
+                                    <input type="number" id="apikey-request-limit" class="form-input" value="0" min="0" step="1">
+                                </div>
+                            </div>
+                            <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                0 表示不限制，任一项用完即暂停访问。每天/每周/每月按服务器本地时间在周期开始时自动恢复（每周从周一算起），累计额度需手动重置用量。
+                                额度在请求进入时检查，进行中的请求会照常算完，最终用量可能略超上限；费用按模型定价计算，两种货币按配置汇率折算。
+                            </small>
+                        </fieldset>
+                        <div class="form-group">
+                            <label class="form-label" for="apikey-expires-at">过期时间</label>
+                            <input type="datetime-local" id="apikey-expires-at" class="form-input">
+                            <small style="color: var(--text-dim); display: block; margin-top: 5px;">
+                                留空表示永不过期。到期后按禁用处理，模型列表也无法读取。
                             </small>
                         </div>
                         <div class="form-group">

@@ -71,7 +71,7 @@ LLMBridge/
 │   ├── config_loader.py      # 配置加载器（JSONC 解析、热更新）
 │   ├── constants.py           # 集中常量管理
 │   ├── db_stats.py            # SQLite 统计查询（Token/成本/请求聚合）
-│   ├── api_key_manager.py     # 访客 Key 权限管理与 RPM 限流
+│   ├── api_key_manager.py     # 访客 Key 权限、用量额度与 RPM 限流
 │   ├── app_state.py           # 应用全局状态管理
 │   ├── web_session.py         # Web 会话验证与登录限流
 │   ├── load_balancer.py       # 负载均衡器
@@ -424,7 +424,7 @@ Vertex AI 的项目接口用 OAuth 访问令牌鉴权。把 `api_key_auth_mode` 
 
 ## 🔑 访客 Key 系统
 
-通过 web端的API Key 管理 配置访客 API Key，实现**细粒度的模型权限控制**和 **RPM 请求速率限制**。
+通过 web端的API Key 管理 配置访客 API Key，实现**细粒度的模型权限控制**、**RPM 请求速率限制**、**按周期的用量额度**和**过期时间**。
 
 ### 配置文件格式
 ```json
@@ -436,9 +436,16 @@ Vertex AI 的项目接口用 OAuth 访问令牌鉴权。把 `api_key_auth_mode` 
     "rpm_limit": 35,
     "enabled": true,
     "description": "",
+    "quota_period": "month",
+    "cost_limit": 5,
+    "cost_currency": "USD",
+    "token_limit": 0,
+    "request_limit": 0,
+    "expires_at": 1796083200,
     "created_at": 1772218824.7140331,
     "last_used_at": 1774750312.9903347,
-    "total_requests": 41312
+    "total_requests": 41312,
+    "usage": {"period_start": 1793462400, "requests": 120, "tokens": 845000, "cost": {"USD": 1.82, "CNY": 0.5}}
   }
 }
 ```
@@ -452,16 +459,26 @@ Vertex AI 的项目接口用 OAuth 访问令牌鉴权。把 `api_key_auth_mode` 
 | `rpm_limit` | int | 每分钟最大请求数限制 |
 | `enabled` | bool | 是否启用该访客 |
 | `description` | string | 备注描述 |
+| `quota_period` | string | 额度统计周期：`total`（累计，手动重置）、`day`、`week`（周一起）、`month`，按服务器本地时间切分 |
+| `cost_limit` | number | 本周期费用上限，`0` 不限制 |
+| `cost_currency` | string | 费用上限的货币，`USD` 或 `CNY`；另一种货币的用量按 `exchange_rate.USD_TO_CNY` 折算 |
+| `token_limit` | int | 本周期 Token 上限（输入 + 输出），`0` 不限制 |
+| `request_limit` | int | 本周期请求次数上限，`0` 不限制 |
+| `expires_at` | number \| null | 过期时间（Unix 秒），`null` 永不过期 |
 | `total_requests` | int | 累计请求次数（自动统计） |
+| `usage` | object | 当前周期用量（自动统计，跨入新周期时清零） |
 
 ### 使用方式
 访客使用自己的 `secret` 作为 API Key 调用接口，系统自动：
-1. 校验 Key 是否有效且启用
-2. 检查请求的模型是否在 `allowed_models` 白名单内
-3. 检查 RPM 是否超限
-4. 通过后转发到上游并记录用量
+1. 校验 Key 是否有效、启用且未过期（禁用和过期返回 401）
+2. 检查请求的模型是否在 `allowed_models` 白名单内（403）
+3. 检查本周期费用、Token、请求次数是否已用完（402，提示用量和恢复时间）
+4. 检查 RPM 是否超限（429）
+5. 通过后转发到上游，请求结束时把 Token 和费用计入本周期用量
 
-> 管理面板 → API Keys Tab 可直接增删改查访客 Key，无需手动编辑 JSON。
+额度在请求进入时检查，进行中的请求会照常算完，因此最终用量可能略超上限。费用按模型定价计算；没到上游或被上游拒绝的失败请求不计 Token，中途失败但已产生费用的请求照常计入。用量每分钟落盘一次。
+
+> 管理面板 → API Keys Tab 可直接增删改查访客 Key、查看本周期用量，并一键重置用量，无需手动编辑 JSON。
 
 ## 🧮 Token 计算器
 
@@ -556,7 +573,7 @@ python id_updater.py
 - **不建议直接将服务暴露在公网**
 - 推荐使用 Cloudflare Tunnel（`start_tunnel.cmd`）
 - 在 `config.jsonc` 中设置 `web_access_key` 保护管理面板
-- 访客 Key 系统：配合 `api_key_manager` 实现细粒度模型权限和 RPM 限制
+- 访客 Key 系统：配合 `api_key_manager` 实现细粒度模型权限、RPM 限制、按周期用量额度和过期时间
 
 
 MIT License

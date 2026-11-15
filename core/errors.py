@@ -118,6 +118,17 @@ class RateLimitError(APIError):
         )
 
 
+class QuotaExceededError(APIError):
+    """402 Payment Required - 访客 Key 额度已用完（客户端不会把 402 当成可重试错误）"""
+    def __init__(self, message: str = "Quota exceeded", code: str = "insufficient_quota"):
+        super().__init__(
+            message=message,
+            error_type="insufficient_quota",
+            status_code=402,
+            code=code
+        )
+
+
 class ServiceUnavailableError(APIError):
     """503 Service Unavailable - 服务不可用"""
     def __init__(self, message: str, code: str = "service_unavailable"):

@@ -37,7 +37,7 @@ async function loadApiKeys() {
         }
 
         let html = '<table class="table"><thead><tr>';
-        html += '<th>名称</th><th>Key (脱敏)</th><th>允许模型</th><th>RPM 限制</th><th>当前 RPM</th><th>总请求</th><th>状态</th><th>操作</th>';
+        html += '<th>名称</th><th>Key (脱敏)</th><th>允许模型</th><th>RPM</th><th>用量额度</th><th>总请求</th><th>状态</th><th>操作</th>';
         html += '</tr></thead><tbody>';
 
         for (const key of keys) {
@@ -45,34 +45,37 @@ async function loadApiKeys() {
                 ? `<span title="${escapeHtmlForAttr(key.allowed_models.join(', '))}">${key.allowed_models.length} 个模型</span>`
                 : '<span style="color: var(--text-dim);">全部模型</span>';
 
-            const rpmDisplay = key.rpm_limit > 0 ? key.rpm_limit : '<span style="color: var(--text-dim);">不限</span>';
             const currentRpm = key.current_rpm || 0;
             const rpmColor = key.rpm_limit > 0 && currentRpm >= key.rpm_limit * 0.8 ? 'var(--danger)' : 'var(--ok)';
-
-            const statusBadge = key.enabled
-                ? '<span class="badge badge-success">启用</span>'
-                : '<span class="badge badge-danger">禁用</span>';
+            const rpmDisplay = `<span style="color: ${rpmColor}; font-weight: 600;">${currentRpm}</span> / ${key.rpm_limit > 0 ? key.rpm_limit : '<span style="color: var(--text-dim);">不限</span>'}`;
 
             const lastUsed = key.last_used_at
                 ? new Date(key.last_used_at * 1000).toLocaleString('zh-CN')
                 : '<span style="color: var(--text-dim);">从未使用</span>';
+            const expiry = key.expires_at
+                ? `<div style="font-size: 0.7rem; color: ${key.expired ? 'var(--danger)' : 'var(--text-dim)'};">到期: ${formatApiKeyTime(key.expires_at)}</div>`
+                : '';
 
             html += `<tr data-key-name="${escapeHtmlForAttr(key.name || '')}">
                 <td>
                     <div style="font-weight: 600;">${escapeHtml(key.name)}</div>
                     ${key.description ? `<div style="font-size: 0.75rem; color: var(--text-dim);">${escapeHtml(key.description)}</div>` : ''}
                     <div style="font-size: 0.7rem; color: var(--text-dim);">最后使用: ${lastUsed}</div>
+                    ${expiry}
                 </td>
                 <td><code style="font-size: 0.8rem; background: var(--surface-2); padding: 2px 6px; border-radius: 3px;">${escapeHtml(key.secret_masked)}</code></td>
                 <td>${modelsDisplay}</td>
-                <td>${rpmDisplay}</td>
-                <td><span style="color: ${rpmColor}; font-weight: 600;">${currentRpm}</span></td>
+                <td style="white-space: nowrap;">${rpmDisplay}</td>
+                <td>${renderApiKeyQuota(key.quota)}</td>
                 <td>${key.total_requests || 0}</td>
-                <td>${statusBadge}</td>
+                <td>${renderApiKeyStatus(key)}</td>
                 <td>
                     <div style="display: flex; gap: 6px;">
                         <button class="btn btn-sm" aria-label="编辑 API Key" title="编辑 API Key" onclick="editApiKey('${key.id}')">
                             <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#edit"/></svg>
+                        </button>
+                        <button class="btn btn-sm" aria-label="重置用量" title="重置用量" onclick="resetApiKeyUsage('${key.id}', this.closest('tr').dataset.keyName)">
+                            <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#refresh"/></svg>
                         </button>
                         <button class="btn btn-sm" aria-label="${key.enabled ? '停用' : '启用'} API Key" onclick="toggleApiKeyEnabled('${key.id}', ${!key.enabled})">
                             <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#${key.enabled ? 'pause' : 'play'}"/></svg>
@@ -95,6 +98,75 @@ async function loadApiKeys() {
 // escapeHtml 统一使用 admin-core.js 的全局实现（转义 &<>"'，属性上下文也安全）。
 // 旧版这里用 createTextNode+innerHTML 重复定义，不转义引号且会覆盖正确实现。
 
+const API_KEY_PERIOD_LABELS = { total: '累计', day: '今日', week: '本周', month: '本月' };
+const API_KEY_QUOTA_LABELS = { cost: '费用', tokens: 'Token', requests: '请求' };
+
+function formatApiKeyTime(timestamp) {
+    return new Date(timestamp * 1000).toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatApiKeyQuota(kind, value, currency) {
+    if (kind === 'cost') {
+        return (currency === 'CNY' ? '¥' : '$') + Number(value || 0).toFixed(4).replace(/\.?0+$/, '');
+    }
+    return Math.round(value || 0).toLocaleString('en-US');
+}
+
+// 每个设了上限的项目一根用量条；没设上限的只把本期已用的费用和 Token 列在下面
+function renderApiKeyQuota(quota) {
+    if (!quota) return '';
+    const { used, limits, currency } = quota;
+    const head = quota.resets_at
+        ? `${API_KEY_PERIOD_LABELS[quota.period]} · ${formatApiKeyTime(quota.resets_at)} 重置`
+        : `累计 · 自 ${formatApiKeyTime(quota.period_start)} 起`;
+    let rows = '';
+    const extras = [];
+    for (const kind of ['cost', 'tokens', 'requests']) {
+        const limit = limits[kind] || 0;
+        const value = formatApiKeyQuota(kind, used[kind], currency);
+        if (!limit) {
+            if (kind !== 'requests' && used[kind] > 0) extras.push(`${API_KEY_QUOTA_LABELS[kind]} ${value}`);
+            continue;
+        }
+        // Chromium 把恰好等于 high 的值算作次优（黄色），用尽时把 high 压到 low，整根变红
+        const high = used[kind] >= limit ? limit * 0.8 : limit;
+        rows += `<div class="apikey-quota-row">
+            <span>${API_KEY_QUOTA_LABELS[kind]}</span>
+            <span>${value} / ${formatApiKeyQuota(kind, limit, currency)}</span>
+            <meter min="0" max="${limit}" low="${limit * 0.8}" high="${high}" optimum="0" value="${Math.min(used[kind], limit)}"
+                aria-label="${API_KEY_QUOTA_LABELS[kind]}用量"></meter>
+        </div>`;
+    }
+    if (!rows) rows = '<div style="color: var(--text-dim);">不限</div>';
+    const extra = extras.length ? `<div class="apikey-quota-head">已用 ${extras.join(' · ')}</div>` : '';
+    return `<div class="apikey-quota-cell"><div class="apikey-quota-head">${head}</div>${rows}${extra}</div>`;
+}
+
+function renderApiKeyStatus(key) {
+    if (!key.enabled) return '<span class="badge badge-danger">禁用</span>';
+    if (key.expired) return '<span class="badge badge-danger">已过期</span>';
+    if (key.quota && key.quota.exhausted.length) return '<span class="badge badge-warning">额度用尽</span>';
+    return '<span class="badge badge-success">启用</span>';
+}
+
+// datetime-local 只认本地时间的 YYYY-MM-DDTHH:MM
+function toApiKeyDateInput(timestamp) {
+    if (!timestamp) return '';
+    const d = new Date(timestamp * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function fillApiKeyQuotaForm(key) {
+    const period = key.quota_period || 'total';
+    document.querySelector(`input[name="apikey-quota-period"][value="${period}"]`).checked = true;
+    document.getElementById('apikey-cost-limit').value = key.cost_limit || 0;
+    document.getElementById('apikey-cost-currency').value = key.cost_currency || 'USD';
+    document.getElementById('apikey-token-limit').value = key.token_limit || 0;
+    document.getElementById('apikey-request-limit').value = key.request_limit || 0;
+    document.getElementById('apikey-expires-at').value = toApiKeyDateInput(key.expires_at);
+}
+
 // ==================== 创建 / 编辑模态框 ====================
 
 async function showCreateApiKeyModal() {
@@ -107,6 +179,7 @@ async function showCreateApiKeyModal() {
     document.getElementById('apikey-description').value = '';
     document.getElementById('apikey-rpm').value = '0';
     document.getElementById('apikey-enabled').checked = true;
+    fillApiKeyQuotaForm({});
     _apikeySelectedModels = new Set();
 
     await loadModelsForApiKeyModal([]);
@@ -128,6 +201,7 @@ async function editApiKey(keyId) {
         document.getElementById('apikey-description').value = key.description || '';
         document.getElementById('apikey-rpm').value = key.rpm_limit || 0;
         document.getElementById('apikey-enabled').checked = key.enabled !== false;
+        fillApiKeyQuotaForm(key);
         _apikeySelectedModels = new Set(key.allowed_models || []);
 
         await loadModelsForApiKeyModal(key.allowed_models || []);
@@ -250,6 +324,7 @@ async function saveApiKey() {
     const description = document.getElementById('apikey-description').value.trim();
     const enabled = document.getElementById('apikey-enabled').checked;
     const allowedModels = getSelectedApiKeyModels();
+    const expiresInput = document.getElementById('apikey-expires-at').value;
 
     const payload = {
         name,
@@ -257,6 +332,12 @@ async function saveApiKey() {
         rpm_limit: rpm,
         enabled,
         allowed_models: allowedModels,
+        quota_period: document.querySelector('input[name="apikey-quota-period"]:checked').value,
+        cost_limit: parseFloat(document.getElementById('apikey-cost-limit').value) || 0,
+        cost_currency: document.getElementById('apikey-cost-currency').value,
+        token_limit: parseInt(document.getElementById('apikey-token-limit').value) || 0,
+        request_limit: parseInt(document.getElementById('apikey-request-limit').value) || 0,
+        expires_at: expiresInput ? new Date(expiresInput).getTime() / 1000 : null,
     };
 
     try {
@@ -334,6 +415,20 @@ async function toggleApiKeyEnabled(keyId, newState) {
         loadApiKeys();
     } catch (err) {
         showMessage('danger', '操作失败: ' + err.message);
+    }
+}
+
+// ==================== 重置用量 ====================
+
+async function resetApiKeyUsage(keyId, keyName) {
+    if (!(await confirmDialog({ title: '重置用量', message: `确定要清零 API Key "${keyName}" 当前周期的费用、Token 和请求次数吗？额度用尽的 Key 会立即恢复访问。`, confirmText: '重置' }))) return;
+
+    try {
+        const resp = await fetch(`/api/admin/api_keys/${keyId}/reset_usage`, { method: 'POST' });
+        await ensureOk(resp);
+        loadApiKeys();
+    } catch (err) {
+        showMessage('danger', '重置失败: ' + err.message);
     }
 }
 

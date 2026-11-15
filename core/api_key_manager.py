@@ -3,6 +3,8 @@ API Key 管理模块
 支持创建多个 API Key，每个 key 可以配置：
 - 允许使用的模型列表（白名单，空列表表示允许所有模型）
 - 全局 RPM（每分钟请求数）限制（0 表示不限制）
+- 按周期（累计/每天/每周/每月）的费用、Token、请求次数上限，用完即暂停（0 表示不限制）
+- 过期时间
 - 名称/描述
 - 启用/禁用状态
 """
@@ -13,19 +15,88 @@ import logging
 import os
 import secrets
 import time
-from pathlib import Path
+from datetime import datetime, timedelta
 from threading import Lock, RLock
 from functools import wraps
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, NamedTuple, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
 # API Key 数据文件路径
 API_KEYS_FILE = "api_keys.json"
 
+# 管理面板可编辑的配置项及默认值；创建、更新和保存失败回滚都以这张表为准
+KEY_CONFIG_DEFAULTS: Dict[str, Any] = {
+    "allowed_models": [],
+    "rpm_limit": 0,
+    "enabled": True,
+    "description": "",
+    "quota_period": "total",
+    "cost_limit": 0,
+    "cost_currency": "USD",
+    "token_limit": 0,
+    "request_limit": 0,
+    "expires_at": None,
+}
+QUOTA_PERIODS = ("total", "day", "week", "month")
+COST_CURRENCIES = ("USD", "CNY")
+_LIMIT_FIELDS = {"cost": "cost_limit", "tokens": "token_limit", "requests": "request_limit"}
+_PERIOD_LABELS = {"total": "累计", "day": "今日", "week": "本周", "month": "本月"}
+_QUOTA_LABELS = {"cost": "费用", "tokens": "Token", "requests": "请求次数"}
+
 
 class KeyPersistenceError(RuntimeError):
     """The requested key mutation was not durably saved."""
+
+
+class KeyCheck(NamedTuple):
+    """validate_request 的结果；路由按 reason 选择状态码，不再匹配错误文案。"""
+    valid: bool
+    key_id: Optional[str]
+    error: Optional[str] = None
+    reason: Optional[str] = None  # invalid / disabled / expired / model / quota / rate
+
+
+def _period_bounds(period: str, now: float) -> Tuple[Optional[float], Optional[float]]:
+    """按服务器本地时间切分自然周期，返回 (起点, 下次重置)；累计周期没有自动边界。"""
+    if period not in ("day", "week", "month"):
+        return None, None
+    today = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "day":
+        start, end = today, today + timedelta(days=1)
+    elif period == "week":
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=7)
+    else:
+        start = today.replace(day=1)
+        end = (start + timedelta(days=32)).replace(day=1)
+    return start.timestamp(), end.timestamp()
+
+
+def _cost_in(currency: str, costs: Dict[str, float]) -> float:
+    """把按货币分开累计的费用折算成额度货币，汇率取当前配置。"""
+    other = "CNY" if currency == "USD" else "USD"
+    total = costs.get(currency, 0.0)
+    if costs.get(other):
+        from core.db_stats import get_exchange_rates
+        usd_to_cny, cny_to_usd = get_exchange_rates()
+        total += costs[other] * (usd_to_cny if other == "USD" else cny_to_usd)
+    return total
+
+
+def _format_quota(kind: str, value: float, currency: str) -> str:
+    if kind == "cost":
+        return ("¥" if currency == "CNY" else "$") + f"{value:.4f}".rstrip("0").rstrip(".")
+    return f"{int(value):,}"
+
+
+def _format_time(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+
+
+def _expired(key_data: Dict[str, Any], now: float) -> bool:
+    expires_at = key_data.get("expires_at")
+    return bool(expires_at) and now >= expires_at
 
 
 class RateLimiter:
@@ -85,7 +156,7 @@ def _serialize_key_mutation(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with self._save_lock:
-            if method.__name__ not in ('create_key', 'update_key', 'delete_key'):
+            if method.__name__ not in ('create_key', 'update_key', 'delete_key', 'reset_usage'):
                 return method(self, *args, **kwargs)
             with self._lock:
                 before = copy.deepcopy(self._keys)
@@ -104,11 +175,18 @@ def _serialize_key_mutation(method):
                             current = self._keys.get(key_id)
                             if current is not None:
                                 revoked = current.get('enabled') is False
-                                for field in ('name', 'allowed_models', 'rpm_limit', 'description', 'enabled'):
+                                for field in ('name', *KEY_CONFIG_DEFAULTS):
                                     if field in previous:
                                         current[field] = previous[field]
+                                    else:
+                                        current.pop(field, None)
                                 if revoked:
                                     current['enabled'] = False
+                    elif method.__name__ == 'reset_usage':
+                        # 只恢复被重置的那个 Key，其他 Key 期间累计的用量不能被快照覆盖
+                        key_id = args[0]
+                        if key_id in self._keys and key_id in before:
+                            self._keys[key_id]['usage'] = before[key_id].get('usage')
                     self._dirty = True
                 raise
     return wrapped
@@ -227,23 +305,14 @@ class APIKeyManager:
         return "sk-" + secrets.token_urlsafe(32)
 
     @_serialize_key_mutation
-    def create_key(
-        self,
-        name: str,
-        allowed_models: Optional[List[str]] = None,
-        rpm_limit: int = 0,
-        enabled: bool = True,
-        description: str = "",
-    ) -> Dict[str, Any]:
+    def create_key(self, name: str, **config: Any) -> Dict[str, Any]:
         """
         创建一个新的 API Key。
 
         Args:
             name: Key 的名称
-            allowed_models: 允许使用的模型列表（None 或空列表 = 允许所有）
-            rpm_limit: 每分钟请求数限制（0 = 不限制）
-            enabled: 是否启用
-            description: 描述
+            config: KEY_CONFIG_DEFAULTS 里的配置项，未提供的取默认值
+                （allowed_models 空列表 = 允许所有模型，各类上限 0 = 不限制）
 
         Returns:
             创建的 key 信息（包含明文 secret，仅此一次展示）
@@ -254,10 +323,8 @@ class APIKeyManager:
         key_data = {
             "name": name,
             "secret": secret,
-            "allowed_models": allowed_models or [],
-            "rpm_limit": rpm_limit,
-            "enabled": enabled,
-            "description": description,
+            **copy.deepcopy(KEY_CONFIG_DEFAULTS),
+            **config,
             "created_at": time.time(),
             "last_used_at": None,
             "total_requests": 0,
@@ -300,9 +367,9 @@ class APIKeyManager:
         """
         更新一个 API Key 的配置。
 
-        可更新字段: name, allowed_models, rpm_limit, enabled, description
+        可更新字段: name 及 KEY_CONFIG_DEFAULTS 里的配置项
         """
-        allowed_fields = {"name", "allowed_models", "rpm_limit", "enabled", "description"}
+        allowed_fields = {"name", *KEY_CONFIG_DEFAULTS}
 
         with self._lock:
             if key_id not in self._keys:
@@ -319,6 +386,21 @@ class APIKeyManager:
         self._write_to_disk(payload, count)
         return info
 
+    @_serialize_key_mutation
+    def reset_usage(self, key_id: str) -> Optional[Dict[str, Any]]:
+        """清零当前周期用量，额度用尽的 Key 立即恢复；累计周期从此刻重新计起。"""
+        with self._lock:
+            key_data = self._keys.get(key_id)
+            if key_data is None:
+                return None
+            key_data.pop("usage", None)
+            info = self._get_key_info_unsafe(key_id)
+            payload, count = self._serialize_unsafe()
+
+        self._write_to_disk(payload, count)
+        logger.info(f"[APIKeyManager] 🔄 重置 API Key 用量: id={key_id}")
+        return info
+
     def get_key_info(self, key_id: str) -> Optional[Dict[str, Any]]:
         """获取 API Key 的信息（不包含 secret）"""
         with self._lock:
@@ -332,20 +414,57 @@ class APIKeyManager:
 
         secret = key_data.get("secret", "")
         masked_secret = secret[:7] + "..." + secret[-4:] if len(secret) > 11 else "***"
+        now = time.time()
 
         return {
             "id": key_id,
             "name": key_data.get("name", ""),
             "secret_masked": masked_secret,
-            "allowed_models": key_data.get("allowed_models", []),
-            "rpm_limit": key_data.get("rpm_limit", 0),
-            "enabled": key_data.get("enabled", True),
-            "description": key_data.get("description", ""),
+            **{field: key_data.get(field, default) for field, default in KEY_CONFIG_DEFAULTS.items()},
             "created_at": key_data.get("created_at"),
             "last_used_at": key_data.get("last_used_at"),
             "total_requests": key_data.get("total_requests", 0),
             "current_rpm": self._rate_limiter.get_usage(key_id),
+            "expired": _expired(key_data, now),
+            "quota": self._quota_unsafe(key_data, now),
         }
+
+    def _usage_unsafe(self, key_data: Dict[str, Any], now: float) -> Dict[str, Any]:
+        """锁内调用：取当前周期的用量计数，跨入新周期时清零。"""
+        start, _ = _period_bounds(key_data.get("quota_period", "total"), now)
+        usage = key_data.get("usage")
+        if not usage or (start is not None and usage.get("period_start") != start):
+            usage = key_data["usage"] = {"period_start": start or now, "requests": 0, "tokens": 0, "cost": {}}
+            self._dirty = True
+        return usage
+
+    def _quota_unsafe(self, key_data: Dict[str, Any], now: float) -> Dict[str, Any]:
+        """锁内调用：当前周期的用量、上限和已用尽的项目。费用按额度货币折算。"""
+        period = key_data.get("quota_period", "total")
+        usage = self._usage_unsafe(key_data, now)
+        currency = key_data.get("cost_currency", "USD")
+        used = {"cost": _cost_in(currency, usage["cost"]), "tokens": usage["tokens"], "requests": usage["requests"]}
+        limits = {kind: key_data.get(field) or 0 for kind, field in _LIMIT_FIELDS.items()}
+        return {
+            "period": period,
+            "period_start": usage["period_start"],
+            "resets_at": _period_bounds(period, now)[1],
+            "currency": currency,
+            "used": used,
+            "limits": limits,
+            "exhausted": [kind for kind, limit in limits.items() if limit and used[kind] >= limit],
+        }
+
+    @staticmethod
+    def _quota_message(quota: Dict[str, Any]) -> str:
+        currency = quota["currency"]
+        details = "，".join(
+            f"{_QUOTA_LABELS[kind]} {_format_quota(kind, quota['used'][kind], currency)}"
+            f" / {_format_quota(kind, quota['limits'][kind], currency)}"
+            for kind in quota["exhausted"]
+        )
+        when = f"将于 {_format_time(quota['resets_at'])} 恢复" if quota["resets_at"] else "请联系管理员调整额度"
+        return f"此 API Key {_PERIOD_LABELS.get(quota['period'], '')}额度已用完（{details}），{when}。"
 
     def list_keys(self) -> List[Dict[str, Any]]:
         """列出所有 API Key（不包含 secret）"""
@@ -357,71 +476,97 @@ class APIKeyManager:
 
     def validate_request(
         self, provided_secret: str, model_name: Optional[str] = None, *, consume: bool = True
-    ) -> Tuple[bool, Optional[str], Optional[str]]:
+    ) -> KeyCheck:
         """
         验证 API 请求。
 
         Args:
             provided_secret: 请求中提供的 API Key
             model_name: 请求的模型名称（可选，用于检查模型权限）
+            consume: False 时只确认身份，不检查额度、不消耗 RPM
 
         Returns:
-            (valid, key_id, error_message)
-            - valid: 验证是否通过
-            - key_id: 匹配的 key ID（验证通过时）
-            - error_message: 错误信息（验证失败时）
+            KeyCheck(valid, key_id, error, reason)
         """
+        now = time.time()
         with self._lock:
             key_id = self._secret_index.get(provided_secret)
             if key_id is None:
-                return False, None, "提供的 API Key 不正确。"
+                return KeyCheck(False, None, "提供的 API Key 不正确。", "invalid")
 
             key_data = self._keys.get(key_id)
             if not key_data:
-                return False, None, "API Key 数据异常。"
+                return KeyCheck(False, None, "API Key 数据异常。", "invalid")
 
             # 检查是否启用
             if not key_data.get("enabled", True):
-                return False, key_id, "此 API Key 已被禁用。"
+                return KeyCheck(False, key_id, "此 API Key 已被禁用。", "disabled")
+            if _expired(key_data, now):
+                return KeyCheck(False, key_id, f"此 API Key 已于 {_format_time(key_data['expires_at'])} 过期。", "expired")
 
             # 检查模型权限
             allowed_models = key_data.get("allowed_models", [])
             if allowed_models and model_name:
                 if model_name not in allowed_models:
-                    return (
+                    return KeyCheck(
                         False,
                         key_id,
                         f"此 API Key 无权访问模型 '{model_name}'。允许的模型: {', '.join(allowed_models)}",
+                        "model",
                     )
 
             # 🔧 在锁内读取 rpm_limit，避免与 update_key/delete_key 的锁外读竞态
             rpm_limit = key_data.get("rpm_limit", 0)
 
-        # WebSocket 握手只确认身份；创建响应或追加指令时才消耗一次请求额度。
-        if not consume:
-            return True, key_id, None
+            # WebSocket 握手只确认身份；创建响应或追加指令时才检查额度并消耗一次请求。
+            if not consume:
+                return KeyCheck(True, key_id)
+
+            # 额度只在请求进入时检查：进行中的请求照常算完，最终用量可能略超上限
+            if any(key_data.get(field) for field in _LIMIT_FIELDS.values()):
+                quota = self._quota_unsafe(key_data, now)
+                if quota["exhausted"]:
+                    return KeyCheck(False, key_id, self._quota_message(quota), "quota")
 
         # RPM 检查（在锁外进行，因为 rate_limiter 有自己的锁）
         allowed, remaining = self._rate_limiter.check_and_consume(key_id, rpm_limit)
         if not allowed:
-            return (
-                False,
-                key_id,
-                f"请求频率超限。此 Key 的 RPM 限制为 {rpm_limit} 次/分钟。",
-            )
+            return KeyCheck(False, key_id, f"请求频率超限。此 Key 的 RPM 限制为 {rpm_limit} 次/分钟。", "rate")
 
         # 更新使用统计
         # 热路径不做同步文件落盘，否则每个新请求都会阻塞事件循环并拖慢其他流式请求；
         # 标记为脏，由后台任务（background_tasks.monitors.api_key_stats_saver）周期性落盘
         with self._lock:
-            if key_id in self._keys:
-                self._keys[key_id]["last_used_at"] = time.time()
-                self._keys[key_id]["total_requests"] = (
-                    self._keys[key_id].get("total_requests", 0) + 1
-                )
+            key_data = self._keys.get(key_id)
+            if key_data is not None:
+                key_data["last_used_at"] = now
+                key_data["total_requests"] = key_data.get("total_requests", 0) + 1
+                self._usage_unsafe(key_data, now)["requests"] += 1
                 self._dirty = True
 
-        return True, key_id, None
+        return KeyCheck(True, key_id)
+
+    def record_usage(
+        self, key_id: str, tokens: int, cost_info: Optional[Dict[str, Any]], *, success: bool = True
+    ) -> None:
+        """请求结束后把 Token 和费用计入当前周期；管理员、本机等非访客调用方直接忽略。
+
+        失败请求只有产生了费用（上游已计费，如流式中途断开）才计入，
+        没到上游或上游拒绝的请求不消耗访客的 Token 额度。
+        """
+        cost = float((cost_info or {}).get("total_cost") or 0)
+        currency = "CNY" if (cost_info or {}).get("currency") == "CNY" else "USD"
+        if not cost and (not tokens or not success):
+            return
+        with self._lock:
+            key_data = self._keys.get(key_id)
+            if key_data is None:
+                return
+            usage = self._usage_unsafe(key_data, time.time())
+            usage["tokens"] += tokens
+            if cost:
+                usage["cost"][currency] = usage["cost"].get(currency, 0.0) + cost
+            self._dirty = True
 
     def get_allowed_models(self, provided_secret: str) -> Optional[List[str]]:
         """
@@ -439,7 +584,7 @@ class APIKeyManager:
                 return None
 
             key_data = self._keys.get(key_id)
-            if not key_data or not key_data.get("enabled", True):
+            if not key_data or not key_data.get("enabled", True) or _expired(key_data, time.time()):
                 return None
 
             return key_data.get("allowed_models", [])

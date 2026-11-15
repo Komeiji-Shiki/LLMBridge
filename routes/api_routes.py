@@ -84,6 +84,8 @@ from core.errors import (
     BrowserNotConnectedError,
     GatewayTimeoutError,
     RateLimitError,
+    QuotaExceededError,
+    PermissionError as APIPermissionError,
 )
 
 # 服务与工具
@@ -177,6 +179,10 @@ def _extract_client_api_key(request: Request, allow_gemini_style: bool = False) 
     return None
 
 
+# 访客 Key 拒绝原因 -> 错误类型；禁用、过期、Key 不存在都按认证失败处理
+_GUEST_KEY_ERRORS = {"rate": RateLimitError, "model": APIPermissionError, "quota": QuotaExceededError}
+
+
 @observe_authenticated_request
 def _validate_request_api_key(request: Request, model_name: Optional[str],
                               allow_gemini_style: bool = False, *,
@@ -221,20 +227,12 @@ def _validate_request_api_key(request: Request, model_name: Optional[str],
     if global_api_key and secrets.compare_digest(str(provided_key), str(global_api_key)):
         return
 
-    # 访客 key 校验（模型白名单 + RPM）
+    # 访客 key 校验（模型白名单 + 过期时间 + 用量额度 + RPM）
     if has_guest_keys:
-        if consume_rate_limit:
-            valid, key_id, error_msg = api_key_manager.validate_request(provided_key, model_name)
-        else:
-            valid, key_id, error_msg = api_key_manager.validate_request(provided_key, model_name, consume=False)
-        if not valid:
-            if error_msg and "频率超限" in error_msg:
-                raise RateLimitError(error_msg).to_http_exception()
-            elif error_msg and "无权访问模型" in error_msg:
-                from core.errors import PermissionError as APIPermissionError
-                raise APIPermissionError(error_msg).to_http_exception()
-            else:
-                raise AuthenticationError(error_msg or "API Key 验证失败。").to_http_exception()
+        check = api_key_manager.validate_request(provided_key, model_name, consume=consume_rate_limit)
+        if not check.valid:
+            error_class = _GUEST_KEY_ERRORS.get(check.reason, AuthenticationError)
+            raise error_class(check.error or "API Key 验证失败。").to_http_exception()
         return
 
     # 仅有全局 key 时，且上面没匹配成功 -> 认证失败

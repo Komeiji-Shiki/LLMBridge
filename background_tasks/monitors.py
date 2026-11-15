@@ -138,11 +138,12 @@ async def _pack_old_logs() -> None:
         logger.info(f"[LOG_PACK] 打包完成: {text}")
 
 
-async def api_key_stats_saver(interval_seconds: int = 300):
+async def api_key_stats_saver(interval_seconds: int = 60):
     """周期性把 API Key 使用统计落盘。
 
     validate_request 属于热路径，只更新内存统计不写盘；
     旧版只在优雅关闭时 save_now()，强杀进程会丢失全部统计。
+    用量额度依赖这些计数，间隔取一分钟，强杀最多少记一分钟用量。
     """
     from core.api_key_manager import api_key_manager
     logger.info("[APIKEY_SAVER] API Key 统计落盘任务已启动")

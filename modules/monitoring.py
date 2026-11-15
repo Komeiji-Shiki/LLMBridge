@@ -16,6 +16,7 @@ import queue
 import concurrent.futures
 import copy
 from contextvars import copy_context
+from core.api_key_manager import api_key_manager
 from core.request_context import current_request
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
@@ -831,6 +832,10 @@ class MonitoringService:
         # ═══════════════════════════════════════════
         
         # （_store_request_details 已移回锁内，因为需要修改共享的 request_details_cache）
+
+        # 所有协议的请求都在这里结束，访客 Key 的周期用量统一在此累计
+        api_key_manager.record_usage(request_info.caller_id, (input_tokens or 0) + (output_tokens or 0), cost_info,
+                                     success=success)
 
         log_entry = {
             'type': 'request_end',

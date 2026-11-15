@@ -7,10 +7,11 @@ API Key 管理路由
 """
 import asyncio
 import logging
+import math
 
 from fastapi import APIRouter, HTTPException, Request
 
-from core.api_key_manager import api_key_manager, KeyPersistenceError
+from core.api_key_manager import api_key_manager, KeyPersistenceError, QUOTA_PERIODS, COST_CURRENCIES
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["api-keys"])
@@ -48,14 +49,28 @@ def _validate_key_payload(data: dict, *, require_name: bool = True) -> dict:
             raise HTTPException(status_code=400, detail="allowed_models 必须是一个列表")
         cleaned["allowed_models"] = allowed_models
 
-    if "rpm_limit" in data:
-        try:
-            rpm_limit = int(data["rpm_limit"])
-            if rpm_limit < 0:
-                raise ValueError()
-        except (ValueError, TypeError):
-            raise HTTPException(status_code=400, detail="rpm_limit 必须是非负整数")
-        cleaned["rpm_limit"] = rpm_limit
+    for field, cast in (("rpm_limit", int), ("token_limit", int), ("request_limit", int), ("cost_limit", float)):
+        if field in data:
+            try:
+                value = cast(data[field])
+                if value < 0 or not math.isfinite(value):
+                    raise ValueError()
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail=f"{field} 必须是非负数")
+            cleaned[field] = value
+
+    for field, choices in (("quota_period", QUOTA_PERIODS), ("cost_currency", COST_CURRENCIES)):
+        if field in data:
+            if data[field] not in choices:
+                raise HTTPException(status_code=400, detail=f"{field} 只能是 {', '.join(choices)}")
+            cleaned[field] = data[field]
+
+    if "expires_at" in data:
+        expires_at = data["expires_at"]
+        if expires_at is not None and (isinstance(expires_at, bool) or not isinstance(expires_at, (int, float))
+                                       or not math.isfinite(expires_at) or expires_at <= 0):
+            raise HTTPException(status_code=400, detail="expires_at 必须是 Unix 时间戳（秒）或 null")
+        cleaned["expires_at"] = expires_at
 
     if "description" in data:
         cleaned["description"] = str(data["description"])
@@ -86,14 +101,7 @@ async def create_api_key(request: Request):
     # 验证并清洗 payload
     cleaned = _validate_key_payload(data, require_name=True)
 
-    key_info = await _mutate_key(
-        api_key_manager.create_key,
-        name=cleaned["name"],
-        allowed_models=cleaned.get("allowed_models", []),
-        rpm_limit=cleaned.get("rpm_limit", 0),
-        enabled=cleaned.get("enabled", True),
-        description=cleaned.get("description", ""),
-    )
+    key_info = await _mutate_key(api_key_manager.create_key, **cleaned)
 
     return {"success": True, "key": key_info, "message": "API Key 创建成功。请保存好 secret，它只会显示一次！"}
 
@@ -130,6 +138,15 @@ async def update_api_key(key_id: str, request: Request):
     if result is None:
         raise HTTPException(status_code=404, detail=f"API Key '{key_id}' 不存在")
 
+    return {"success": True, "key": result}
+
+
+@router.post("/api/admin/api_keys/{key_id}/reset_usage")
+async def reset_api_key_usage(key_id: str):
+    """清零 API Key 当前周期的用量"""
+    result = await _mutate_key(api_key_manager.reset_usage, key_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"API Key '{key_id}' 不存在")
     return {"success": True, "key": result}
 
 
