@@ -31,7 +31,7 @@ _DIRECT_TYPES = ('direct_api', 'responses_native', 'anthropic_native', 'gemini_n
 
 # 渠道可以统一给默认值的模型设置：模型自己写了用自己的，没写就跟渠道走，写成 null 表示明确不设置
 DEFAULT_FIELDS = ('passthrough', 'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream',
-                  'first_chunk_timeout_seconds', 'cached_tokens_mode', 'auto_retry', 'image_compression')
+                  'first_chunk_timeout_seconds', 'gemini_max_continuation_hops', 'cached_tokens_mode', 'auto_retry', 'image_compression')
 _BOOLEAN_DEFAULTS = ('passthrough', 'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream')
 # 这些项不写时请求链路实际采用的取值，用来判断模型的值和渠道默认值是不是一回事
 _BUILTIN_VALUES = {'passthrough': False, 'convert_system_to_user': False, 'enable_prefix': False, 'enable_partial': False,
@@ -90,6 +90,8 @@ def _normalize_defaults(data) -> dict:
             raise ValueError(f'{field} 必须是 true 或 false')
         if field == 'first_chunk_timeout_seconds' and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0):
             raise ValueError('first_chunk_timeout_seconds 必须是正数')
+        if field == 'gemini_max_continuation_hops' and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise ValueError('gemini_max_continuation_hops 必须是非负整数')
         if field == 'cached_tokens_mode' and value not in ('off', 'forward', 'reverse'):
             raise ValueError(f'未知的缓存 Token 统计模式: {value}')
         if field in ('auto_retry', 'image_compression') and not isinstance(value, dict):

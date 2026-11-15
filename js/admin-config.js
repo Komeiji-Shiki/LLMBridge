@@ -437,6 +437,7 @@ function buildPerformanceConfig() {
             ${buildCompactFormGroup('验证冷却(秒)', `<input type="number" class="form-input" id="form-verification_cooldown_seconds" value="${currentConfigData.verification_cooldown_seconds ?? 25}" style="padding: 4px; font-size: 0.8rem;">`)}
             ${buildCompactFormGroup('流结束延迟(秒)', `<input type="number" class="form-input" id="form-stream_end_wait_delay_seconds" value="${currentConfigData.stream_end_wait_delay_seconds ?? 1.0}" step="0.1" style="padding: 4px; font-size: 0.8rem;">`)}
             ${buildCompactFormGroup('最大转移次数', `<input type="number" class="form-input" id="form-max_request_transfers" value="${currentConfigData.max_request_transfers ?? 3}" style="padding: 4px; font-size: 0.8rem;">`)}
+            ${buildCompactFormGroup('Gemini续传跳数', `<input type="number" class="form-input" id="form-gemini_max_continuation_hops" min="0" step="1" value="${currentConfigData.gemini_max_continuation_hops ?? 32}" style="padding: 4px; font-size: 0.8rem;">`)}
         </div>
     `;
     
@@ -617,6 +618,7 @@ function formToConfig() {
     config.verification_cooldown_seconds = safeInt('form-verification_cooldown_seconds', 25);
     config.stream_end_wait_delay_seconds = safeFloat('form-stream_end_wait_delay_seconds', 1.0);
     config.max_request_transfers = safeInt('form-max_request_transfers', 3);
+    config.gemini_max_continuation_hops = Math.max(0, safeInt('form-gemini_max_continuation_hops', 32));
     config.load_balancer_lock_timeout_seconds = safeFloat('form-load_balancer_lock_timeout_seconds', 5.0);
     
     // 后台任务配置

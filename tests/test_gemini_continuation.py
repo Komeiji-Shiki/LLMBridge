@@ -639,3 +639,94 @@ def test_generate_content_stream_exposes_the_token_on_the_finish_chunk():
     finish = next(item for item in chunks if item.get('candidates') and item['candidates'][0].get('finishReason'))
     assert finish['candidates'][0]['finishReason'] == 'CONTINUATION'
     assert finish['candidates'][0]['continuationToken'] == 'token-1'
+
+
+_MISMATCH_400 = (400, json.dumps({
+    'error': {
+        'message': ('The request input or conversation history does not match the continuation token. '
+                    'When resuming generation with a continuation token, pass the exact same input and '
+                    'conversation history as the initial request.'),
+        'type': 'upstream_error',
+        'param': '',
+        'code': 400,
+    }
+}))
+
+
+@pytest.mark.parametrize('stream', [True, False])
+def test_endpoint_zero_hops_overrides_global_config(stream):
+    context = RequestContext(endpoint={'gemini_max_continuation_hops': 0})
+    token = current_request.set(context)
+    try:
+        hop = chunk('只跑一跳', 'CONTINUATION', 'token-1', usage(candidates=16))
+        session = session_with([hop] if stream else hop)
+        result = collect(session, stream=stream)
+        assert session.post.call_count == 1
+        assert result[-1]['candidates'][0]['finishReason'] == 'CONTINUATION'
+
+        inter_session = session_with(
+            hop_events('只跑一跳', 'requires_continuation', 'token-1') if stream
+            else hop_response([output_step('只跑一跳')], 'requires_continuation', 'token-1'))
+        inter_result = collect_interactions(inter_session, stream=stream)
+        assert inter_session.post.call_count == 1
+        if stream:
+            assert finishes(to_chat(inter_result)) == ['length']
+        else:
+            assert inter_result[0]['status'] == 'requires_continuation'
+    finally:
+        current_request.reset(token)
+
+
+@pytest.mark.parametrize('stream', [True, False])
+def test_relay_continuation_mismatch_400_falls_back_to_truncated_instead_of_failing(stream):
+    from core.conversion_report import conversion_notes
+    hop_1_usage = {**usage(prompt=22421, candidates=3, thoughts=65533), 'serviceTier': 'standard'}
+    first = chunk('已生成部分', 'CONTINUATION', 'token-1', hop_1_usage)
+    context = RequestContext()
+    token = current_request.set(context)
+    try:
+        session = session_with([first] if stream else first, _MISMATCH_400)
+        result = collect(session, stream=stream)
+        assert session.post.call_count == 2
+        assert not any('error' in item for item in result)
+        assert text_of(result) == '已生成部分'
+        assert result[-1]['candidates'][0]['finishReason'] == 'CONTINUATION'
+        assert result[-1]['usageMetadata']['thoughtsTokenCount'] == 65533
+        assert result[-1]['usageMetadata']['serviceTier'] == 'standard'
+        assert context.outcome['stop_reason'] == 'CONTINUATION'
+        assert any(note['field'] == 'continuation' for note in conversion_notes())
+    finally:
+        current_request.reset(token)
+
+
+def test_first_hop_400_mentioning_continuation_token_still_surfaces_error():
+    session = session_with(_MISMATCH_400)
+    result = collect(session, stream=True)
+    assert 'error' in result[-1] and result[-1]['error']['code'] == 400
+
+
+@pytest.mark.parametrize('stream', [True, False])
+def test_interactions_continuation_mismatch_400_falls_back_to_truncated(stream):
+    from converters.gemini_interactions import convert_interactions_to_openai_response
+    from core.conversion_report import conversion_notes
+    context = RequestContext()
+    token = current_request.set(context)
+    try:
+        first = (hop_events('第一跳正文', 'requires_continuation', 't1', hop_usage(100, 0, 50, 10)) if stream
+                 else hop_response([output_step('第一跳正文')], 'requires_continuation', 't1', hop_usage(100, 0, 50, 10)))
+        session = session_with(first, _MISMATCH_400)
+        result = collect_interactions(session, stream=stream)
+        assert session.post.call_count == 2
+        assert not any('error' in item for item in result)
+        if stream:
+            chunks = to_chat(result)
+            assert chat_text(chunks) == '第一跳正文'
+            assert finishes(chunks) == ['length']
+        else:
+            openai = convert_interactions_to_openai_response(result[0], 'm', 'r')
+            assert openai['choices'][0]['message']['content'] == '第一跳正文'
+            assert openai['choices'][0]['finish_reason'] == 'length'
+        assert any(note['field'] == 'continuation' for note in conversion_notes())
+    finally:
+        current_request.reset(token)
+

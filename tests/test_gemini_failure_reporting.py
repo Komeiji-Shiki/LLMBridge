@@ -372,6 +372,59 @@ def test_claude_code_sees_unresumable_continuation_as_max_tokens():
     assert [event['delta']['stop_reason'] for event in parsed if event.get('type') == 'message_delta'] == ['max_tokens']
 
 
+def test_claude_code_sees_relay_continuation_mismatch_as_max_tokens_with_full_usage():
+    hop_1 = {'candidates': [{'content': {'role': 'model', 'parts': [{'text': '先想这么多', 'thought': True}]},
+                             'finishReason': 'CONTINUATION', 'continuationToken': 'token-1'}],
+             'usageMetadata': {'promptTokenCount': 22421, 'candidatesTokenCount': 3,
+                               'thoughtsTokenCount': 65533, 'totalTokenCount': 87957}}
+    mismatch_resp = MagicMock(status=400)
+    mismatch_resp.text = AsyncMock(return_value=json.dumps({
+        'error': {'message': 'The request input or conversation history does not match the continuation token.',
+                  'type': 'upstream_error', 'code': 400}}))
+    ok_resp = MagicMock(status=200)
+
+    async def stream():
+        yield ('data: ' + json.dumps(hop_1) + '\n\n').encode()
+
+    ok_resp.content.iter_any = stream
+    session = MagicMock()
+    session.post.return_value.__aenter__ = AsyncMock(side_effect=[ok_resp, mismatch_resp])
+    session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    parsed, monitor = anthropic_events(session)
+    assert [event['delta']['stop_reason'] for event in parsed if event.get('type') == 'message_delta'] == ['max_tokens']
+    end = only_end(monitor)
+    assert end['success'] is True and end['error'] is None
+    assert end['input_tokens'] == 22421 and end['output_tokens'] == 65536
+
+
+def test_stream_mid_continuation_503_preserves_merged_usage_metadata():
+    hop_1 = chunk('前半', 'CONTINUATION', 'token-1',
+                  {'promptTokenCount': 100, 'candidatesTokenCount': 20, 'thoughtsTokenCount': 30, 'totalTokenCount': 150})
+    fail_resp = MagicMock(status=503)
+    fail_resp.text = AsyncMock(return_value=json.dumps({'error': {'message': '上游过载', 'code': 503}}))
+    ok_resp = MagicMock(status=200)
+
+    async def stream():
+        yield ('data: ' + json.dumps(hop_1) + '\n\n').encode()
+
+    ok_resp.content.iter_any = stream
+    session = MagicMock()
+    session.post.return_value.__aenter__ = AsyncMock(side_effect=[ok_resp, fail_resp])
+    session.post.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    async def run():
+        call, monitor = route(None, session=session)
+        await drain(await call)
+        return monitor
+
+    end = only_end(asyncio.run(run()))
+    assert end['success'] is False
+    assert end['input_tokens'] == 100 and end['output_tokens'] == 50
+    assert end['upstream_usage']['continuationHops'] == 1
+    assert end['upstream_usage']['billedPromptTokenCount'] == 100
+
+
 def test_tool_calls_across_hops_stay_distinct():
     call = lambda call_id: {'candidates': [{'content': {'parts': [
         {'functionCall': {'id': call_id, 'name': 'Read', 'args': {'file_path': call_id}}}]}}]}

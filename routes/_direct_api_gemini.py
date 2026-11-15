@@ -289,8 +289,8 @@ async def handle_gemini_native_direct(
         monitor_extra_params["extra_body_params"] = extra_body_params
     if thinking_config:
         monitor_extra_params["thinking_config"] = thinking_config
-    # 记录思考相关配置到监控日志
-    for key in ("enable_thinking", "reasoning_effort", "thinking_budget", "force_stream"):
+    # 记录思考与续传相关配置到监控日志
+    for key in ("enable_thinking", "reasoning_effort", "thinking_budget", "force_stream", "gemini_max_continuation_hops"):
         val = endpoint_config.get(key)
         if val is not None and val != "":
             monitor_extra_params[key] = val
@@ -439,6 +439,17 @@ async def handle_gemini_native_direct(
                 first_chunk_seen = False
                 splitter = ThinkingSeparatorStreamSplitter(thinking_separator)
 
+                def account_failure(metadata):
+                    """续传中途失败时，已经完成的各跳用量仍然计入统计。"""
+                    nonlocal input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, upstream_usage
+                    if isinstance(metadata, dict) and metadata:
+                        input_tokens = int(metadata.get("promptTokenCount") or 0)
+                        reasoning_tokens = int(metadata.get("thoughtsTokenCount") or 0)
+                        output_tokens = int(metadata.get("candidatesTokenCount") or 0) + reasoning_tokens
+                        cached_tokens = int(metadata.get("cachedContentTokenCount") or 0)
+                        total_tokens = int(metadata.get("totalTokenCount") or (input_tokens + output_tokens))
+                        upstream_usage = metadata
+
                 def consume(gemini_chunk):
                     """累积一个上游块，返回要转发的 SSE 文本（被思考分隔吞掉时为 None）。"""
                     nonlocal upstream_usage, input_tokens, output_tokens, reasoning_tokens
@@ -497,6 +508,7 @@ async def handle_gemini_native_direct(
 
                         if "error" in gemini_chunk:
                             error_msg = str(gemini_chunk.get("error"))
+                            account_failure(gemini_chunk.get("usageMetadata"))
                             yield f"data: {json.dumps({'error': gemini_chunk['error']}, ensure_ascii=False)}\n\n"
                             if not first_chunk_seen:
                                 logger.error(f"[GEMINI_NATIVE] 流式预读检测到错误: {gemini_chunk}")
@@ -675,12 +687,13 @@ async def handle_gemini_native_direct(
 
                 def account_failure(metadata):
                     """续传中途失败时，已经完成的各跳用量仍然计入统计。"""
-                    nonlocal input_tokens, output_tokens, cached_tokens, upstream_usage
+                    nonlocal input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, upstream_usage
                     if isinstance(metadata, dict) and metadata:
                         input_tokens = int(metadata.get("promptTokenCount") or 0)
-                        output_tokens = (int(metadata.get("candidatesTokenCount") or 0)
-                                         + int(metadata.get("thoughtsTokenCount") or 0))
+                        reasoning_tokens = int(metadata.get("thoughtsTokenCount") or 0)
+                        output_tokens = int(metadata.get("candidatesTokenCount") or 0) + reasoning_tokens
                         cached_tokens = int(metadata.get("cachedContentTokenCount") or 0)
+                        total_tokens = int(metadata.get("totalTokenCount") or (input_tokens + output_tokens))
                         upstream_usage = metadata
 
                 def consume(openai_chunk):

@@ -29,7 +29,7 @@ from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 
 from core.config_loader import CONFIG
-from core.constants import GeminiDefaults, TimeoutDefaults
+from core.constants import GeminiDefaults, TimeoutDefaults, resolve_max_continuation_hops
 from core.conversion_report import ConversionRejected, raise_if_strict
 from converters.gemini_generate import GeminiRequestError, build_gemini_contents
 from converters.gemini_interactions import build_interactions_request_body, interaction_failure, load_signature_history
@@ -834,7 +834,7 @@ class DirectAPIService:
             logger.info(f"[GEMINI_NATIVE] maxOutputTokens: {max_tokens}")
 
         continuation = GeminiContinuation(
-            CONFIG.get("gemini_max_continuation_hops", GeminiDefaults.MAX_CONTINUATION_HOPS))
+            resolve_max_continuation_hops(CONFIG, request_context.endpoint if request_context else None))
         # Vertex 流式参数分片在这里拼回完整调用，转换链路只处理完整的 functionCall
         partial_calls = PartialCallMerger()
 
@@ -879,6 +879,19 @@ class DirectAPIService:
                     if response.status != 200:
                         error_text = await response.text()
                         error_message = error_text.strip() or f"Gemini API 返回 HTTP {response.status}（响应正文为空）"
+                        if continuation.can_fallback_to_truncated(response.status, error_message):
+                            logger.warning(
+                                f"[GEMINI_NATIVE] 第 {continuation.hops} 次续传被上游拒绝，保留前序输出并按截断收尾: {error_message[:200]}")
+                            if stream:
+                                chunk = continuation.fallback_chunk()
+                                _termination_error(chunk)
+                                if assembler is not None:
+                                    assembler.feed(chunk)
+                                yield chunk
+                            else:
+                                response_data = continuation.fallback_response(response_data)
+                                _termination_error(response_data)
+                            break
                         logger.error(f"[GEMINI_NATIVE] API调用失败: {response.status} - {error_message}")
                         try:
                             error_json = json.loads(error_text)
@@ -1042,7 +1055,7 @@ class DirectAPIService:
             return
 
         continuation = InteractionsContinuation(
-            CONFIG.get("gemini_max_continuation_hops", GeminiDefaults.MAX_CONTINUATION_HOPS))
+            resolve_max_continuation_hops(CONFIG, request_context.endpoint if request_context else None))
 
         logger.info(f"[GEMINI_INTERACTIONS] 调用Interactions API: {_redact(endpoint)}")
         logger.info(f"[GEMINI_INTERACTIONS] 模型: {model}, 流式: {stream}, 步骤数: {len(request_body.get('input', []))}")
@@ -1079,6 +1092,14 @@ class DirectAPIService:
                         _remember_response_headers(response)
                         if response.status != 200:
                             error_text = await response.text()
+                            if continuation.can_fallback_to_truncated(response.status, error_text):
+                                logger.warning(
+                                    f"[GEMINI_INTERACTIONS] 第 {continuation.hops} 次续传被上游拒绝，保留前序输出并按截断收尾: {error_text[:200]}")
+                                if stream:
+                                    yield continuation.fallback_event()
+                                else:
+                                    response_data = continuation.fallback_response(response_data)
+                                break
                             logger.error(f"[GEMINI_INTERACTIONS] API调用失败: {response.status} - {error_text}")
                             try:
                                 error_json = json.loads(error_text)

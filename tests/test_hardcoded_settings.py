@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from starlette.requests import Request
 
-from core.constants import GeminiDefaults, RetryDefaults, ServerDefaults, TimeoutDefaults, resolve_first_chunk_timeout, resolve_heartbeat_interval
+from core.constants import (
+    GeminiDefaults, RetryDefaults, ServerDefaults, TimeoutDefaults,
+    resolve_first_chunk_timeout, resolve_heartbeat_interval, resolve_max_continuation_hops,
+)
 from routes._direct_api_passthrough import _prepare_passthrough_request
 from services.provider_capabilities import diagnose_model, model_family, provider_name, validate_tool_config
 from utils.usage_tokens import rough_message_tokens, rough_token_count
@@ -140,6 +143,14 @@ def test_first_chunk_timeout_precedence():
     assert resolve_first_chunk_timeout({'first_chunk_timeout_seconds': 90}) == 90
     assert resolve_first_chunk_timeout({'first_chunk_timeout_seconds': 90}, {'first_chunk_timeout_seconds': 15}) == 15
     assert resolve_first_chunk_timeout({'first_chunk_timeout_seconds': 90}, {}) == 90
+
+
+def test_max_continuation_hops_precedence_preserves_zero():
+    assert resolve_max_continuation_hops() == GeminiDefaults.MAX_CONTINUATION_HOPS == 32
+    assert resolve_max_continuation_hops({'gemini_max_continuation_hops': 0}) == 0
+    assert resolve_max_continuation_hops({'gemini_max_continuation_hops': 8}, {'gemini_max_continuation_hops': 0}) == 0
+    assert resolve_max_continuation_hops({'gemini_max_continuation_hops': 0}, {'gemini_max_continuation_hops': 4}) == 4
+    assert resolve_max_continuation_hops({'gemini_max_continuation_hops': 6}, {}) == 6
 
 
 def test_heartbeat_honors_configuration():

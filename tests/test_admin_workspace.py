@@ -646,6 +646,7 @@ def test_native_tool_model_configuration_survives_save(ui):
     page.locator('#model-provider').select_option('deepseek')
     page.locator('#model-family').select_option('gemini')
     page.locator('#model-first-chunk-timeout').fill('120')
+    page.locator('#model-continuation-hops').fill('0')
     page.locator('#model-native-tools').fill('web_search')
     page.locator('#model-native-tool-options').fill('{"web_search": {}}')
     page.locator('#model-save-btn').click()
@@ -654,6 +655,7 @@ def test_native_tool_model_configuration_survives_save(ui):
     assert writes[-1]['config']['provider'] == 'deepseek'
     assert writes[-1]['config']['model_family'] == 'gemini'
     assert writes[-1]['config']['first_chunk_timeout_seconds'] == 120
+    assert writes[-1]['config']['gemini_max_continuation_hops'] == 0
     assert writes[-1]['config']['sanitize_recursive_schemas'] is False
 
 
@@ -764,6 +766,55 @@ def test_estimated_cost_currency_chart_reuse_and_mobile_layout(ui):
     page.set_viewport_size({'width': 390, 'height': 844})
     assert page.evaluate('document.documentElement.scrollWidth') <= 390
     assert page.locator('#token-stats-table .table-scroll').evaluate('el => el.scrollWidth > el.clientWidth')
+
+
+def test_token_stats_search_filters_rows_and_keeps_selection_to_visible_rows(ui):
+    from core.combined_usage import combine_usage
+    page, _, _, _ = ui
+    stats = [{'model': 'gemini-3-flash-preview', 'display_name': '[gcli] gemini-3-flash-preview'},
+             {'model': 'gemini-3-pro'},
+             {'model': 'claude4.5s_think32k'}]
+    bridge = {'model_stats': [{'request_count': 1, 'input_tokens': 10, 'output_tokens': 1, 'total_tokens': 11, 'total_cost': 0, **row} for row in stats],
+              'daily_stats': [], 'total_tokens': 33, 'total_input_tokens': 30,
+              'total_output_tokens': 3, 'total_cached_tokens': 0,
+              'total_cost': 0, 'input_cost': 0, 'output_cost': 0,
+              'rate_stats': {'request_count': 3, 'total_tokens': 33, 'minutes': 60}}
+    page.route('**/api/admin/token_stats?*', lambda route: route.fulfill(json=combine_usage(bridge, {}, 'bridge')))
+    page.locator('[data-page="overview"]').click()
+    page.evaluate('refreshTokenStats()')
+    rows = page.locator('#token-stats-table tbody tr')
+    query = page.locator('#token-stats-query')
+    selected = page.locator('#selected-count-display')
+    playwright.expect(rows).to_have_count(3)
+    # 按 / 聚焦搜索框；空格分隔的多个词需全部命中，大小写不敏感
+    page.keyboard.press('/')
+    playwright.expect(query).to_be_focused()
+    query.fill('GEMINI  flash')
+    playwright.expect(rows).to_have_count(1)
+    playwright.expect(rows.first).to_contain_text('gemini-3-flash-preview')
+    query.fill('gemini')
+    playwright.expect(rows).to_have_count(2)
+    # 全选只勾选可见的行
+    page.locator('#select-all-checkbox').check()
+    playwright.expect(selected).to_have_text('已选择: 2')
+    # 被筛掉的勾选不保留，清空搜索后也不会回来
+    query.fill('claude')
+    playwright.expect(rows).to_have_count(1)
+    playwright.expect(selected).to_have_text('已选择: 0')
+    query.fill('nope')
+    playwright.expect(page.locator('#token-stats-table tbody')).to_contain_text('没有匹配的模型')
+    query.press('Escape')
+    playwright.expect(rows).to_have_count(3)
+    assert query.input_value() == ''
+    # 定时刷新会整表重绘，但搜索框本身和搜索词保持不变
+    query.fill('gemini')
+    query.evaluate('el => el.dataset.kept = "1"')
+    with page.expect_response('**/api/admin/token_stats?*'):
+        page.evaluate('refreshTokenStats()')
+    playwright.expect(rows).to_have_count(2)
+    assert query.get_attribute('data-kept') == '1' and query.input_value() == 'gemini'
+    page.evaluate('renderTokenStatsTable([])')
+    playwright.expect(page.locator('#token-stats-actions')).to_be_hidden()
 
 
 def test_home_statistics_do_not_wait_for_overview_and_quick_ranges(ui):
@@ -1244,6 +1295,7 @@ def test_channel_editor_sets_defaults_and_asks_about_models_that_differ(ui):
     assert '开 1' in note and '关 1' in note
     page.locator('[data-channel-default="passthrough"]').select_option('false')
     page.locator('[data-channel-default="first_chunk_timeout_seconds"]').fill('300')
+    page.locator('[data-channel-default="gemini_max_continuation_hops"]').fill('0')
     page.locator('#channel-auto-retry-enabled').check()
     assert page.locator('#channel-auto-retry-options').is_visible()
     page.locator('#channel-auto-retry-max-retries').fill('4')
@@ -1254,5 +1306,7 @@ def test_channel_editor_sets_defaults_and_asks_about_models_that_differ(ui):
     dialog.get_by_role('button', name='都跟随渠道').click()
     page.wait_for_selector('#channel-modal', state='hidden')
     assert 'override' not in posts[0] and posts[1]['override'] is True
-    assert posts[1]['channel']['defaults'] == {'passthrough': False, 'first_chunk_timeout_seconds': 300, 'auto_retry': {
-        'enabled': True, 'max_retries': 4, 'retry_delay_seconds': 2, 'retry_on_429': True, 'retry_on_503': True, 'retry_on_other_errors': False}}
+    assert posts[1]['channel']['defaults'] == {
+        'passthrough': False, 'first_chunk_timeout_seconds': 300, 'gemini_max_continuation_hops': 0,
+        'auto_retry': {'enabled': True, 'max_retries': 4, 'retry_delay_seconds': 2,
+                       'retry_on_429': True, 'retry_on_503': True, 'retry_on_other_errors': False}}

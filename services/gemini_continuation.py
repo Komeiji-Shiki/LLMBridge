@@ -6,11 +6,24 @@
 """
 import logging
 
+from core.conversion_report import note_loss
+
 logger = logging.getLogger(__name__)
 
 _OUTPUT_FIELDS = ('candidatesTokenCount', 'thoughtsTokenCount', 'toolUsePromptTokenCount')
 # 明细只描述单跳，合并后与总量对不上
 _HOP_ONLY_FIELDS = ('candidatesTokensDetails', 'cacheTokensDetails')
+_CONTINUATION_REJECTED = '上游拒绝续传 token，已保留前序各跳输出并按截断结束'
+
+
+def _is_continuation_rejection(status_code: int, message: str) -> bool:
+    """续传跳在吐出新内容前收到 400 且报错指向续传 token，说明中转层改写了请求或不支持续传。"""
+    if status_code != 400 or not message:
+        return False
+    lowered = message.lower()
+    return ('continuation token' in lowered
+            or 'continuation_token' in lowered
+            or 'continuationtoken' in lowered)
 
 
 def _first_candidate(value):
@@ -34,6 +47,7 @@ class GeminiContinuation:
         self._last_token = None
         self._pending = False
         self._hop_usage = None
+        self._last_usage = None
         self._totals = None
         self._parts = None
 
@@ -43,7 +57,7 @@ class GeminiContinuation:
             return
         usage = value.get('usageMetadata')
         if isinstance(usage, dict) and usage:
-            self._hop_usage = usage
+            self._hop_usage = self._last_usage = usage
             if self._totals:
                 value['usageMetadata'] = self._merged(usage)
         candidate = _first_candidate(value)
@@ -86,6 +100,34 @@ class GeminiContinuation:
             return error
         return {**error, 'usageMetadata': self._merged(self._hop_usage or {})}
 
+    def can_fallback_to_truncated(self, status_code: int, message: str) -> bool:
+        return self.hops >= 1 and not self._hop_usage and _is_continuation_rejection(status_code, message)
+
+    def _fallback_usage(self):
+        self.hops = max(0, self.hops - 1)
+        if self.hops == 0 and self._last_usage:
+            return dict(self._last_usage)
+        return self._merged({})
+
+    def fallback_chunk(self):
+        """流式续传跳被上游拒绝时补发截断结束块，保留已输出的前序各跳内容。"""
+        note_loss('continuation', _CONTINUATION_REJECTED)
+        return {
+            'candidates': [{'content': {'role': 'model', 'parts': []}, 'finishReason': 'CONTINUATION'}],
+            'usageMetadata': self._fallback_usage(),
+        }
+
+    def fallback_response(self, response):
+        """非流式续传跳被上游拒绝时，把已合并的前序响应恢复为 CONTINUATION 截断状态。"""
+        note_loss('continuation', _CONTINUATION_REJECTED)
+        if not isinstance(response, dict):
+            return self.fallback_chunk()
+        candidate = _first_candidate(response)
+        if candidate is not None:
+            candidate['finishReason'] = 'CONTINUATION'
+        response['usageMetadata'] = self._fallback_usage()
+        return response
+
     def _can_resume(self):
         if self.hops >= self.max_hops:
             logger.warning('[GEMINI_NATIVE] 已达到续传跳数上限 %s，按输出截断结束', self.max_hops)
@@ -108,7 +150,8 @@ class GeminiContinuation:
     def _merged(self, usage):
         # 客户端用提示量判断上下文大小，所以只报第一跳；重复计费的部分单独记录。
         totals = self._add_hop(usage)
-        merged = {key: value for key, value in usage.items() if key not in _HOP_ONLY_FIELDS}
+        base = usage or self._last_usage or {}
+        merged = {key: value for key, value in base.items() if key not in _HOP_ONLY_FIELDS}
         merged.update({field: totals[field] for field in _OUTPUT_FIELDS})
         merged.update(promptTokenCount=totals['prompt'], cachedContentTokenCount=totals['cached'],
                       totalTokenCount=totals['prompt'] + sum(totals[field] for field in _OUTPUT_FIELDS),
@@ -141,8 +184,11 @@ class InteractionsContinuation:
         self._token = None
         self._last_token = None
         self._pending = False
+        self._boundary_resume = False
         self._completed = False
         self._hop_usage = None
+        self._last_usage = None
+        self._last_interaction = None
         self._totals = None
         self._steps = []
 
@@ -158,12 +204,15 @@ class InteractionsContinuation:
             self.step_open = False
         elif kind == 'interaction.status_update':
             self._token = event.get('continuation_token') or self._token
-            self._hop_usage = event.get('usage') or self._hop_usage
+            if event.get('usage'):
+                self._hop_usage = self._last_usage = event['usage']
         elif kind == 'interaction.completed' and isinstance(event.get('interaction'), dict):
             interaction = event['interaction']
-            self._hop_usage = interaction.get('usage') or self._hop_usage
+            if interaction.get('usage'):
+                self._hop_usage = self._last_usage = interaction['usage']
             token = interaction.get('continuation_token') or event.get('continuation_token') or self._token
             if interaction.get('status') == 'requires_continuation' and self._can_resume(token):
+                self._last_interaction = dict(interaction)
                 self._token, self._pending = token, True
                 return False
             self._completed = True
@@ -175,10 +224,12 @@ class InteractionsContinuation:
         """非流式：把此前各跳的步骤接到本跳前面，返回合并后的响应。"""
         if not isinstance(response, dict):
             return response
-        self._hop_usage = response.get('usage') or self._hop_usage
+        if response.get('usage'):
+            self._hop_usage = self._last_usage = response['usage']
         self._steps = [*self._steps, *(response.get('steps') or [])]
         token = response.get('continuation_token')
         if response.get('status') == 'requires_continuation' and self._can_resume(token):
+            self._last_interaction = dict(response)
             self._token, self._pending = token, True
             return response
         self._completed = True
@@ -190,12 +241,39 @@ class InteractionsContinuation:
         """需要续传时返回下一跳的 token，否则返回 None。流断在检查点上也可以接着生成。"""
         if not self._pending and (self._completed or not self._token or not self._can_resume(self._token)):
             return None
+        self._boundary_resume = self._pending
         self._pending = False
         self.hops += 1
         self._totals = self._add_hop(self._hop_usage or {})
         self._hop_usage = None
         self._last_token, self._token = self._token, None
         return self._last_token
+
+    def can_fallback_to_truncated(self, status_code: int, message: str) -> bool:
+        return (self.hops >= 1 and self._boundary_resume and not self._hop_usage
+                and _is_continuation_rejection(status_code, message))
+
+    def _fallback_usage(self):
+        self.hops = max(0, self.hops - 1)
+        if self.hops == 0 and self._last_usage:
+            return dict(self._last_usage)
+        return self._merged({})
+
+    def fallback_event(self):
+        """流式续传跳被上游拒绝时补发 requires_continuation 完成事件，由转换器按截断收尾。"""
+        self._completed = True
+        note_loss('continuation', _CONTINUATION_REJECTED)
+        interaction = dict(self._last_interaction or {})
+        interaction.update(status='requires_continuation', usage=self._fallback_usage())
+        return {'event_type': 'interaction.completed', 'interaction': interaction}
+
+    def fallback_response(self, response):
+        """非流式续传跳被上游拒绝时，把已合并的步骤恢复为 requires_continuation 截断状态。"""
+        self._completed = True
+        note_loss('continuation', _CONTINUATION_REJECTED)
+        base = dict(response) if isinstance(response, dict) else dict(self._last_interaction or {})
+        base.update(status='requires_continuation', steps=self._steps, usage=self._fallback_usage())
+        return base
 
     def with_usage(self, error):
         """续传中途失败时带上此前已计费的用量，字段和 generateContent 的错误一致。"""
@@ -230,7 +308,8 @@ class InteractionsContinuation:
     def _merged(self, usage):
         # 客户端用提示量判断上下文大小，所以只报第一跳；重复计费的部分单独记录。
         totals = self._add_hop(usage)
-        merged = {key: value for key, value in usage.items() if key not in _INTERACTION_HOP_ONLY_FIELDS}
+        base = usage or self._last_usage or {}
+        merged = {key: value for key, value in base.items() if key not in _INTERACTION_HOP_ONLY_FIELDS}
         merged.update({field: totals[field] for field in _INTERACTION_SUMMED_FIELDS})
         merged.update(initial_input_tokens=totals['initial_input'], initial_cached_tokens=totals['initial_cached'],
                       billedPromptTokenCount=totals['total_input_tokens'] + totals['total_tool_use_tokens'],

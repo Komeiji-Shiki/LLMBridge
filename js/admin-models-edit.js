@@ -12,6 +12,7 @@ const MODEL_DEFAULT_FILLERS = {
     enable_partial: value => { document.getElementById('enable-partial').checked = value || false; },
     force_stream: value => { document.getElementById('force-stream').value = value !== undefined ? String(value) : ''; },
     first_chunk_timeout_seconds: value => { document.getElementById('model-first-chunk-timeout').value = value || ''; },
+    gemini_max_continuation_hops: value => { document.getElementById('model-continuation-hops').value = value ?? ''; },
     cached_tokens_mode: value => { document.getElementById('cached-tokens-mode').value = value || 'reverse'; },
     image_compression: value => loadImageCompressionConfig(value),
     auto_retry: value => loadAutoRetryConfig(value),
@@ -337,7 +338,8 @@ async function saveModel() {
         }
         
         const thinkingSeparator = document.getElementById('thinking-separator').value.trim();
-        
+        const continuationHopsRaw = document.getElementById('model-continuation-hops').value.trim();
+
         config = {
             api_type: apiType,
             model_id: document.getElementById('model-id').value.trim() || modelName,
@@ -351,6 +353,7 @@ async function saveModel() {
             ...(document.getElementById('model-provider').value ? {provider: document.getElementById('model-provider').value} : {}),
             ...(document.getElementById('model-family').value ? {model_family: document.getElementById('model-family').value} : {}),
             ...(Number(document.getElementById('model-first-chunk-timeout').value) > 0 ? {first_chunk_timeout_seconds: Number(document.getElementById('model-first-chunk-timeout').value)} : {}),
+            ...(continuationHopsRaw !== '' && Number(continuationHopsRaw) >= 0 ? {gemini_max_continuation_hops: Math.trunc(Number(continuationHopsRaw))} : {}),
             native_tools: document.getElementById('model-native-tools').value.split(',').map(value => value.trim()).filter(Boolean),
             native_tool_options: JSON.parse(document.getElementById('model-native-tool-options').value.trim() || '{}'),
             convert_system_to_user: document.getElementById('convert-system-to-user').checked,

@@ -12,8 +12,8 @@ const channelWorkspace = { usage: {}, suggestions: [], editing: null, snapshot: 
 // 渠道可以统一给默认值的模型设置，和后端 core/model_channels.DEFAULT_FIELDS 一致
 const CHANNEL_DEFAULT_LABELS = {
     passthrough: '透传', convert_system_to_user: 'System 转 User', enable_prefix: 'Prefix 续写', enable_partial: 'Partial 续写',
-    force_stream: '流式模式', first_chunk_timeout_seconds: '首块超时', cached_tokens_mode: '缓存 Token 统计',
-    auto_retry: '自动重试', image_compression: '图片压缩',
+    force_stream: '流式模式', first_chunk_timeout_seconds: '首块超时', gemini_max_continuation_hops: 'Gemini 续传跳数',
+    cached_tokens_mode: '缓存 Token 统计', auto_retry: '自动重试', image_compression: '图片压缩',
 };
 
 function loadChannelSort() {

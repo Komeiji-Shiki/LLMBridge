@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### 2026-11-15：Gemini 续传跳数分层配置与中转拒绝优雅降级
+
+- `gemini_max_continuation_hops` 支持在渠道默认设置与单个模型端点上覆盖全局值（`0` 表示关闭自动续传，达到单跳上限直接按输出截断收尾）。
+- 中转站改写请求体导致第 2 跳及后续续传收到 HTTP `400` 续传 token 校验失败时，网关保留已完成各跳的正文、思考和用量元数据，按截断（`length` / `max_tokens`）正常结束并记入转换警告，不再让整条长请求报废；首跳报错或 `5xx`/断流故障仍原样报错。
+- 修复流式 `gemini_native` 在续传中途报错时未提取合并 `usageMetadata`（`continuationHops`、`billedPromptTokenCount` 等）的问题。
+
 ### 2026-11-13：Gemini 自动清理 Claude Agent SDK 身份句
 
 - Claude Code 请求发往 Gemini 时，网关在转换协议前移除系统提示中的固定 SDK 身份句，保留其余提示词。Gemini 原生和兼容协议均生效，原来的渠道及模型开关已退役。

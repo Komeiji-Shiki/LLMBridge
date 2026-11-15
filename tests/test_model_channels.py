@@ -307,11 +307,13 @@ def settings(endpoint):
 class TestChannelDefaults:
     def test_normalize_keeps_valid_defaults_and_rejects_the_rest(self):
         channel = normalize_channel({'name': 'x', 'api_base_url': 'u',
-                                     'defaults': {'passthrough': False, 'force_stream': None, 'cached_tokens_mode': 'forward'}})
-        assert channel['defaults'] == {'passthrough': False, 'cached_tokens_mode': 'forward'}
+                                     'defaults': {'passthrough': False, 'force_stream': None, 'cached_tokens_mode': 'forward',
+                                                  'gemini_max_continuation_hops': 0}})
+        assert channel['defaults'] == {'passthrough': False, 'cached_tokens_mode': 'forward', 'gemini_max_continuation_hops': 0}
         assert 'defaults' not in normalize_channel({'name': 'x', 'api_base_url': 'u', 'defaults': {}})
-        for bad in ({'model_id': 'x'}, {'passthrough': 'yes'}, {'first_chunk_timeout_seconds': 0}, {'cached_tokens_mode': 'sideways'},
-                    {'auto_retry': True}, ['passthrough']):
+        for bad in ({'model_id': 'x'}, {'passthrough': 'yes'}, {'first_chunk_timeout_seconds': 0},
+                    {'gemini_max_continuation_hops': -1}, {'gemini_max_continuation_hops': True}, {'gemini_max_continuation_hops': 1.5},
+                    {'cached_tokens_mode': 'sideways'}, {'auto_retry': True}, ['passthrough']):
             with pytest.raises(ValueError):
                 normalize_channel({'name': 'x', 'api_base_url': 'u', 'defaults': bad})
 

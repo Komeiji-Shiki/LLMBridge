@@ -223,7 +223,22 @@
                         <section><div class="usage-charts-header"><h3>每日 Token 趋势</h3><button id="toggle-output-axis-btn" class="btn btn-sm" onclick="toggleOutputAxis()">合并 Y 轴</button></div><div class="chart-shell"><canvas id="tokenTrendChart"></canvas></div></section>
                         <section id="cost-trend-panel"><div class="usage-charts-header"><h3 id="cost-trend-title">每日金额 (USD)</h3><button id="toggle-cost-currency-btn" class="btn btn-sm" onclick="toggleCostCurrency()">USD / CNY</button></div><div class="chart-shell"><canvas id="costTrendChart"></canvas></div></section>
                     </div>
-                    <div id="token-stats-table"></div>
+                    <div id="token-stats-table">
+                        <div id="token-stats-actions" class="stat-actions" hidden>
+                            <input id="token-stats-query" class="form-input stat-search" type="search" aria-label="搜索模型" placeholder="搜索模型名称或 ID（按 / 搜索）" oninput="renderTokenStatsTable(latestModelStatsCache)">
+                            <button class="btn btn-sm" onclick="toggleAllModelStats()">
+                                <span id="toggle-all-text">全选</span>
+                            </button>
+                            <button class="btn btn-primary btn-sm" onclick="mergeSelectedModelStats()">
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#link"/></svg> 合并选中
+                            </button>
+                            <button class="btn btn-danger btn-sm" onclick="deleteSelectedModelStats()">
+                                <svg class="ui-icon" aria-hidden="true"><use href="/css/icons.svg#trash"/></svg> 删除选中
+                            </button>
+                            <span id="selected-count-display" style="color: var(--text-dim); margin-left: auto;">已选择: 0</span>
+                        </div>
+                        <div id="token-stats-body"></div>
+                    </div>
                     <div id="endpoint-cache-table" hidden></div>
                 </section>
                 <div class="card request-trend-card">
@@ -802,6 +817,9 @@
                         <label>首块超时（秒）
                             <input class="form-input" data-channel-default="first_chunk_timeout_seconds" data-kind="number" min="1" placeholder="各模型自己定" type="number">
                         </label>
+                        <label>Gemini 续传跳数
+                            <input class="form-input" data-channel-default="gemini_max_continuation_hops" data-kind="number" min="0" step="1" placeholder="各模型自己定（0=关闭）" type="number">
+                        </label>
                     </div>
                     <div class="channel-default-block">
                         <label><input id="channel-auto-retry-enabled" onchange="toggleAutoRetryOptions('channel-')" type="checkbox"> 统一开启自动重试</label>
@@ -1316,6 +1334,8 @@
 <small>模型别名或上游 model_id 不含家族名称时在这里指定。</small>
 <label class="form-label" for="model-first-chunk-timeout">首块超时（秒）</label>
 <input class="form-input" id="model-first-chunk-timeout" type="number" min="1" placeholder="留空使用全局设置">
+<label class="form-label" for="model-continuation-hops">Gemini 最大续传跳数</label>
+<input class="form-input" id="model-continuation-hops" type="number" min="0" step="1" placeholder="留空跟随渠道或全局（0 表示关闭续传）">
 <label class="form-label" for="model-native-tools">默认原生工具（英文逗号分隔）</label>
 <input class="form-input" id="model-native-tools" placeholder="web_search">
 <label class="form-label" for="model-native-tool-options">工具选项 JSON</label>

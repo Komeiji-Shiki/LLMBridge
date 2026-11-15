@@ -160,6 +160,16 @@ def resolve_first_chunk_timeout(config=None, endpoint_config=None):
             or TimeoutDefaults.FIRST_CHUNK_TIMEOUT)
 
 
+def resolve_max_continuation_hops(config=None, endpoint_config=None):
+    """Gemini 自动续传跳数：端点和渠道优先，其次全局配置；0 表示关闭续传。"""
+    for source in (endpoint_config, config):
+        if isinstance(source, dict):
+            value = source.get("gemini_max_continuation_hops")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return value
+    return GeminiDefaults.MAX_CONTINUATION_HOPS
+
+
 def resolve_heartbeat_interval(endpoint_config=None):
     """流式心跳间隔；下限 1 秒，避免配置为 0/负数时 busy-loop 狂发心跳。"""
     return max(1, (endpoint_config or {}).get("client_disconnect_probe_interval")
