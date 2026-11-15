@@ -267,6 +267,31 @@ def test_admin_channel_lifecycle(workdir, monkeypatch):
                                                          'api_key': 'rotated'}
 
 
+def test_quota_sharing_is_checked_on_save_and_delete(workdir, monkeypatch):
+    write_json('model_endpoint_map.json', {})
+    eu = {'name': 'eu', 'api_base_url': 'https://eu.example', 'api_keys': ['k'], 'quota': {'cost_limit': 165}}
+    us = {'name': 'us', 'api_base_url': 'https://us.example', 'api_keys': ['k'], 'quota_from': 'ch-eu'}
+    write_json(CHANNELS_FILE, {'ch-eu': normalize_channel(eu)})
+    run_admin(monkeypatch, 'save_channel', {'id': None, 'channel': us})
+    us_id = next(channel_id for channel_id in read_json(CHANNELS_FILE) if channel_id != 'ch-eu')
+    assert read_json(CHANNELS_FILE)[us_id]['quota_from'] == 'ch-eu'
+
+    def rejected(operation, payload):
+        with pytest.raises(HTTPException) as error:
+            run_admin(monkeypatch, operation, payload)
+        return error.value.status_code, error.value.detail
+
+    no_quota = {key: value for key, value in eu.items() if key != 'quota'}
+    # 被共用的不能取消额度，也不能转去共用别人
+    assert rejected('save_channel', {'id': 'ch-eu', 'channel': no_quota}) == (
+        409, 'us 共用的是渠道 eu 的额度，所以 eu 必须自己设额度，不能不设，也不能再去共用别的渠道')
+    assert rejected('save_channel', {'id': 'ch-eu', 'channel': {**no_quota, 'quota_from': us_id}})[0] == 409
+    assert rejected('save_channel', {'id': us_id, 'channel': {**us, 'quota_from': 'ch-gone'}})[0] == 409
+    assert rejected('save_channel', {'id': us_id, 'channel': {**us, 'quota': {'cost_limit': 1}}})[0] == 400
+    assert rejected('delete_channel', {'id': 'ch-eu'}) == (409, 'us 还在共用渠道 eu 的额度，先让它们改用自己的额度')
+    assert read_json(CHANNELS_FILE)['ch-eu']['quota']['cost_limit'] == 165
+
+
 def test_saving_a_model_validates_and_normalizes_its_channel(workdir, monkeypatch):
     write_json('model_endpoint_map.json', {})
     write_json(CHANNELS_FILE, {'ch-solo': CHANNELS['ch-solo']})

@@ -14,8 +14,8 @@ from fastapi import APIRouter, HTTPException, Request
 
 from core.config_loader import load_model_endpoint_map
 from core.model_channels import (
-    CHANNELS_FILE, adopt_suggestions, assign_channel, channel_usage,
-    new_channel_id, normalize_channel, remove_channel, settle_channel_defaults, suggest_channels,
+    CHANNELS_FILE, adopt_suggestions, assign_channel, channel_usage, check_quota_sharing,
+    new_channel_id, normalize_channel, quota_sharers, remove_channel, settle_channel_defaults, suggest_channels,
 )
 from core.model_quota import model_quota
 from routes import admin_routes
@@ -97,10 +97,15 @@ async def save_channel(request: Request):
         if conflicts and override is None:
             return {"status": "conflict", "conflicts": conflicts}
         channel_id = channel_id or new_channel_id(channels)
-        # 新设或取消渠道额度时旧用量作废，重新设置的额度从零开始
-        if ("quota" in channels.get(channel_id, {})) != ("quota" in channel):
-            model_quota.forget("channel:" + channel_id)
+        previous = channels.get(channel_id, {})
         channels[channel_id] = channel
+        try:
+            check_quota_sharing(channels)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        # 新设或取消渠道额度时旧用量作废，重新设置的额度从零开始
+        if ("quota" in previous) != ("quota" in channel):
+            model_quota.forget("channel:" + channel_id)
         # 有默认值被取消时模型要先拿到抄回去的值，其余情况先写渠道：中途被热重载读到，模型的效果也不变
         channels_first = all(field in new_defaults for field in old_defaults)
         await _write_both(new_map if changed else None, channels, channels_first=channels_first)
@@ -119,6 +124,10 @@ async def delete_channel(request: Request):
         if channel_id not in channels:
             raise HTTPException(status_code=404, detail=f"渠道 {channel_id} 不存在")
         name = channels[channel_id].get("name", channel_id)
+        sharers = quota_sharers(channels, channel_id)
+        if sharers:
+            # 直接删掉，共用它的渠道就没有额度了，等于把上限悄悄撤掉
+            raise HTTPException(status_code=409, detail=f"{'、'.join(sharers)} 还在共用渠道 {name} 的额度，先让它们改用自己的额度")
         new_map, new_channels, detached = remove_channel(model_map, channels, channel_id)
         await _write_both(new_map if detached else None, new_channels, channels_first=False)
         model_quota.forget("channel:" + channel_id)

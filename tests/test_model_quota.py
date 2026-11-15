@@ -50,7 +50,7 @@ def test_model_quota_blocks_every_caller_once_used_up(manager, monkeypatch):
 
 
 def test_channel_quota_is_shared_by_its_models(manager, monkeypatch):
-    monkeypatch.setitem(config_loader.CHANNEL_QUOTAS, 'ch-1', {'name': '主力中转', 'quota': quota(token_limit=1000)})
+    monkeypatch.setitem(config_loader.CHANNEL_QUOTAS, 'ch-1', {'owner': 'ch-1', 'name': '主力中转', 'quota': quota(token_limit=1000)})
     first, second = {'channel': 'ch-1'}, {'channel': 'ch-1', 'quota': quota(request_limit=100)}
     manager.record('a', first, 600, None)
     manager.record('b', second, 500, None)
@@ -62,8 +62,43 @@ def test_channel_quota_is_shared_by_its_models(manager, monkeypatch):
     assert manager._usage['model:b']['tokens'] == 500 and 'model:a' not in manager._usage
 
 
+def test_channels_sharing_a_quota_draw_from_one_pool(manager, monkeypatch):
+    from core.model_channels import resolve_channel_quotas
+    connection = {'api_base_url': 'https://example.test', 'api_keys': ['k']}
+    monkeypatch.setattr(config_loader, 'CHANNEL_QUOTAS', resolve_channel_quotas({
+        'eu': {'name': 'Vertex eu', **connection, 'quota': quota(cost_limit=1)},
+        'us': {'name': 'Vertex us', **connection, 'quota_from': 'eu'},
+        'lost': {'name': '断了', **connection, 'quota_from': 'gone'}}))
+    assert set(config_loader.CHANNEL_QUOTAS) == {'eu', 'us'}  # 共用的渠道不存在时按不限额加载
+    manager.record('a', {'channel': 'eu'}, 10, {'total_cost': 0.6})
+    manager.record('b', {'channel': 'us'}, 10, {'total_cost': 0.5})
+    status, detail = status_of(lambda: enforce(manager, 'b', {'channel': 'us'}))
+    assert status == 402 and detail.startswith('渠道 Vertex eu 累计额度已用完（费用 $1.1 / $1）')
+    assert list(manager.overview()['channels']) == ['eu'] and set(manager._usage) == {'channel:eu'}
+    enforce(manager, 'c', {'channel': 'lost'})
+
+
+def test_quota_stops_at_expiry_even_with_room_left(manager, monkeypatch):
+    expires_at = datetime(2027, 1, 29).timestamp()
+    endpoint = {'quota': quota(cost_limit=10, expires_at=expires_at)}
+    monkeypatch.setattr(module.time, 'time', lambda: expires_at - 1)
+    enforce(manager, 'm', endpoint)
+    monkeypatch.setattr(module.time, 'time', lambda: expires_at)
+    status, detail = status_of(lambda: enforce(manager, 'm', endpoint))
+    assert status == 402 and detail == '模型 m 的额度已于 2027-01-29 00:00 到期，请联系管理员调整额度。'
+    assert manager._usage['model:m']['requests'] == 1  # 到期挡下的请求不计次数
+
+
+def test_expiry_alone_is_a_quota():
+    assert quota(expires_at=1801238400) == {'period': 'total', 'cost_currency': 'USD', 'cost_limit': 0.0,
+                                            'token_limit': 0, 'request_limit': 0, 'expires_at': 1801238400}
+    for bad in (True, 0, -5, '2027-01-29', float('inf')):
+        with pytest.raises(ValueError):
+            quota(expires_at=bad)
+
+
 def test_request_limit_counts_admissions_on_both_layers(manager, monkeypatch):
-    monkeypatch.setitem(config_loader.CHANNEL_QUOTAS, 'ch-1', {'name': 'x', 'quota': quota(request_limit=5)})
+    monkeypatch.setitem(config_loader.CHANNEL_QUOTAS, 'ch-1', {'owner': 'ch-1', 'name': 'x', 'quota': quota(request_limit=5)})
     endpoint = {'channel': 'ch-1', 'quota': quota(request_limit=1)}
     enforce(manager, 'm', endpoint)
     assert status_of(lambda: enforce(manager, 'm', endpoint))[0] == 402
@@ -156,7 +191,7 @@ def test_loader_collects_channel_quotas(monkeypatch, tmp_path):
         'ch': {'name': '中转', 'api_base_url': 'https://example.test', 'api_keys': ['k'], 'quota': quota(cost_limit=3)},
         'free': {'name': '免费', 'api_base_url': 'https://example.test', 'api_keys': ['k']}}))
     config_loader.load_model_endpoint_map(True)
-    assert config_loader.CHANNEL_QUOTAS == {'ch': {'name': '中转', 'quota': quota(cost_limit=3)}}
+    assert config_loader.CHANNEL_QUOTAS == {'ch': {'owner': 'ch', 'name': '中转', 'quota': quota(cost_limit=3)}}
     assert 'quota' not in config_loader.MODEL_ENDPOINT_MAP['m']
 
 

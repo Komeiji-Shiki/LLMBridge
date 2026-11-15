@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from threading import Lock
 
-from core.model_channels import CHANNELS_FILE, expand_model_map
+from core.model_channels import CHANNELS_FILE, expand_model_map, resolve_channel_quotas
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ CONFIG_LOCK = Lock()  # 保护配置重载的线程锁
 CONFIG = {}
 MODEL_NAME_TO_ID_MAP = {}
 MODEL_ENDPOINT_MAP = {}
-# 设了额度的渠道：{渠道 id: {"name": 名称, "quota": 额度配置}}，随端点表一起重新加载
+# 有额度的渠道：{渠道 id: {"owner": 用量记在哪个渠道名下, "name": 那个渠道的名称, "quota": 额度配置}}，
+# 共用别的渠道额度的渠道指向同一份（见 model_channels.resolve_channel_quotas），随端点表一起重新加载
 CHANNEL_QUOTAS = {}
 DEFAULT_MODEL_ID = None
 
@@ -255,10 +256,7 @@ def load_model_endpoint_map(force_reload=False):
             # 无空窗替换，保持字典对象不变（见 _replace_dict_no_gap）
             channels = _read_channels()
             _replace_dict_no_gap(MODEL_ENDPOINT_MAP, expand_model_map(new_map, channels))
-            _replace_dict_no_gap(CHANNEL_QUOTAS, {
-                channel_id: {'name': channel.get('name') or channel_id, 'quota': channel['quota']}
-                for channel_id, channel in channels.items()
-                if isinstance(channel, dict) and isinstance(channel.get('quota'), dict)})
+            _replace_dict_no_gap(CHANNEL_QUOTAS, resolve_channel_quotas(channels))
             CONFIG_FILE_MTIMES[config_file] = current_mtime
             CONFIG_FILE_MTIMES[CHANNELS_FILE] = channels_mtime
             logger.info(f"✅ 已{'重新' if not force_reload else ''}加载 'model_endpoint_map.json' ({len(MODEL_ENDPOINT_MAP)} 个模型端点)")

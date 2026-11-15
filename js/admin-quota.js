@@ -2,6 +2,7 @@
  * 用量额度：访客 Key、模型、渠道共用的设置表单和用量展示
  *
  * 表单写成 <fieldset data-quota-form="前缀" data-quota-legend="标题">，页面加载时生成内容；
+ * 加上 data-quota-expiry 才显示到期时间（访客 Key 有自己的过期时间，不再重复）。
  * 额度和用量的格式见 core/usage_quota.py。
  */
 
@@ -39,8 +40,22 @@ function initQuotaForms() {
                     <label class="form-label" for="${prefix}-request-limit">请求次数上限</label>
                     <input type="number" id="${prefix}-request-limit" class="form-input" value="0" min="0" step="1">
                 </div>
-            </div>`;
+            </div>
+            ${'quotaExpiry' in fieldset.dataset ? `<div class="quota-grid">
+                <div>
+                    <label class="form-label" for="${prefix}-quota-expires-at">到期时间</label>
+                    <input type="datetime-local" id="${prefix}-quota-expires-at" class="form-input">
+                </div>
+            </div>` : ''}`;
     });
+}
+
+// Unix 秒转成 datetime-local 输入框的值：它只认本地时间的 YYYY-MM-DDTHH:MM
+function toDateTimeInput(timestamp) {
+    if (!timestamp) return '';
+    const d = new Date(timestamp * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function fillQuotaForm(prefix, quota) {
@@ -50,9 +65,11 @@ function fillQuotaForm(prefix, quota) {
     document.getElementById(`${prefix}-cost-currency`).value = quota.cost_currency || 'USD';
     document.getElementById(`${prefix}-token-limit`).value = quota.token_limit || 0;
     document.getElementById(`${prefix}-request-limit`).value = quota.request_limit || 0;
+    const expiry = document.getElementById(`${prefix}-quota-expires-at`);
+    if (expiry) expiry.value = toDateTimeInput(quota.expires_at);
 }
 
-// 没设任何上限的累计额度等于不限额，返回 null
+// 没设任何上限和到期时间的累计额度等于不限额，返回 null
 function readQuotaForm(prefix) {
     const quota = {
         period: document.querySelector(`input[name="${prefix}-quota-period"]:checked`).value,
@@ -61,7 +78,9 @@ function readQuotaForm(prefix) {
         token_limit: parseInt(document.getElementById(`${prefix}-token-limit`).value) || 0,
         request_limit: parseInt(document.getElementById(`${prefix}-request-limit`).value) || 0,
     };
-    return quota.period === 'total' && !quota.cost_limit && !quota.token_limit && !quota.request_limit ? null : quota;
+    const expiry = document.getElementById(`${prefix}-quota-expires-at`)?.value;
+    if (expiry) quota.expires_at = new Date(expiry).getTime() / 1000;
+    return quota.period === 'total' && !quota.cost_limit && !quota.token_limit && !quota.request_limit && !quota.expires_at ? null : quota;
 }
 
 function formatQuotaTime(timestamp) {
@@ -79,9 +98,14 @@ function formatQuotaAmount(kind, value, currency) {
 function renderQuotaUsage(usage) {
     if (!usage) return '';
     const { used, limits, currency } = usage;
-    const head = usage.resets_at
+    let head = usage.resets_at
         ? `${QUOTA_PERIOD_LABELS[usage.period]} · ${formatQuotaTime(usage.resets_at)} 重置`
         : `累计 · 自 ${formatQuotaTime(usage.period_start)} 起`;
+    if (usage.expires_at) {
+        head += usage.expired
+            ? ` · <span style="color: var(--danger);">已于 ${formatQuotaTime(usage.expires_at)} 到期</span>`
+            : ` · ${formatQuotaTime(usage.expires_at)} 到期`;
+    }
     let rows = '';
     const extras = [];
     for (const kind of ['cost', 'tokens', 'requests']) {
@@ -109,6 +133,7 @@ function renderQuotaUsage(usage) {
 // 列表里的一行小字：用得最满的那一项占上限的百分比
 function quotaListBadge(usage) {
     if (!usage) return '';
+    if (usage.expired) return '<span class="badge badge-danger">额度到期</span>';
     if (usage.exhausted.length) return '<span class="badge badge-danger">额度用尽</span>';
     const ratios = ['cost', 'tokens', 'requests'].filter(kind => usage.limits[kind]).map(kind => usage.used[kind] / usage.limits[kind]);
     if (!ratios.length) return '';

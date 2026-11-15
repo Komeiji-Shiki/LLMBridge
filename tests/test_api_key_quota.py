@@ -51,6 +51,15 @@ def test_cost_quota_pauses_key_until_usage_is_reset(manager):
     assert saved['usage']['cost'] == {}
 
 
+def test_quota_expiry_pauses_key(manager, monkeypatch):
+    key = manager.create_key('guest', quota=quota(expires_at=datetime(2027, 1, 29).timestamp()))
+    clock(monkeypatch, 2027, 1, 28)
+    assert manager.validate_request(key['secret'], 'demo').valid
+    clock(monkeypatch, 2027, 1, 29)
+    check = manager.validate_request(key['secret'], 'demo')
+    assert (check.valid, check.reason) == (False, 'quota') and '额度已于 2027-01-29 00:00 到期' in check.error
+
+
 def test_handshake_skips_quota_and_admin_usage_is_ignored(manager):
     key = manager.create_key('guest', quota=quota(request_limit=1))
     assert manager.validate_request(key['secret'], 'demo').valid

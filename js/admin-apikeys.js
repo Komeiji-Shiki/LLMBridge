@@ -107,17 +107,9 @@ function renderApiKeyStatus(key) {
     return '<span class="badge badge-success">启用</span>';
 }
 
-// datetime-local 只认本地时间的 YYYY-MM-DDTHH:MM
-function toApiKeyDateInput(timestamp) {
-    if (!timestamp) return '';
-    const d = new Date(timestamp * 1000);
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 function fillApiKeyQuotaForm(key) {
     fillQuotaForm('apikey', key.quota);
-    document.getElementById('apikey-expires-at').value = toApiKeyDateInput(key.expires_at);
+    document.getElementById('apikey-expires-at').value = toDateTimeInput(key.expires_at);
 }
 
 // ==================== 创建 / 编辑模态框 ====================

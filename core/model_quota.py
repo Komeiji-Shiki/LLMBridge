@@ -2,8 +2,9 @@
 模型与渠道额度
 
 模型额度写在端点配置的 quota 字段，按模型别名统计；渠道额度写在渠道的 quota 字段，
-渠道下所有模型共用一份。两层额度对所有调用方（包括管理员）合计生效，任一层用完，
-请求在发往上游之前就以 402 结束，只能在管理面板调高上限或重置用量后恢复。
+渠道下所有模型共用一份，写了 quota_from 的渠道记在被共用的渠道名下（同一个上游 Key 接了好几个
+地址时，从同一笔钱里扣）。两层额度对所有调用方（包括管理员）合计生效，任一层用完或到期，
+请求在发往上游之前就以 402 结束，只能在管理面板调高上限、延后到期时间或重置用量后恢复。
 
 费用和 Token 要等请求结束才知道，进行中的请求不会被打断。为了不让并发请求把用量冲出上限太多，
 费用或 Token 用到 90% 以后，同一份额度同一时间只放行一个请求，其余返回 429 让客户端稍后重试。
@@ -63,7 +64,7 @@ class ModelQuotaManager:
         channel_id = endpoint.get("channel")
         entry = CHANNEL_QUOTAS.get(channel_id) if channel_id else None
         if entry:
-            found.append(("channel:" + channel_id, f"渠道 {entry['name']}", entry["quota"]))
+            found.append(("channel:" + entry["owner"], f"渠道 {entry['name']}", entry["quota"]))
         return found
 
     def _usage_unsafe(self, key: str, quota: Dict[str, Any], now: float) -> Dict[str, Any]:
@@ -94,7 +95,7 @@ class ModelQuotaManager:
         with self._lock:
             for key, label, config in subjects:
                 quota = usage_quota.snapshot(config, self._usage_unsafe(key, config, now), now)
-                if quota["exhausted"]:
+                if usage_quota.blocked(quota):
                     raise QuotaExceededError(usage_quota.exhausted_message(label, quota)).to_http_exception()
                 if self._inflight.get(key) and self._near_limit(quota):
                     raise RateLimitError(f"{label} 的额度快用完了，同一时间只放行一个请求，请稍后重试。").to_http_exception()
@@ -137,7 +138,7 @@ class ModelQuotaManager:
             self._dirty = True
 
     def overview(self) -> Dict[str, Dict[str, Any]]:
-        """管理面板用：所有设了额度的模型和渠道的本期用量，以及进行中的请求数。"""
+        """管理面板用：所有设了额度的模型和渠道的本期用量，以及进行中的请求数；共用额度的渠道不单列。"""
         from core.config_loader import CHANNEL_QUOTAS, MODEL_ENDPOINT_MAP
         now = time.time()
         models, channels = {}, {}
@@ -148,7 +149,8 @@ class ModelQuotaManager:
                 if isinstance(quota, dict):
                     models[name] = self._snapshot_unsafe("model:" + name, quota, now)
             for channel_id, entry in list(CHANNEL_QUOTAS.items()):
-                channels[channel_id] = self._snapshot_unsafe("channel:" + channel_id, entry["quota"], now)
+                if entry["owner"] == channel_id:
+                    channels[channel_id] = self._snapshot_unsafe("channel:" + channel_id, entry["quota"], now)
         return {"models": models, "channels": channels}
 
     def _snapshot_unsafe(self, key: str, config: Dict[str, Any], now: float) -> Dict[str, Any]:

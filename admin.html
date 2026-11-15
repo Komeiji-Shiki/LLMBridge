@@ -866,9 +866,12 @@
                 </div>
                 <div class="channel-defaults">
                     <h4>渠道总额度</h4>
-                    <small class="field-hint">渠道下所有模型、所有调用方（包括管理员）共用这一份，0 表示不限制。用完后这个渠道的模型全部直接返回 402，不会发往上游；单个模型自己的额度同时生效。</small>
+                    <small class="field-hint">渠道下所有模型、所有调用方（包括管理员）共用这一份，0 表示不限制。用完或到期后这个渠道的模型全部直接返回 402，不会发往上游；单个模型自己的额度同时生效。</small>
+                    <label class="form-label" for="channel-quota-from">额度来源</label>
+                    <select class="form-select" id="channel-quota-from" onchange="showChannelQuotaSource()"></select>
+                    <small class="field-hint">同一个上游 Key 接了好几个地址（比如 Vertex 的不同区域）时，选共用其中一个渠道的额度，几个渠道就从同一笔钱里扣。只能选自己设了额度的渠道。</small>
                     <div id="channel-quota-usage"></div>
-                    <fieldset data-quota-form="channel" data-quota-legend="统计周期与上限"></fieldset>
+                    <fieldset data-quota-form="channel" data-quota-expiry data-quota-legend="统计周期与上限"></fieldset>
                 </div>
                 <p id="channel-usage-note" class="channel-usage-note"></p>
             </div>
@@ -1641,9 +1644,9 @@
 </div>
 <div class="collapsible-content">
 <div id="model-quota-usage"></div>
-<fieldset data-quota-form="model" data-quota-legend="统计周期与上限"></fieldset>
+<fieldset data-quota-form="model" data-quota-expiry data-quota-legend="统计周期与上限"></fieldset>
 <small style="color: var(--text-dim); display: block; margin-top: 8px;">
-                                所有调用方（包括管理员）的用量加在一起算，0 表示不限制。任一项用完，这个模型的请求直接返回 402，不会发往上游，要在这里调高上限或重置用量才能恢复。
+                                所有调用方（包括管理员）的用量加在一起算，0 表示不限制。任一项用完或过了到期时间，这个模型的请求直接返回 402，不会发往上游，要在这里调高上限、延后到期时间或重置用量才能恢复。
                                 费用或 Token 用到 90% 以后同一时间只放行一个请求，其余返回 429 让客户端稍后重试。渠道设置里的总额度同时生效。
                             </small>
 </div>

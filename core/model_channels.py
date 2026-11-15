@@ -9,6 +9,9 @@
 渠道还可以给一部分模型设置统一的默认值（defaults）：模型自己写了的用自己的，
 没写的跟渠道走，所以模型配置里只剩和渠道不一样的那几项。
 
+渠道额度（quota）是渠道下所有模型共用的一份；quota_from 指向另一个自己设了额度的渠道，
+表示从那份额度里扣，用在同一个上游 Key 接了好几个地址（比如 Vertex 的不同区域）的时候。
+
 本模块只有纯函数，不做文件 IO 与加锁；
 文件读写/锁/配置重载由调用方（config_loader / admin_channels）负责。
 """
@@ -131,6 +134,11 @@ def normalize_channel(data) -> dict:
     defaults = _normalize_defaults(data.get('defaults'))
     # 渠道额度是渠道下所有模型共用的一份，不展开到模型上（见 core.model_quota）
     quota = normalize_quota(data.get('quota'))
+    quota_from = data.get('quota_from') or None
+    if quota_from is not None and not isinstance(quota_from, str):
+        raise ValueError('quota_from 必须是渠道 id')
+    if quota and quota_from:
+        raise ValueError('渠道要么用自己的额度，要么共用别的渠道的额度，不能两样都设')
 
     channel = {'name': name.strip(), 'api_base_url': url.strip(), 'api_keys': keys}
     if auth_mode != 'auto':
@@ -144,6 +152,8 @@ def normalize_channel(data) -> dict:
         channel['defaults'] = defaults
     if quota:
         channel['quota'] = quota
+    if quota_from:
+        channel['quota_from'] = quota_from
     return channel
 
 
@@ -271,6 +281,49 @@ def remove_channel(model_map: dict, channels: dict, channel_id: str):
         model_map, users,
         lambda endpoint: _detach(endpoint, channels) if endpoint.get('channel') == channel_id else endpoint)
     return new_map, {key: value for key, value in channels.items() if key != channel_id}, changed
+
+
+def quota_sharers(channels: dict, channel_id: str) -> List[str]:
+    """共用这个渠道额度的渠道名。"""
+    return [channel.get('name') or other_id for other_id, channel in channels.items()
+            if isinstance(channel, dict) and channel.get('quota_from') == channel_id]
+
+
+def check_quota_sharing(channels: dict) -> None:
+    """保存前检查共用关系：被共用的渠道必须存在、自己设了额度，不能层层转共用。不对时抛 ValueError。"""
+    for channel_id, channel in channels.items():
+        source_id = channel.get('quota_from') if isinstance(channel, dict) else None
+        if not source_id:
+            continue
+        source = channels.get(source_id)
+        if source_id == channel_id or not isinstance(source, dict):
+            raise ValueError(f"渠道 {channel.get('name')} 要共用的渠道 {source_id} 不存在")
+        if not isinstance(source.get('quota'), dict):
+            sharers = '、'.join(quota_sharers(channels, source_id))
+            name = source.get('name')
+            raise ValueError(f"{sharers} 共用的是渠道 {name} 的额度，所以 {name} 必须自己设额度，不能不设，也不能再去共用别的渠道")
+
+
+def resolve_channel_quotas(channels: dict) -> dict:
+    """加载用：{渠道 id: {"owner": 用量记在哪个渠道名下, "name": 那个渠道的名称, "quota": 额度}}。
+
+    共用关系不成立（被共用的渠道不存在或没设额度）时这个渠道按不限额加载，并记一条警告。
+    """
+    quotas = {channel_id: {'owner': channel_id, 'name': channel.get('name') or channel_id, 'quota': channel['quota']}
+              for channel_id, channel in channels.items()
+              if isinstance(channel, dict) and isinstance(channel.get('quota'), dict)}
+    broken = []
+    for channel_id, channel in channels.items():
+        source_id = channel.get('quota_from') if isinstance(channel, dict) else None
+        if not source_id:
+            continue
+        if source_id in quotas and source_id != channel_id:
+            quotas[channel_id] = quotas[source_id]
+        else:
+            broken.append(channel.get('name') or channel_id)
+    if broken:
+        logger.warning(f"渠道 {', '.join(broken)} 要共用的额度不存在，这些渠道按不限额加载")
+    return quotas
 
 
 def new_channel_id(channels: dict) -> str:

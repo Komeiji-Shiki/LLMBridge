@@ -125,8 +125,9 @@ function buildChannelRow(id, channel) {
     const address = escapeHtml(channel.api_base_url || '协议默认地址');
     const previews = keys.slice(0, 2).map(channelKeyPreview).join('、') + (keys.length > 2 ? ' 等' : '');
     const unified = Object.keys(channel.defaults || {}).map(field => CHANNEL_DEFAULT_LABELS[field] || field).join('、');
+    const quotaSource = channel.quota_from && modelWorkspace.channels[channel.quota_from];
     const row = `<tr data-channel-id="${attr}"${users.length ? (open ? ' class="channel-open"' : '') : ' class="channel-idle"'}>
-        <td><button class="model-name" data-channel-id="${attr}" onclick="openChannelModal(this.dataset.channelId)">${escapeHtml(channel.name)}</button>${quotaListBadge(quotaOverview.channels[id])}${unified ? `<div class="model-subtitle">统一设置：${escapeHtml(unified)}</div>` : ''}</td>
+        <td><button class="model-name" data-channel-id="${attr}" onclick="openChannelModal(this.dataset.channelId)">${escapeHtml(channel.name)}</button>${quotaListBadge(quotaOverview.channels[channel.quota_from || id])}${unified ? `<div class="model-subtitle">统一设置：${escapeHtml(unified)}</div>` : ''}${quotaSource ? `<div class="model-subtitle">共用「${escapeHtml(quotaSource.name)}」的额度</div>` : ''}</td>
         <td class="channel-address" title="${address}">${address}</td>
         <td>${channelKeySummary(channel)}${keys.length ? `<div class="model-subtitle channel-key-preview">${escapeHtml(previews)}</div>` : ''}</td>
         <td>${users.length
@@ -245,7 +246,7 @@ function openChannelModal(id = null, copyFrom = null) {
     toggleChannelStrategyOptions();
     fillChannelDefaults(channel.defaults || {});
     fillQuotaForm('channel', channel.quota);
-    showQuotaUsage('channel-quota-usage', 'channel:' + id, id ? quotaOverview.channels[id] : null);
+    fillChannelQuotaSource(id, channel.quota_from);
     clearApiKeyRows('channel-api-keys-list');
     const keys = channel.api_keys || [];
     (keys.length ? keys : ['']).forEach(key => addApiKeyRow(key, 'channel-api-keys-list'));
@@ -325,6 +326,30 @@ async function closeChannelModal(force = false) {
     return true;
 }
 
+// 额度来源：自己的额度，或者共用另一个自己设了额度的渠道（不能层层转共用）
+function fillChannelQuotaSource(id, quotaFrom) {
+    const options = [new Option('自己的额度', '')];
+    for (const [otherId, other] of Object.entries(modelWorkspace.channels)) {
+        if (otherId !== id && (other.quota || otherId === quotaFrom)) options.push(new Option(`共用「${other.name}」的额度`, otherId));
+    }
+    const select = document.getElementById('channel-quota-from');
+    select.replaceChildren(...options);
+    select.value = quotaFrom || '';
+    showChannelQuotaSource();
+}
+
+function showChannelQuotaSource() {
+    const source = document.getElementById('channel-quota-from').value;
+    const id = channelWorkspace.editing;
+    document.querySelector('fieldset[data-quota-form="channel"]').hidden = Boolean(source);
+    if (source) {
+        // 共用的用量记在被共用的渠道名下，在这里只看不重置
+        document.getElementById('channel-quota-usage').innerHTML = renderQuotaUsage(quotaOverview.channels[source]);
+    } else {
+        showQuotaUsage('channel-quota-usage', 'channel:' + id, id ? quotaOverview.channels[id] : null);
+    }
+}
+
 async function saveChannel() {
     const button = document.getElementById('channel-save-btn');
     if (button.disabled) return;
@@ -346,7 +371,9 @@ async function saveChannel() {
     if (cooldown > 0) channel.api_key_cooldown_seconds = cooldown;
     const defaults = readChannelDefaults();
     if (Object.keys(defaults).length) channel.defaults = defaults;
-    const quota = readQuotaForm('channel');
+    const quotaFrom = document.getElementById('channel-quota-from').value;
+    const quota = quotaFrom ? null : readQuotaForm('channel');
+    if (quotaFrom) channel.quota_from = quotaFrom;
     if (quota) channel.quota = quota;
 
     button.disabled = true;

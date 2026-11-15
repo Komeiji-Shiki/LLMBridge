@@ -2,9 +2,11 @@
 用量额度：访客 Key、模型、渠道共用的周期统计与上限判断
 
 额度配置统一写成一个对象：
-    {"period": "day", "cost_limit": 5, "cost_currency": "USD", "token_limit": 0, "request_limit": 0}
+    {"period": "day", "cost_limit": 5, "cost_currency": "USD", "token_limit": 0, "request_limit": 0,
+     "expires_at": 1801238400}
 period 是统计周期（total 累计 / day / week / month，按服务器本地时间切分），
-各类上限为 0 表示不限制，任一项用完即暂停。
+各类上限为 0 表示不限制，任一项用完即暂停。expires_at 是可选的到期时间（Unix 秒），
+到期后不论用量多少都暂停，比如赠金到期后就不该再花钱。
 
 用量记录 {"period_start", "requests", "tokens", "cost": {货币: 金额}} 由调用方保存；
 本模块只有纯函数，不做文件 IO 与加锁。
@@ -26,7 +28,7 @@ def normalize_quota(data: Any) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(data, dict):
         raise ValueError("quota 必须是 JSON 对象")
-    unknown = set(data) - {"period", "cost_currency", *LIMIT_FIELDS.values()}
+    unknown = set(data) - {"period", "cost_currency", "expires_at", *LIMIT_FIELDS.values()}
     if unknown:
         raise ValueError(f"quota 不支持 {', '.join(sorted(unknown))}")
     period = data.get("period", "total")
@@ -41,13 +43,19 @@ def normalize_quota(data: Any) -> Optional[Dict[str, Any]]:
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
             raise ValueError(f"quota.{field} 必须是非负数")
         quota[field] = float(value) if kind == "cost" else int(value)
+    expires_at = data.get("expires_at")
+    if expires_at is not None:
+        if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or not math.isfinite(expires_at)                 or expires_at <= 0:
+            raise ValueError("quota.expires_at 必须是 Unix 时间戳（秒）或 null")
+        quota["expires_at"] = expires_at
     if period == "total" and not has_limits(quota):
         return None
     return quota
 
 
 def has_limits(quota: Optional[Dict[str, Any]]) -> bool:
-    return bool(quota) and any(quota.get(field) for field in LIMIT_FIELDS.values())
+    """设了任何一项上限或到期时间。"""
+    return bool(quota) and (any(quota.get(field) for field in LIMIT_FIELDS.values()) or bool(quota.get("expires_at")))
 
 
 def period_bounds(period: str, now: float) -> Tuple[Optional[float], Optional[float]]:
@@ -98,12 +106,13 @@ def cost_in(currency: str, costs: Dict[str, float]) -> float:
 
 
 def snapshot(quota: Optional[Dict[str, Any]], usage: Dict[str, Any], now: float) -> Dict[str, Any]:
-    """当前周期的用量、上限和已用尽的项目，费用按额度货币折算。"""
+    """当前周期的用量、上限、已用尽的项目和是否已到期，费用按额度货币折算。"""
     quota = quota or {}
     period = quota.get("period", "total")
     currency = quota.get("cost_currency", "USD")
     used = {"cost": cost_in(currency, usage["cost"]), "tokens": usage["tokens"], "requests": usage["requests"]}
     limits = {kind: quota.get(field) or 0 for kind, field in LIMIT_FIELDS.items()}
+    expires_at = quota.get("expires_at")
     return {
         "period": period,
         "period_start": usage["period_start"],
@@ -112,7 +121,14 @@ def snapshot(quota: Optional[Dict[str, Any]], usage: Dict[str, Any], now: float)
         "used": used,
         "limits": limits,
         "exhausted": [kind for kind, limit in limits.items() if limit and used[kind] >= limit],
+        "expires_at": expires_at,
+        "expired": bool(expires_at) and now >= expires_at,
     }
+
+
+def blocked(quota: Dict[str, Any]) -> bool:
+    """snapshot 的结果是否该挡下新请求：有一项用完，或者已到期。"""
+    return bool(quota["exhausted"]) or quota["expired"]
 
 
 def format_quota(kind: str, value: float, currency: str) -> str:
@@ -126,7 +142,9 @@ def format_time(timestamp: float) -> str:
 
 
 def exhausted_message(subject: str, quota: Dict[str, Any]) -> str:
-    """额度用尽的提示：写明哪一项、用了多少、何时恢复。subject 如“此 API Key”“模型 gpt-5”。"""
+    """额度用尽或到期的提示：写明哪一项、用了多少、何时恢复。subject 如“此 API Key”“模型 gpt-5”。"""
+    if quota["expired"]:
+        return f"{subject} 的额度已于 {format_time(quota['expires_at'])} 到期，请联系管理员调整额度。"
     currency = quota["currency"]
     details = "，".join(
         f"{QUOTA_LABELS[kind]} {format_quota(kind, quota['used'][kind], currency)}"

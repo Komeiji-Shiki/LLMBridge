@@ -459,7 +459,7 @@ class APIKeyManager:
             # 额度只在请求进入时检查：进行中的请求照常算完，最终用量可能略超上限
             if usage_quota.has_limits(key_data.get("quota")):
                 quota = self._quota_unsafe(key_data, now)
-                if quota["exhausted"]:
+                if usage_quota.blocked(quota):
                     return KeyCheck(False, key_id, usage_quota.exhausted_message("此 API Key", quota), "quota")
 
         # RPM 检查（在锁外进行，因为 rate_limiter 有自己的锁）
