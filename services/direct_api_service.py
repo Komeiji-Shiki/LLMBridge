@@ -78,6 +78,24 @@ def _extract_complete_sse_events(buffer: bytes, search_start: int = 0) -> Tuple[
     return events, buffer[pos:]
 
 
+def _lift_nested_error(error: dict) -> dict:
+    """把 error.data 里的说明提到 error 顶层，下游只读 error.message 也能拿到原因。
+
+    WorkBuddy 额度耗尽时返回 {"error": {"data": {"code", "msg", "requestId"}}}，没有 message。
+    """
+    data = error.get('data')
+    if isinstance(data, dict):
+        if not error.get('message'):
+            error['message'] = data.get('message') or data.get('msg') or ''
+        for key in ('code', 'requestId', 'request_id'):
+            if data.get(key) is not None:
+                error.setdefault(key, data[key])
+    if not error.get('message'):
+        # 认不出结构时保留原始错误，失败原因不能是空的。
+        error['message'] = json.dumps(error, ensure_ascii=False)
+    return error
+
+
 def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> dict:
     """将上游返回的错误 JSON 归一化为 OpenAI 兼容格式，并保留原始 HTTP 状态码。
 
@@ -100,7 +118,7 @@ def _normalize_error_for_passthrough(error_json: dict, status_code: int = 0) -> 
     error_val = error_json.get('error')
     if isinstance(error_val, dict):
         result = dict(error_json)
-        error = dict(error_val)
+        error = _lift_nested_error(dict(error_val))
     elif error_val is not None:
         result = dict(error_json)
         error = {

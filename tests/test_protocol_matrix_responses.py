@@ -164,6 +164,20 @@ def test_rate_limit_keeps_status_message_and_retry_hints(gateway, cell):
     assert response.status_code == 429
 
 
+@pytest.mark.parametrize('stream', STREAMS)
+def test_error_nested_under_data_keeps_its_reason(gateway, stream):
+    # WorkBuddy 额度耗尽：说明在 error.data.msg，没有 error.message
+    app, monitor, monkeypatch = gateway
+    reply = Reply(status=429, body={'error': {'data': {
+        'code': 14012, 'msg': '个人额度已耗尽', 'requestId': 'req-wb-1', 'quotaExceed': {'limit': 2000}}}})
+    response, _ = exchange(app, monkeypatch, 'chat', [reply], CLIENT_PATHS['chat'], request_for('chat', stream))
+    seen = READERS['chat'](response, stream)
+    assert response.status_code == 429
+    assert '个人额度已耗尽' in seen.error and 'req-wb-1' in seen.error
+    error = monitor.request_end.call_args.kwargs['error']
+    assert '个人额度已耗尽' in error and '14012' in error
+
+
 @pytest.mark.parametrize('upstream', ['gemini', 'interactions', 'chat', 'responses'])
 @pytest.mark.parametrize('stream', STREAMS)
 def test_overflow_error_triggers_anthropic_client_recovery(gateway, upstream, stream):
