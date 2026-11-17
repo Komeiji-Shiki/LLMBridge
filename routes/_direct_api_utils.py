@@ -15,6 +15,7 @@ from fastapi.responses import Response
 
 from core.config_loader import MODEL_ROUND_ROBIN_LOCK
 from core.constants import RetryDefaults, TimeoutDefaults
+from services.protocol_events import named_error_status
 
 logger = logging.getLogger(__name__)
 
@@ -483,29 +484,6 @@ def normalize_auto_retry_config(endpoint_config: dict) -> dict:
 # HTTP 状态码映射
 # ============================================================
 
-def normalize_error_status_code(raw_status) -> int:
-    """将各种错误码/状态字符串统一映射为HTTP状态码"""
-    if isinstance(raw_status, int):
-        return raw_status if 100 <= raw_status <= 599 else 0
-
-    if isinstance(raw_status, str):
-        stripped = raw_status.strip()
-        if stripped.isdigit():
-            numeric = int(stripped)
-            return numeric if 100 <= numeric <= 599 else 0
-
-        status_map = {
-            "RESOURCE_EXHAUSTED": 429,
-            "TOO_MANY_REQUESTS": 429,
-            "UNAVAILABLE": 503,
-            "SERVICE_UNAVAILABLE": 503,
-            "DEADLINE_EXCEEDED": 504
-        }
-        return status_map.get(stripped.upper(), 0)
-
-    return 0
-
-
 def extract_retry_status_candidates(status_code: int, payload: Optional[dict] = None) -> set:
     """从HTTP状态和错误载荷中提取可用于重试判断的状态码集合"""
     status_candidates = set()
@@ -517,7 +495,7 @@ def extract_retry_status_candidates(status_code: int, payload: Optional[dict] = 
         return status_candidates
 
     for key in ("code", "status"):
-        normalized = normalize_error_status_code(payload.get(key))
+        normalized = named_error_status(payload.get(key))
         if normalized:
             status_candidates.add(normalized)
 
@@ -525,7 +503,7 @@ def extract_retry_status_candidates(status_code: int, payload: Optional[dict] = 
     error_type = None
     if isinstance(error_obj, dict):
         for key in ("code", "status"):
-            normalized = normalize_error_status_code(error_obj.get(key))
+            normalized = named_error_status(error_obj.get(key))
             if normalized:
                 status_candidates.add(normalized)
         error_type = error_obj.get("type")
@@ -535,20 +513,9 @@ def extract_retry_status_candidates(status_code: int, payload: Optional[dict] = 
     if isinstance(payload.get("type"), str) and not error_type:
         error_type = payload.get("type")
 
-    if isinstance(error_type, str):
-        error_type_map = {
-            "invalid_request_error": 400,
-            "authentication_error": 401,
-            "permission_error": 403,
-            "rate_limit_error": 429,
-            "too_many_requests": 429,
-            "service_unavailable_error": 503,
-            "server_error": 503,
-            "overloaded_error": 503
-        }
-        mapped = error_type_map.get(error_type.strip().lower())
-        if mapped:
-            status_candidates.add(mapped)
+    mapped = named_error_status(error_type)
+    if mapped:
+        status_candidates.add(mapped)
 
     if payload.get("scode") == "0x1":
         status_candidates.add(401)
@@ -658,21 +625,9 @@ def map_upstream_error_to_status_code(error_payload: dict, default_status_code: 
     elif isinstance(error_obj, str):
         error_type = error_obj
 
-    type_map = {
-        "invalid_request_error": 400,
-        "authentication_error": 401,
-        "permission_error": 403,
-        "rate_limit_error": 429,
-        "too_many_requests": 429,
-        "service_unavailable_error": 503,
-        "server_error": 503,
-        "overloaded_error": 503
-    }
-
-    if isinstance(error_type, str):
-        mapped = type_map.get(error_type.strip().lower())
-        if mapped:
-            return mapped
+    mapped = named_error_status(error_type)
+    if mapped:
+        return mapped
 
     return primary_code
 

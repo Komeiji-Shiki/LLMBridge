@@ -137,7 +137,7 @@ class GatewayRequestMiddleware:
                         if isinstance(value, dict):
                             if value.get('type') in ('response.completed', 'response.incomplete'):
                                 response_object = value.get('response')
-                            elif value.get('event_type') in ('interaction.complete', 'interaction.completed'):
+                            elif value.get('event_type') == 'interaction.completed':
                                 response_object = value.get('interaction')
                             elif not streaming:
                                 response_object = value

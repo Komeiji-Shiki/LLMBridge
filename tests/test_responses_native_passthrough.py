@@ -691,7 +691,7 @@ class PassthroughHandlerTests(unittest.TestCase):
         self.assertIn("upstream boom", end_kwargs["error"])
 
     def test_stream_top_level_error_event_records_failure(self):
-        # 顶层 code+message 的 error 事件会被 is_error_json 判为首块错误 → 502 JSON 响应
+        # 顶层 code+message 的 error 事件会被 is_error_json 判为首块错误，状态码按 code 折算
         payloads = [
             b'event: error\n'
             b'data: {"type":"error","code":"invalid_request_error","message":"bad top-level error"}\n\n',
@@ -702,7 +702,7 @@ class PassthroughHandlerTests(unittest.TestCase):
 
         result = self._handle(service, request_body)
         self.assertIsInstance(result, JSONResponse)
-        self.assertEqual(result.status_code, 502)
+        self.assertEqual(result.status_code, 400)
 
         monitoring = self.monitoring_mock
         monitoring.request_start.assert_called_once()

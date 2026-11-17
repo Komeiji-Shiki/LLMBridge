@@ -1,4 +1,5 @@
 """Classify protocol events without changing their wire representation."""
+from http import HTTPStatus
 import json
 
 
@@ -125,6 +126,47 @@ def gemini_termination(value):
                     'reason': reason, 'message': message}
 
 
+# Interactions 因内容被拦而失败时的错误码；重试只会得到同样的结果，按请求错误处理。
+INTERACTIONS_BLOCKED_CODES = frozenset({'safety', 'jailbreak', 'prohibited_content', 'blocklist'})
+
+# 字符串错误标识的唯一映射表。各家写法不同：Interactions 用 HTTP 状态名（too_many_requests），
+# Gemini 用 google.rpc 规范码（RESOURCE_EXHAUSTED），OpenAI 和 Anthropic 用错误类型（overloaded_error）。
+NAMED_ERROR_STATUS = {
+    **{name.lower(): status.value for name, status in HTTPStatus.__members__.items() if status >= 400},
+    'invalid_argument': 400, 'failed_precondition': 400, 'out_of_range': 400, 'unauthenticated': 401,
+    'permission_denied': 403, 'already_exists': 409, 'aborted': 409, 'resource_exhausted': 429,
+    'internal': 500, 'unknown': 500, 'data_loss': 500, 'unimplemented': 501, 'unavailable': 503,
+    'deadline_exceeded': 504,
+    'invalid_request_error': 400, 'authentication_error': 401, 'permission_error': 403, 'not_found_error': 404,
+    'rate_limit_error': 429, 'rate_limit_exceeded': 429,
+    'server_error': 503, 'service_unavailable_error': 503, 'overloaded_error': 503,
+    **dict.fromkeys(INTERACTIONS_BLOCKED_CODES, 400),
+}
+
+
+def named_error_status(value):
+    """数字或字符串错误标识折算成 HTTP 错误状态码，认不出返回 None。"""
+    if isinstance(value, str):
+        value = value.strip()
+        if not value.isdigit():
+            return NAMED_ERROR_STATUS.get(value.lower())
+    if isinstance(value, bool):
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if 400 <= value <= 599 else None
+
+
+def interaction_error(interaction):
+    """失败或取消的 Interaction 取第一条错误（没有时为空字典），其他状态返回 None。"""
+    if not isinstance(interaction, dict) or interaction.get('status') not in ('failed', 'cancelled'):
+        return None
+    errors = interaction.get('errors')
+    return errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else {}
+
+
 def error_status(value):
     if not isinstance(value, dict):
         return None
@@ -132,15 +174,16 @@ def error_status(value):
     kind = value.get('type') or value.get('event_type') or ''
     if kind == 'response.failed':
         error = (value.get('response') or {}).get('error') or {'code': 502}
+    elif kind == 'interaction.completed':
+        error = interaction_error(value.get('interaction'))
     if error is None and kind != 'error':
         return None
     error = error if isinstance(error, dict) else {}
-    code = value.get('_http_status') or error.get('code') or error.get('status')
-    try:
-        return int(code)
-    except (TypeError, ValueError):
-        kind = str(error.get('type') or value.get('code') or '')
-        return 429 if 'rate_limit' in kind else 504 if 'timeout' in kind else 502
+    for code in (value.get('_http_status'), error.get('code'), error.get('status'), error.get('type'), value.get('code')):
+        if status := named_error_status(code):
+            return status
+    kind = str(error.get('type') or value.get('code') or '')
+    return 429 if 'rate_limit' in kind else 504 if 'timeout' in kind else 502
 
 
 def is_terminal(value):
@@ -148,7 +191,7 @@ def is_terminal(value):
         return False
     if (value.get('promptFeedback') or {}).get('blockReason'):
         return True
-    if value.get('done') or (value.get('type') or value.get('event_type')) in ('response.completed', 'response.incomplete', 'message_stop', 'interaction.complete', 'interaction.completed'):
+    if value.get('done') or (value.get('type') or value.get('event_type')) in ('response.completed', 'response.incomplete', 'message_stop', 'interaction.completed'):
         return True
     if any(candidate.get('finishReason') for candidate in value.get('candidates', []) if isinstance(candidate, dict)):
         return True
@@ -159,9 +202,9 @@ def is_business_event(value):
     if not isinstance(value, dict) or error_status(value) is not None or value.get('done'):
         return False
     kind = value.get('type') or value.get('event_type') or ''
-    if kind in ('ping', 'response.created', 'response.in_progress', 'message_start', 'interaction.start', 'interaction.created', 'interaction.status_update'):
+    if kind in ('ping', 'response.created', 'response.in_progress', 'message_start', 'interaction.created', 'interaction.status_update'):
         return False
-    if kind in ('response.completed', 'response.incomplete', 'message_stop', 'interaction.complete'):
+    if kind in ('response.completed', 'response.incomplete', 'message_stop', 'interaction.completed'):
         return True
     if kind == 'response.output_item.added':
         item = value.get('item') or {}
@@ -172,7 +215,11 @@ def is_business_event(value):
     if kind in ('response.content_part.added', 'response.reasoning_summary_part.added', 'response.reasoning_part.added'):
         part = value.get('part') or {}
         return bool(part.get('text') or part.get('refusal'))
-    if kind == 'content_block_stop':
+    if kind == 'step.start':
+        # Interactions 的文本和思考步骤先发空壳，内容随后在 step.delta 里到达。
+        step = value.get('step') or {}
+        return step.get('type') not in ('model_output', 'thought') or bool(step.get('content') or step.get('summary') or step.get('signature'))
+    if kind in ('content_block_stop', 'step.stop'):
         return False
     if kind == 'content_block_delta':
         delta = value.get('delta') or {}

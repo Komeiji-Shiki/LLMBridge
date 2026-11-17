@@ -652,9 +652,12 @@ class InteractionsAuditRegressionTests(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0]["error"]["message"], "炸了")
         failure = interaction_failure(interaction)
-        self.assertEqual(failure["error"]["code"], 502)
+        # 错误码按 google.rpc 规范折算：internal 是 500，限流能命中 retry_on_429，认不出的按 502
+        self.assertEqual(failure["error"]["code"], 500)
         self.assertEqual(failure["usageMetadata"]["promptTokenCount"], 9)
         self.assertEqual(interaction_failure({"status": "failed", "errors": [{"code": "safety"}]})["error"]["code"], 400)
+        self.assertEqual(interaction_failure({"status": "failed", "errors": [{"code": "too_many_requests"}]})["error"]["code"], 429)
+        self.assertEqual(interaction_failure({"status": "cancelled"})["error"]["code"], 502)
         self.assertIsNone(interaction_failure({"status": "completed"}))
 
     def test_incomplete_and_continuation_report_length(self):

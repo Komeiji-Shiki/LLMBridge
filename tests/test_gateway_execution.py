@@ -255,6 +255,46 @@ def test_other_errors_retry_credential_rejections_but_not_bad_requests(status, r
     assert should_retry_from_status_codes({status}, normalize_auto_retry_config(endpoint))[0] == retried
 
 
+_INTERACTION_START = [{'event_type': 'interaction.created', 'interaction': {'id': 'i'}},
+                      {'event_type': 'step.start', 'index': 0, 'step': {'type': 'model_output'}}]
+
+
+@pytest.mark.parametrize(('prelude', 'failure', 'status', 'retried'), [
+    (_INTERACTION_START, {'event_type': 'error', 'error': {'code': 'too_many_requests', 'message': 'Resource exhausted.'}}, 429, True),
+    (_INTERACTION_START, {'event_type': 'interaction.completed', 'interaction': {
+        'status': 'failed', 'errors': [{'code': 'unavailable'}]}}, 503, True),
+    (_INTERACTION_START, {'event_type': 'interaction.completed', 'interaction': {
+        'status': 'failed', 'errors': [{'code': 'prohibited_content'}]}}, 400, False),
+    ([{'type': 'message_start', 'message': {'id': 'm'}}],
+     {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}}, 503, True),
+    ([{'type': 'response.created', 'response': {'id': 'r'}}],
+     {'type': 'response.failed', 'response': {'error': {'code': 'rate_limit_exceeded'}}}, 429, True),
+], ids=['interactions-error', 'interactions-failed', 'interactions-blocked', 'anthropic-overloaded', 'responses-failed'])
+def test_stream_errors_with_named_codes_use_their_retry_switch(prelude, failure, status, retried):
+    """流里用字符串标识的错误要折算成真实状态码，才能命中 retry_on_429/503。"""
+    calls = []
+
+    @retry_before_output
+    async def upstream(api_key='', request_body=None):
+        calls.append(api_key)
+        for event in prelude:
+            yield event
+        yield failure if len(calls) == 1 else {'done': True}
+
+    async def run():
+        # 和线上配置一致：只开 429/503，误判成 502 就不会重试
+        context = RequestContext(model='test', endpoint={'auto_retry': {
+            'enabled': True, 'max_retries': 1, 'retry_delay_seconds': 0}})
+        token = current_request.set(context)
+        try:
+            [chunk async for chunk in upstream(request_body={'stream': True})]
+            return [attempt['status'] for attempt in context.attempts]
+        finally:
+            current_request.reset(token)
+
+    assert asyncio.run(run()) == ([status, 200] if retried else [status])
+
+
 @pytest.mark.parametrize('output_bytes, stream', [(False, True), (True, True), (True, False)])
 def test_exhausted_upstream_credential_rejection_reaches_client_as_502(output_bytes, stream):
     from converters.anthropic_openai import build_anthropic_error_payload

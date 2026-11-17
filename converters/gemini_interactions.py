@@ -41,6 +41,7 @@ from services.model_capabilities import (
     budget_to_effort,
     limits_for,
 )
+from services.protocol_events import interaction_error, named_error_status
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage
 
 logger = logging.getLogger(__name__)
@@ -68,8 +69,6 @@ _SERVER_TOOL_STEPS = frozenset({
     "processing_call", "processing_result", "mcp_server_tool_call", "mcp_server_tool_result",
 })
 _CONTINUATION_STOPPED = "续传跳数已达上限或上游没有给出新的 token，回复被截断"
-# 官方文档：这几个错误码表示内容被拦截，重试也没用。
-_BLOCKED_CODES = frozenset({"safety", "jailbreak", "prohibited_content", "blocklist"})
 
 
 # ============================================================================
@@ -725,13 +724,12 @@ def interaction_failure(interaction: Any) -> Optional[dict]:
 
     带上已计费的用量，调用方记录成本时能读到（和 generateContent 续传中断的处理一致）。
     """
-    if not isinstance(interaction, dict) or interaction.get("status") not in ("failed", "cancelled"):
+    first = interaction_error(interaction)
+    if first is None:
         return None
-    errors = interaction.get("errors")
-    first = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], dict) else {}
     upstream_code = first.get("code")
     error = {"message": first.get("message") or f"Interaction {interaction['status']}",
-             "type": "upstream_error", "code": 400 if upstream_code in _BLOCKED_CODES else 502}
+             "type": "upstream_error", "code": named_error_status(upstream_code) or 502}
     if upstream_code:
         error["upstream_code"] = upstream_code
     usage = interaction.get("usage") or {}
