@@ -34,7 +34,7 @@ from ._direct_api_utils import (
     estimate_text_tokens_non_blocking,
     finalize_tool_calls,
     is_error_json,
-    iter_with_keepalive,
+    resume_after_first,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
 )
@@ -287,20 +287,10 @@ async def _handle_stream(
         error_message = error_obj.get("message", "上游 Responses 请求失败") if isinstance(error_obj, dict) else str(error_obj)
         raise _UpstreamRejected(status_code, error_message, normalize_to_openai_error(error_json))
 
-    # 读上游时同时等监控页的手动收尾；收尾后转换器按上游已结束补发结束块
+    # 手动收尾后转换器按上游已结束补发结束块
     stop = stream_stop.register(request_id)
-
-    async def prefixed_source():
-        yield first_chunk
-        source = iter_with_keepalive(upstream_iterator, None, stop=stop)
-        try:
-            async for chunk in source:
-                yield chunk
-        finally:
-            await source.aclose()
-
     converted_response = build_chat_streaming_response_from_responses(
-        prefixed_source(),
+        resume_after_first(first_chunk, upstream_iterator, stop),
         display_name,
         get_completion_tokens_mode(endpoint_config),
         on_response=_remember_response,

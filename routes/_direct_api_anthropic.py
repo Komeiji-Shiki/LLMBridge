@@ -52,7 +52,7 @@ from ._direct_api_utils import (
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     is_error_json,
-    iter_with_keepalive,
+    resume_after_first,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
     record_request_failure,
@@ -1597,20 +1597,9 @@ async def handle_anthropic_native_from_openai(
                 monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
             return JSONResponse(status_code=status_code, content=normalized)
 
-        # 构建一个能先发送 first_chunk 再继续的迭代器；读上游时同时等监控页的手动收尾
         stop = stream_stop.register(request_id)
-
-        async def _stream_with_first():
-            yield first_chunk
-            source = iter_with_keepalive(api_iter, None, stop=stop)
-            try:
-                async for chunk in source:
-                    yield chunk
-            finally:
-                await source.aclose()
-
         return build_openai_stream_from_anthropic(
-            api_iterator=_stream_with_first(),
+            api_iterator=resume_after_first(first_chunk, api_iter, stop),
             model_name=display_name,
             request_id=request_id,
             monitoring_service=monitoring_service,

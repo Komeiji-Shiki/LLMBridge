@@ -895,6 +895,17 @@ async def peek_stream(iterator, interval: Optional[float], wait: float = Timeout
     return first, chunks()
 
 
+async def resume_after_first(first, iterator, stop: Optional[asyncio.Event]):
+    """预读过第一块的上游流：先补回第一块，再接着读剩下的，同时等监控页的手动收尾。"""
+    yield first
+    source = iter_with_keepalive(iterator, None, stop=stop)
+    try:
+        async for chunk in source:
+            yield chunk
+    finally:
+        await source.aclose()
+
+
 async def close_quietly(iterator):
     """释放上游迭代器的连接。收尾阶段的异常不能盖过主流程的结果，只留一条调试日志。"""
     try:
