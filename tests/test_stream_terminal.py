@@ -1,4 +1,6 @@
-"""流式请求的结束记录：各条链路在客户端中途断开时都只记一次，原因统一是 Client disconnected。"""
+"""流式请求的结束矩阵：客户端 × 上游的每种组合在客户端断开、上游静默、上游截断时结束方式一致。"""
+import json
+
 import pytest
 
 from core import stream_stop
@@ -88,3 +90,32 @@ def test_silent_upstream_gets_keepalives_and_content_survives(monkeypatch, cell)
     lines = response.text.splitlines()
     assert any(line.startswith(':') or line == 'event: ping' for line in lines), response.text[:400]
     assert monitor.request_end.call_args.kwargs['success'] is True
+
+
+@pytest.mark.parametrize('cell', CELLS, ids='-'.join)
+def test_stream_cut_before_terminal_event_is_an_upstream_failure(monkeypatch, cell):
+    """上游没发结束事件就关了连接：客户端收到错误，记成上游失败，不能算成功或客户端断开。"""
+    from protocol_harness import READERS, exchange
+    client, upstream = cell
+    app, monitor = build_gateway(monkeypatch)
+    events = REPLY_BUILDERS[upstream](TURN, True).events
+    response, _ = exchange(app, monkeypatch, upstream, [Reply(events=events[:-TAIL[upstream]])],
+                           CLIENT_PATHS[client], request_for(client))
+    seen = READERS[client](response, True)
+    assert seen.error is not None
+    if client == 'anthropic':
+        assert 'event: error' in response.text
+    kwargs = monitor.request_end.call_args.kwargs
+    assert kwargs['success'] is False and not kwargs['error'].startswith('Client disconnected'), kwargs['error']
+
+
+def test_native_anthropic_error_mid_stream_is_forwarded_and_recorded(monkeypatch):
+    from protocol_harness import exchange
+    app, monitor = build_gateway(monkeypatch)
+    events = REPLY_BUILDERS['anthropic'](TURN, True).events
+    overloaded = {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}}
+    response, _ = exchange(app, monkeypatch, 'anthropic', [Reply(events=events[:-TAIL['anthropic']] + [('error', overloaded)])],
+                           CLIENT_PATHS['anthropic'], request_for('anthropic'))
+    assert response.text.endswith('event: error\ndata: ' + json.dumps(overloaded) + '\n\n')
+    kwargs = monitor.request_end.call_args.kwargs
+    assert kwargs['success'] is False and 'Overloaded' in kwargs['error']

@@ -750,6 +750,10 @@ def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
             continue
 
         etype = event.get("type")
+        if etype == "error" or (etype is None and event.get("error") not in (None, "", {})):
+            # 上游原生的 error 事件，或网关传输层在流中途补的错误块（OpenAI 形状，不带 type）
+            state["error"] = event
+            continue
         if etype == "content_block_delta":
             delta = event.get("delta")
             if not isinstance(delta, dict):

@@ -966,6 +966,20 @@ async def _handle_anthropic_passthrough(
                     if not rewritten:
                         continue
                     extract_anthropic_sse_content(rewritten, stream_state)
+                    upstream_error = stream_state.get("error")
+                    if upstream_error is not None:
+                        # 流中途的错误：上游原生 error 事件原样转发；网关传输层补的错误块
+                        # （上游没发终态事件就断了等）是 OpenAI 形状，换成 Anthropic 的 error 事件
+                        success = False
+                        error_msg = json.dumps(upstream_error, ensure_ascii=False)
+                        logger.warning(f"[ANTHROPIC_COMPAT] 流式请求中途收到上游错误: {error_msg[:300]}")
+                        if upstream_error.get("type") != "error":
+                            rewritten = (
+                                "event: error\n"
+                                f"data: {json.dumps(build_anthropic_error_payload(upstream_error), ensure_ascii=False)}\n\n"
+                            ).encode("utf-8")
+                        yield rewritten
+                        return
                     yield rewritten
                 # 转发重写器缓冲中的残留（正常 SSE 流以空行结尾，此处为空操作）
                 tail_bytes = sse_rewriter.flush()

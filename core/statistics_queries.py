@@ -1,6 +1,7 @@
 """统计查询只扫描必要的分组；Token 和金额总计复用模型聚合结果。"""
 
 import ast
+import json
 import time
 
 from core.stream_stop import CLIENT_DISCONNECTED
@@ -116,12 +117,16 @@ def _error_label(error: str) -> str:
     """日志里的错误多是 dict 的 repr，取出 message 当作简短说明。"""
     text = (error or '').strip()
     if text.startswith('{'):
-        try:
-            message = ast.literal_eval(text).get('message')
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                value = parse(text)
+            except (ValueError, SyntaxError):
+                continue
+            value = value.get('error', value) if isinstance(value, dict) else None
+            message = value.get('message') if isinstance(value, dict) else value
             if isinstance(message, str) and message:
                 text = message
-        except (ValueError, SyntaxError, AttributeError):
-            pass
+            break
     return text.splitlines()[0][:160] if text else '未知错误'
 
 

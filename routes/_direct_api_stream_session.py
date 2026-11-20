@@ -135,7 +135,9 @@ class PassthroughStreamSession:
 
         self.client_disconnected = True
         self.request_success = False
-        self.error_msg = reason
+        # 上游已经报错时，外层协议转换读到错误就会关掉这条流，同样走到这里；原因保留上游的错误
+        if not (self.upstream_error_detected and self.error_msg):
+            self.error_msg = reason
 
         self._flush_tool_args_tails()
         partial_content = ''.join(self.content_parts)
