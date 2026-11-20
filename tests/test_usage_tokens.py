@@ -9,7 +9,8 @@ OpenAI 官方形态（completion_tokens 已含思考，相加会造成重复计�
 import asyncio
 import copy
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 
@@ -290,6 +291,104 @@ class StreamSessionUsageTests(unittest.TestCase):
         self.assertFalse(session._process_usage(chunk))
         self.assertEqual(chunk["usage"], {"prompt_tokens": 10, "completion_tokens": 20,
                                          "total_tokens": 30})
+
+
+class AnthropicDisconnectUsageTests(unittest.TestCase):
+    """Anthropic 上游在 message_delta 之前断开：message_start 的输出只是占位，按已收到的内容估算。"""
+
+    @staticmethod
+    def _sse(*events):
+        return [("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode()
+                for event in events]
+
+    @staticmethod
+    def _stalled(chunks, stalled):
+        async def upstream(**kwargs):
+            for item in chunks:
+                yield item
+            stalled.set()
+            await asyncio.sleep(30)
+        return upstream()
+
+    @staticmethod
+    async def _disconnect_when(stalled, body):
+        """上游假死后客户端放弃：Starlette 在断开时取消整个 anyio 任务组。"""
+        async with anyio.create_task_group() as group:
+            async def consume():
+                async for _ in body:
+                    pass
+
+            async def disconnect():
+                await stalled.wait()
+                group.cancel_scope.cancel()
+            group.start_soon(consume)
+            group.start_soon(disconnect)
+
+    _STARTED = {"type": "message_start", "message": {"usage": {"input_tokens": 100, "output_tokens": 1}}}
+    _PARTIAL = (
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "一半"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {}}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"a":1}'}},
+    )
+
+    def _passthrough_end(self, chunks):
+        from routes import api_routes
+
+        service = MagicMock()
+        service.calculate_cost.return_value = {}
+        monitor = MagicMock()
+        monitor.broadcast_to_monitors = AsyncMock()
+
+        async def run():
+            stalled = asyncio.Event()
+            service.call_api_passthrough = lambda **kwargs: self._stalled(chunks, stalled)
+            response = await api_routes._handle_anthropic_passthrough(
+                {"model": "claude", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+                "claude", {"api_base_url": "https://example.test", "api_key": "k"}, "/messages")
+            await self._disconnect_when(stalled, response.body_iterator)
+
+        with patch.object(api_routes._app_state.server, "direct_api_service", service), \
+                patch.object(api_routes, "monitoring_service", monitor), \
+                patch.object(api_routes, "get_round_robin_api_key", AsyncMock(return_value="k")), \
+                patch.object(api_routes, "estimate_message_tokens", lambda messages, model=None: 7), \
+                patch.object(api_routes, "estimate_tokens", lambda text, model=None: len(text)):
+            asyncio.run(run())
+        self.assertEqual(monitor.request_end.call_count, 1)
+        return monitor.request_end.call_args.kwargs
+
+    def test_passthrough_counts_partial_text_and_tool_arguments(self):
+        end = self._passthrough_end(self._sse(self._STARTED, *self._PARTIAL))
+        self.assertEqual((end["input_tokens"], end["output_tokens"]), (100, len("一半") + len('{"a":1}')))
+
+    def test_passthrough_estimates_input_when_relay_omits_it(self):
+        started = {"type": "message_start", "message": {"usage": {"input_tokens": 0, "output_tokens": 0}}}
+        end = self._passthrough_end(self._sse(started, *self._PARTIAL[:2]))
+        self.assertEqual((end["input_tokens"], end["output_tokens"]), (7, len("一半")))
+
+    def test_passthrough_without_message_start_estimates_nothing(self):
+        end = self._passthrough_end(self._sse({"type": "ping"}))
+        self.assertEqual((end["input_tokens"], end["output_tokens"]), (0, 0))
+
+    def test_openai_client_counts_partial_text_and_open_tool_call(self):
+        from routes._direct_api_anthropic import build_openai_stream_from_anthropic
+
+        monitor = MagicMock()
+        monitor.broadcast_to_monitors = AsyncMock()
+
+        async def run():
+            stalled = asyncio.Event()
+            response = build_openai_stream_from_anthropic(
+                self._stalled(self._sse(self._STARTED, *self._PARTIAL), stalled), "demo", "req", monitor, {}, {}, None,
+                lambda messages, model=None: 7, {"messages": []}, [],
+                estimate_tokens_func=lambda text, model=None: len(text))
+            await self._disconnect_when(stalled, response.body_iterator)
+
+        asyncio.run(run())
+        end = monitor.request_end.call_args.kwargs
+        self.assertEqual((end["input_tokens"], end["output_tokens"]), (100, len("一半") + len('{"a":1}')))
 
 
 class CrossProtocolTests(unittest.TestCase):

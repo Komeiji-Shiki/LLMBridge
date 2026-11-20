@@ -679,6 +679,21 @@ def _apply_native_system_injection(passthrough_body: dict, endpoint_config: dict
         f"(位置: {position}, 内容长度: {len(inject_content)})")
 
 
+def _anthropic_estimate_messages(passthrough_body: Dict[str, Any]) -> list:
+    """Anthropic 请求体 → 估算输入用的消息列表，system 并作首条消息。"""
+    msgs = list(passthrough_body.get("messages") or [])
+    system = passthrough_body.get("system")
+    system_text = ""
+    if isinstance(system, str):
+        system_text = system
+    elif isinstance(system, list):
+        system_text = "\n".join(
+            b.get("text", "") for b in system if isinstance(b, dict))
+    if system_text:
+        msgs = [{"role": "system", "content": system_text}] + msgs
+    return msgs
+
+
 async def _estimate_anthropic_local_usage(
     passthrough_body: Dict[str, Any],
     resp_content: Optional[str],
@@ -693,18 +708,8 @@ async def _estimate_anthropic_local_usage(
     这里只需在 tokenizer 出错时回退上游值。
     """
     try:
-        msgs = list(passthrough_body.get("messages") or [])
-        system = passthrough_body.get("system")
-        system_text = ""
-        if isinstance(system, str):
-            system_text = system
-        elif isinstance(system, list):
-            system_text = "\n".join(
-                b.get("text", "") for b in system if isinstance(b, dict))
-        if system_text:
-            msgs = [{"role": "system", "content": system_text}] + msgs
         input_tokens = await estimate_message_tokens_non_blocking(
-            estimate_message_tokens, msgs, model)
+            estimate_message_tokens, _anthropic_estimate_messages(passthrough_body), model)
         output_text = (resp_reasoning or "") + (resp_content or "")
         output_tokens = await estimate_text_tokens_non_blocking(
             estimate_tokens, output_text, model) if output_text else 0
@@ -714,6 +719,33 @@ async def _estimate_anthropic_local_usage(
     except Exception as e:
         logger.warning(f"[TOKEN_STATS_LOCAL] 本地token估算失败，回退上游值: {e}")
         return fallback_input, fallback_output
+
+
+async def _estimate_interrupted_anthropic_usage(
+    passthrough_body: Dict[str, Any],
+    stream_state: Dict[str, Any],
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> tuple:
+    """上游流在 message_delta 之前中断（多为客户端断开）时补齐用量。
+
+    message_start 里的 output_tokens 只是占位，已生成的内容（含工具参数）照样计费；
+    有的中转 message_start 也不带输入量，此时一并估算。
+    """
+    output_text = (
+        "".join(stream_state["reasoning_parts"]) + "".join(stream_state["content_parts"])
+        + "".join(call["function"]["arguments"] for call in stream_state.get("tool_calls") or []))
+    try:
+        if not input_tokens:
+            input_tokens = await estimate_message_tokens_non_blocking(
+                estimate_message_tokens, _anthropic_estimate_messages(passthrough_body), model)
+        if output_text:
+            output_tokens = max(output_tokens, await estimate_text_tokens_non_blocking(
+                estimate_tokens, output_text, model))
+    except Exception as e:
+        logger.warning(f"[ANTHROPIC_COMPAT] 中断请求的token估算失败，保留上游值: {e}")
+    return input_tokens, output_tokens
 
 
 def _extract_upstream_stream_error(chunk: bytes) -> Optional[Dict[str, Any]]:
@@ -965,6 +997,10 @@ async def _handle_anthropic_passthrough(
                         display_name,
                         fallback_input=final_input_tokens,
                         fallback_output=final_output_tokens)
+                elif stream_state.get("message_started") and not stream_state.get("usage_final"):
+                    final_input_tokens, final_output_tokens = await _estimate_interrupted_anthropic_usage(
+                        passthrough_body, stream_state, display_name,
+                        final_input_tokens, final_output_tokens)
                 final_cached_tokens = stream_state.get("cached_tokens") or 0
                 cost_info = direct_api_service.calculate_cost(
                     input_tokens=final_input_tokens,

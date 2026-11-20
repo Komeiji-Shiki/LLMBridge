@@ -1288,7 +1288,12 @@ def build_openai_stream_from_anthropic(
             #      高压缩内容又会误触发，等于用更差的数据替换上游精确值。
             # 现与 PassthroughStreamSession.finalize 的策略对齐：只有上游确实
             # 没给出有效 output_tokens 时才回退到本地估算。
-            total_output = (resp_reasoning or "") + (resp_content if success else "")
+            # 失败时 resp_content 已换成错误信息，估算要用已收到的原始内容；
+            # message_delta 之前断开时工具参数也已经生成计费，一并算上。
+            tool_arguments = [call["function"]["arguments"] for call in tool_calls_acc]
+            if active_tool:
+                tool_arguments.extend(active_tool.get("arguments_parts", []))
+            total_output = "".join(reasoning_parts) + "".join(content_parts) + "".join(tool_arguments)
             if total_output and output_tokens <= 1:
                 if estimate_tokens_func:
                     try:

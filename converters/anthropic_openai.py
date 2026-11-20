@@ -677,7 +677,8 @@ def extract_anthropic_sse_content(chunk_bytes: bytes, state: dict) -> None:
     """旁路解析 Anthropic SSE chunk，累积内容到 state dict。
 
     state 包含: content_parts, reasoning_parts, tool_calls, input_tokens,
-    output_tokens, cached_tokens；内部使用 _sse_buf 做跨 chunk 行缓冲。
+    output_tokens, cached_tokens；message_started / usage_final 标记是否收到
+    message_start 和 message_delta 的最终用量；内部使用 _sse_buf 做跨 chunk 行缓冲。
 
     🔧 修复：SSE 的 data 行经常被 TCP chunk 边界切断，旧版对每个 chunk
     独立按行解析，被切断的行 json.loads 失败后直接丢弃，导致监控日志中
@@ -769,6 +770,7 @@ def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
             raw_usage = event.get("usage")
             if isinstance(raw_usage, dict) and raw_usage:
                 state.setdefault("upstream_usage", {}).update(raw_usage)
+                state["usage_final"] = True
             inp, outp, cached = extract_anthropic_usage_tokens(raw_usage)
             if inp:
                 state["input_tokens"] = inp
@@ -777,6 +779,7 @@ def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
             if cached:
                 state["cached_tokens"] = cached
         elif etype == "message_start":
+            state["message_started"] = True
             note_cache_diagnostics(event.get("message"))
             msg = event.get("message")
             if isinstance(msg, dict):
