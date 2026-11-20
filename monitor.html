@@ -167,6 +167,24 @@
         </div>
     </div>
 
+        <!-- 模型可用性 -->
+        <div class="section" id="availability-section">
+            <div class="section-header">
+                <h2 class="section-title">模型可用性</h2>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <select id="availability-range" class="filter-input" aria-label="时间范围" onchange="MonitorAvailability.refresh()">
+                        <option value="6:10" selected>最近 6 小时 · 每格 10 分钟</option>
+                        <option value="24:30">最近 24 小时 · 每格 30 分钟</option>
+                        <option value="48:60">最近 48 小时 · 每格 1 小时</option>
+                    </select>
+                    <button class="refresh-btn" onclick="MonitorAvailability.refresh()">刷新</button>
+                </div>
+            </div>
+            <div id="availability-list">
+                <div class="empty-state">加载中...</div>
+            </div>
+        </div>
+
         <!-- 模型使用统计 -->
         <div class="section">
             <div class="section-header">
@@ -478,5 +496,6 @@
     <script src="/js/monitor-logs.js"></script>
     <script src="/js/monitor-messages.js"></script>
     <script src="/js/monitor.js"></script>
+    <script src="/js/monitor-availability.js"></script>
 </body>
 </html>

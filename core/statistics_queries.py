@@ -1,5 +1,6 @@
 """统计查询只扫描必要的分组；Token 和金额总计复用模型聚合结果。"""
 
+import ast
 import time
 
 TOKENS = ('input_tokens', 'output_tokens', 'total_tokens', 'cached_tokens', 'cache_write_tokens', 'cache_write_1h_tokens')
@@ -103,3 +104,52 @@ def query_token_stats(conn, start_ts, end_ts, model_config, rpm_period, usd_to_c
                            'request_count': sum(row['request_count'] for row in rates.values()),
                            'total_tokens': sum(row['total_tokens'] for row in rates.values())},
             'models_count': len(models)}
+
+
+# 客户端自己断开不算上游不可用，单独计数
+_CLIENT_GONE = "error LIKE 'Client disconnected%'"
+
+
+def _error_label(error: str) -> str:
+    """日志里的错误多是 dict 的 repr，取出 message 当作简短说明。"""
+    text = (error or '').strip()
+    if text.startswith('{'):
+        try:
+            message = ast.literal_eval(text).get('message')
+            if isinstance(message, str) and message:
+                text = message
+        except (ValueError, SyntaxError, AttributeError):
+            pass
+    return text.splitlines()[0][:160] if text else '未知错误'
+
+
+def query_availability(conn, now: float, bucket_seconds: int, buckets: int) -> dict:
+    """按模型、按时间桶统计成功和失败；桶对齐到整点倍数，最后一格是正在进行的这一段。"""
+    start = (int(now // bucket_seconds) - buckets + 1) * bucket_seconds
+    slot = 'CAST((timestamp - ?) / ? AS INTEGER)'
+    models = {}
+    for model, index, total, success, gone in conn.execute(f'''
+        SELECT model, {slot}, COUNT(*), SUM(success = 1), SUM(success = 0 AND {_CLIENT_GONE})
+        FROM requests WHERE timestamp >= ? GROUP BY 1, 2
+    ''', (start, bucket_seconds, start)):
+        item = models.setdefault(model, {'model': model, 'total': 0, 'success': 0, 'failed': 0, 'cancelled': 0, 'cells': {}})
+        failed = total - success - gone
+        item['cells'][index] = {'slot': index, 'total': total, 'success': success, 'failed': failed, 'cancelled': gone}
+        item['total'] += total
+        item['success'] += success
+        item['failed'] += failed
+        item['cancelled'] += gone
+    # 失败的格子附上出现最多的错误，悬停时直接看到是限流还是上游报错
+    top = {}
+    for model, index, error, count in conn.execute(f'''
+        SELECT model, {slot}, error, COUNT(*) FROM requests
+        WHERE timestamp >= ? AND success = 0 AND NOT {_CLIENT_GONE} GROUP BY 1, 2, 3
+    ''', (start, bucket_seconds, start)):
+        if count > top.get((model, index), (None, 0))[1]:
+            top[(model, index)] = (error, count)
+    for (model, index), (error, count) in top.items():
+        models[model]['cells'][index].update(error=_error_label(error), error_count=count)
+    rows = sorted(models.values(), key=lambda row: row['total'], reverse=True)
+    for row in rows:
+        row['cells'] = sorted(row['cells'].values(), key=lambda cell: cell['slot'])
+    return {'start': start, 'bucket_seconds': bucket_seconds, 'buckets': buckets, 'models': rows}

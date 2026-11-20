@@ -16,6 +16,7 @@ from core import stream_stop
 from core.app_state import get_app_state
 from core.config_loader import CONFIG
 from core.constants import PROJECT_ROOT
+from core.db_stats import stats_db
 from modules.monitoring import monitoring_service, MonitorConfig
 from utils import loop_watchdog
 
@@ -346,6 +347,16 @@ async def finish_active_request_endpoint(request_id: str):
         raise HTTPException(status_code=409, detail="请求已经结束，或者它走的链路不支持手动收尾")
     logger.info(f"[STREAM_STOP] 监控页手动收尾请求 {request_id[:8]}")
     return {"success": True}
+
+
+@router.get("/api/monitor/availability")
+async def get_availability_endpoint(hours: int = Query(6, ge=1, le=48),
+                                    bucket_minutes: int = Query(10, ge=5, le=120)):
+    """各模型最近一段时间的成功率时间线，数据来自 requests.db。"""
+    result = await stats_db.get_availability_async(hours, bucket_minutes)
+    if result is None:
+        raise HTTPException(status_code=503, detail="请求数据库尚未就绪")
+    return result
 
 
 @router.get("/api/monitor/logs/requests")

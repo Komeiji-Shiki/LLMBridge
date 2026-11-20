@@ -7,6 +7,7 @@ import asyncio
 import sqlite3
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
@@ -354,6 +355,23 @@ class StatsDB:
         if not self.db_path.exists():
             return None
         return estimate_current_prices(self.db_path, model_config)
+
+    def get_availability(self, hours: int, bucket_minutes: int) -> Optional[Dict]:
+        """最近 hours 小时按模型、每 bucket_minutes 分钟一格的成功与失败次数。"""
+        if not self._check_enabled():
+            return None
+        from core.statistics_queries import query_availability
+        try:
+            return query_availability(self._get_connection(), time.time(), bucket_minutes * 60,
+                                      hours * 60 // bucket_minutes)
+        except Exception as error:
+            logger.error("获取模型可用性失败: %s", error, exc_info=True)
+            self._discard_connection()
+            return None
+
+    async def get_availability_async(self, hours: int, bucket_minutes: int):
+        """在线程池查询模型可用性。"""
+        return await asyncio.to_thread(self.get_availability, hours, bucket_minutes)
 
     async def get_token_stats_async(self, start_time=None, end_time=None, model_config=None, rpm_period=None):
         """在线程池查询 Token 统计，避免阻塞请求事件循环。"""

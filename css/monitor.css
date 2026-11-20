@@ -1035,3 +1035,29 @@ button.tab { font: inherit; font-size: 14px; font-weight: 500; background: none;
 .embedded .brand, .embedded .header-link { display: none; }
 .embedded .header { padding: 10px 32px; justify-content: flex-end; }
 .embedded .container { padding-top: 18px; }
+
+/* 模型可用性时间线：每格一个时间段，颜色按成功率分三档，客户端断开不计入 */
+#availability-list { padding: 4px 22px 18px; }
+.availability-row { display: grid; grid-template-columns: minmax(120px, 240px) 56px minmax(0, 1fr) 96px; align-items: center; gap: 12px; padding: 3px 0; }
+.availability-model { min-width: 0; padding: 0; border: 0; background: none; color: var(--text-main); font: 12px var(--font-mono); text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.availability-model:hover { color: var(--accent-hover); text-decoration: underline; }
+.availability-rate, .availability-count { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; color: var(--text-dim); }
+.availability-count { text-align: left; color: var(--text-faint); white-space: nowrap; }
+.availability-rate.ok { color: var(--ok); }
+.availability-rate.warn { color: var(--warn); }
+.availability-rate.bad { color: var(--danger); }
+.availability-cells { display: grid; grid-template-columns: repeat(var(--buckets), minmax(0, 1fr)); gap: 2px; }
+.availability-cell { height: 16px; padding: 0; border: 0; border-radius: 0; background: var(--surface-2); }
+button.availability-cell { cursor: pointer; }
+button.availability-cell:hover { outline: 1px solid var(--text-main); outline-offset: 1px; }
+.availability-cell.idle { background: var(--line-strong); }
+.availability-cell.ok { background: rgb(var(--ok-rgb) / .75); }
+.availability-cell.warn { background: var(--warn); }
+.availability-cell.bad { background: var(--danger); }
+.availability-axis { padding-top: 4px; }
+.availability-ticks { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) {
+    .availability-row { grid-template-columns: minmax(0, 1fr) 56px; }
+    .availability-cells, .availability-ticks { grid-column: 1 / -1; }
+    .availability-count, .availability-axis > span { display: none; }
+}
