@@ -202,12 +202,17 @@ async def update_model_config(
             raise HTTPException(status_code=400, detail="缺少必要参数")
 
         from services.provider_capabilities import validate_tool_config
+        from utils.upstream_fields import validate_rules
         for endpoint in config if isinstance(config, list) else [config]:
             try:
                 validate_tool_config(endpoint)
                 quota = normalize_quota(endpoint.get('quota'))
+                if endpoint.get('upstream_rules') is not None:
+                    validate_rules(endpoint['upstream_rules'])
             except ValueError as error:
                 raise HTTPException(400, str(error)) from error
+            if endpoint.get('upstream_rules') == []:
+                del endpoint['upstream_rules']
             endpoint['sanitize_recursive_schemas'] = False
             if quota:
                 endpoint['quota'] = quota

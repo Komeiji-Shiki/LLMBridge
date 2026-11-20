@@ -40,7 +40,7 @@ from services import upstream_compression
 from services.model_capabilities import limits_for
 from services.provider_capabilities import provider_name
 from utils import fastjson
-from utils.upstream_fields import omit_configured_fields
+from utils.upstream_fields import apply_upstream_rules, omit_configured_fields
 from utils.usage_tokens import MODE_MERGE, compose_chat_usage, rough_token_count
 
 logger = logging.getLogger(__name__)
@@ -192,15 +192,25 @@ def _retry_after_seconds(value: str) -> Optional[str]:
 async def _post_upstream(session, url: str, body: Dict[str, Any], headers: Dict[str, str]):
     """发往上游的 POST。渠道开了请求体压缩时压缩发送，上游拒收压缩就在这一次尝试里改发明文。
 
-    开始发送的时间点在压缩之后记下（之前算网关构造请求，之后算等上游）；压缩明细记在本次尝试上。
+    端点配置的 upstream_rules 在这里作用于最终请求体（见 utils.upstream_fields）。开始发送的时间点在
+    压缩之后记下（之前算网关构造请求，之后算等上游）；生效的规则和压缩明细记在本次尝试上。
     """
-    payload = fastjson.dumps(body)
     context = current_request.get()
-    data, extra, report = await upstream_compression.prepare(url, payload, context.endpoint if context else {})
+    endpoint = context.endpoint if context else {}
+    applied = []
+    if endpoint.get('upstream_rules'):
+        # 续传和重试会复用同一份请求体，改副本，规则不会叠加生效
+        body = copy.deepcopy(body)
+        applied = apply_upstream_rules(body, endpoint, context)
+    payload = fastjson.dumps(body)
+    data, extra, report = await upstream_compression.prepare(url, payload, endpoint)
     if context:
         context.mark('upstream_post')
-        if report and context.attempts:
-            context.attempts[-1]['upstream_compression'] = report
+        if context.attempts:
+            if applied:
+                context.attempts[-1]['upstream_rules'] = applied
+            if report:
+                context.attempts[-1]['upstream_compression'] = report
     async with session.post(url, data=data, headers={**headers, **extra}, timeout=_upstream_timeout()) as response:
         if not (extra and await upstream_compression.rejected(response, report)):
             # 发完就释放正文，否则整份请求体要陪着流式响应活到结束

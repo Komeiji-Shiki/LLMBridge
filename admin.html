@@ -833,6 +833,10 @@
                             <select class="form-select" data-channel-default="upstream_compression" data-kind="string"><option value="">各模型自己定</option><option value="off">不压缩</option><option value="zstd">zstd</option><option value="gzip">gzip</option><option value="br">Brotli</option></select>
                             <small class="field-hint" data-default-note="upstream_compression"></small>
                         </label>
+                        <label>上游请求改写规则 JSON
+                            <textarea class="form-textarea" data-channel-default="upstream_rules" data-kind="json" rows="3" placeholder="各模型自己定，例：[{&quot;drop_tools&quot;: [&quot;WebSearch&quot;]}, {&quot;delete&quot;: &quot;stream_options&quot;}]"></textarea>
+                            <small class="field-hint">按顺序改写真正发往上游的请求体：set 设值、delete 删除（路径用 . 分隔，* 匹配一层全部元素）、drop_tools 按名称通配删工具、replace 正则替换对话文本（加 "in": "body" 改整份 JSON）；加 "callers" 只对指定调用方生效。生效的规则记在请求尝试记录里。</small>
+                        </label>
                         <label>首块超时（秒）
                             <input class="form-input" data-channel-default="first_chunk_timeout_seconds" data-kind="number" min="1" placeholder="各模型自己定" type="number">
                         </label>
@@ -1365,6 +1369,9 @@
 <label class="form-label" for="model-upstream-compression">上游请求体压缩</label>
 <select class="form-select" id="model-upstream-compression"><option value="">跟随渠道（默认不压缩）</option><option value="off">不压缩</option><option value="zstd">zstd</option><option value="gzip">gzip</option><option value="br">Brotli</option></select>
 <small>压缩发往上游的请求体，长对话省上传流量。上游不认这种压缩时自动改发明文并记住；请求详情的尝试记录里能看到压缩比。</small>
+<label class="form-label" for="model-upstream-rules">上游请求改写规则 JSON</label>
+<textarea class="form-textarea" id="model-upstream-rules" rows="4" placeholder="[{&quot;drop_tools&quot;: [&quot;WebSearch&quot;]}, {&quot;delete&quot;: &quot;stream_options&quot;}]"></textarea>
+<small>按顺序改写真正发往上游的请求体：set 设值、delete 删除（路径用 . 分隔，* 匹配一层全部元素）、drop_tools 按名称通配删工具、replace 正则替换对话文本（加 "in": "body" 改整份 JSON）；加 "callers" 只对指定调用方生效。生效的规则记在请求尝试记录里。留空跟随渠道。</small>
 <label class="form-label" for="model-continuation-hops">Gemini 最大续传跳数</label>
 <input class="form-input" id="model-continuation-hops" type="number" min="0" step="1" placeholder="留空跟随渠道或全局（0 表示关闭续传）">
 <label class="form-label" for="model-native-tools">默认原生工具（英文逗号分隔）</label>

@@ -57,6 +57,17 @@ def _compress(algorithm: str, payload: bytes, settings: dict) -> bytes:
     return gzip.compress(payload, compresslevel=int(settings['gzip_level']), mtime=0)
 
 
+def decompress(encoding, data: bytes) -> bytes:
+    """还原压缩后的请求体；转换预览展示真正要发的正文时用。"""
+    if encoding == 'zstd':
+        return zstandard.ZstdDecompressor().decompress(data)
+    if encoding == 'br':
+        return brotli.decompress(data)
+    if encoding == 'gzip':
+        return gzip.decompress(data)
+    return data
+
+
 async def prepare(url: str, payload: bytes, endpoint: dict):
     """返回 (发送的正文, 追加的请求头, 压缩明细)；渠道没开压缩时明细为 None。"""
     algorithm = (endpoint or {}).get('upstream_compression')

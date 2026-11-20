@@ -16,7 +16,8 @@ from core.request_context import RequestContext, current_request
 from services.direct_api_service import DirectAPIService
 from services.model_capabilities import sanitize_anthropic_body
 from services.provider_capabilities import protocol_name
-from utils.upstream_fields import omit_configured_fields
+from services import upstream_compression
+from utils.upstream_fields import apply_upstream_rules, omit_configured_fields
 
 CLIENT_PROTOCOLS = ('chat', 'anthropic', 'responses')
 _NOT_SENT = json.dumps({'error': {'message': '转换预览：请求未发送', 'type': 'preview', 'code': 418}})
@@ -49,7 +50,11 @@ class _CaptureSession:
         self.sent: List[Tuple[str, Any]] = []
 
     def post(self, url, **kwargs):
-        self.sent.append((str(url).split('?', 1)[0], kwargs.get('data') or kwargs.get('json')))
+        data = kwargs.get('data') or kwargs.get('json')
+        encoding = (kwargs.get('headers') or {}).get('Content-Encoding')
+        if encoding and isinstance(data, (bytes, bytearray)):
+            data = upstream_compression.decompress(encoding, data)
+        self.sent.append((str(url).split('?', 1)[0], data))
         return _PreviewResponse()
 
     def get(self, _url, **_kwargs):
@@ -90,6 +95,7 @@ def _passthrough(client_protocol: str, body: dict, target: str, config: dict) ->
     upstream['model'] = target
     if client_protocol == 'anthropic':
         sanitize_anthropic_body(upstream, target)
+    apply_upstream_rules(upstream, config, current_request.get())
     return omit_configured_fields(upstream, config)
 
 

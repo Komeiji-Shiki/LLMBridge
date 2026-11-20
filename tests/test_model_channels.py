@@ -333,13 +333,16 @@ class TestChannelDefaults:
     def test_normalize_keeps_valid_defaults_and_rejects_the_rest(self):
         channel = normalize_channel({'name': 'x', 'api_base_url': 'u',
                                      'defaults': {'passthrough': False, 'force_stream': None, 'cached_tokens_mode': 'forward',
-                                                  'gemini_max_continuation_hops': 0, 'upstream_compression': 'zstd'}})
+                                                  'gemini_max_continuation_hops': 0, 'upstream_compression': 'zstd',
+                                                  'upstream_rules': [{'delete': 'stream_options'}]}})
         assert channel['defaults'] == {'passthrough': False, 'cached_tokens_mode': 'forward', 'gemini_max_continuation_hops': 0,
-                                       'upstream_compression': 'zstd'}
+                                       'upstream_compression': 'zstd', 'upstream_rules': [{'delete': 'stream_options'}]}
+        assert 'defaults' not in normalize_channel({'name': 'x', 'api_base_url': 'u', 'defaults': {'upstream_rules': []}})
         assert 'defaults' not in normalize_channel({'name': 'x', 'api_base_url': 'u', 'defaults': {}})
         for bad in ({'model_id': 'x'}, {'passthrough': 'yes'}, {'first_chunk_timeout_seconds': 0},
                     {'gemini_max_continuation_hops': -1}, {'gemini_max_continuation_hops': True}, {'gemini_max_continuation_hops': 1.5},
-                    {'cached_tokens_mode': 'sideways'}, {'auto_retry': True}, {'upstream_compression': 'lz4'}, ['passthrough']):
+                    {'cached_tokens_mode': 'sideways'}, {'auto_retry': True}, {'upstream_compression': 'lz4'},
+                    {'upstream_rules': [{'replace': '('}]}, ['passthrough']):
             with pytest.raises(ValueError):
                 normalize_channel({'name': 'x', 'api_base_url': 'u', 'defaults': bad})
 

@@ -19,7 +19,7 @@ from core.request_context import RequestContext, UPSTREAM_HEADER_EXCLUSIONS, cur
 from core.upstream_auth import apply_api_key_auth
 from services.provider_capabilities import apply_native_tool_defaults
 from services.responses_websocket_monitor import ResponsesWebSocketMonitor
-from utils.upstream_fields import omission_warnings, omit_configured_fields
+from utils.upstream_fields import apply_upstream_rules, omission_warnings, omit_configured_fields
 from . import api_routes as api
 from ._direct_api_utils import get_api_key
 
@@ -84,6 +84,7 @@ def prepare_event(event: dict, alias: str, config: dict) -> dict:
         raise HTTPException(400, "WebSocket 已绑定当前模型；切换模型时请建立新连接。")
     result = apply_native_tool_defaults(event, config, "responses")
     result["model"] = config.get("target_model_id") or config.get("model_id") or alias
+    apply_upstream_rules(result, config, current_request.get())
     return omit_configured_fields(result, config)
 
 

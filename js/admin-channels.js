@@ -14,7 +14,7 @@ const CHANNEL_DEFAULT_LABELS = {
     passthrough: '透传', convert_system_to_user: 'System 转 User', enable_prefix: 'Prefix 续写', enable_partial: 'Partial 续写',
     force_stream: '流式模式', first_chunk_timeout_seconds: '首块超时', gemini_max_continuation_hops: 'Gemini 续传跳数',
     cached_tokens_mode: '缓存 Token 统计', auto_retry: '自动重试', image_compression: '图片压缩',
-    upstream_compression: '上游请求体压缩',
+    upstream_compression: '上游请求体压缩', upstream_rules: '上游请求改写规则',
 };
 
 function loadChannelSort() {
@@ -278,7 +278,7 @@ function openChannelModal(id = null, copyFrom = null) {
 function fillChannelDefaults(defaults) {
     document.querySelectorAll('[data-channel-default]').forEach(control => {
         const value = defaults[control.dataset.channelDefault];
-        control.value = value === undefined ? '' : String(value);
+        control.value = value === undefined ? '' : (control.dataset.kind === 'json' ? JSON.stringify(value, null, 2) : String(value));
     });
     loadAutoRetryConfig(defaults.auto_retry, 'channel-');
     loadImageCompressionConfig(defaults.image_compression, 'channel-');
@@ -288,9 +288,10 @@ function fillChannelDefaults(defaults) {
 function readChannelDefaults() {
     const defaults = {};
     document.querySelectorAll('[data-channel-default]').forEach(control => {
-        if (control.value === '') return;
+        if (control.value.trim() === '') return;
         const kind = control.dataset.kind;
-        defaults[control.dataset.channelDefault] = kind === 'boolean' ? control.value === 'true' : (kind === 'number' ? Number(control.value) : control.value);
+        defaults[control.dataset.channelDefault] = kind === 'boolean' ? control.value === 'true'
+            : kind === 'number' ? Number(control.value) : kind === 'json' ? JSON.parse(control.value) : control.value;
     });
     const autoRetry = getAutoRetryConfig('channel-');
     if (autoRetry) defaults.auto_retry = autoRetry;
@@ -370,7 +371,13 @@ async function saveChannel() {
     };
     const cooldown = parseInt(document.getElementById('channel-key-cooldown').value, 10);
     if (cooldown > 0) channel.api_key_cooldown_seconds = cooldown;
-    const defaults = readChannelDefaults();
+    let defaults;
+    try {
+        defaults = readChannelDefaults();
+    } catch (error) {
+        showMessage('warning', `渠道默认值里的 JSON 写得不对：${error.message}`);
+        return;
+    }
     if (Object.keys(defaults).length) channel.defaults = defaults;
     const quotaFrom = document.getElementById('channel-quota-from').value;
     const quota = quotaFrom ? null : readQuotaForm('channel');
