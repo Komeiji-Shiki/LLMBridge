@@ -19,6 +19,7 @@ import time
 import uuid
 import base64
 import copy
+from contextlib import asynccontextmanager
 from core.exchange_archive import upstream_snapshot
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
 from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
@@ -35,6 +36,7 @@ from converters.gemini_generate import GeminiRequestError, build_gemini_contents
 from converters.gemini_interactions import build_interactions_request_body, interaction_failure, load_signature_history
 from converters.gemini_partial_args import PartialCallMerger
 from converters.media import gemini_code_text
+from services import upstream_compression
 from services.model_capabilities import limits_for
 from services.provider_capabilities import provider_name
 from utils import fastjson
@@ -186,13 +188,33 @@ def _retry_after_seconds(value: str) -> Optional[str]:
     return str(max(0, math.ceil(when.timestamp() - time.time())))
 
 
-def _upstream_payload(body: Dict[str, Any]) -> bytes:
-    """序列化上游正文，并记下开始发送的时间点（之前算网关构造请求，之后算等上游）。"""
-    data = fastjson.dumps(body)
+@asynccontextmanager
+async def _post_upstream(session, url: str, body: Dict[str, Any], headers: Dict[str, str]):
+    """发往上游的 POST。渠道开了请求体压缩时压缩发送，上游拒收压缩就在这一次尝试里改发明文。
+
+    开始发送的时间点在压缩之后记下（之前算网关构造请求，之后算等上游）；压缩明细记在本次尝试上。
+    """
+    payload = fastjson.dumps(body)
     context = current_request.get()
+    data, extra, report = await upstream_compression.prepare(url, payload, context.endpoint if context else {})
     if context:
         context.mark('upstream_post')
-    return data
+        if report and context.attempts:
+            context.attempts[-1]['upstream_compression'] = report
+    async with session.post(url, data=data, headers={**headers, **extra}, timeout=_upstream_timeout()) as response:
+        if not (extra and await upstream_compression.rejected(response, report)):
+            # 发完就释放正文，否则整份请求体要陪着流式响应活到结束
+            payload = data = None
+            yield response
+            return
+    async with session.post(url, data=payload, headers=headers, timeout=_upstream_timeout()) as response:
+        report['sent_bytes'] += len(payload)
+        report['status'] = 'fallback_failed' if response.status >= 400 else 'fallback_ok'
+        if response.status < 400:
+            upstream_compression.remember(url, report)
+        logger.warning(f"[UPSTREAM_COMPRESSION] 上游不接受 {report['encoding']}，已改发明文（HTTP {response.status}）")
+        payload = data = None
+        yield response
 
 
 def _remember_response_headers(response) -> None:
@@ -534,12 +556,7 @@ class DirectAPIService:
                 request_body = apply_native_tool_defaults(request_body, context.endpoint, 'chat')
                 context.upstream_request = copy.deepcopy(request_body)
             # 序列化结果不留在局部变量里：发完就该释放，否则整份请求体要陪着流式响应活到结束
-            async with self.session.post(
-                endpoint,
-                data=_upstream_payload(request_body),
-                headers=headers,
-                timeout=_upstream_timeout()
-            ) as response:
+            async with _post_upstream(self.session, endpoint, request_body, headers) as response:
                 _remember_response_headers(response)
                 # 检查响应状态
                 if response.status != 200:
@@ -886,12 +903,7 @@ class DirectAPIService:
             await apply_upstream_auth(headers, api_key, api_key_auth_mode)
             response_data = None
             while True:
-                async with self.session.post(
-                    endpoint,
-                    data=_upstream_payload(upstream_body),
-                    headers=headers,
-                    timeout=_upstream_timeout()
-                ) as response:
+                async with _post_upstream(self.session, endpoint, upstream_body, headers) as response:
                     _remember_response_headers(response)
                     # 检查响应状态
                     if response.status != 200:
@@ -1101,12 +1113,7 @@ class DirectAPIService:
             while True:
                 interrupted = None
                 try:
-                    async with self.session.post(
-                        endpoint,
-                        data=_upstream_payload(upstream_body),
-                        headers=headers,
-                        timeout=_upstream_timeout()
-                    ) as response:
+                    async with _post_upstream(self.session, endpoint, upstream_body, headers) as response:
                         _remember_response_headers(response)
                         if response.status != 200:
                             error_text = await response.text()
@@ -1481,12 +1488,7 @@ class DirectAPIService:
                                 f"(包含分号，将导致上游400错误)")
 
         try:
-            async with self.session.post(
-                endpoint,
-                data=_upstream_payload(request_body),
-                headers=request_headers,
-                timeout=_upstream_timeout()
-            ) as response:
+            async with _post_upstream(self.session, endpoint, request_body, request_headers) as response:
                 _remember_response_headers(response)
                 # 检查响应状态
                 if response.status != 200:

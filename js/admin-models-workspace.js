@@ -26,7 +26,7 @@ function mergeModelEditorConfig(config) {
     // Only fields represented by this form can be removed by clearing a control.
     const managedFields = [
         'api_type', 'model_id', 'display_name', 'passthrough', 'sanitize_recursive_schemas',
-        'provider', 'model_family', 'first_chunk_timeout_seconds', 'gemini_max_continuation_hops', 'native_tools', 'native_tool_options',
+        'provider', 'model_family', 'first_chunk_timeout_seconds', 'upstream_compression', 'gemini_max_continuation_hops', 'native_tools', 'native_tool_options',
         'convert_system_to_user', 'enable_prefix', 'enable_partial', 'force_stream',
         'strip_claude_agent_sdk_prefix', // 保存旧模型时清除已废弃的开关。
         'enable_thinking', 'reasoning_effort', 'thinking_budget', 'thinking_effort', 'thinking_display',

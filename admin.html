@@ -829,6 +829,10 @@
                             <select class="form-select" data-channel-default="cached_tokens_mode" data-kind="string"><option value="">各模型自己定</option><option value="off">关闭</option><option value="forward">正向</option><option value="reverse">反向</option></select>
                             <small class="field-hint" data-default-note="cached_tokens_mode"></small>
                         </label>
+                        <label>上游请求体压缩
+                            <select class="form-select" data-channel-default="upstream_compression" data-kind="string"><option value="">各模型自己定</option><option value="off">不压缩</option><option value="zstd">zstd</option><option value="gzip">gzip</option><option value="br">Brotli</option></select>
+                            <small class="field-hint" data-default-note="upstream_compression"></small>
+                        </label>
                         <label>首块超时（秒）
                             <input class="form-input" data-channel-default="first_chunk_timeout_seconds" data-kind="number" min="1" placeholder="各模型自己定" type="number">
                         </label>
@@ -1358,6 +1362,9 @@
 <small>模型别名或上游 model_id 不含家族名称时在这里指定。</small>
 <label class="form-label" for="model-first-chunk-timeout">首块超时（秒）</label>
 <input class="form-input" id="model-first-chunk-timeout" type="number" min="1" placeholder="留空使用全局设置">
+<label class="form-label" for="model-upstream-compression">上游请求体压缩</label>
+<select class="form-select" id="model-upstream-compression"><option value="">跟随渠道（默认不压缩）</option><option value="off">不压缩</option><option value="zstd">zstd</option><option value="gzip">gzip</option><option value="br">Brotli</option></select>
+<small>压缩发往上游的请求体，长对话省上传流量。上游不认这种压缩时自动改发明文并记住；请求详情的尝试记录里能看到压缩比。</small>
 <label class="form-label" for="model-continuation-hops">Gemini 最大续传跳数</label>
 <input class="form-input" id="model-continuation-hops" type="number" min="0" step="1" placeholder="留空跟随渠道或全局（0 表示关闭续传）">
 <label class="form-label" for="model-native-tools">默认原生工具（英文逗号分隔）</label>

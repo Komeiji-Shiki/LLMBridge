@@ -554,6 +554,17 @@ function toggleLongText(id, button) {
     node.textContent = entry.expanded ? entry.text : entry.text.slice(0, entry.maxLen) + '…';
     button.textContent = entry.expanded ? '收起' : '展开';
 }
+// 上游请求体压缩：取最后一次尝试的明细，显示发出字节占原文的比例
+const COMPRESSION_STATUS = {compressed: '已压缩', fallback_ok: '上游不认，已改发明文', fallback_failed: '改发明文仍失败',
+    below_min: '太小未压缩', remembered_unsupported: '已记住上游不认，发明文', compress_error: '压缩出错，发明文'};
+function renderCompressionSummary(attempts) {
+    const report = [...attempts].reverse().find(attempt => attempt.upstream_compression)?.upstream_compression;
+    if (!report) return '';
+    const kb = bytes => (bytes / 1024).toFixed(1) + ' KB';
+    const ratio = report.raw_bytes ? ` (${(report.sent_bytes / report.raw_bytes * 100).toFixed(1)}%)` : '';
+    return ` · 上游压缩 ${escapeHtml(report.encoding)} ${kb(report.raw_bytes)} → ${kb(report.sent_bytes)}${ratio} ${escapeHtml(COMPRESSION_STATUS[report.status] || report.status)}`;
+}
+
 function renderPhaseTimings(timings) {
     if (!timings) return '该记录没有阶段耗时';
     const labels = {prepare_ms: '准备', upstream_wait_ms: '等待上游首字节', first_business_ms: '首业务事件', output_ms: '输出', total_ms: '总计'};
@@ -713,7 +724,7 @@ async function viewRequestDetails(requestId) {
                 <div><span>会话 ID</span><code>${escapeHtml(details.conversation_id || '未记录')}</code></div></div>
                 <div class="timing-grid">${Object.entries({prepare_ms: '准备', upstream_wait_ms: '等待上游首字节', first_business_ms: '首业务事件', output_ms: '输出', total_ms: '总计'}).map(([key, label]) => `<div class="timing-card"><span>${label}</span><strong>${details.timings?.[key] == null ? '—' : (Number(details.timings[key]) / 1000).toFixed(3)}<small>${details.timings?.[key] == null ? '无数据' : '秒'}</small></strong></div>`).join('')}</div>
                 ${Object.keys(details.timings?.prepare_stages || {}).length ? `<p class="timing-stages">准备阶段：${Object.entries({receive_ms: '接收请求体', parse_ms: '解析', route_ms: '鉴权与选路', convert_ms: '协议转换'}).filter(([key]) => details.timings.prepare_stages[key] != null).map(([key, label]) => `${label} ${(Number(details.timings.prepare_stages[key]) / 1000).toFixed(3)} 秒`).join(' · ')}${details.timings.upstream_build_ms == null ? '' : `；等待上游中构造并发出请求占 ${(Number(details.timings.upstream_build_ms) / 1000).toFixed(3)} 秒`}</p>` : ''}
-                ${details.timings?.attempts?.length ? `<details class="data-disclosure"><summary>请求尝试记录 <span>${details.timings.attempts.length} 次${details.timings.attempts.some(attempt => attempt.upstream_failure) ? ' · 含上游失败原始事件' : ''}</span></summary><pre>${renderTruncatable(JSON.stringify(details.timings.attempts, null, 2), 2000)}</pre></details>` : ''}
+                ${details.timings?.attempts?.length ? `<details class="data-disclosure"><summary>请求尝试记录 <span>${details.timings.attempts.length} 次${details.timings.attempts.some(attempt => attempt.upstream_failure) ? ' · 含上游失败原始事件' : ''}${renderCompressionSummary(details.timings.attempts)}</span></summary><pre>${renderTruncatable(JSON.stringify(details.timings.attempts, null, 2), 2000)}</pre></details>` : ''}
                 ${details.pricing_snapshot ? `<details class="data-disclosure"><summary>调用时价格快照 <span>JSON</span></summary><pre>${escapeHtml(JSON.stringify(details.pricing_snapshot, null, 2))}</pre></details>` : ''}
                 ${details.gateway_request_id ? `<a class="archive-link" href="/api/admin/exchanges/${encodeURIComponent(details.gateway_request_id)}">下载完整原生请求与响应归档 <span aria-hidden="true">↗</span></a>` : ''}
             </div>
