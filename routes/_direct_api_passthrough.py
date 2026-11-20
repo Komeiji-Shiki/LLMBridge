@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from converters.media import adapt_chat_files
 from core import stream_stop
-from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
+from core.constants import resolve_first_chunk_timeout
 from services.logprobs_collector import create_logprobs_collector
 from core.conversion_report import note_loss
 from services.model_capabilities import (
@@ -508,23 +508,14 @@ async def _handle_passthrough_stream(
 
     async def combined_stream_generator():
         client_gone = False
-        source = iter_with_keepalive(api_iterator, resolve_heartbeat_interval(endpoint_config), stop=stop)
+        # 空闲心跳由 GatewayRequestMiddleware 统一补，这里只等手动收尾
+        source = iter_with_keepalive(api_iterator, None, stop=stop)
         try:
             # 先 yield 已处理的首块
             yield processed_first
 
             # 继续处理剩余流
             async for chunk_bytes in source:
-                if chunk_bytes is None:
-                    try:
-                        yield f": keep-alive {int(time.time())}\n\n".encode("utf-8")
-                    except asyncio.CancelledError:
-                        logger.warning(f"[DIRECT_API_PASSTHROUGH] 客户端在上游空闲期间断开: {request_id[:8]}")
-                        await session.handle_client_disconnect()
-                        await close_quietly(api_iterator)
-                        return
-                    continue
-
                 processed_chunk = session.process_sse_chunk(chunk_bytes)
 
                 if session.upstream_error_detected:

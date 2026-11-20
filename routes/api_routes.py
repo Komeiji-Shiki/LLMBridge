@@ -33,7 +33,6 @@ from .lmarena_handler import handle_lmarena_request
 from ._direct_api_anthropic import apply_auto_cache_control
 from converters.cache_warnings import anthropic_cache_warnings
 from core import stream_stop
-from core.constants import resolve_heartbeat_interval
 from services.error_translation import translate_openai_error
 from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.model_capabilities import sanitize_anthropic_body
@@ -902,7 +901,7 @@ async def _handle_anthropic_passthrough(
                 request_body=passthrough_body,
                 endpoint_path=endpoint_path
             ),
-            resolve_heartbeat_interval(endpoint_config), stop=stop)
+            None, stop=stop)
         early_error = _extract_upstream_stream_error(first_upstream_chunk) if first_upstream_chunk else None
         if early_error is not None:
             # 响应还没开始：用真实状态码回给客户端，它靠状态码和 retry-after 决定是否重试
@@ -939,8 +938,7 @@ async def _handle_anthropic_passthrough(
             try:
                 async for chunk in upstream_chunks:
                     if chunk is None:
-                        # 上游长时间静默时保持连接，SSE 注释不影响客户端解析
-                        yield b": keep-alive\n\n"
+                        # 预读窗口内上游还没出数据；空闲心跳由 GatewayRequestMiddleware 统一补
                         continue
                     if first_chunk:
                         first_chunk = False

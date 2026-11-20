@@ -9,6 +9,7 @@ import logging
 import re
 from starlette.responses import JSONResponse
 from core.config_loader import get_setting
+from core.constants import resolve_heartbeat_interval
 from core.conversion_report import WARNINGS_HEADER, warnings_header_value
 from core.model_quota import model_quota
 from core.request_context import CLIENT_TRACE_HEADERS, RequestContext, UPSTREAM_HEADER_EXCLUSIONS, current_request
@@ -17,6 +18,7 @@ from services.protocol_events import payloads, is_business_event
 
 logger = logging.getLogger(__name__)
 _STORED_OBJECT_PATH = re.compile(r'^/(v1/responses|v1beta/interactions)/[^/]+(/input_items)?$')
+_KEEPALIVE = {'type': 'http.response.body', 'body': b': keep-alive\n\n', 'more_body': True}
 
 def _should_capture_upstream_header(name: str) -> bool:
     """保留端到端请求头，只过滤代理控制和不可复用的传输头。"""
@@ -68,6 +70,10 @@ class GatewayRequestMiddleware:
         streaming = False
         received = 0
         limit = int(get_setting('request_limits.max_body_mb', 256)) * 1024 * 1024
+        loop = asyncio.get_running_loop()
+        send_lock = asyncio.Lock()
+        heartbeat = None
+        last_body = loop.time()
 
         async def receive_checked():
             nonlocal received
@@ -90,8 +96,37 @@ class GatewayRequestMiddleware:
                 except Exception:
                     logger.exception('思考签名保存失败，后续请求无法从会话库找回这些签名')
 
+        async def keep_alive():
+            """上游长时间不出数据时（思考、排队），各条链路和协议转换层都可能一个字节不发；
+            在发给客户端的这一层统一补 SSE 注释心跳，间隔取端点的 client_disconnect_probe_interval。"""
+            try:
+                while True:
+                    interval = resolve_heartbeat_interval(context.endpoint)
+                    due = last_body + interval - loop.time()
+                    if due > 0:
+                        await asyncio.sleep(due)
+                        continue
+                    async with send_lock:
+                        # 只在事件边界上发：插进半个事件会把它拆坏，这一轮跳过
+                        boundary = not pending and not decoder.getstate()[0]
+                        if boundary:
+                            await observe(_KEEPALIVE)
+                    if not boundary:
+                        await asyncio.sleep(interval)
+            except Exception as error:
+                logger.debug('流式心跳停止（客户端多半已断开）: %s', error)
+
+        async def send_from_app(message):
+            nonlocal heartbeat
+            async with send_lock:
+                await observe(message)
+            if message['type'] == 'http.response.start' and streaming:
+                heartbeat = asyncio.create_task(keep_alive())
+            elif heartbeat and message['type'] == 'http.response.body' and not message.get('more_body'):
+                heartbeat.cancel()
+
         async def observe(message):
-            nonlocal status, streaming, pending, response_object
+            nonlocal status, streaming, pending, response_object, last_body
             if message['type'] == 'http.response.start':
                 status = message['status']
                 response_headers = list(message.get('headers', []))
@@ -112,6 +147,7 @@ class GatewayRequestMiddleware:
                                          (b'x-bridge-request-id', context.request_id.encode())])
                 message = {**message, 'headers': response_headers}
             elif message['type'] == 'http.response.body':
+                last_body = loop.time()
                 await save_signatures()
                 body = message.get('body', b'')
                 if len(body) > 65536:
@@ -146,8 +182,10 @@ class GatewayRequestMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, receive_checked, observe)
+            await self.app(scope, receive_checked, send_from_app)
         finally:
+            if heartbeat:
+                heartbeat.cancel()
             context.mark('finished')
             compressor.close()
             wire_archive = archive.getvalue()

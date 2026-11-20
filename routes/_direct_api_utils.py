@@ -868,12 +868,12 @@ async def iter_with_keepalive(iterator, interval: Optional[float], first_interva
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def peek_stream(iterator, interval: float, wait: float = TimeoutDefaults.UPSTREAM_ERROR_WAIT,
+async def peek_stream(iterator, interval: Optional[float], wait: float = TimeoutDefaults.UPSTREAM_ERROR_WAIT,
                       stop: Optional[asyncio.Event] = None):
     """等上游第一块一小会儿，上游立刻报错时响应还没开始，能用真实状态码回给客户端。
 
     返回 (first, chunks)：first 为 None 表示还没有数据；chunks 从头迭代（含 first），
-    空闲时产出 None。迭代异常延后到 chunks 上抛出，由流式生成器的收尾逻辑统一处理。
+    空闲超过 interval 时产出 None（interval 为 None 时不产出，客户端心跳由 GatewayRequestMiddleware 统一补）。迭代异常延后到 chunks 上抛出，由流式生成器的收尾逻辑统一处理。
     stop 见 iter_with_keepalive。
     """
     source = iter_with_keepalive(iterator, interval, first_interval=wait, stop=stop)

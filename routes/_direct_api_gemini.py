@@ -493,7 +493,6 @@ async def handle_gemini_native_direct(
                     return None if suppress_chunk else f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
                 try:
-                    yield f": keep-alive {int(time.time())}\n\n"
                     first_chunk_wait_start = time.time()
 
                     async for gemini_chunk in chunks:
@@ -505,8 +504,7 @@ async def handle_gemini_native_direct(
                                 yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
                                 tail_suppressed = True
                                 return
-                            # 续传跳之间模型可能长时间静默，心跳覆盖整条流
-                            yield f": keep-alive {int(time.time())}\n\n"
+                            # 空闲时只用来检查首块超时，心跳由 GatewayRequestMiddleware 统一补
                             continue
 
                         if "error" in gemini_chunk:
@@ -725,7 +723,6 @@ async def handle_gemini_native_direct(
                     return None if suppress_chunk else f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
                 try:
-                    yield f": keep-alive {int(time.time())}\n\n"
                     first_chunk_wait_start = time.time()
 
                     async for event in chunks:
@@ -736,8 +733,7 @@ async def handle_gemini_native_direct(
                                 yield f"data: {json.dumps({'error': {'message': error_msg, 'type': 'timeout'}}, ensure_ascii=False)}\n\n"
                                 tail_suppressed = True
                                 return
-                            # 长输出的检查点之间和续传跳之间模型可能长时间静默，心跳覆盖整条流
-                            yield f": keep-alive {int(time.time())}\n\n"
+                            # 空闲时只用来检查首块超时，心跳由 GatewayRequestMiddleware 统一补
                             continue
 
                         openai_chunks = converter.feed(event)

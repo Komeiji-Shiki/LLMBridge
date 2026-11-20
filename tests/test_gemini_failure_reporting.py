@@ -351,24 +351,6 @@ def test_claude_code_sees_resumed_response_as_one_complete_message():
     assert end['success'] is True and end['output_tokens'] == 42 and end['input_tokens'] == 100
 
 
-def test_keepalive_reaches_anthropic_client_during_silence():
-    async def upstream(**kwargs):
-        await asyncio.sleep(0.1)
-        yield chunk('想好了', 'STOP')
-
-    async def run():
-        call, _ = route(upstream)
-        with patch('routes._direct_api_gemini.peek_stream',
-                   lambda iterator, interval, stop=None: peek_stream(iterator, 0.01, wait=0.01, stop=stop)):
-            wrapped = build_anthropic_streaming_response(await call, 'demo')
-            return [item async for item in wrapped.body_iterator]
-
-    raw = asyncio.run(run())
-    first_event = next(index for index, item in enumerate(raw) if item.startswith('event:'))
-    assert first_event > 1 and all(item == ': keep-alive\n\n' for item in raw[:first_event])
-    assert raw[first_event].startswith('event: message_start')
-
-
 def test_claude_code_sees_unresumable_continuation_as_max_tokens():
     parsed, _ = anthropic_events(gemini_session([chunk('被截断', 'CONTINUATION')]))
     assert [event['delta']['stop_reason'] for event in parsed if event.get('type') == 'message_delta'] == ['max_tokens']
