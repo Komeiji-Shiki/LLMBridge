@@ -295,6 +295,69 @@ def test_stream_errors_with_named_codes_use_their_retry_switch(prelude, failure,
     assert asyncio.run(run()) == ([status, 200] if retried else [status])
 
 
+def _attempts_of(upstream, request_body):
+    async def run():
+        context = RequestContext(model='test', endpoint={})
+        token = current_request.set(context)
+        try:
+            [chunk async for chunk in upstream(request_body=request_body)]
+            return context.attempts
+        finally:
+            current_request.reset(token)
+    return asyncio.run(run())
+
+
+def test_failure_keeps_raw_event_and_unfinished_step_with_long_strings_clipped():
+    """Vertex 只回 status=failed 不给原因时，原始事件和没写完的步骤要留在那次尝试上。"""
+    summaries = [{'event_type': 'step.delta', 'index': 0,
+                  'delta': {'type': 'thought_summary', 'content': {'type': 'text', 'text': f'第{i}段'}}} for i in range(10)]
+    failed = {'event_type': 'interaction.completed', 'interaction': {
+        'status': 'failed', 'steps': [{'type': 'thought', 'signature': 'x' * 20000}]}}
+
+    @retry_before_output
+    async def upstream(api_key='', request_body=None):
+        yield {'event_type': 'interaction.created', 'interaction': {'id': 'i'}}
+        yield {'event_type': 'step.start', 'index': 0, 'step': {'type': 'thought'}}
+        for event in summaries:
+            yield event
+        yield failed
+
+    [attempt] = _attempts_of(upstream, {'stream': True})
+    failure = attempt['upstream_failure']
+    signature = failure['event']['interaction']['steps'][0]['signature']
+    assert failure['event']['interaction']['status'] == 'failed'
+    assert len(signature) < 1100 and signature.endswith('（共 20000 字符）')
+    unfinished = failure['unfinished']
+    assert unfinished['start']['step'] == {'type': 'thought'} and unfinished['deltas'] == 10
+    assert unfinished['last_deltas'] == summaries[-8:]
+
+
+def test_failure_after_closed_block_has_no_unfinished_part():
+    events = [{'type': 'message_start', 'message': {'id': 'm'}},
+              {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+              {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': '好'}},
+              {'type': 'content_block_stop', 'index': 0},
+              {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}}]
+
+    @retry_before_output(output_bytes=True)
+    async def upstream(api_key='', request_body=None):
+        for event in events:
+            yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+
+    [attempt] = _attempts_of(upstream, {'stream': True})
+    assert attempt['upstream_failure'] == {'event': events[-1]}
+
+
+def test_successful_attempt_records_no_failure():
+    @retry_before_output
+    async def upstream(api_key='', request_body=None):
+        yield {'event_type': 'step.start', 'index': 0, 'step': {'type': 'model_output'}}
+        yield {'event_type': 'interaction.completed', 'interaction': {'status': 'completed'}}
+
+    [attempt] = _attempts_of(upstream, {'stream': True})
+    assert attempt['status'] == 200 and 'upstream_failure' not in attempt
+
+
 @pytest.mark.parametrize('output_bytes, stream', [(False, True), (True, True), (True, False)])
 def test_exhausted_upstream_credential_rejection_reaches_client_as_502(output_bytes, stream):
     from converters.anthropic_openai import build_anthropic_error_payload

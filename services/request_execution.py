@@ -14,7 +14,8 @@ from core.request_context import current_request, credential_identity, endpoint_
 from services.gemini_signature_recovery import GeminiTextSignatureRecovery
 from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.model_replacements import apply_known_replacement, learn_replacement
-from services.protocol_events import payloads, error_status, is_business_event, is_terminal, upstream_response_model
+from services.protocol_events import (payloads, error_status, failure_snapshot, is_business_event, is_terminal,
+                                      upstream_response_model, UnfinishedBlock)
 from services.provider_capabilities import apply_native_tool_defaults, protocol_name
 from core.constants import RetryDefaults
 
@@ -117,19 +118,24 @@ def retry_before_output(method=None, *, output_bytes=False):
                 values = []
                 # 空响应没有首块可用于判断类型，沿用入口声明的输出格式。
                 failed, error_text, byte_mode = None, '', output_bytes
+                unfinished = UnfinishedBlock()
                 iterator = method(*bound.args, **bound.kwargs)
                 try:
                     async for chunk in iterator:
                         context.mark('first_byte')
                         byte_mode = isinstance(chunk, (bytes, str))
                         values = payloads(chunk)
-                        failure = next((error_status(value) for value in values if error_status(value) is not None), None)
+                        failure = next((value for value in values if error_status(value) is not None), None)
                         if failure is not None:
-                            failed, error_text = failure, str(values)
+                            failed, error_text = error_status(failure), str(values)
+                            # 上游常常只给一句笼统的失败，原始事件和当时没写完的块记在这次尝试上
+                            info['upstream_failure'] = failure_snapshot(failure, unfinished.snapshot())
                             prefix.append(chunk)
                             if committed:
                                 yield chunk
                             break
+                        for value in values:
+                            unfinished.feed(value)
                         terminal = terminal or any(is_terminal(value) for value in values)
                         if not stream:
                             prefix.append(chunk)
@@ -157,8 +163,11 @@ def retry_before_output(method=None, *, output_bytes=False):
                     if not stream and failed is None:
                         raw = b''.join(chunk.encode() if isinstance(chunk, str) else chunk for chunk in prefix) if byte_mode else None
                         values = payloads(raw) if raw is not None else prefix
-                        failed = next((error_status(value) for value in values if error_status(value) is not None), None)
+                        failure = next((value for value in values if error_status(value) is not None), None)
+                        failed = error_status(failure) if failure is not None else None
                         error_text = str(values) if failed else ''
+                        if failed:
+                            info['upstream_failure'] = failure_snapshot(failure)
                         if not failed and (response_model := upstream_response_model(values)):
                             context.outcome['upstream_model'] = response_model
                         if not failed and signature_recovery is not None and any(is_business_event(value) for value in values):

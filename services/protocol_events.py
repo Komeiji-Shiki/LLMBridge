@@ -1,4 +1,5 @@
 """Classify protocol events without changing their wire representation."""
+from collections import deque
 from http import HTTPStatus
 import json
 
@@ -239,3 +240,62 @@ def is_business_event(value):
         # Unknown typed provider/tool events commit the stream conservatively.
         return True
     return bool(value.get('content') or value.get('output') or value.get('steps') or value.get('promptFeedback'))
+
+
+# 三家流式协议里“一个步骤/内容块”的起止事件
+_BLOCK_START = frozenset(('step.start', 'content_block_start', 'response.output_item.added'))
+_BLOCK_STOP = frozenset(('step.stop', 'content_block_stop', 'response.output_item.done'))
+_UNFINISHED_TAIL = 8
+# 签名和 base64 动辄上万字符，快照只留开头，结构和其余字段原样保留
+_CLIP_CHARS = 1000
+_CLIP_ITEMS = 20
+
+
+class UnfinishedBlock:
+    """跟踪最近一个还没收尾的步骤或内容块：起始事件、增量个数和最后几个增量。
+
+    只存原始事件引用、不拼内容，每个事件的开销是一次判断加一次追加。
+    """
+
+    def __init__(self):
+        self.start = None
+        self.deltas = 0
+        self.tail = deque(maxlen=_UNFINISHED_TAIL)
+
+    def feed(self, value):
+        kind = (value.get('event_type') or value.get('type')) if isinstance(value, dict) else None
+        if kind in _BLOCK_START:
+            self.start, self.deltas = value, 0
+            self.tail.clear()
+        elif kind in _BLOCK_STOP:
+            self.start = None
+            self.tail.clear()
+        elif self.start is not None:
+            self.deltas += 1
+            self.tail.append(value)
+
+    def snapshot(self):
+        if self.start is None:
+            return None
+        return {'start': self.start, 'deltas': self.deltas, 'last_deltas': list(self.tail)}
+
+
+def failure_snapshot(event, unfinished=None):
+    """上游失败时的原始事件，连同当时没写完的块，长字符串和长列表截短后留作诊断。"""
+    snapshot = {'event': _clip(event)}
+    if unfinished:
+        snapshot['unfinished'] = _clip(unfinished)
+    return snapshot
+
+
+def _clip(value):
+    if isinstance(value, str):
+        return value if len(value) <= _CLIP_CHARS else f'{value[:_CLIP_CHARS]}…（共 {len(value)} 字符）'
+    if isinstance(value, dict):
+        return {key: _clip(item) for key, item in value.items()}
+    if isinstance(value, list):
+        clipped = [_clip(item) for item in value[:_CLIP_ITEMS]]
+        if len(value) > _CLIP_ITEMS:
+            clipped.append(f'…（共 {len(value)} 项）')
+        return clipped
+    return value
