@@ -10,6 +10,7 @@ import time
 from core.endpoint_observer import observe_credential
 from typing import Any, Dict, Optional
 
+import anyio
 from fastapi import HTTPException
 from fastapi.responses import Response
 
@@ -767,15 +768,20 @@ def detect_first_chunk_error(first_chunk_bytes) -> tuple:
 # ============================================================
 # 异步 Token 计算
 # ============================================================
+# 客户端断开时 Starlette 用 anyio 取消整个响应任务，此后每个 await 都会再被取消，
+# asyncio.shield 也挡不住。估算多在流式收尾里做，线程里的计算本来就停不下，
+# 屏蔽取消只是把结果等回来，断开的请求才能按实际用量计入统计。
 
 async def estimate_message_tokens_non_blocking(estimate_message_tokens_func, messages, model: str) -> int:
-    """在线程池中执行消息 token 计算"""
-    return await asyncio.to_thread(estimate_message_tokens_func, messages, model=model)
+    """在线程池中执行消息 token 计算，调用方正在取消时也会算完"""
+    with anyio.CancelScope(shield=True):
+        return await asyncio.to_thread(estimate_message_tokens_func, messages, model=model)
 
 
 async def estimate_text_tokens_non_blocking(estimate_tokens_func, text: str, model: str) -> int:
-    """在线程池中执行文本 token 计算"""
-    return await asyncio.to_thread(estimate_tokens_func, text, model=model)
+    """在线程池中执行文本 token 计算，调用方正在取消时也会算完"""
+    with anyio.CancelScope(shield=True):
+        return await asyncio.to_thread(estimate_tokens_func, text, model=model)
 
 
 # ============================================================

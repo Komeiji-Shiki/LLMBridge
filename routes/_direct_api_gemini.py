@@ -8,6 +8,7 @@ import time
 import uuid
 from typing import Optional
 
+import anyio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -567,61 +568,60 @@ async def handle_gemini_native_direct(
                     error_msg = internal_error = str(e)
                     logger.error(f"[GEMINI_NATIVE] 流式处理失败: {e}", exc_info=True)
                 finally:
-                    if input_tokens == 0 or output_tokens == 0:
-                        # 🔧 修复：旧版这里硬编码模型名 "gemma"，绕过了
-                        # config.jsonc 中 tokenizer_config 的按模型映射，
-                        # 与同文件非流式分支（用 display_name）结果不一致
-                        try:
-                            if input_tokens == 0:
-                                input_tokens = await asyncio.shield(estimate_message_tokens_non_blocking(
-                                    estimate_message_tokens_func,
-                                    openai_req.get('messages', []), display_name))
-                            if output_tokens == 0:
-                                accumulated_content = ''.join(content_parts)
-                                accumulated_reasoning = ''.join(reasoning_parts)
-                                total_output_text = accumulated_reasoning + accumulated_content
-                                if total_output_text:
-                                    output_tokens = await asyncio.shield(estimate_text_tokens_non_blocking(
-                                        estimate_tokens_func, total_output_text, display_name))
-                        except asyncio.CancelledError:
-                            # shield 也会在取消态下抛出 CancelledError，此时保持 0 值
-                            logger.warning(f"[GEMINI_NATIVE] Token 估算被取消，使用上游返回的 usage 值")
-                        except Exception as token_error:
-                            logger.error(f"[GEMINI_NATIVE] Token计算失败: {token_error}")
+                    # 客户端断开时任务处于取消态，统计和关闭上游都要屏蔽取消才能做完；作用域内不能 yield
+                    with anyio.CancelScope(shield=True):
+                        if input_tokens == 0 or output_tokens == 0:
+                            # 🔧 修复：旧版这里硬编码模型名 "gemma"，绕过了
+                            # config.jsonc 中 tokenizer_config 的按模型映射，
+                            # 与同文件非流式分支（用 display_name）结果不一致
+                            try:
+                                if input_tokens == 0:
+                                    input_tokens = await estimate_message_tokens_non_blocking(
+                                        estimate_message_tokens_func,
+                                        openai_req.get('messages', []), display_name)
+                                if output_tokens == 0:
+                                    accumulated_content = ''.join(content_parts)
+                                    accumulated_reasoning = ''.join(reasoning_parts)
+                                    total_output_text = accumulated_reasoning + accumulated_content
+                                    if total_output_text:
+                                        output_tokens = await estimate_text_tokens_non_blocking(
+                                            estimate_tokens_func, total_output_text, display_name)
+                            except Exception as token_error:
+                                logger.error(f"[GEMINI_NATIVE] Token计算失败: {token_error}")
 
-                    cost_info = _gemini_cost(
-                        direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage)
-                    final_content = ''.join(content_parts)
-                    final_reasoning = ''.join(reasoning_parts)
-                    final_tool_calls = finalize_tool_calls(tool_call_accumulator)
+                        cost_info = _gemini_cost(
+                            direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage)
+                        final_content = ''.join(content_parts)
+                        final_reasoning = ''.join(reasoning_parts)
+                        final_tool_calls = finalize_tool_calls(tool_call_accumulator)
 
-                    if (request_success and splitter.done
-                            and splitter.original_content and final_content):
-                        remember_split_original(final_content, splitter.original_content)
+                        if (request_success and splitter.done
+                                and splitter.original_content and final_content):
+                            remember_split_original(final_content, splitter.original_content)
 
-                    monitoring_service.request_end(
-                        request_id=request_id, success=request_success,
-                        input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=cached_tokens, error=error_msg,
-                        response_content=final_content,
-                        reasoning_content=final_reasoning,
-                        cost_info=cost_info, full_messages=full_messages,
-                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls, signatures),
-                        response_tool_calls=final_tool_calls,
-                        upstream_usage=upstream_usage)
+                        monitoring_service.request_end(
+                            request_id=request_id, success=request_success,
+                            input_tokens=input_tokens, output_tokens=output_tokens,
+                            cached_tokens=cached_tokens, error=error_msg,
+                            response_content=final_content,
+                            reasoning_content=final_reasoning,
+                            cost_info=cost_info, full_messages=full_messages,
+                            response_message=build_response_message(final_content, final_reasoning, final_tool_calls, signatures),
+                            response_tool_calls=final_tool_calls,
+                            upstream_usage=upstream_usage)
 
-                    await monitoring_service.broadcast_to_monitors({
-                        "type": "request_end", "request_id": request_id,
-                        "success": request_success})
+                        await monitoring_service.broadcast_to_monitors({
+                            "type": "request_end", "request_id": request_id,
+                            "success": request_success})
 
-                    logger.info(f"[GEMINI_NATIVE] 流式请求完成: {request_id[:8]}")
-                    logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
-                    if cost_info.get("total_cost"):
-                        logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+                        logger.info(f"[GEMINI_NATIVE] 流式请求完成: {request_id[:8]}")
+                        logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
+                        if cost_info.get("total_cost"):
+                            logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
 
-                    # 客户端走了就不能再续传，及时释放上游连接
-                    await chunks.aclose()
-                    await gemini_generator.aclose()
+                        # 客户端走了就不能再续传，及时释放上游连接
+                        await chunks.aclose()
+                        await gemini_generator.aclose()
 
                     if not client_gone and not tail_suppressed:
                         try:
@@ -801,57 +801,57 @@ async def handle_gemini_native_direct(
                 finally:
                     # 中途断开也保存已收到的步骤，签名不随失败的那次请求一起丢。
                     converter.finalize()
-                    if input_tokens == 0 or output_tokens == 0:
-                        try:
-                            if input_tokens == 0:
-                                input_tokens = await asyncio.shield(estimate_message_tokens_non_blocking(
-                                    estimate_message_tokens_func,
-                                    openai_req.get('messages', []), display_name))
-                            if output_tokens == 0:
-                                accumulated_content = ''.join(content_parts)
-                                accumulated_reasoning = ''.join(reasoning_parts)
-                                total_output_text = accumulated_reasoning + accumulated_content
-                                if total_output_text:
-                                    output_tokens = await asyncio.shield(estimate_text_tokens_non_blocking(
-                                        estimate_tokens_func, total_output_text, display_name))
-                        except asyncio.CancelledError:
-                            logger.warning(f"[GEMINI_INTERACTIONS] Token 估算被取消，使用上游返回的 usage 值")
-                        except Exception as token_error:
-                            logger.error(f"[GEMINI_INTERACTIONS] Token计算失败: {token_error}")
+                    # 客户端断开时任务处于取消态，统计和关闭上游都要屏蔽取消才能做完；作用域内不能 yield
+                    with anyio.CancelScope(shield=True):
+                        if input_tokens == 0 or output_tokens == 0:
+                            try:
+                                if input_tokens == 0:
+                                    input_tokens = await estimate_message_tokens_non_blocking(
+                                        estimate_message_tokens_func,
+                                        openai_req.get('messages', []), display_name)
+                                if output_tokens == 0:
+                                    accumulated_content = ''.join(content_parts)
+                                    accumulated_reasoning = ''.join(reasoning_parts)
+                                    total_output_text = accumulated_reasoning + accumulated_content
+                                    if total_output_text:
+                                        output_tokens = await estimate_text_tokens_non_blocking(
+                                            estimate_tokens_func, total_output_text, display_name)
+                            except Exception as token_error:
+                                logger.error(f"[GEMINI_INTERACTIONS] Token计算失败: {token_error}")
 
-                    cost_info = _gemini_cost(
-                        direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage)
-                    final_content = ''.join(content_parts)
-                    final_reasoning = ''.join(reasoning_parts)
-                    final_tool_calls = finalize_tool_calls(tool_call_accumulator)
+                        cost_info = _gemini_cost(
+                            direct_api_service, pricing_config, input_tokens, output_tokens, cached_tokens, upstream_usage)
+                        final_content = ''.join(content_parts)
+                        final_reasoning = ''.join(reasoning_parts)
+                        final_tool_calls = finalize_tool_calls(tool_call_accumulator)
 
-                    if (request_success and splitter.done
-                            and splitter.original_content and final_content):
-                        remember_split_original(final_content, splitter.original_content)
+                        if (request_success and splitter.done
+                                and splitter.original_content and final_content):
+                            remember_split_original(final_content, splitter.original_content)
 
-                    monitoring_service.request_end(
-                        request_id=request_id, success=request_success,
-                        input_tokens=input_tokens, output_tokens=output_tokens,
-                        cached_tokens=cached_tokens, error=error_msg,
-                        response_content=final_content,
-                        reasoning_content=final_reasoning,
-                        cost_info=cost_info, full_messages=full_messages,
-                        response_message=build_response_message(final_content, final_reasoning, final_tool_calls, converter.signatures),
-                        response_tool_calls=final_tool_calls,
-                        upstream_usage=upstream_usage)
+                        monitoring_service.request_end(
+                            request_id=request_id, success=request_success,
+                            input_tokens=input_tokens, output_tokens=output_tokens,
+                            cached_tokens=cached_tokens, error=error_msg,
+                            response_content=final_content,
+                            reasoning_content=final_reasoning,
+                            cost_info=cost_info, full_messages=full_messages,
+                            response_message=build_response_message(final_content, final_reasoning, final_tool_calls, converter.signatures),
+                            response_tool_calls=final_tool_calls,
+                            upstream_usage=upstream_usage)
 
-                    await monitoring_service.broadcast_to_monitors({
-                        "type": "request_end", "request_id": request_id,
-                        "success": request_success})
+                        await monitoring_service.broadcast_to_monitors({
+                            "type": "request_end", "request_id": request_id,
+                            "success": request_success})
 
-                    logger.info(f"[GEMINI_INTERACTIONS] 流式请求完成: {request_id[:8]}")
-                    logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
-                    if cost_info.get("total_cost"):
-                        logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
+                        logger.info(f"[GEMINI_INTERACTIONS] 流式请求完成: {request_id[:8]}")
+                        logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
+                        if cost_info.get("total_cost"):
+                            logger.info(f"  - 总成本: {cost_info['total_cost']:.6f} {cost_info.get('currency', 'USD')}")
 
-                    # 客户端走了就不能再续传，及时释放上游连接
-                    await chunks.aclose()
-                    await gemini_generator.aclose()
+                        # 客户端走了就不能再续传，及时释放上游连接
+                        await chunks.aclose()
+                        await gemini_generator.aclose()
 
                     if not client_gone and not tail_suppressed:
                         try:

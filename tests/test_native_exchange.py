@@ -1,6 +1,7 @@
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
+import anyio
 import pytest
 from core.conversation_store import ConversationStore
 from core.request_context import RequestContext, current_request
@@ -311,3 +312,35 @@ def test_forward_native_gemini_restores_thought_signature(stream, monkeypatch, t
         params = monitor.request_start.call_args.kwargs['params']
         assert params['restored_thought_signatures'] == 1
     asyncio.run(run())
+
+
+def test_stream_disconnect_under_anyio_cancel_records_once_and_closes_upstream():
+    """Starlette 断开时取消整个任务组：关闭上游和计入统计都要做完。"""
+    closed = {}
+
+    async def run():
+        service = MagicMock()
+        service.calculate_cost.return_value = {}
+        monitor = MagicMock()
+        monitor.broadcast_to_monitors = AsyncMock()
+
+        async def upstream(**kwargs):
+            try:
+                yield ('data: ' + json.dumps({'candidates': [{'content': {'parts': [{'text': '一半'}]}}]}) + '\n\n').encode()
+                await asyncio.sleep(30)
+            finally:
+                closed['upstream'] = True
+        service.call_api_passthrough = upstream
+        config = {'provider': 'gemini', 'api_type': 'gemini_native', 'api_key': 'test', 'api_base_url': 'https://example.test'}
+        result = await forward_native_exchange({'input': 'hello'}, config, 'alias', service, monitor, stream=True)
+        async with anyio.create_task_group() as group:
+            async def consume():
+                async for _ in result.body_iterator:
+                    group.cancel_scope.cancel()
+            group.start_soon(consume)
+        return monitor
+
+    monitor = asyncio.run(run())
+    assert monitor.request_end.call_count == 1
+    assert monitor.request_end.call_args.kwargs['error'] == 'Client disconnected'
+    assert closed.get('upstream') is True

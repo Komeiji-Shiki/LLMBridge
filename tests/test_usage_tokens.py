@@ -6,8 +6,12 @@
 OpenAI 官方形态（completion_tokens 已含思考，相加会造成重复计费），
 以及 merge / separate 两种模式在流式与非流式链路上的落地结果。
 """
+import asyncio
 import copy
 import unittest
+from unittest.mock import AsyncMock, MagicMock
+
+import anyio
 
 from converters.anthropic_openai import convert_openai_usage_to_anthropic
 from converters.responses_openai import _usage_to_responses
@@ -210,6 +214,28 @@ class StreamSessionUsageTests(unittest.TestCase):
             thinking_separator=None, monitoring_service=None, direct_api_service=None,
             estimate_message_tokens_func=None, estimate_tokens_func=None, full_messages=[],
         )
+
+    def test_disconnect_estimates_missing_input_while_cancelled(self):
+        """断开时上游还没报用量：任务处于取消态也要按 tokenizer 估算输入，不能记成 0。"""
+        monitor = MagicMock()
+        monitor.broadcast_to_monitors = AsyncMock()
+        session = PassthroughStreamSession(
+            request_id="test-req", display_name="test-model",
+            openai_req={"messages": [{"role": "user", "content": "hi"}]},
+            endpoint_config={}, pricing_config={}, thinking_separator=None,
+            monitoring_service=monitor, direct_api_service=None,
+            estimate_message_tokens_func=lambda messages, model=None: 11,
+            estimate_tokens_func=None, full_messages=[],
+        )
+
+        async def run():
+            with anyio.CancelScope() as scope:
+                scope.cancel()
+                await session.handle_client_disconnect()
+
+        asyncio.run(run())
+        end = monitor.request_end.call_args.kwargs
+        self.assertEqual((end["input_tokens"], end["error"]), (11, "Client disconnected"))
 
     def test_merge_mode_rewrites_chunk_and_stats(self):
         session = self._session({})

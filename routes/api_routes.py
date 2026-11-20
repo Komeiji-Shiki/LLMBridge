@@ -689,9 +689,8 @@ async def _estimate_anthropic_local_usage(
 ) -> tuple:
     """token_stats_mode=local：用本地 tokenizer 估算 Anthropic 请求的输入/输出 token。
 
-    注意：可能在流式生成器的 finally 中被调用，此时若任务正在取消，
-    await 会抛 CancelledError，故这里捕获 BaseException 回退上游值，
-    保证监控记录一定能写入。
+    可能在流式生成器的 finally 中被调用；估算函数会屏蔽客户端断开带来的取消，
+    这里只需在 tokenizer 出错时回退上游值。
     """
     try:
         msgs = list(passthrough_body.get("messages") or [])
@@ -712,7 +711,7 @@ async def _estimate_anthropic_local_usage(
         logger.info(
             f"[TOKEN_STATS_LOCAL] 本地tokenizer统计: 输入={input_tokens}, 输出={output_tokens} (model={model})")
         return input_tokens, output_tokens
-    except BaseException as e:
+    except Exception as e:
         logger.warning(f"[TOKEN_STATS_LOCAL] 本地token估算失败，回退上游值: {e}")
         return fallback_input, fallback_output
 

@@ -3,6 +3,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 from fastapi import HTTPException
 
@@ -30,6 +31,7 @@ def route(upstream, *, stream=True, session=None, pricing=None, config=None, end
     service = DirectAPIService(session or MagicMock())
     if upstream is not None:
         service.call_gemini_native_api = upstream
+        service.call_gemini_interactions_api = upstream
     monitor = MagicMock()
     monitor.broadcast_to_monitors = AsyncMock()
     call = handle_gemini_native_direct(
@@ -492,6 +494,55 @@ def test_cancelled_stream_records_reason_and_reraises():
 
     end = only_end(asyncio.run(run()))
     assert end['success'] is False and end['error'] == 'Client disconnected'
+
+
+def cancel_like_starlette(upstream, endpoint=None):
+    """Starlette 在客户端断开时取消整个 anyio 任务组，之后生成器里的每个 await 都会再被取消。"""
+    closed = {}
+
+    async def tracked(**kwargs):
+        try:
+            async for item in upstream():
+                yield item
+        finally:
+            closed['upstream'] = True
+
+    async def run():
+        call, monitor = route(tracked, endpoint=endpoint)
+        body = (await call).body_iterator
+        async with anyio.create_task_group() as group:
+            async def consume():
+                async for item in body:
+                    if item.startswith('data: '):
+                        group.cancel_scope.cancel()
+            group.start_soon(consume)
+        return monitor, dict(closed)
+
+    return asyncio.run(run())
+
+
+async def stalled_generate_content():
+    yield chunk('一半')
+    await asyncio.sleep(30)
+
+
+async def stalled_interactions():
+    yield {'event_type': 'interaction.created', 'interaction': {'id': 'i1'}}
+    yield {'event_type': 'step.start', 'index': 0, 'step': {'type': 'model_output'}}
+    yield {'event_type': 'step.delta', 'index': 0, 'delta': {'type': 'text', 'text': '一半'}}
+    await asyncio.sleep(30)
+
+
+@pytest.mark.parametrize('upstream,endpoint', [
+    (stalled_generate_content, None),
+    (stalled_interactions, {'upstream_protocol': 'interactions'}),
+], ids=['generate_content', 'interactions'])
+def test_disconnect_under_anyio_cancel_still_estimates_usage(upstream, endpoint):
+    monitor, closed = cancel_like_starlette(upstream, endpoint)
+    end = only_end(monitor)
+    assert end['success'] is False and end['error'] == 'Client disconnected'
+    assert (end['input_tokens'], end['output_tokens']) == (7, 3)
+    assert closed.get('upstream') is True
 
 
 def test_monitor_never_stores_failure_without_reason(monkeypatch):

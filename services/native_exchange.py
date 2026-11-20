@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import uuid
+import anyio
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from core.config_loader import CONFIG
@@ -512,16 +513,19 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                 failure = str(error)
                 yield ('data: ' + json.dumps({'error': {'message': '上游响应中断', 'code': 502}}) + '\n\n').encode()
             finally:
-                await iterator.aclose()
-                await asyncio.shield(finish())
+                # 客户端断开时任务处于取消态，屏蔽取消才能关完上游并计入统计
+                with anyio.CancelScope(shield=True):
+                    await iterator.aclose()
+                    await finish()
         return ContextStreamingResponse(generate(), context=context, media_type='text/event-stream',
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'X-Bridge-Session-ID': context.session_id,
                      'X-Bridge-Request-ID': context.request_id})
     except BaseException as error:
         failure = str(error)
-        if iterator is not None:
-            await iterator.aclose()
-        await finish()
+        with anyio.CancelScope(shield=True):
+            if iterator is not None:
+                await iterator.aclose()
+            await finish()
         raise
     finally:
         current_request.reset(token)

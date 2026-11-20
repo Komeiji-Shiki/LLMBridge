@@ -139,7 +139,7 @@ class PassthroughStreamSession:
         self._flush_tool_args_tails()
         partial_content = ''.join(self.content_parts)
         partial_reasoning = ''.join(self.reasoning_parts)
-        local_input_tokens = self.input_tokens or 0
+        local_input_tokens = self.input_tokens or rough_message_tokens(self.openai_req.get('messages', []))
         partial_tool_calls = finalize_tool_calls(self.tool_call_accumulator)
         local_output_tokens = self.output_tokens or (
             rough_token_count(partial_reasoning + partial_content)
@@ -160,9 +160,11 @@ class PassthroughStreamSession:
         self._schedule_logprobs_finish(completed=False, error=reason)
 
     async def handle_client_disconnect(self) -> None:
-        """异步断连处理：标记 + 广播。"""
+        """异步断连处理：上游还没报用量时先用 tokenizer 估算输入，再标记 + 广播。"""
         if self.request_end_called:
             return
+        if not self.input_tokens:
+            self.input_tokens = await self._estimate_input_tokens()
         self.mark_client_disconnect("Client disconnected")
         await self.monitoring_service.broadcast_to_monitors({
             "type": "request_end", "request_id": self.request_id, "success": False})
@@ -607,6 +609,15 @@ class PassthroughStreamSession:
 
     # ================= 收尾统计 =================
 
+    async def _estimate_input_tokens(self) -> int:
+        messages = self.openai_req.get('messages', [])
+        try:
+            return await estimate_message_tokens_non_blocking(
+                self.estimate_message_tokens_func, messages, self.display_name)
+        except Exception as token_error:
+            logger.error(f"[DIRECT_API_PASSTHROUGH] Input token计算失败: {token_error}")
+            return rough_message_tokens(messages)
+
     async def finalize(self) -> list:
         """流结束后的统计与监控上报，返回应追加发送的 SSE 尾部字节块列表。
 
@@ -656,13 +667,7 @@ class PassthroughStreamSession:
                 logger.info(f"[TOKEN_STATS_LOCAL] local统计模式：使用本地tokenizer计算输入")
             else:
                 logger.warning(f"[DIRECT_API_PASSTHROUGH] API未返回input_tokens，使用tokenizer计算")
-            try:
-                self.input_tokens = await estimate_message_tokens_non_blocking(
-                    self.estimate_message_tokens_func,
-                    self.openai_req.get('messages', []), self.display_name)
-            except Exception as token_error:
-                logger.error(f"[DIRECT_API_PASSTHROUGH] Input token计算失败: {token_error}")
-                self.input_tokens = rough_message_tokens(self.openai_req.get('messages', []))
+            self.input_tokens = await self._estimate_input_tokens()
 
         total_output_text = (final_reasoning or "") + (final_content or "")
         content_char_count = len(total_output_text) if total_output_text else 0
