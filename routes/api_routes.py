@@ -32,6 +32,7 @@ from .direct_api_handler import handle_direct_api_request
 from .lmarena_handler import handle_lmarena_request
 from ._direct_api_anthropic import apply_auto_cache_control
 from converters.cache_warnings import anthropic_cache_warnings
+from core import stream_stop
 from core.constants import resolve_heartbeat_interval
 from services.error_translation import translate_openai_error
 from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
@@ -52,6 +53,7 @@ from converters.anthropic_openai import (
     convert_anthropic_to_openai_request,
     build_anthropic_error_payload,
     extract_anthropic_response_content,
+    anthropic_manual_finish_events,
     extract_anthropic_sse_content,
     flush_anthropic_sse_state,
     convert_openai_non_stream_response_to_anthropic,
@@ -892,6 +894,7 @@ async def _handle_anthropic_passthrough(
         f"endpoint_path={endpoint_path}, stream={is_stream}")
 
     if is_stream:
+        stop = stream_stop.register(request_id)
         first_upstream_chunk, upstream_chunks = await peek_stream(
             direct_api_service.call_api_passthrough(
                 base_url=api_base_url,
@@ -899,7 +902,7 @@ async def _handle_anthropic_passthrough(
                 request_body=passthrough_body,
                 endpoint_path=endpoint_path
             ),
-            resolve_heartbeat_interval(endpoint_config))
+            resolve_heartbeat_interval(endpoint_config), stop=stop)
         early_error = _extract_upstream_stream_error(first_upstream_chunk) if first_upstream_chunk else None
         if early_error is not None:
             # 响应还没开始：用真实状态码回给客户端，它靠状态码和 retry-after 决定是否重试
@@ -971,6 +974,14 @@ async def _handle_anthropic_passthrough(
                 if tail_bytes:
                     extract_anthropic_sse_content(tail_bytes, stream_state)
                     yield tail_bytes
+                if stop.is_set() and stream_state.get("message_started") and not stream_state.get("message_stopped"):
+                    # 手动收尾：先补齐用量，再替上游发结尾事件，客户端按正常结束处理
+                    flush_anthropic_sse_state(stream_state)
+                    stream_state["input_tokens"], stream_state["output_tokens"] = await _estimate_interrupted_anthropic_usage(
+                        passthrough_body, stream_state, display_name,
+                        stream_state.get("input_tokens") or 0, stream_state.get("output_tokens") or 0)
+                    stream_state["usage_final"] = True
+                    yield anthropic_manual_finish_events(stream_state, stream_state["output_tokens"])
             except asyncio.CancelledError:
                 success = False
                 error_msg = "客户端断开连接"

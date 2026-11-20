@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
 from converters.media import adapt_chat_files
+from core import stream_stop
 from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from services.logprobs_collector import create_logprobs_collector
 from core.conversion_report import note_loss
@@ -39,13 +40,14 @@ from ._direct_api_reasoning_cache import lookup_reasoning_details, store_reasoni
 from ._direct_api_stream_session import PassthroughStreamSession
 from ._direct_api_utils import (
     build_response_message,
-    cancel_and_wait,
     close_quietly,
     detect_first_chunk_error,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     extract_tool_calls_from_message,
     is_error_json,
+    iter_with_keepalive,
+    manual_finish_chunk,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
     record_request_failure,
@@ -502,25 +504,18 @@ async def _handle_passthrough_stream(
         raise HTTPException(status_code=502, detail=session.error_msg)
 
     # ── 流式生成器（处理首块之后的剩余流）──
+    stop = stream_stop.register(request_id)
+
     async def combined_stream_generator():
-        api_task = None
         client_gone = False
+        source = iter_with_keepalive(api_iterator, resolve_heartbeat_interval(endpoint_config), stop=stop)
         try:
             # 先 yield 已处理的首块
             yield processed_first
 
             # 继续处理剩余流
-            heartbeat_interval = resolve_heartbeat_interval(endpoint_config)
-            while True:
-                if api_task is None or api_task.done():
-                    api_task = asyncio.create_task(anext(api_iterator))
-                try:
-                    chunk_bytes = await asyncio.wait_for(asyncio.shield(api_task), timeout=heartbeat_interval)
-                    api_task = None  # 成功取到值，任务已完成
-                except StopAsyncIteration:
-                    api_task = None
-                    break
-                except asyncio.TimeoutError:
+            async for chunk_bytes in source:
+                if chunk_bytes is None:
                     try:
                         yield f": keep-alive {int(time.time())}\n\n".encode("utf-8")
                     except asyncio.CancelledError:
@@ -550,6 +545,11 @@ async def _handle_passthrough_stream(
                     await close_quietly(api_iterator)
                     return
 
+            if stop.is_set() and session.finish_reason is None and not session.upstream_error_detected:
+                # 手动收尾：上游没给结束原因，替它补上，客户端按正常结束处理
+                yield session.process_sse_chunk(manual_finish_chunk(
+                    f"chatcmpl-{request_id}", display_name, bool(session.tool_call_accumulator)).encode("utf-8"))
+
             session.stream_completed = not session.upstream_error_detected
             session.request_success = (not session.upstream_error_detected) and (session.error_msg is None)
 
@@ -566,8 +566,7 @@ async def _handle_passthrough_stream(
             session.error_msg = str(e)
             logger.error(f"[DIRECT_API_PASSTHROUGH] 流式处理中发生异常: {e}", exc_info=True)
         finally:
-            if api_task is not None and not api_task.done():
-                await cancel_and_wait(api_task)
+            await source.aclose()
             await close_quietly(api_iterator)
 
             # 收尾统计与监控上报（断连路径已上报时返回空列表，不再补发）

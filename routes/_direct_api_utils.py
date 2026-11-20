@@ -14,6 +14,7 @@ import anyio
 from fastapi import HTTPException
 from fastapi.responses import Response
 
+from core import stream_stop
 from core.config_loader import MODEL_ROUND_ROBIN_LOCK
 from core.constants import RetryDefaults, TimeoutDefaults
 from services.protocol_events import named_error_status
@@ -818,20 +819,40 @@ async def record_request_failure(monitoring_service, direct_api_service, request
 # SSE 行处理
 # ============================================================
 
-async def iter_with_keepalive(iterator, interval: float, first_interval: Optional[float] = None):
+def manual_finish_chunk(chunk_id: str, model: str, has_tool_calls: bool) -> str:
+    """手动收尾补发的结束块：已发出工具调用就按 tool_calls 结束，客户端照常执行这些调用。"""
+    chunk = {
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if has_tool_calls else "stop"}],
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+
+async def iter_with_keepalive(iterator, interval: Optional[float], first_interval: Optional[float] = None,
+                              stop: Optional[asyncio.Event] = None):
     """转发异步迭代器；上游空闲超过 interval 秒时产出 None，调用方借此发送心跳。
 
-    first_interval 单独指定第一次等待的时长。
+    first_interval 单独指定第一次等待的时长；interval 为 None 时不发心跳。
+    stop 是监控页的手动收尾信号：置位后取消正在等的那一块并结束迭代，停止原因记为手动收尾，
+    调用方看 stop.is_set() 补齐正常结尾。
     """
     pending = None
+    stopped = asyncio.ensure_future(stop.wait()) if stop is not None else None
     wait = first_interval or interval
     try:
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(anext(iterator))
-            done, _ = await asyncio.wait({pending}, timeout=wait)
+            waiters = {pending} if stopped is None else {pending, stopped}
+            done, _ = await asyncio.wait(waiters, timeout=wait, return_when=asyncio.FIRST_COMPLETED)
             wait = interval
-            if not done:
+            if pending not in done:
+                if stopped in done:
+                    stream_stop.mark_finished()
+                    return
                 yield None
                 continue
             current, pending = pending, None
@@ -841,18 +862,21 @@ async def iter_with_keepalive(iterator, interval: float, first_interval: Optiona
                 return
             yield item
     finally:
-        if pending is not None:
-            pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+        tasks = [task for task in (pending, stopped) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def peek_stream(iterator, interval: float, wait: float = TimeoutDefaults.UPSTREAM_ERROR_WAIT):
+async def peek_stream(iterator, interval: float, wait: float = TimeoutDefaults.UPSTREAM_ERROR_WAIT,
+                      stop: Optional[asyncio.Event] = None):
     """等上游第一块一小会儿，上游立刻报错时响应还没开始，能用真实状态码回给客户端。
 
     返回 (first, chunks)：first 为 None 表示还没有数据；chunks 从头迭代（含 first），
     空闲时产出 None。迭代异常延后到 chunks 上抛出，由流式生成器的收尾逻辑统一处理。
+    stop 见 iter_with_keepalive。
     """
-    source = iter_with_keepalive(iterator, interval, first_interval=wait)
+    source = iter_with_keepalive(iterator, interval, first_interval=wait, stop=stop)
     failure = None
     try:
         first = await anext(source, None)

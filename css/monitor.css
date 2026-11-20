@@ -291,6 +291,22 @@
             color: var(--text-dim);
         }
 
+        .active-request .finish-btn {
+            margin-left: 16px;
+            padding: 4px 12px;
+            font-size: 12px;
+        }
+
+        .active-request .finish-btn[data-armed] {
+            color: var(--danger);
+            border-color: rgb(var(--danger-rgb) / 0.5);
+        }
+
+        .active-request .finish-btn:disabled {
+            cursor: default;
+            opacity: 0.6;
+        }
+
         .empty-state {
             text-align: center;
             padding: 48px;

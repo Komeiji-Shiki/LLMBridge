@@ -1115,6 +1115,10 @@ class InteractionsStreamConverter:
             return self._on_completed(interaction)
         return []
 
+    def finish_manually(self) -> List[dict]:
+        """监控页手动收尾：替上游收起没写完的步骤并按完成结束，签名照常下发，用量由调用方估算。"""
+        return self._on_step_stop() + self._on_completed({"status": "completed"})
+
     def finalize(self) -> List[dict]:
         """上游没有发送 completed 事件时也保存已收到的步骤，并交还缓冲的思考摘要。"""
         chunks = self._flush_thought()

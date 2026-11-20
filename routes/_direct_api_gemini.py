@@ -12,6 +12,7 @@ import anyio
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
+from core import stream_stop
 from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from utils.monitor_params import build_monitor_request_params
 from utils.usage_tokens import (
@@ -45,6 +46,7 @@ from ._direct_api_utils import (
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     finalize_tool_calls,
+    manual_finish_chunk,
     peek_stream,
     map_upstream_error_to_status_code,
     record_request_failure,
@@ -523,6 +525,11 @@ async def handle_gemini_native_direct(
                         if sse_text:
                             yield sse_text
 
+                    if stop.is_set() and error_msg is None and not finish_seen:
+                        # 手动收尾：上游没给结束原因，替它补上，客户端按正常结束处理
+                        first_chunk_seen = finish_seen = True
+                        yield manual_finish_chunk(request_id, display_name, bool(tool_call_accumulator))
+
                     if not first_chunk_seen:
                         error_msg = f"Gemini Native API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                         logger.error(f"[GEMINI_NATIVE] {error_msg}")
@@ -751,6 +758,14 @@ async def handle_gemini_native_direct(
                             if sse_text:
                                 yield sse_text
 
+                    if stop.is_set() and error_msg is None and not converter.completed:
+                        # 手动收尾：上游迟迟不发结束事件，替它补上，已发出的工具调用照常交给客户端
+                        first_event_seen = True
+                        for openai_chunk in converter.finish_manually():
+                            sse_text = consume(openai_chunk)
+                            if sse_text:
+                                yield sse_text
+
                     if not first_event_seen:
                         error_msg = f"Gemini Interactions API返回空响应或在{first_chunk_timeout}秒内未返回第一个数据块"
                         logger.error(f"[GEMINI_INTERACTIONS] {error_msg}")
@@ -876,7 +891,9 @@ async def handle_gemini_native_direct(
                         except Exception as yield_err:
                             logger.debug(f"[GEMINI_INTERACTIONS] 发送 usage/[DONE] 时客户端已断开: {yield_err}")
 
-            first_event, chunks = await peek_stream(gemini_generator, resolve_heartbeat_interval(endpoint_config))
+            stop = stream_stop.register(request_id)
+            first_event, chunks = await peek_stream(
+                gemini_generator, resolve_heartbeat_interval(endpoint_config), stop=stop)
             if isinstance(first_event, dict) and "error" in first_event:
                 await gemini_generator.aclose()
                 return await upstream_error_response(first_event)

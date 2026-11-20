@@ -305,10 +305,36 @@ function updateActiveRequests(requests) {
                 </div>
                 <div class="request-duration" data-started="${Number(req.timestamp)}">${duration}s</div>
                 <span class="status-badge active">处理中</span>
+                ${req.finishable ? `<button type="button" class="refresh-btn finish-btn" data-finish="${escapeHtml(req.request_id)}" title="不再等上游，已经收到的内容按正常结束交给客户端">收尾</button>` : ''}
             </div>
         `;
     }).join('');
 }
+
+// 手动收尾：点一次进入确认态，3 秒内再点才发出，免得误触结束正在正常输出的请求
+document.getElementById('active-requests-list').addEventListener('click', async event => {
+    const button = event.target.closest('[data-finish]');
+    if (!button || button.disabled) return;
+    if (!button.dataset.armed) {
+        button.dataset.armed = '1';
+        button.textContent = '确认收尾';
+        setTimeout(() => {
+            if (button.disabled) return;
+            delete button.dataset.armed;
+            button.textContent = '收尾';
+        }, 3000);
+        return;
+    }
+    button.disabled = true;
+    button.textContent = '收尾中…';
+    try {
+        await apiGet(`/api/monitor/active/${encodeURIComponent(button.dataset.finish)}/finish`, {method: 'POST'});
+    } catch (error) {
+        console.error('手动收尾失败:', error);
+        button.textContent = '收尾失败';
+    }
+    scheduleActiveRefresh();
+});
 
 // 活跃请求刷新节流：密集的 request_start/request_end 合并为一次查询
 let _activeRefreshTimer = null;

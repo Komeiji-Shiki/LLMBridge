@@ -873,7 +873,9 @@ class _ChatStreamBuilder:
         if self.failed:
             chunks.append(b"data: [DONE]\n\n")
             return chunks
-        chunks.append(self.chunk({}, finish_reason=self.finish_reason))
+        # 没收到终态事件（手动收尾或上游提前关流）时，已经发出的工具调用仍要按 tool_calls 交给客户端
+        finish_reason = "tool_calls" if self.finish_reason == "stop" and self.tool_indexes else self.finish_reason
+        chunks.append(self.chunk({}, finish_reason=finish_reason))
         if self.usage:
             chunks.append(self.usage_chunk())
         chunks.append(b"data: [DONE]\n\n")

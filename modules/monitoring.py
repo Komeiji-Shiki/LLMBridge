@@ -16,6 +16,7 @@ import queue
 import concurrent.futures
 import copy
 from contextvars import copy_context
+from core import stream_stop
 from core.api_key_manager import api_key_manager
 from core.model_quota import model_quota
 from core.request_context import current_request
@@ -740,6 +741,7 @@ class MonitoringService:
                     response_message: Optional[dict] = None, response_tool_calls: Optional[List[dict]] = None,
                     upstream_usage: Optional[dict] = None, system_fingerprint: Optional[str] = None):
         """记录请求结束（非阻塞版：提交到串行事件池，与 request_start 保持顺序）"""
+        stream_stop.release(request_id)
         self._event_pool.submit(
             copy_context().run, self._request_end_sync,
             request_id, success, error, response_content, reasoning_content,
@@ -951,7 +953,8 @@ class MonitoringService:
     def get_active_requests(self) -> List[dict]:
         """获取活动请求列表"""
         with self._lock:
-            return [asdict(req) for req in self.active_requests.values()]
+            return [{**asdict(req), 'finishable': stream_stop.finishable(req.request_id)}
+                    for req in self.active_requests.values()]
     
     def cleanup_stale_requests(self):
         """
@@ -1022,6 +1025,7 @@ class MonitoringService:
                 
                 # 从活动请求中移除
                 del self.active_requests[request_id]
+                stream_stop.release(request_id)
                 
                 logger.info(f"[CLEANUP] 已清理超时请求: {request_id[:8]} (超时: {request_info.duration:.1f}秒)")
             

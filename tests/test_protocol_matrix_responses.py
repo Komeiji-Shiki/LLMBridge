@@ -219,8 +219,8 @@ def test_streaming_error_after_the_wait_window_still_reaches_the_client(gateway)
     app, _, monkeypatch = gateway
     original = _direct_api_utils.peek_stream
 
-    async def no_wait(iterator, interval, wait=0.001):
-        return await original(iterator, interval, wait=0.001)
+    async def no_wait(iterator, interval, wait=0.001, stop=None):
+        return await original(iterator, interval, wait=0.001, stop=stop)
 
     reply = Reply(status=429, body=_rate_limit_error('gemini'))
     with patch('routes._direct_api_gemini.peek_stream', no_wait):

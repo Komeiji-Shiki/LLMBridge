@@ -711,6 +711,26 @@ def flush_anthropic_sse_state(state: dict) -> None:
         state["tool_calls"][tidx]["function"]["arguments"] = _normalize_tool_args_str(pending)
 
 
+def anthropic_manual_finish_events(state: dict, output_tokens: int) -> bytes:
+    """监控页手动收尾时补齐上游没发的结尾：收起开着的块，按已发出的内容给停止原因。
+
+    state 是 extract_anthropic_sse_content 的旁路状态；已经有工具调用就按 tool_use 结束，客户端照常执行。
+    """
+    events = []
+    if state.get("open_block") is not None:
+        events.append({"type": "content_block_stop", "index": state["open_block"]})
+    if not state.get("message_delta_seen"):
+        events.append({
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use" if state.get("tool_calls") else "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": output_tokens},
+        })
+    events.append({"type": "message_stop"})
+    return "".join(
+        f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n" for event in events
+    ).encode("utf-8")
+
+
 def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
     """解析若干完整的 SSE 行，累积事件内容到 state（仅供上面两个入口调用）。"""
     for line in chunk_str.splitlines():
@@ -750,6 +770,7 @@ def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
                 if t:
                     state["pending_tool_args"] = state.get("pending_tool_args", "") + t
         elif etype == "content_block_start":
+            state["open_block"] = event.get("index")
             cb = event.get("content_block")
             if isinstance(cb, dict) and cb.get("type") == "tool_use":
                 # tool_use block 开始，记录 id/name
@@ -761,12 +782,14 @@ def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
                 state["current_tool_idx"] = len(state["tool_calls"]) - 1
                 state["pending_tool_args"] = ""
         elif etype == "content_block_stop":
+            state.pop("open_block", None)
             # 把累积的 tool args 存入对应的 tool_call（顺带把 \uXXXX 转义规范化为明文）
             pending = state.pop("pending_tool_args", "")
             tidx = state.pop("current_tool_idx", None)
             if tidx is not None and tidx < len(state.get("tool_calls", [])):
                 state["tool_calls"][tidx]["function"]["arguments"] = _normalize_tool_args_str(pending) or "{}"
         elif etype == "message_delta":
+            state["message_delta_seen"] = True
             raw_usage = event.get("usage")
             if isinstance(raw_usage, dict) and raw_usage:
                 state.setdefault("upstream_usage", {}).update(raw_usage)
@@ -778,6 +801,8 @@ def _parse_anthropic_sse_lines(chunk_str: str, state: dict) -> None:
                 state["output_tokens"] = outp
             if cached:
                 state["cached_tokens"] = cached
+        elif etype == "message_stop":
+            state["message_stopped"] = True
         elif etype == "message_start":
             state["message_started"] = True
             note_cache_diagnostics(event.get("message"))

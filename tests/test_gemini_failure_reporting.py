@@ -95,7 +95,7 @@ def test_first_chunk_timeout_records_once_with_reason():
         call, monitor = route(upstream, config={'first_chunk_timeout_seconds': 0.01},
                               endpoint={'client_disconnect_probe_interval': 0.01})
         with patch('routes._direct_api_gemini.peek_stream',
-                   lambda iterator, interval: peek_stream(iterator, 0.02, wait=0.02)):
+                   lambda iterator, interval, stop=None: peek_stream(iterator, 0.02, wait=0.02, stop=stop)):
             return await drain(await call), monitor
 
     output, monitor = asyncio.run(run())
@@ -143,7 +143,7 @@ def test_upstream_error_after_the_wait_window_stays_in_the_stream():
     async def run():
         call, monitor = route(upstream)
         with patch('routes._direct_api_gemini.peek_stream',
-                   lambda iterator, interval: peek_stream(iterator, 0.01, wait=0.01)):
+                   lambda iterator, interval, stop=None: peek_stream(iterator, 0.01, wait=0.01, stop=stop)):
             return await drain(await call), monitor
 
     output, monitor = asyncio.run(run())
@@ -359,7 +359,7 @@ def test_keepalive_reaches_anthropic_client_during_silence():
     async def run():
         call, _ = route(upstream)
         with patch('routes._direct_api_gemini.peek_stream',
-                   lambda iterator, interval: peek_stream(iterator, 0.01, wait=0.01)):
+                   lambda iterator, interval, stop=None: peek_stream(iterator, 0.01, wait=0.01, stop=stop)):
             wrapped = build_anthropic_streaming_response(await call, 'demo')
             return [item async for item in wrapped.body_iterator]
 

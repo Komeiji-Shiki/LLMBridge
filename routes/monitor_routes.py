@@ -12,6 +12,7 @@ import psutil
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from core import stream_stop
 from core.app_state import get_app_state
 from core.config_loader import CONFIG
 from core.constants import PROJECT_ROOT
@@ -336,6 +337,15 @@ async def get_monitor_stats_endpoint():
 @router.get("/api/monitor/active")
 async def get_active_requests_endpoint():
     return await get_active_requests(monitoring_service)
+
+
+@router.post("/api/monitor/active/{request_id}/finish")
+async def finish_active_request_endpoint(request_id: str):
+    """手动收尾卡住的流式请求：不再等上游，已经转发的内容按正常结束交给客户端。"""
+    if not stream_stop.request_finish(request_id):
+        raise HTTPException(status_code=409, detail="请求已经结束，或者它走的链路不支持手动收尾")
+    logger.info(f"[STREAM_STOP] 监控页手动收尾请求 {request_id[:8]}")
+    return {"success": True}
 
 
 @router.get("/api/monitor/logs/requests")

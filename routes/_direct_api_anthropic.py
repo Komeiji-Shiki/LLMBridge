@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 
+from core import stream_stop
 from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from utils.monitor_params import build_monitor_request_params
 from utils.task_registry import spawn
@@ -51,6 +52,7 @@ from ._direct_api_utils import (
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     is_error_json,
+    iter_with_keepalive,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
     record_request_failure,
@@ -921,11 +923,13 @@ def build_openai_stream_from_anthropic(
     full_messages: list,
     estimate_tokens_func=None,
     thinking_separator: Optional[str] = None,
-    tool_name_restore: Optional[Dict[str, str]] = None
+    tool_name_restore: Optional[Dict[str, str]] = None,
+    stop: Optional[asyncio.Event] = None
 ):
     """将 Anthropic SSE 流转换为 OpenAI SSE 流。
 
     tool_name_restore：工具名改写的 别名 → 原名 映射，tool_use 名称按此恢复。
+    stop：监控页的手动收尾信号，api_iterator 因它提前结束时按正常结束补发结束块。
 
     Anthropic 事件序列：
       message_start → content_block_start → content_block_delta(可多次)
@@ -1226,6 +1230,9 @@ def build_openai_stream_from_anthropic(
 
             # 发送 finish chunk
             finish_reason = _map_anthropic_stop_reason_to_openai(stop_reason)
+            if stop is not None and stop.is_set() and stop_reason is None:
+                # 手动收尾：上游没给停止原因，已经发出工具调用就按 tool_calls 结束，客户端照常执行
+                finish_reason = "tool_calls" if tool_calls_acc or active_tool else "stop"
             yield _make_delta_chunk({}, finish_reason=finish_reason)
 
             # local 统计模式：忽略上游 usage，用本地 tokenizer 重算
@@ -1590,11 +1597,17 @@ async def handle_anthropic_native_from_openai(
                 monitoring_service, direct_api_service, request_id, error_msg, **failure_context)
             return JSONResponse(status_code=status_code, content=normalized)
 
-        # 构建一个能先发送 first_chunk 再继续的迭代器
+        # 构建一个能先发送 first_chunk 再继续的迭代器；读上游时同时等监控页的手动收尾
+        stop = stream_stop.register(request_id)
+
         async def _stream_with_first():
             yield first_chunk
-            async for chunk in api_iter:
-                yield chunk
+            source = iter_with_keepalive(api_iter, None, stop=stop)
+            try:
+                async for chunk in source:
+                    yield chunk
+            finally:
+                await source.aclose()
 
         return build_openai_stream_from_anthropic(
             api_iterator=_stream_with_first(),
@@ -1609,7 +1622,8 @@ async def handle_anthropic_native_from_openai(
             openai_req=openai_req,
             full_messages=full_messages,
             thinking_separator=thinking_separator,
-            tool_name_restore=tool_name_restore
+            tool_name_restore=tool_name_restore,
+            stop=stop
         )
 
     else:

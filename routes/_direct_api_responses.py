@@ -17,6 +17,7 @@ from converters.responses_bridge import (
     convert_chat_request_to_responses,
     convert_responses_response_to_chat,
 )
+from core import stream_stop
 from core.constants import resolve_first_chunk_timeout
 from core.request_context import current_request
 from services.responses_history import ResponsesHistory
@@ -33,6 +34,7 @@ from ._direct_api_utils import (
     estimate_text_tokens_non_blocking,
     finalize_tool_calls,
     is_error_json,
+    iter_with_keepalive,
     map_upstream_error_to_status_code,
     normalize_to_openai_error,
 )
@@ -285,10 +287,17 @@ async def _handle_stream(
         error_message = error_obj.get("message", "上游 Responses 请求失败") if isinstance(error_obj, dict) else str(error_obj)
         raise _UpstreamRejected(status_code, error_message, normalize_to_openai_error(error_json))
 
+    # 读上游时同时等监控页的手动收尾；收尾后转换器按上游已结束补发结束块
+    stop = stream_stop.register(request_id)
+
     async def prefixed_source():
         yield first_chunk
-        async for chunk in upstream_iterator:
-            yield chunk
+        source = iter_with_keepalive(upstream_iterator, None, stop=stop)
+        try:
+            async for chunk in source:
+                yield chunk
+        finally:
+            await source.aclose()
 
     converted_response = build_chat_streaming_response_from_responses(
         prefixed_source(),

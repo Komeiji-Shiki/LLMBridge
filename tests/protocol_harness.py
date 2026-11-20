@@ -37,6 +37,8 @@ class Reply:
     body: Any = None
     events: Optional[list] = None
     headers: Dict[str, str] = field(default_factory=dict)
+    # 写完 events 后既不结束也不断开，模拟上游迟迟不发结束事件
+    stall: bool = False
 
 
 # ---- Turn → 各上游协议的线路格式 ----
@@ -289,6 +291,7 @@ class FakeUpstream:
     def __init__(self, replies):
         self.replies = list(replies)
         self.requests: List[dict] = []
+        self.stalled = asyncio.Event()
 
     async def handle(self, request):
         body = await request.read()
@@ -307,6 +310,10 @@ class FakeUpstream:
             else:
                 text = f'data: {json.dumps(event, ensure_ascii=False)}\n\n'
             await response.write(text.encode())
+        if reply.stall:
+            # 网关关掉连接或测试结束时这个处理协程会被取消
+            self.stalled.set()
+            await asyncio.Event().wait()
         await response.write_eof()
         return response
 
@@ -335,7 +342,7 @@ def build_gateway(monkeypatch):
 CLIENT_PATHS = {'chat': '/v1/chat/completions', 'anthropic': '/v1/messages', 'responses': '/v1/responses'}
 
 
-async def _exchange(app, monkeypatch, upstream_name, replies, calls, overrides):
+async def _exchange(app, monkeypatch, upstream_name, replies, calls, overrides, alongside=None):
     from services.direct_api_service import DirectAPIService
     from routes import api_routes
     fake = FakeUpstream(replies)
@@ -352,18 +359,21 @@ async def _exchange(app, monkeypatch, upstream_name, replies, calls, overrides):
         transport = httpx.ASGITransport(app=app)
         responses = []
         async with httpx.AsyncClient(transport=transport, base_url='http://gateway', timeout=30) as client:
+            side = asyncio.create_task(alongside(fake)) if alongside else None
             for method, path, body, headers in calls:
                 responses.append(await client.request(method, path, json=body, headers=headers or {}))
+            if side:
+                await side
         return responses, fake
     finally:
         await session.close()
         await server.close()
 
 
-def exchange(app, monkeypatch, upstream, replies, path, body, overrides=None, headers=None):
-    """跑一次完整请求，返回 (客户端响应, 假上游)。"""
+def exchange(app, monkeypatch, upstream, replies, path, body, overrides=None, headers=None, alongside=None):
+    """跑一次完整请求，返回 (客户端响应, 假上游)。alongside(fake) 和请求并行运行，用来在流中途做操作。"""
     responses, fake = asyncio.run(_exchange(app, monkeypatch, upstream, replies, [('POST', path, body, headers)],
-                                            overrides or {}))
+                                            overrides or {}, alongside))
     return responses[0], fake
 
 

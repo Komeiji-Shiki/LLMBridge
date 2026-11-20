@@ -173,6 +173,34 @@ function updateOverallRatesFromCachedData() {
     }
 }
 
+// 手动收尾：点一次进入确认态，3 秒内再点才发出，免得误触结束正在正常输出的请求
+document.getElementById('active-requests-list').addEventListener('click', async event => {
+    const button = event.target.closest('[data-finish]');
+    if (!button || button.disabled) return;
+    if (!button.dataset.armed) {
+        button.dataset.armed = '1';
+        button.textContent = '确认收尾';
+        button.classList.add('btn-danger');
+        setTimeout(() => {
+            if (button.disabled) return;
+            delete button.dataset.armed;
+            button.textContent = '收尾';
+            button.classList.remove('btn-danger');
+        }, 3000);
+        return;
+    }
+    button.disabled = true;
+    button.textContent = '收尾中…';
+    try {
+        await ensureOk(await fetch(`/api/monitor/active/${encodeURIComponent(button.dataset.finish)}/finish`, { method: 'POST' }));
+        showMessage('success', '已收尾，客户端按正常结束收到已有内容');
+    } catch (error) {
+        showMessage('danger', '收尾失败: ' + error.message);
+    }
+    // 统计在后台线程落盘，稍等再刷新列表
+    setTimeout(() => refreshOverview({ includeRates: false }), 500);
+});
+
 async function refreshOverview(options = {}) {
     const { includeRates = true, force = false } = options;
     const serial = ++overviewRefresh.serial;
@@ -224,6 +252,7 @@ async function refreshOverview(options = {}) {
                         <th>模型</th>
                         <th>状态</th>
                         <th>开始时间</th>
+                        <th></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -233,6 +262,7 @@ async function refreshOverview(options = {}) {
                             <td>${escapeHtml(req.model)}</td>
                             <td><span class="badge badge-info">处理中</span></td>
                             <td>${new Date(req.timestamp * 1000).toLocaleString()}</td>
+                            <td>${req.finishable ? `<button type="button" class="btn btn-sm" data-finish="${escapeHtml(req.request_id)}" title="不再等上游，已经收到的内容按正常结束交给客户端">收尾</button>` : ''}</td>
                         </tr>
                     `).join('')}
                 </tbody>
