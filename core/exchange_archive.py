@@ -2,8 +2,8 @@
 
 upstream_request 与 request 共享的大字段（整段 messages、tools、system 等）
 只保存一份：upstream_request 中该字段换成 SAME_AS_REQUEST 占位，字段顺序
-不变。gzip 窗口只有 32KB，数百 KB 的重复历史无法被压缩掉，去重后归档体积
-约减半。load_exchange() / restore_exchange() 读取时原样还原。
+不变。对话数组再逐项交给 core.log_blobs 跨请求去重，多轮对话重复的历史只存一份。
+load_exchange() / restore_exchange() 读取时原样还原。
 """
 from datetime import datetime, timedelta
 import hashlib
@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+
+from core import log_blobs
 
 SAME_AS_REQUEST = {'__same_as_request__': True}
 # 短字符串（模型名等）不值得占位，只共享容器和长文本
@@ -53,8 +55,9 @@ def dedupe_exchange(record):
     return {**record, 'upstream_request': stored} if changed else record
 
 
-def restore_exchange(record):
-    """还原 dedupe_exchange 的占位，读取方看到的结构与原始记录一致。"""
+def restore_exchange(record, log_root='logs'):
+    """还原块引用和 dedupe_exchange 的占位，读取方看到的结构与原始记录一致。"""
+    record = log_blobs.hydrate_exchange(record, log_root)
     request, upstream = record.get('request'), record.get('upstream_request')
     if not isinstance(request, dict) or not isinstance(upstream, dict):
         return record
@@ -73,6 +76,7 @@ def save_exchange(context, record, root='logs/exchanges'):
     temporary = target.with_suffix('.tmp')
     metadata = {'gateway_request_id': context.request_id, 'caller_id': context.owner_id,
                 'model': context.model, 'conversation_id': context.session_id, **dedupe_exchange(record)}
+    metadata = log_blobs.outline_exchange(metadata, Path(root).parent)
     try:
         with gzip.open(temporary, 'wt', encoding='utf-8', compresslevel=6) as handle:
             json.dump(metadata, handle, ensure_ascii=False, separators=(',', ':'))
@@ -83,8 +87,9 @@ def save_exchange(context, record, root='logs/exchanges'):
 
 
 def load_exchange(path):
+    # 文件在 <日志根>/exchanges/日期/小时/ 下，块库和 save_exchange 写入时一样取日志根目录
     with gzip.open(path, 'rt', encoding='utf-8') as handle:
-        return restore_exchange(json.load(handle))
+        return restore_exchange(json.load(handle), Path(path).parents[3])
 
 
 def purge_expired_exchanges(retention_days, root='logs/exchanges', today=None):

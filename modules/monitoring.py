@@ -16,7 +16,7 @@ import queue
 import concurrent.futures
 import copy
 from contextvars import copy_context
-from core import stream_stop
+from core import log_blobs, stream_stop
 from core.api_key_manager import api_key_manager
 from core.model_quota import model_quota
 from core.request_context import current_request
@@ -131,6 +131,17 @@ _RECENT_RECORD_TEXT_FIELDS = (
     'reasoning_preview', 'error',
 )
 _MAX_RECENT_TEXT_CHARS = 1000
+
+
+def _load_log_file(path: Path) -> dict:
+    """读取一条分层日志并还原块引用；同时支持历史 .json 与 .json.gz。"""
+    if path.suffix == ".gz":
+        with gzip.open(path, 'rt', encoding='utf-8') as f:
+            entry = json.load(f)
+    else:
+        with open(path, 'r', encoding='utf-8') as f:
+            entry = json.load(f)
+    return log_blobs.hydrate_log(entry, MonitorConfig.LOG_DIR)
 
 
 def _compact_recent_record(record: dict) -> dict:
@@ -367,8 +378,8 @@ class LogManager:
             
             file_path = self._get_hierarchical_log_path(timestamp, request_id, log_type, model_name)
             
-            # 无损归档，保留完整对话和图片内容。
-            log_entry_filtered = log_entry
+            # 无损归档：对话历史和图片按消息去重存进块库，文件里只留引用
+            log_entry_filtered = log_blobs.outline_log(log_entry, MonitorConfig.LOG_DIR)
 
             # 写入文件
             # 直接出字节：不经过整份 str，写盘线程占 GIL 的时间短一个量级
@@ -579,12 +590,7 @@ class LogManager:
                         break
                     filepath = hour_dir / filename
                     try:
-                        if filepath.suffix == ".gz":
-                            with gzip.open(filepath, 'rt', encoding='utf-8') as f:
-                                log_entry = json.load(f)
-                        else:
-                            with open(filepath, 'r', encoding='utf-8') as f:
-                                log_entry = json.load(f)
+                        log_entry = _load_log_file(filepath)
                         if log_type == "request" and log_entry.get('type') == 'request_end':
                             logs.append(log_entry)
                         elif log_type == "error" and log_entry.get('error'):
@@ -1265,12 +1271,7 @@ class MonitoringService:
                         pattern = f"*_{req_id_short}{ext}"
                         for log_file in Path(hour_entry.path).glob(pattern):
                             try:
-                                if log_file.suffix == ".gz":
-                                    with gzip.open(log_file, 'rt', encoding='utf-8') as f:
-                                        log_entry = json.load(f)
-                                else:
-                                    with open(log_file, 'r', encoding='utf-8') as f:
-                                        log_entry = json.load(f)
+                                log_entry = _load_log_file(log_file)
                                 if log_entry.get('request_id') == request_id:
                                     logger.debug(f"从分层日志找到请求详情: {log_file}")
                                     return log_entry
@@ -1289,7 +1290,8 @@ class MonitoringService:
     def _find_request_in_log_pack(self, request_id: str, date_str: Optional[str] = None) -> Optional[dict]:
         """散文件里没有时，到旧日志压缩归档中读取。"""
         from core.log_pack import find_packed_request
-        return find_packed_request(MonitorConfig.LOG_DIR, request_id, date_str)
+        return log_blobs.hydrate_log(find_packed_request(MonitorConfig.LOG_DIR, request_id, date_str),
+                                     MonitorConfig.LOG_DIR)
 
     def _find_request_in_hierarchical_logs_fast(self, request_id: str, timestamp: float) -> Optional[dict]:
         """用 timestamp 精确定位分层日志文件，O(1) 目录查找，只扫描单个小时目录"""
@@ -1308,12 +1310,7 @@ class MonitoringService:
             
             for log_file in hour_dir.glob(pattern):
                 try:
-                    if log_file.suffix == ".gz":
-                        with gzip.open(log_file, 'rt', encoding='utf-8') as f:
-                            log_entry = json.load(f)
-                    else:
-                        with open(log_file, 'r', encoding='utf-8') as f:
-                            log_entry = json.load(f)
+                    log_entry = _load_log_file(log_file)
                     if log_entry.get('request_id') == request_id:
                         logger.debug(f"从分层日志快速定位找到请求详情: {log_file}")
                         return log_entry

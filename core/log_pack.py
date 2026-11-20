@@ -354,7 +354,8 @@ def find_packed_request(root, request_id: str, date=None):
         path = _archive_root(root) / KIND_LOGS / part
         record = json.loads(_read_member(path, offset, size))
         if record.get('request_id') == request_id:
-            return record
+            from core.log_blobs import hydrate_log
+            return hydrate_log(record, root)
     return None
 
 
@@ -363,5 +364,5 @@ def load_packed_exchange(root, request_id: str):
     from core.exchange_archive import restore_exchange
     for part, offset, size in _candidates(root, KIND_EXCHANGES, request_id):
         path = _archive_root(root) / KIND_EXCHANGES / part
-        return restore_exchange(json.loads(_read_member(path, offset, size)))
+        return restore_exchange(json.loads(_read_member(path, offset, size)), root)
     return None

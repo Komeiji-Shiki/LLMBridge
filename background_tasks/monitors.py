@@ -48,7 +48,9 @@ def _purge_expired_logs(monitoring_service) -> None:
     - 删除 logs/ 下超过 MAX_LOG_DAYS 的日期目录（YYYYMMDD 命名，分层 JSON 日志）
     - 删除 SQLite 中超过 MAX_DB_DAYS 的请求记录（保留期更长，避免长期费用统计缩水）
     - 删除 logs/exchanges 中超过 exchange_archive.retention_days 的完整交换归档
+    - 回收只被已删除日志引用的正文块（core.log_blobs）
     """
+    from core import log_blobs
     from core.config_loader import CONFIG
     from core.exchange_archive import purge_expired_exchanges
     from core.log_pack import KIND_EXCHANGES, KIND_LOGS, purge_packed_before
@@ -57,8 +59,9 @@ def _purge_expired_logs(monitoring_service) -> None:
     archive_days = (CONFIG.get('exchange_archive') or {}).get('retention_days', 0)
     removed_archives = purge_expired_exchanges(archive_days)
     if int(archive_days or 0) > 0:
-        purge_packed_before(MonitorConfig.LOG_DIR, KIND_EXCHANGES,
-                            (datetime.now() - timedelta(days=int(archive_days))).strftime("%Y%m%d"))
+        exchange_cutoff = (datetime.now() - timedelta(days=int(archive_days))).strftime("%Y%m%d")
+        purge_packed_before(MonitorConfig.LOG_DIR, KIND_EXCHANGES, exchange_cutoff)
+        log_blobs.store_for(MonitorConfig.LOG_DIR).purge_before(log_blobs.KIND_EXCHANGES, int(exchange_cutoff))
     if removed_archives:
         logger.info(f"[LOG_CLEANER] 🧹 删除 {removed_archives} 个超过 {archive_days} 天的完整交换归档日期目录")
 
@@ -77,6 +80,7 @@ def _purge_expired_logs(monitoring_service) -> None:
                 removed_dirs += 1
         if MonitorConfig.MAX_LOG_DAYS > 0:
             removed_dirs += purge_packed_before(log_dir, KIND_LOGS, cutoff_str)
+            log_blobs.store_for(log_dir).purge_before(log_blobs.KIND_LOGS, int(cutoff_str))
 
     deleted_rows = 0
     sqlite_logger = getattr(monitoring_service.log_manager, "sqlite_logger", None)
