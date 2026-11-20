@@ -9,6 +9,8 @@ import asyncio
 from core.request_context import current_request
 
 MANUAL_STOP_REASON = 'manual_finish'
+# 客户端中途断开时各条链路统一记的失败原因（可带后缀说明断在哪）；统计按这个前缀把它和上游失败分开
+CLIENT_DISCONNECTED = 'Client disconnected'
 
 _signals: dict = {}
 

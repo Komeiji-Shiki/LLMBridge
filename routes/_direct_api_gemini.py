@@ -568,7 +568,7 @@ async def handle_gemini_native_direct(
                         request_success = True
                         logger.info(f"[GEMINI_NATIVE] 客户端关闭连接，但结束原因已转发，标记为成功")
                     elif not error_msg:
-                        error_msg = "Client disconnected"
+                        error_msg = stream_stop.CLIENT_DISCONNECTED
                         logger.warning(f"[GEMINI_NATIVE] 客户端在流结束前断开: {request_id[:8]}")
                     raise
                 except Exception as e:
@@ -807,7 +807,7 @@ async def handle_gemini_native_direct(
                         request_success = True
                         logger.info(f"[GEMINI_INTERACTIONS] 客户端关闭连接，但结束原因已转发，标记为成功")
                     elif not error_msg:
-                        error_msg = "Client disconnected"
+                        error_msg = stream_stop.CLIENT_DISCONNECTED
                         logger.warning(f"[GEMINI_INTERACTIONS] 客户端在流结束前断开: {request_id[:8]}")
                     raise
                 except Exception as e:

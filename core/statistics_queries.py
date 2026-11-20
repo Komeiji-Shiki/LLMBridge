@@ -3,6 +3,8 @@
 import ast
 import time
 
+from core.stream_stop import CLIENT_DISCONNECTED
+
 TOKENS = ('input_tokens', 'output_tokens', 'total_tokens', 'cached_tokens', 'cache_write_tokens', 'cache_write_1h_tokens')
 COSTS = ('input_cost', 'cached_cost', 'output_cost', 'total_cost', 'cache_write_cost', 'cache_write_extra_cost')
 
@@ -107,7 +109,7 @@ def query_token_stats(conn, start_ts, end_ts, model_config, rpm_period, usd_to_c
 
 
 # 客户端自己断开不算上游不可用，单独计数
-_CLIENT_GONE = "error LIKE 'Client disconnected%'"
+_CLIENT_GONE = f"error LIKE '{CLIENT_DISCONNECTED}%'"
 
 
 def _error_label(error: str) -> str:

@@ -1256,7 +1256,7 @@ def build_openai_stream_from_anthropic(
 
         except asyncio.CancelledError:
             success = False
-            error_msg = "客户端断开连接"
+            error_msg = stream_stop.CLIENT_DISCONNECTED
             raise
         except Exception as e:
             success = False

@@ -332,7 +332,7 @@ async def _handle_stream(
             monitoring_completed = True
             success = stream_complete and error_message is None
             if not success and error_message is None:
-                error_message = "Client disconnected"
+                error_message = stream_stop.CLIENT_DISCONNECTED
             await _complete_monitoring(
                 monitoring_service=monitoring_service,
                 direct_api_service=direct_api_service,
@@ -394,12 +394,12 @@ async def _handle_stream(
         except asyncio.CancelledError:
             # 客户端取消/断开：流已完整输出时不改判失败，否则按断连处理
             if not stream_complete:
-                error_message = "Client disconnected"
+                error_message = stream_stop.CLIENT_DISCONNECTED
             raise
         except GeneratorExit:
             # 生成器被关闭（客户端提前断开等）：成功与否仍由上游流完整性决定
             if not stream_complete:
-                error_message = "Client disconnected"
+                error_message = stream_stop.CLIENT_DISCONNECTED
             raise
         except Exception as exc:
             # 转换/上游异常：记录真实错误，避免 finally 以 success=False + error=None 误报

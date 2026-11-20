@@ -39,6 +39,8 @@ class Reply:
     headers: Dict[str, str] = field(default_factory=dict)
     # 写完 events 后既不结束也不断开，模拟上游迟迟不发结束事件
     stall: bool = False
+    # (第几个事件之后, 秒)：在这里停一会儿再继续写，模拟上游长时间思考不出数据
+    pause: Optional[Tuple[int, float]] = None
 
 
 # ---- Turn → 各上游协议的线路格式 ----
@@ -302,7 +304,9 @@ class FakeUpstream:
             return web.json_response(reply.body, status=reply.status, headers=reply.headers)
         response = web.StreamResponse(status=reply.status, headers={'Content-Type': 'text/event-stream', **reply.headers})
         await response.prepare(request)
-        for event in reply.events:
+        for index, event in enumerate(reply.events):
+            if reply.pause and index == reply.pause[0]:
+                await asyncio.sleep(reply.pause[1])
             if event == '[DONE]':
                 text = 'data: [DONE]\n\n'
             elif isinstance(event, tuple):
@@ -375,6 +379,56 @@ def exchange(app, monkeypatch, upstream, replies, path, body, overrides=None, he
     responses, fake = asyncio.run(_exchange(app, monkeypatch, upstream, replies, [('POST', path, body, headers)],
                                             overrides or {}, alongside))
     return responses[0], fake
+
+
+async def _disconnect(app, monkeypatch, upstream_name, reply, path, body, after):
+    from services.direct_api_service import DirectAPIService
+    from routes import api_routes
+    fake = FakeUpstream([reply])
+    upstream_app = web.Application()
+    upstream_app.router.add_route('*', '/{tail:.*}', fake.handle)
+    server = TestServer(upstream_app)
+    await server.start_server()
+    session = aiohttp.ClientSession()
+    try:
+        config = endpoint_for(upstream_name, str(server.make_url('')).rstrip('/'))
+        monkeypatch.setitem(api_routes.MODEL_ENDPOINT_MAP, MODEL, config)
+        monkeypatch.setattr(api_routes._app_state.server, 'direct_api_service', DirectAPIService(session))
+        payload = json.dumps(body).encode()
+        chunks, enough, delivered = [], asyncio.Event(), False
+
+        async def receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {'type': 'http.request', 'body': payload, 'more_body': False}
+            await enough.wait()
+            return {'type': 'http.disconnect'}
+
+        async def send(message):
+            if message['type'] == 'http.response.body' and message.get('body'):
+                chunks.append(message['body'])
+                if len(chunks) >= after:
+                    enough.set()
+
+        # 不带 spec_version，Starlette 和线上 Hypercorn 一样边发边监听断开，断开时取消整个任务组
+        scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': 'POST',
+                 'scheme': 'http', 'path': path, 'raw_path': path.encode(), 'query_string': b'', 'root_path': '',
+                 'headers': [(b'host', b'gateway'), (b'content-type', b'application/json'),
+                             (b'content-length', str(len(payload)).encode())],
+                 'client': ('127.0.0.1', 50000), 'server': ('gateway', 80)}
+        await asyncio.wait_for(app(scope, receive, send), 20)
+        # 收尾里交给后台的任务跑完
+        await asyncio.sleep(0.3)
+        return b''.join(chunks), fake
+    finally:
+        await session.close()
+        await server.close()
+
+
+def disconnect(app, monkeypatch, upstream, reply, path, body, after=1):
+    """客户端收到 after 个响应块后断开；返回 (断开前收到的字节, 假上游)。"""
+    return asyncio.run(_disconnect(app, monkeypatch, upstream, reply, path, body, after))
 
 
 def exchange_many(app, monkeypatch, upstream, replies, calls, overrides=None):

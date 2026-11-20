@@ -24,6 +24,7 @@ import logging
 import time
 from typing import Optional
 
+from core.stream_stop import CLIENT_DISCONNECTED
 from ._direct_api_reasoning_cache import (
     merge_reasoning_detail_chunks,
     store_reasoning_details,
@@ -165,7 +166,7 @@ class PassthroughStreamSession:
             return
         if not self.input_tokens:
             self.input_tokens = await self._estimate_input_tokens()
-        self.mark_client_disconnect("Client disconnected")
+        self.mark_client_disconnect(CLIENT_DISCONNECTED)
         await self.monitoring_service.broadcast_to_monitors({
             "type": "request_end", "request_id": self.request_id, "success": False})
 

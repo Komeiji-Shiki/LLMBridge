@@ -6,6 +6,7 @@ import codecs
 import copy
 import json
 import logging
+from core.stream_stop import CLIENT_DISCONNECTED
 from core.endpoint_observer import observe_endpoint
 import re
 import time
@@ -630,7 +631,7 @@ async def _handle_responses_native_passthrough(
                 # （Codex 拿到完整回复就关连接是常态）不得改判失败。
                 success = (stats["stream_complete"] or stats.get("saw_completed")) and stats["error_message"] is None
                 if not success and stats["error_message"] is None:
-                    stats["error_message"] = "Client disconnected"
+                    stats["error_message"] = CLIENT_DISCONNECTED
                 billed = await _complete_responses_monitoring(
                     monitoring_service=monitoring_service,
                     direct_api_service=direct_api_service,
@@ -683,11 +684,11 @@ async def _handle_responses_native_passthrough(
             except asyncio.CancelledError:
                 # 客户端取消：上游已 completed（或流已完整输出）时不改判失败，否则按断连处理
                 if not (stats["stream_complete"] or stats.get("saw_completed")):
-                    stats["error_message"] = "Client disconnected"
+                    stats["error_message"] = CLIENT_DISCONNECTED
                 raise
             except GeneratorExit:
                 if not (stats["stream_complete"] or stats.get("saw_completed")):
-                    stats["error_message"] = "Client disconnected"
+                    stats["error_message"] = CLIENT_DISCONNECTED
                 raise
             except Exception as exc:
                 if stats["error_message"] is None:

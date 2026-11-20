@@ -7,6 +7,7 @@ import uuid
 import anyio
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from core.stream_stop import CLIENT_DISCONNECTED
 from core.config_loader import CONFIG
 from core.conversion_report import ConversionRejected, raise_if_strict
 from core.endpoint_observer import bind_endpoint
@@ -391,7 +392,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
             return
         ended = True
         context.mark('finished')
-        context.outcome.update(status='cancelled' if failure == 'Client disconnected' else 'failed' if failure else 'incomplete' if incomplete else 'success',
+        context.outcome.update(status='cancelled' if failure == CLIENT_DISCONNECTED else 'failed' if failure else 'incomplete' if incomplete else 'success',
                                observed_native_tools=sorted(observed_tools))
         params['timings'] = context.snapshot()
         cost = service.calculate_cost(input_tokens, output_tokens, config.get('pricing') or {}, cached_tokens=cached_tokens, upstream_usage=upstream_usage)
@@ -507,7 +508,7 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                         return
             except (asyncio.CancelledError, GeneratorExit):
                 # 客户端收到错误后关闭流时，保留已经确认的上游失败原因。
-                failure = failure or 'Client disconnected'
+                failure = failure or CLIENT_DISCONNECTED
                 raise
             except Exception as error:
                 failure = str(error)
