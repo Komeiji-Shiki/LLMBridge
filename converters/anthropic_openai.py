@@ -39,6 +39,7 @@ from converters.interactions_anthropic_signatures import (
 from core.conversion_report import note_cache_diagnostics, note_loss
 from services.error_translation import translate_anthropic_error
 from services.model_capabilities import budget_to_effort
+from services.prompt_usage_hint import PromptUsageHint
 from utils.json_unescape import StreamingUnicodeUnescaper, normalize_tool_args_json
 from utils.usage_tokens import total_output_tokens
 
@@ -1247,6 +1248,7 @@ def build_anthropic_streaming_response(
     request_model: str,
     warnings: Optional[List[Dict[str, Any]]] = None,
     usage_pending: bool = False,
+    prompt_hint: Optional[PromptUsageHint] = None,
 ) -> StreamingResponse:
     """流式：OpenAI SSE 流 → Anthropic SSE 事件流
 
@@ -1255,6 +1257,7 @@ def build_anthropic_streaming_response(
     - text 块 (content → text_delta)
     - tool_use 块 (tool_calls → input_json_delta)
     自动处理块之间的切换、索引分配、block start/stop 事件。
+    prompt_hint 在首个上游块没有用量时给 message_start 填输入量估计，见 services.prompt_usage_hint。
     """
 
     async def anthropic_stream_generator():
@@ -1283,6 +1286,23 @@ def build_anthropic_streaming_response(
             nonlocal next_block_idx
             next_block_idx += 1
             return next_block_idx - 1
+
+        def _message_start_event() -> str:
+            usage = convert_openai_usage_to_anthropic(merged_usage)
+            if prompt_hint is not None and not any(usage[key] for key in (
+                    "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")):
+                usage["input_tokens"] = prompt_hint.input_tokens
+            return format_anthropic_sse_event("message_start", {
+                "type": "message_start",
+                "message": {
+                    "id": message_id, "type": "message", "role": "assistant",
+                    "model": model_name, "content": [],
+                    "stop_reason": None, "stop_sequence": None,
+                    "usage": usage,
+                    **({"bridge_warnings": warnings} if warnings else {}),
+                    **({"bridge_usage_pending": True} if usage_pending else {})
+                }
+            })
 
         def _emit_block_start(idx: int, block_type: str, extra: Optional[Dict[str, Any]] = None) -> str:
             if block_type == "thinking":
@@ -1372,17 +1392,7 @@ def build_anthropic_streaming_response(
 
             if not sent_message_start:
                 sent_message_start = True
-                yield format_anthropic_sse_event("message_start", {
-                    "type": "message_start",
-                    "message": {
-                        "id": message_id, "type": "message", "role": "assistant",
-                        "model": model_name, "content": [],
-                        "stop_reason": None, "stop_sequence": None,
-                        "usage": convert_openai_usage_to_anthropic(merged_usage),
-                        **({"bridge_warnings": warnings} if warnings else {}),
-                        **({"bridge_usage_pending": True} if usage_pending else {})
-                    }
-                })
+                yield _message_start_event()
 
             choices = chunk.get("choices", [])
             if not choices or not isinstance(choices[0], dict):
@@ -1500,26 +1510,19 @@ def build_anthropic_streaming_response(
 
         # ── 消息收尾事件 ──
         if not sent_message_start:
-            yield format_anthropic_sse_event("message_start", {
-                "type": "message_start",
-                "message": {
-                    "id": message_id, "type": "message", "role": "assistant",
-                    "model": model_name, "content": [],
-                    "stop_reason": None, "stop_sequence": None,
-                    "usage": convert_openai_usage_to_anthropic(merged_usage),
-                    **({"bridge_warnings": warnings} if warnings else {}),
-                    **({"bridge_usage_pending": True} if usage_pending else {})
-                }
-            })
+            yield _message_start_event()
 
         # 统一按 Anthropic 官方格式输出最终用量（含缓存字段），
         # 多数客户端从 message_delta.usage 读取计费数据
+        final_usage = convert_openai_usage_to_anthropic(merged_usage)
+        if prompt_hint is not None:
+            prompt_hint.remember(final_usage)
         stop_details = ({"stop_details": {"type": "refusal", "category": None, "explanation": "".join(refusal_parts)}}
                         if stop_reason == "refusal" else {})
         yield format_anthropic_sse_event("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None, **stop_details},
-            "usage": convert_openai_usage_to_anthropic(merged_usage),
+            "usage": final_usage,
             **({"bridge_usage_pending": False} if usage_pending else {})
         })
 

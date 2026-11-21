@@ -36,6 +36,7 @@ from core import stream_stop
 from services.error_translation import translate_openai_error
 from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.model_capabilities import sanitize_anthropic_body
+from services.prompt_usage_hint import PromptUsageHint
 from utils.upstream_fields import omission_warnings, omit_configured_fields
 from ._direct_api_utils import (
     get_round_robin_api_key,
@@ -528,6 +529,9 @@ async def anthropic_messages(request: Request):
         )
 
     # ── Anthropic → OpenAI 转换模式 ──
+    # 转换前按客户端原样的消息计算前缀，和上一轮记下的对得上
+    prompt_hint = (await asyncio.to_thread(PromptUsageHint, model_name, anthropic_req.get("messages") or [])
+                   if anthropic_req.get("stream") else None)
     try:
         openai_req = convert_anthropic_to_openai_request(anthropic_req)
     except ValueError as e:
@@ -548,6 +552,7 @@ async def anthropic_messages(request: Request):
             request_model=model_name,
             warnings=warnings,
             usage_pending=_endpoint_api_type == "responses_native",
+            prompt_hint=prompt_hint,
         )
 
     # 非流式：OpenAI JSON -> Anthropic JSON
