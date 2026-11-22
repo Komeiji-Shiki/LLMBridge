@@ -109,9 +109,12 @@ class BlobStore:
         return conn
 
     @contextmanager
-    def writing(self, kind: str):
-        """一条记录的所有块放进同一个事务；返回的 put(payload) 给出块 ID。"""
-        day = _today()
+    def writing(self, kind: str, day: int = None):
+        """一条记录的所有块放进同一个事务；返回的 put(payload) 给出块 ID。
+
+        day 是记录所属的日期，默认今天；补拆旧日志时传记录自己的日期，块才能按天回收。
+        """
+        day = day or _today()
         with self._lock:
             if day != self._touched_day:
                 self._touched_day, self._touched = day, set()
@@ -293,10 +296,10 @@ def hydrate(value: dict, keys, store: BlobStore) -> dict:
 
 # ---------------------------------------------------------------- 两类日志的入口
 
-def outline_log(entry: dict, log_root) -> dict:
+def outline_log(entry: dict, log_root, day: int = None) -> dict:
     if not any(key in entry for key in LOG_KEYS):
         return entry
-    with store_for(log_root).writing(KIND_LOGS) as put:
+    with store_for(log_root).writing(KIND_LOGS, day) as put:
         return outline(entry, LOG_KEYS, put)
 
 
@@ -306,12 +309,12 @@ def hydrate_log(entry, log_root):
     return hydrate(entry, LOG_KEYS, store_for(log_root))
 
 
-def outline_exchange(record: dict, log_root) -> dict:
+def outline_exchange(record: dict, log_root, day: int = None) -> dict:
     sections = [name for name in EXCHANGE_SECTIONS if isinstance(record.get(name), dict)]
     if not sections:
         return record
     copied = dict(record)
-    with store_for(log_root).writing(KIND_EXCHANGES) as put:
+    with store_for(log_root).writing(KIND_EXCHANGES, day) as put:
         for name in sections:
             copied[name] = outline(copied[name], EXCHANGE_KEYS, put)
     return copied

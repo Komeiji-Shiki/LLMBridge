@@ -301,6 +301,92 @@ def pack_old_logs(root='logs', older_than_days=DEFAULT_COMPRESS_AFTER_DAYS, toda
     return stats
 
 
+def _discard_parts(writers) -> None:
+    for writer in writers:
+        writer.abort()
+        writer.path.unlink(missing_ok=True)
+
+
+def _rewrite_day(conn, archive: Path, kind: str, date: str, rewrite, stats: dict) -> None:
+    directory = archive / kind
+    rows = conn.execute('SELECT part, rel, gunzipped FROM entries WHERE kind=? AND date=? ORDER BY part, data_offset',
+                        (kind, date)).fetchall()
+    pending = {(part, f'{kind}/{date}/{rel[:-3] if gunzipped else rel}'): (rel, gunzipped)
+               for part, rel, gunzipped in rows}
+    parts = list(dict.fromkeys(part for part, _, _ in rows))
+    writers, changed = [], 0
+    try:
+        for part in parts:
+            with open(directory / part, 'rb') as raw, _open_reader(raw) as reader, \
+                    tarfile.open(fileobj=reader, mode='r|') as tar:
+                for info in tar:
+                    target = pending.pop((part, info.name), None)
+                    if target is None or not info.isfile():
+                        continue
+                    payload = tar.extractfile(info).read()
+                    stats['records'] += 1
+                    rewritten = rewrite(kind, date, payload)
+                    if rewritten is not None:
+                        payload, changed = rewritten, changed + 1
+                    # 分块编号按目录里已落盘的分块推算，上一块改名落盘之后才能开下一块
+                    if writers and writers[-1].size >= PART_BYTES:
+                        writers[-1].finish()
+                    if not writers or writers[-1].size >= PART_BYTES:
+                        writers.append(_PartWriter(directory, date, kind))
+                    rel, gunzipped = target
+                    writers[-1].add(None, rel, payload, bool(gunzipped), hashlib.sha256(payload).hexdigest(), info.mtime)
+        if pending:
+            raise PackVerifyError(f'{kind}/{date} 有 {len(pending)} 条索引记录在分块里找不到')
+        if not changed:
+            _discard_parts(writers)
+            return
+        writers[-1].finish()
+        for writer in writers:
+            _verify_part(writer.path, writer.entries)
+        with conn:
+            conn.execute('DELETE FROM entries WHERE kind=? AND date=?', (kind, date))
+            conn.executemany('INSERT INTO entries VALUES (?,?,?,?,?,?,?,?,?)',
+                             [entry for writer in writers for entry in writer.entries])
+    except Exception:
+        _discard_parts(writers)
+        raise
+    stats['rewritten'] += changed
+    stats['days'] += 1
+    stats['packed_bytes'] += sum(writer.path.stat().st_size for writer in writers)
+    for part in parts:
+        stats['source_bytes'] += (directory / part).stat().st_size
+        # 读取方正打开着的旧分块在 Windows 上删不掉，不在索引里了，下一轮打包按孤儿清理
+        with contextlib.suppress(OSError):
+            (directory / part).unlink()
+    logger.info(f'[LOG_PACK] 重新打包 {kind}/{date}: {changed} 条改写，{len(parts)} 个分块换成 {len(writers)} 个')
+
+
+def rewrite_packed(root, rewrite) -> dict:
+    """把已归档的记录逐条交给 rewrite(kind, date, payload) 改写后按天重新打包。
+
+    rewrite 返回 None 的记录原样保留，一天里没有记录被改写时不动这一天的分块。新分块全部
+    落盘并校验通过后，才在同一个事务里换掉这一天的索引，旧分块随后删除；中途崩溃留下的
+    新分块或旧分块都不在索引里，下一轮打包时按孤儿清理。
+    """
+    stats = dict(days=0, records=0, rewritten=0, source_bytes=0, packed_bytes=0)
+    archive = _archive_root(root)
+    if not (archive / INDEX_FILE).exists():
+        return stats
+    with _exclusive_lock(archive):
+        conn = sqlite3.connect(archive / INDEX_FILE, timeout=30)
+        try:
+            conn.executescript(_SCHEMA)
+            for kind in (KIND_LOGS, KIND_EXCHANGES):
+                _remove_orphans(conn, archive / kind, kind)
+                dates = [row[0] for row in conn.execute(
+                    'SELECT DISTINCT date FROM entries WHERE kind=? ORDER BY date', (kind,))]
+                for date in dates:
+                    _rewrite_day(conn, archive, kind, date, rewrite, stats)
+        finally:
+            conn.close()
+    return stats
+
+
 def purge_packed_before(root, kind: str, cutoff: str) -> int:
     """删除日期早于 cutoff（YYYYMMDD）的归档分块，让保留期也覆盖已打包的数据。
 

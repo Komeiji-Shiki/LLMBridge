@@ -1,10 +1,11 @@
 """日志正文块存储：多轮对话重复的历史和截图只存一份，读回来和原始记录完全一致。"""
 import gzip
 import json
+import os
 import sqlite3
 from datetime import date
 
-from core import log_blobs, log_pack
+from core import log_blob_migration, log_blobs, log_pack
 from core.exchange_archive import load_exchange, save_exchange
 from core.request_context import RequestContext
 from modules.monitoring import MonitorConfig, _load_log_file, monitoring_service
@@ -109,3 +110,80 @@ def test_exchange_archive_and_pack_restore_full_records(tmp_path):
     log_pack.pack_old_logs(tmp_path, 1, today=date(int(day[:4]), int(day[4:6]), int(day[6:])).replace(year=2099))
     packed = log_pack.load_packed_exchange(tmp_path, 'b' * 32)
     assert packed['upstream_request'] == record['upstream_request']
+
+
+def write_old_log(root, day, entry):
+    path = root / day / '06' / f'demo_{day}_0600_{entry["request_id"][:8]}.json.gz'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(gzip.compress(json.dumps(entry, ensure_ascii=False).encode()))
+    return path
+
+
+def write_old_exchange(root, day, exchange_id, record):
+    path = root / 'exchanges' / day / '06' / f'{exchange_id}.json.gz'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(gzip.compress(json.dumps(record, ensure_ascii=False).encode()))
+    return path
+
+
+OLD_ENTRY = {'request_id': 'abcd1234-0000-4000-8000-000000000010', 'model': 'demo', 'request_messages': history(4)}
+OLD_EXCHANGE = {'gateway_request_id': 'c' * 32, 'request': {'messages': history(3)},
+                'upstream_request': {'messages': {'__same_as_request__': True}}}
+
+
+def test_migration_rewrites_old_loose_files_in_place(tmp_path):
+    log = write_old_log(tmp_path, '20261120', OLD_ENTRY)
+    exchange = write_old_exchange(tmp_path, '20261120', 'c' * 32, OLD_EXCHANGE)
+    current = write_old_log(tmp_path, '20261122', {**OLD_ENTRY, 'request_id': 'ffff0000'})
+    untouched = current.read_bytes()
+    os.utime(log, (1795000000, 1795000000))
+
+    stats = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))
+
+    assert stats['loose']['rewritten'] == 2 and stats['loose']['kept'] == 0
+    assert len(gzip.decompress(log.read_bytes())) < 3000
+    assert log.stat().st_mtime == 1795000000  # 打包按修改时间排列
+    stored = json.loads(gzip.decompress(log.read_bytes()))
+    assert log_blobs.hydrate_log(stored, tmp_path) == OLD_ENTRY
+    assert load_exchange(exchange)['request'] == OLD_EXCHANGE['request']
+    assert {last_day for _, _, last_day in blob_rows(tmp_path)} == {20261120}
+    assert current.read_bytes() == untouched  # 今天的目录还在写入，不碰
+    assert log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))['loose']['rewritten'] == 0
+
+
+def test_migration_repacks_archived_days(tmp_path, monkeypatch):
+    # 每条记录单独一个分块，覆盖重新打包时分块的编号
+    monkeypatch.setattr(log_pack, 'PART_BYTES', 1)
+    second = {**OLD_ENTRY, 'request_id': 'bcde2345-0000-4000-8000-000000000011', 'request_messages': history(5)}
+    write_old_log(tmp_path, '20261101', OLD_ENTRY)
+    write_old_log(tmp_path, '20261101', second)
+    write_old_exchange(tmp_path, '20261101', 'c' * 32, OLD_EXCHANGE)
+    log_pack.pack_old_logs(tmp_path, 3, today=date(2026, 11, 22))
+    archive = tmp_path / 'archive'
+    old_parts = set(archive.rglob('*.tar.zst'))
+    old_bytes = sum(path.stat().st_size for path in old_parts)
+
+    stats = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))['packed']
+
+    assert stats['rewritten'] == 3 and stats['days'] == 2 and stats['kept'] == 0
+    new_parts = set(archive.rglob('*.tar.zst'))
+    assert len(new_parts) == 3 and not new_parts & old_parts
+    assert sum(path.stat().st_size for path in new_parts) < old_bytes
+    assert log_pack.find_packed_request(tmp_path, OLD_ENTRY['request_id']) == OLD_ENTRY
+    assert log_pack.find_packed_request(tmp_path, second['request_id']) == second
+    assert log_pack.load_packed_exchange(tmp_path, 'c' * 32)['request'] == OLD_EXCHANGE['request']
+
+    again = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))['packed']
+    assert again['rewritten'] == 0 and set(archive.rglob('*.tar.zst')) == new_parts
+
+
+def test_migration_keeps_records_that_do_not_read_back(tmp_path, monkeypatch):
+    monkeypatch.setitem(log_blob_migration._CODECS, log_pack.KIND_LOGS,
+                        (log_blobs.outline_log, lambda record, root: {**record, 'model': 'changed'}))
+    log = write_old_log(tmp_path, '20261120', OLD_ENTRY)
+    original = log.read_bytes()
+
+    stats = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))
+
+    assert stats['loose']['kept'] == 1 and stats['loose']['rewritten'] == 0
+    assert log.read_bytes() == original
