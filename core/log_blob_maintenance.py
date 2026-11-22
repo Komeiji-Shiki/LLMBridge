@@ -125,17 +125,25 @@ def migrate(root='logs', today=None) -> dict:
 
 # ---------------------------------------------------------------- 删除指定任务的图片
 
-def _refs(value, found: set) -> set:
-    """收集 value 里全部块引用的 ID。"""
-    if isinstance(value, dict):
-        if len(value) == 1 and isinstance(value.get(log_blobs.REF), int):
+def _mime(value: dict) -> str:
+    return next((value[key] for key in _MIME_KEYS if isinstance(value.get(key), str)), '')
+
+
+def _image_refs(value, found: set) -> set:
+    """引用处就能看出是图片的块：带图片 data URL 前缀，或者挂在带图片 MIME 的 data 字段上。"""
+    if log_blobs.is_ref(value):
+        if value.get(log_blobs.PREFIX, '').startswith('data:image/'):
             found.add(value[log_blobs.REF])
-        else:
-            for item in value.values():
-                _refs(item, found)
+    elif isinstance(value, dict):
+        mime = _mime(value)
+        for key, item in value.items():
+            if key == 'data' and mime.startswith('image/') and log_blobs.is_ref(item):
+                found.add(item[log_blobs.REF])
+            else:
+                _image_refs(item, found)
     elif isinstance(value, list):
         for item in value:
-            _refs(item, found)
+            _image_refs(item, found)
     return found
 
 
@@ -150,7 +158,7 @@ def _strip_images(value, note: str, counter: list):
     if isinstance(value, list):
         return [_strip_images(item, note, counter) for item in value]
     if isinstance(value, dict):
-        mime = next((value[key] for key in _MIME_KEYS if isinstance(value.get(key), str)), '')
+        mime = _mime(value)
         copied = {}
         for key, item in value.items():
             if key == 'data' and mime.startswith('image/') and isinstance(item, str) and len(item) >= _IMAGE_MIN_CHARS:
@@ -171,20 +179,29 @@ def _record_payloads(root: Path, kind: str):
                 yield payload
 
 
-def _owned_images(conn, root: Path, kind: str, needle: bytes, stats: dict) -> list:
-    """只被含 needle 的消息引用的块 ID；还被别的消息或记录直接引用的块不算。"""
-    owned, shared = set(), set()
+def _owned_images(conn, root: Path, kind: str, needle: bytes, stats: dict):
+    """只被含 needle 的消息引用的块 ID，以及其中在引用处就能看出是图片的块。
+
+    还被别的消息或记录直接引用的块不算。
+    """
+    owned, shared, images = set(), set(), set()
     for _, codec, data in conn.execute('SELECT id, codec, data FROM blobs WHERE kind = ?', (kind,)):
         payload = log_blobs._decompress(codec, data)
-        if b'"$blob"' in payload:
-            (owned if needle in payload else shared).update(_refs(json.loads(payload), set()))
+        if b'"$blob"' not in payload:
+            continue
+        value = json.loads(payload)
+        if needle in payload:
+            log_blobs.collect_refs(value, owned)
+            _image_refs(value, images)
+        else:
+            log_blobs.collect_refs(value, shared)
     for payload in _record_payloads(root, kind):
         try:
-            shared |= _refs(json.loads(payload), set())
+            log_blobs.collect_refs(json.loads(payload), shared)
         except ValueError:
             continue
     stats['kept_shared'] += len(owned & shared)
-    return sorted(owned - shared)
+    return sorted(owned - shared), images
 
 
 def drop_images(root='logs', marker: str = '', dry_run=False) -> dict:
@@ -202,7 +219,7 @@ def drop_images(root='logs', marker: str = '', dry_run=False) -> dict:
     conn = sqlite3.connect(path, timeout=60, isolation_level=None)
     try:
         for kind in (log_pack.KIND_LOGS, log_pack.KIND_EXCHANGES):
-            candidates = _owned_images(conn, root, kind, marker.encode('utf-8'), stats)
+            candidates, images = _owned_images(conn, root, kind, marker.encode('utf-8'), stats)
             for start in range(0, len(candidates), _UPDATE_BATCH):
                 batch = candidates[start:start + _UPDATE_BATCH]
                 rows = conn.execute(f'SELECT id, codec, hash, data FROM blobs WHERE id IN ({",".join("?" * len(batch))})',
@@ -210,11 +227,17 @@ def drop_images(root='logs', marker: str = '', dry_run=False) -> dict:
                 updates = []
                 for blob_id, codec, digest, data in rows:
                     payload = log_blobs._decompress(codec, data)
-                    counter = [0]
-                    stripped = _strip_images(json.loads(payload), f'原 {len(payload)} 字节，sha256 {digest.hex()[:16]}',
-                                             counter)
-                    if not counter[0]:
-                        continue  # 长文本之类的非图片块
+                    note = f'原 {len(payload)} 字节，sha256 {digest.hex()[:16]}'
+                    content, counter = json.loads(payload), [0]
+                    if isinstance(content, str):
+                        # 只有 base64 的图片块：读取时前缀接回去，得到 "data:image/png;base64,[图片未保存：…]"
+                        if blob_id not in images:
+                            continue  # 长文本块
+                        stripped = f'[图片未保存：{note}]'
+                    else:
+                        stripped = _strip_images(content, note, counter)
+                        if not counter[0]:
+                            continue
                     new = fastjson.dumps(stripped)
                     updates.append((new, len(new), hashlib.sha256(new).digest(), blob_id))
                     stats['dropped'] += 1

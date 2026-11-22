@@ -1,8 +1,13 @@
 """日志正文的内容寻址块存储：多轮对话每轮都带着的历史消息和截图只存一份。
 
 请求日志和交换归档写盘前，outline() 把对话数组（messages / input / contents / tools 等）的
-每一项、以及项内的大块内容（截图、长文本）换成 {"$blob": 块 ID}，正文按 sha256 去重存进
+每一项、以及项内的长字符串（截图、长文本）换成 {"$blob": 块 ID}，正文按 sha256 去重存进
 日志根目录下的 blobs.db；hydrate() 读取时原样还原，读取方看到的结构和原始记录一致。
+
+长字符串按字符串本身成块，和外面包着的部件结构无关：同一张图在 Chat 的 image_url、
+Responses 的 input_image 里都指向同一个块。data URL 的 "data:image/png;base64," 前缀记在
+引用里（{"$blob": ID, "$prefix": 前缀}），块里只有 base64，和 Anthropic / Gemini 的裸
+base64 也是同一个块。
 
 两类日志保留期不同，块按 kind 分开去重。每个块记最后一次被引用的日期：按天删除日志时，
 最后引用日期早于截止日的块只被已删除的日志引用，可以一并回收，不用扫描归档。
@@ -27,6 +32,7 @@ from utils import fastjson
 logger = logging.getLogger(__name__)
 
 REF = '$blob'
+PREFIX = '$prefix'
 MISSING = '$blob_missing'
 KIND_LOGS = 'logs'
 KIND_EXCHANGES = 'exchanges'
@@ -36,10 +42,10 @@ EXCHANGE_KEYS = ('messages', 'input', 'contents', 'tools', 'system', 'instructio
                  'system_instruction', 'systemInstruction')
 # 序列化后不到这个长度的项留在原处：块引用本身也要几十字节
 MIN_ITEM_BYTES = 512
-# 项内的单块内容先单独成块：消息外层只差一个缓存标记时，里面的截图仍能共用
-MIN_PART_BYTES = 8192
-_NESTED_KEYS = ('content', 'parts', 'summary')
-_MAX_DEPTH = 4
+# 项内的长字符串先单独成块：消息外层只差一个缓存标记、或者换了协议格式时，里面的截图仍能共用
+MIN_STRING_CHARS = 8192
+# data URL 的前缀只在开头一小段里找
+_PREFIX_SCAN = 128
 _CODEC_RAW, _CODEC_ZSTD = 0, 1
 _ZSTD_LEVEL = 3
 # 同一段历史每轮都要查一次，记住最近的哈希省掉查库
@@ -216,33 +222,51 @@ def store_for(log_root) -> BlobStore:
 
 # ---------------------------------------------------------------- 拆分与还原
 
-def _shrink(value, put, depth):
-    """项内的大块内容先单独成块，返回替换后的副本；没有替换时返回原对象。"""
-    if depth >= _MAX_DEPTH or not isinstance(value, dict):
-        return value
-    copied = None
-    for key in _NESTED_KEYS:
-        nested = value.get(key)
-        if not isinstance(nested, list):
-            continue
-        parts = []
-        for part in nested:
-            part = _shrink(part, put, depth + 1)
-            payload = fastjson.dumps(part)
-            parts.append({REF: put(payload)} if len(payload) >= MIN_PART_BYTES else part)
-        copied = copied or dict(value)
-        copied[key] = parts
-    return copied or value
+def data_url_prefix(text: str) -> str:
+    """data URL 里 base64 之前的部分，不是 base64 data URL 时返回空串。"""
+    if not text.startswith('data:'):
+        return ''
+    end = text.find(';base64,', 0, _PREFIX_SCAN)
+    return text[:end + 8] if end > 0 else ''
+
+
+def _shrink(value, put):
+    """长字符串单独成块，返回替换后的副本；没有替换时返回原对象。"""
+    if isinstance(value, str):
+        if len(value) < MIN_STRING_CHARS:
+            return value
+        prefix = data_url_prefix(value)
+        ref = {REF: put(fastjson.dumps(value[len(prefix):]))}
+        if prefix:
+            ref[PREFIX] = prefix
+        return ref
+    if isinstance(value, list):
+        copied = None
+        for index, item in enumerate(value):
+            shrunk = _shrink(item, put)
+            if shrunk is not item:
+                copied = copied or list(value)
+                copied[index] = shrunk
+        return value if copied is None else copied
+    if isinstance(value, dict):
+        copied = None
+        for key, item in value.items():
+            shrunk = _shrink(item, put)
+            if shrunk is not item:
+                copied = copied or dict(value)
+                copied[key] = shrunk
+        return value if copied is None else copied
+    return value
 
 
 def _chunk(value, put):
-    value = _shrink(value, put, 0)
+    value = _shrink(value, put)
     payload = fastjson.dumps(value)
     return {REF: put(payload)} if len(payload) >= MIN_ITEM_BYTES else value
 
 
 def outline(value: dict, keys, put) -> dict:
-    """把 keys 对应的对话数组逐项、长文本整段换成块引用，返回新 dict，不改原值。"""
+    """把 keys 对应的对话数组逐项、长字符串整段换成块引用，返回新 dict，不改原值。"""
     copied = dict(value)
     for key in keys:
         item = copied.get(key)
@@ -253,52 +277,74 @@ def outline(value: dict, keys, put) -> dict:
     return copied
 
 
-def _is_ref(value) -> bool:
-    return isinstance(value, dict) and len(value) == 1 and isinstance(value.get(REF), int)
+def is_ref(value) -> bool:
+    return (isinstance(value, dict) and isinstance(value.get(REF), int)
+            and len(value) == (2 if isinstance(value.get(PREFIX), str) else 1))
+
+
+def collect_refs(value, found: set) -> set:
+    """value 里全部块引用的 ID，不进入块内容。"""
+    if is_ref(value):
+        found.add(value[REF])
+    elif isinstance(value, dict):
+        for item in value.values():
+            collect_refs(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            collect_refs(item, found)
+    return found
 
 
 class _Resolver:
+    """逐层取块：先收集这一层的全部引用一次查库，取回的内容里还有引用就再来一轮。"""
+
     def __init__(self, store: BlobStore):
         self.store = store
+        # 块 ID -> (内容, 内容里是否还有引用)；没有引用的块还原时不用再遍历
         self.cache = {}
 
-    def prefetch(self, values):
-        ids = [value[REF] for value in values if _is_ref(value) and value[REF] not in self.cache]
-        for blob_id, payload in self.store.load(ids).items():
-            self.cache[blob_id] = json.loads(payload)
+    def load(self, value):
+        pending = collect_refs(value, set()) - self.cache.keys()
+        while pending:
+            found = self.store.load(pending)
+            nested = set()
+            for blob_id in pending:
+                payload = found.get(blob_id)
+                if payload is None:
+                    self.cache[blob_id] = (None, False)
+                    logger.warning(f'[LOG_BLOBS] 日志块 {blob_id} 缺失，原位留下占位')
+                    continue
+                loaded, has_refs = json.loads(payload), b'"$blob"' in payload
+                self.cache[blob_id] = (loaded, has_refs)
+                if has_refs:
+                    collect_refs(loaded, nested)
+            pending = nested - self.cache.keys()
 
-    def item(self, value, depth=0):
-        if _is_ref(value):
-            blob_id = value[REF]
-            if blob_id not in self.cache:
-                self.prefetch([value])
-            if blob_id not in self.cache:
-                logger.warning(f'[LOG_BLOBS] 日志块 {blob_id} 缺失，原位留下占位')
-                return {MISSING: blob_id}
-            value = self.cache[blob_id]
-        if depth >= _MAX_DEPTH or not isinstance(value, dict):
-            return value
-        if not any(isinstance(value.get(key), list) for key in _NESTED_KEYS):
-            return value
-        copied = dict(value)
-        for key in _NESTED_KEYS:
-            if isinstance(copied.get(key), list):
-                self.prefetch(copied[key])
-                copied[key] = [self.item(part, depth + 1) for part in copied[key]]
-        return copied
+    def restore(self, value):
+        if is_ref(value):
+            loaded, has_refs = self.cache.get(value[REF], (None, False))
+            if loaded is None:
+                return {MISSING: value[REF]}
+            if has_refs:
+                loaded = self.restore(loaded)
+            return value[PREFIX] + loaded if PREFIX in value and isinstance(loaded, str) else loaded
+        if isinstance(value, list):
+            restored = [self.restore(item) for item in value]
+            return value if all(a is b for a, b in zip(restored, value)) else restored
+        if isinstance(value, dict):
+            restored = {key: self.restore(item) for key, item in value.items()}
+            return value if all(restored[key] is item for key, item in value.items()) else restored
+        return value
 
 
 def hydrate(value: dict, keys, store: BlobStore) -> dict:
     """还原 outline 的块引用，读取方看到的结构和原始记录一致。"""
     resolver = _Resolver(store)
+    present = [key for key in keys if value.get(key) is not None]
+    resolver.load([value[key] for key in present])
     copied = dict(value)
-    for key in keys:
-        item = copied.get(key)
-        if isinstance(item, list):
-            resolver.prefetch(item)
-            copied[key] = [resolver.item(element) for element in item]
-        elif item is not None:
-            copied[key] = resolver.item(item)
+    for key in present:
+        copied[key] = resolver.restore(value[key])
     return copied
 
 

@@ -9,6 +9,7 @@ from core import log_blob_maintenance, log_blobs, log_pack
 from core.exchange_archive import load_exchange, save_exchange
 from core.request_context import RequestContext
 from modules.monitoring import MonitorConfig, _load_log_file, monitoring_service
+from utils import fastjson
 
 TODAY = date(2026, 11, 21)
 SCREENSHOT = 'data:image/png;base64,' + 'iVBORw0KGgo' * 3000
@@ -43,7 +44,34 @@ def test_outlined_log_reads_back_identical(tmp_path):
     assert len(json.dumps(stored)) < 2000
     assert log_blobs.hydrate_log(stored, tmp_path) == entry
     # 外层只差缓存标记的两条消息各存一份，里面的截图只存一份
-    assert sum(size > len(SCREENSHOT) for _, size, _ in blob_rows(tmp_path)) == 1
+    assert sum(size >= log_blobs.MIN_STRING_CHARS for _, size, _ in blob_rows(tmp_path)) == 1
+
+
+def test_same_image_in_any_protocol_format_is_stored_once(tmp_path):
+    data = SCREENSHOT.split(',', 1)[1]
+    record = {
+        'request': {'messages': [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': SCREENSHOT}}]}]},
+        'upstream_request': {
+            'input': [{'role': 'user', 'content': [{'type': 'input_image', 'image_url': SCREENSHOT}]}],
+            'messages': [{'role': 'user', 'content': [
+                {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': data}}]}],
+            'contents': [{'role': 'user', 'parts': [{'inline_data': {'mime_type': 'image/png', 'data': data}}]}]}}
+
+    stored = log_blobs.outline_exchange(record, tmp_path)
+
+    assert log_blobs.hydrate_exchange(stored, tmp_path) == record
+    assert sum(size >= log_blobs.MIN_STRING_CHARS for _, size, _ in blob_rows(tmp_path)) == 1
+
+
+def test_older_part_level_blobs_still_read_back(tmp_path):
+    message = screenshot_turn()
+    with log_blobs.store_for(tmp_path).writing(log_blobs.KIND_LOGS) as put:
+        part = put(fastjson.dumps(message['content'][0]))
+        item = put(fastjson.dumps({**message, 'content': [{log_blobs.REF: part}, message['content'][1]]}))
+
+    restored = log_blobs.hydrate_log({'request_messages': [{log_blobs.REF: item}]}, tmp_path)
+
+    assert restored == {'request_messages': [message]}
 
 
 def test_later_turns_only_store_new_messages(tmp_path):
@@ -221,7 +249,12 @@ def test_drop_images_only_touches_photos_owned_by_marked_requests(tmp_path):
         {'role': 'user', 'content': [{'type': 'text', 'text': '再看这张' * 200}, photo('d')]}])
     log_pack.pack_old_logs(tmp_path, 3, today=date(2026, 11, 22))
     context = RequestContext(request_id='e' * 32, owner_id='admin', model='demo')
-    exchange = save_exchange(context, {'request': {'input': indexing_request(photo('a'))}}, tmp_path / 'exchanges')
+    # 上游请求换成 Anthropic 格式，同一张图是裸 base64，和 data URL 落在同一个块上
+    anthropic = indexing_request(photo('a'))
+    anthropic[0]['content'][1] = {'type': 'image', 'source': {
+        'type': 'base64', 'media_type': 'image/jpeg', 'data': photo('a')['image_url']['url'].split(',', 1)[1]}}
+    exchange = save_exchange(context, {'request': {'input': indexing_request(photo('a'))},
+                                       'upstream_request': {'messages': anthropic}}, tmp_path / 'exchanges')
 
     preview = log_blob_maintenance.drop_images(tmp_path, MARKER, dry_run=True)
     assert preview['dropped'] == 3 and preview['kept_shared'] == 1
@@ -232,10 +265,13 @@ def test_drop_images_only_touches_photos_owned_by_marked_requests(tmp_path):
     assert stats['dropped'] == 3
     parts = log_pack.find_packed_request(tmp_path, 'aaaa0001')['request_messages'][0]['content']
     assert parts[0] == first['request_messages'][0]['content'][0]
-    assert parts[1]['image_url']['url'].startswith('[图片未保存：image/jpeg，原 ') and parts[1]['image_url']['detail'] == 'high'
+    assert parts[1]['image_url']['url'].startswith('data:image/jpeg;base64,[图片未保存：原 ')
+    assert parts[1]['image_url']['detail'] == 'high'
     assert parts[2] == photo('b')
     assert read_log(tmp_path, chat_path) == chat
-    assert load_exchange(exchange)['request']['input'][0]['content'][1]['image_url']['url'].startswith('[图片未保存')
+    loaded = load_exchange(exchange)
+    assert loaded['request']['input'][0]['content'][1]['image_url']['url'].startswith('data:image/jpeg;base64,[图片未保存')
+    assert loaded['upstream_request']['messages'][0]['content'][1]['source']['data'].startswith('[图片未保存')
     # 占位换了哈希：再写入同一张图会另存一份
     again, again_path = write_outlined_log(tmp_path, '20261122', 'cccc0001', indexing_request(photo('a')))
     assert read_log(tmp_path, again_path) == again
