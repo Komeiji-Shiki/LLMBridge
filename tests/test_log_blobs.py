@@ -5,7 +5,7 @@ import os
 import sqlite3
 from datetime import date
 
-from core import log_blob_migration, log_blobs, log_pack
+from core import log_blob_maintenance, log_blobs, log_pack
 from core.exchange_archive import load_exchange, save_exchange
 from core.request_context import RequestContext
 from modules.monitoring import MonitorConfig, _load_log_file, monitoring_service
@@ -138,7 +138,7 @@ def test_migration_rewrites_old_loose_files_in_place(tmp_path):
     untouched = current.read_bytes()
     os.utime(log, (1795000000, 1795000000))
 
-    stats = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))
+    stats = log_blob_maintenance.migrate(tmp_path, today=date(2026, 11, 22))
 
     assert stats['loose']['rewritten'] == 2 and stats['loose']['kept'] == 0
     assert len(gzip.decompress(log.read_bytes())) < 3000
@@ -148,7 +148,7 @@ def test_migration_rewrites_old_loose_files_in_place(tmp_path):
     assert load_exchange(exchange)['request'] == OLD_EXCHANGE['request']
     assert {last_day for _, _, last_day in blob_rows(tmp_path)} == {20261120}
     assert current.read_bytes() == untouched  # 今天的目录还在写入，不碰
-    assert log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))['loose']['rewritten'] == 0
+    assert log_blob_maintenance.migrate(tmp_path, today=date(2026, 11, 22))['loose']['rewritten'] == 0
 
 
 def test_migration_repacks_archived_days(tmp_path, monkeypatch):
@@ -163,7 +163,7 @@ def test_migration_repacks_archived_days(tmp_path, monkeypatch):
     old_parts = set(archive.rglob('*.tar.zst'))
     old_bytes = sum(path.stat().st_size for path in old_parts)
 
-    stats = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))['packed']
+    stats = log_blob_maintenance.migrate(tmp_path, today=date(2026, 11, 22))['packed']
 
     assert stats['rewritten'] == 3 and stats['days'] == 2 and stats['kept'] == 0
     new_parts = set(archive.rglob('*.tar.zst'))
@@ -173,17 +173,69 @@ def test_migration_repacks_archived_days(tmp_path, monkeypatch):
     assert log_pack.find_packed_request(tmp_path, second['request_id']) == second
     assert log_pack.load_packed_exchange(tmp_path, 'c' * 32)['request'] == OLD_EXCHANGE['request']
 
-    again = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))['packed']
+    again = log_blob_maintenance.migrate(tmp_path, today=date(2026, 11, 22))['packed']
     assert again['rewritten'] == 0 and set(archive.rglob('*.tar.zst')) == new_parts
 
 
 def test_migration_keeps_records_that_do_not_read_back(tmp_path, monkeypatch):
-    monkeypatch.setitem(log_blob_migration._CODECS, log_pack.KIND_LOGS,
+    monkeypatch.setitem(log_blob_maintenance._CODECS, log_pack.KIND_LOGS,
                         (log_blobs.outline_log, lambda record, root: {**record, 'model': 'changed'}))
     log = write_old_log(tmp_path, '20261120', OLD_ENTRY)
     original = log.read_bytes()
 
-    stats = log_blob_migration.migrate(tmp_path, today=date(2026, 11, 22))
+    stats = log_blob_maintenance.migrate(tmp_path, today=date(2026, 11, 22))
 
     assert stats['loose']['kept'] == 1 and stats['loose']['rewritten'] == 0
     assert log.read_bytes() == original
+
+
+MARKER = '批量识图任务标记'
+
+
+def photo(tag):
+    return {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + f'/9j/{tag}' * 3000, 'detail': 'high'}}
+
+
+def indexing_request(*photos):
+    return [{'role': 'user', 'content': [{'type': 'text', 'text': MARKER + '，只输出 JSON。' * 30}, *photos]}]
+
+
+def write_outlined_log(root, day, rid, messages):
+    entry = {'request_id': rid, 'request_messages': messages}
+    path = root / day / '06' / f'demo_{day}_0600_{rid[:8]}.json.gz'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(gzip.compress(json.dumps(log_blobs.outline_log(entry, root)).encode()))
+    return entry, path
+
+
+def read_log(root, path):
+    return log_blobs.hydrate_log(json.loads(gzip.decompress(path.read_bytes())), root)
+
+
+def test_drop_images_only_touches_photos_owned_by_marked_requests(tmp_path):
+    first, first_path = write_outlined_log(tmp_path, '20261101', 'aaaa0001', indexing_request(photo('a'), photo('b')))
+    write_outlined_log(tmp_path, '20261101', 'aaaa0002', indexing_request(photo('c')))
+    # 同一张 b 也在普通对话里发过：短消息留在记录里直接引用图片块，长消息自己成块
+    chat, chat_path = write_outlined_log(tmp_path, '20261122', 'bbbb0001', [
+        {'role': 'user', 'content': [{'type': 'text', 'text': '这是什么'}, photo('b')]},
+        {'role': 'user', 'content': [{'type': 'text', 'text': '再看这张' * 200}, photo('d')]}])
+    log_pack.pack_old_logs(tmp_path, 3, today=date(2026, 11, 22))
+    context = RequestContext(request_id='e' * 32, owner_id='admin', model='demo')
+    exchange = save_exchange(context, {'request': {'input': indexing_request(photo('a'))}}, tmp_path / 'exchanges')
+
+    preview = log_blob_maintenance.drop_images(tmp_path, MARKER, dry_run=True)
+    assert preview['dropped'] == 3 and preview['kept_shared'] == 1
+    assert log_pack.find_packed_request(tmp_path, 'aaaa0001') == first
+
+    stats = log_blob_maintenance.drop_images(tmp_path, MARKER)
+
+    assert stats['dropped'] == 3
+    parts = log_pack.find_packed_request(tmp_path, 'aaaa0001')['request_messages'][0]['content']
+    assert parts[0] == first['request_messages'][0]['content'][0]
+    assert parts[1]['image_url']['url'].startswith('[图片未保存：image/jpeg，原 ') and parts[1]['image_url']['detail'] == 'high'
+    assert parts[2] == photo('b')
+    assert read_log(tmp_path, chat_path) == chat
+    assert load_exchange(exchange)['request']['input'][0]['content'][1]['image_url']['url'].startswith('[图片未保存')
+    # 占位换了哈希：再写入同一张图会另存一份
+    again, again_path = write_outlined_log(tmp_path, '20261122', 'cccc0001', indexing_request(photo('a')))
+    assert read_log(tmp_path, again_path) == again

@@ -187,9 +187,17 @@ class BlobStore:
                 self._writer = self._connect(check_same_thread=False)
             removed = self._writer.execute(
                 'DELETE FROM blobs WHERE kind = ? AND last_day < ?', (kind, day)).rowcount
-            self._memo.clear()
-            self._touched = set()
+            self._forget()
         return removed
+
+    def forget(self):
+        """块库被别处改过（回收、换成占位）之后清掉缓存，后续记录不再引用旧块。"""
+        with self._lock:
+            self._forget()
+
+    def _forget(self):
+        self._memo.clear()
+        self._touched = set()
 
 
 _stores = {}

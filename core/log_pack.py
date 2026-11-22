@@ -301,6 +301,38 @@ def pack_old_logs(root='logs', older_than_days=DEFAULT_COMPRESS_AFTER_DAYS, toda
     return stats
 
 
+def _members(path: Path):
+    """按顺序读出分块里的每个文件：(TarInfo, 内容)。"""
+    with open(path, 'rb') as raw, _open_reader(raw) as reader, tarfile.open(fileobj=reader, mode='r|') as tar:
+        for info in tar:
+            if info.isfile():
+                yield info, tar.extractfile(info).read()
+
+
+def _member_name(kind: str, date: str, rel: str, gunzipped) -> str:
+    return f'{kind}/{date}/{rel[:-3] if gunzipped else rel}'
+
+
+def iter_packed(root, kind: str):
+    """按分块顺序读出某类日志的全部归档记录：(日期, 相对路径, 内容)。"""
+    conn = _connect_readonly(root)
+    if conn is None:
+        return
+    try:
+        rows = conn.execute('SELECT part, date, rel, gunzipped FROM entries WHERE kind=?', (kind,)).fetchall()
+    except sqlite3.OperationalError:
+        return  # 打包任务还没建表
+    finally:
+        conn.close()
+    parts = {}
+    for part, date, rel, gunzipped in rows:
+        parts.setdefault(part, {})[_member_name(kind, date, rel, gunzipped)] = (date, rel)
+    for part, names in sorted(parts.items()):
+        for info, payload in _members(_archive_root(root) / kind / part):
+            if info.name in names:
+                yield (*names[info.name], payload)
+
+
 def _discard_parts(writers) -> None:
     for writer in writers:
         writer.abort()
@@ -311,30 +343,26 @@ def _rewrite_day(conn, archive: Path, kind: str, date: str, rewrite, stats: dict
     directory = archive / kind
     rows = conn.execute('SELECT part, rel, gunzipped FROM entries WHERE kind=? AND date=? ORDER BY part, data_offset',
                         (kind, date)).fetchall()
-    pending = {(part, f'{kind}/{date}/{rel[:-3] if gunzipped else rel}'): (rel, gunzipped)
-               for part, rel, gunzipped in rows}
+    pending = {(part, _member_name(kind, date, rel, gunzipped)): (rel, gunzipped) for part, rel, gunzipped in rows}
     parts = list(dict.fromkeys(part for part, _, _ in rows))
     writers, changed = [], 0
     try:
         for part in parts:
-            with open(directory / part, 'rb') as raw, _open_reader(raw) as reader, \
-                    tarfile.open(fileobj=reader, mode='r|') as tar:
-                for info in tar:
-                    target = pending.pop((part, info.name), None)
-                    if target is None or not info.isfile():
-                        continue
-                    payload = tar.extractfile(info).read()
-                    stats['records'] += 1
-                    rewritten = rewrite(kind, date, payload)
-                    if rewritten is not None:
-                        payload, changed = rewritten, changed + 1
-                    # 分块编号按目录里已落盘的分块推算，上一块改名落盘之后才能开下一块
-                    if writers and writers[-1].size >= PART_BYTES:
-                        writers[-1].finish()
-                    if not writers or writers[-1].size >= PART_BYTES:
-                        writers.append(_PartWriter(directory, date, kind))
-                    rel, gunzipped = target
-                    writers[-1].add(None, rel, payload, bool(gunzipped), hashlib.sha256(payload).hexdigest(), info.mtime)
+            for info, payload in _members(directory / part):
+                target = pending.pop((part, info.name), None)
+                if target is None:
+                    continue
+                stats['records'] += 1
+                rewritten = rewrite(kind, date, payload)
+                if rewritten is not None:
+                    payload, changed = rewritten, changed + 1
+                # 分块编号按目录里已落盘的分块推算，上一块改名落盘之后才能开下一块
+                if writers and writers[-1].size >= PART_BYTES:
+                    writers[-1].finish()
+                if not writers or writers[-1].size >= PART_BYTES:
+                    writers.append(_PartWriter(directory, date, kind))
+                rel, gunzipped = target
+                writers[-1].add(None, rel, payload, bool(gunzipped), hashlib.sha256(payload).hexdigest(), info.mtime)
         if pending:
             raise PackVerifyError(f'{kind}/{date} 有 {len(pending)} 条索引记录在分块里找不到')
         if not changed:
