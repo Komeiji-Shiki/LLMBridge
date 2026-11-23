@@ -619,6 +619,7 @@ def test_responses_content_filter_is_an_incomplete_result(stream):
     {"type": "audio", "source": {"type": "base64", "data": "QUJD", "media_type": "audio/mpeg"}},
     {"type": "text", "text": '1→<graywill_audio mime_type="audio/mpeg">QUJD</graywill_audio>'},
     {"type": "text", "text": '<graywill_audio_ref id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>'},
+    {"type": "text", "text": '1\t音频文件：a.mp3\n3\t<graywill_audio_ref id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/>'},
 ])
 def test_anthropic_tool_audio_keeps_parallel_results_before_media(protocol, audio_block):
     """音频经过入口转换后保留字节及 MIME，两个并行工具结果仍先配对完成。"""

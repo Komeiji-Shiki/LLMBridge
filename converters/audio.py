@@ -7,8 +7,8 @@ from converters.media import extract_file
 
 
 _AUDIO_ENVELOPE = re.compile(
-    # 封装必须独占一行，避免把源码字符串里的标签当成音频；兼容 Read 的行号前缀。
-    r'^[ \t]*(?:\d+[ \t]*→[ \t]*)?'
+    # 封装必须独占一行，避免把源码字符串里的标签当成音频；兼容 Read 新旧两种行号前缀（"3→"、"3\t"）。
+    r'^[ \t]*(?:\d+(?:[ \t]*→|\t)[ \t]*)?'
     r'(?:<graywill_audio mime_type="(audio/[^"<>\s]+)">([A-Za-z0-9+/=]+)</graywill_audio>'
     r'|<graywill_audio_ref id="([a-f0-9]{32})"[ \t]*/>)'
     r'[ \t]*(?=\r?$)',
