@@ -74,6 +74,18 @@ def test_passthrough_forwards_client_end_to_end_headers():
     assert headers['Authorization'] == 'Bearer upstream-key'
 
 
+def test_endpoint_extra_headers_are_sent_and_override_client_values():
+    _, headers = _collect_passthrough(RequestContext(
+        endpoint={'extra_headers': {'X-Vertex-AI-LLM-Shared-Request-Type': 'priority'}},
+        upstream_headers={'x-vertex-ai-llm-shared-request-type': 'flex', 'x-provider-trace': 'kept'},
+    ))
+
+    assert headers['X-Vertex-AI-LLM-Shared-Request-Type'] == 'priority'
+    assert 'x-vertex-ai-llm-shared-request-type' not in headers
+    assert headers['x-provider-trace'] == 'kept'
+    assert headers['Authorization'] == 'Bearer upstream-key'
+
+
 def test_passthrough_does_not_invent_missing_opencode_session():
     _, headers = _collect_passthrough(RequestContext())
 

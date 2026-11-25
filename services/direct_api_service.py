@@ -275,14 +275,23 @@ class DirectAPIService:
 
     @classmethod
     def _apply_context_upstream_headers(cls, request_headers: Dict[str, str]) -> None:
-        """转发客户端提供的端到端请求头，不为缺失字段生成替代值。"""
+        """转发客户端提供的端到端请求头，不为缺失字段生成替代值；
+        再写入模型配置 extra_headers 里固定的上游请求头（同名时覆盖客户端的值）。"""
         context = current_request.get()
         context_headers = getattr(context, 'upstream_headers', None) if context else None
-        if not isinstance(context_headers, dict):
+        if isinstance(context_headers, dict):
+            for name, value in context_headers.items():
+                if str(name).lower() not in UPSTREAM_HEADER_EXCLUSIONS:
+                    request_headers[name] = value
+        endpoint = getattr(context, 'endpoint', None) if context else None
+        extra_headers = endpoint.get('extra_headers') if isinstance(endpoint, dict) else None
+        if not isinstance(extra_headers, dict):
             return
-        for name, value in context_headers.items():
-            if str(name).lower() not in UPSTREAM_HEADER_EXCLUSIONS:
-                request_headers[name] = value
+        for name, value in extra_headers.items():
+            name = str(name)
+            for existing in [key for key in request_headers if key.lower() == name.lower()]:
+                del request_headers[existing]
+            request_headers[name] = str(value)
 
     @staticmethod
     def _convert_oai_tools_to_gemini(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
