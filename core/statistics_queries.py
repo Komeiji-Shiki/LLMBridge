@@ -3,6 +3,7 @@
 import ast
 import json
 import time
+from collections import Counter
 
 from core.stream_stop import CLIENT_DISCONNECTED
 
@@ -130,32 +131,58 @@ def _error_label(error: str) -> str:
     return text.splitlines()[0][:160] if text else '未知错误'
 
 
+# 一次请求内部重试过几次上游：只有多于一次时才需要解析 timings
+_RETRIED = "COALESCE(json_array_length(timings, '$.attempts'), 0) > 1"
+
+
 def query_availability(conn, now: float, bucket_seconds: int, buckets: int) -> dict:
-    """按模型、按时间桶统计成功和失败；桶对齐到整点倍数，最后一格是正在进行的这一段。"""
+    """按模型、按时间桶统计上游每次尝试的成败，一次请求重试几次就算几次；桶对齐到整点倍数，最后一格是正在进行的这一段。
+    格子里另带请求级的 requests / request_failed，区分调用方实际看到的结果。"""
     start = (int(now // bucket_seconds) - buckets + 1) * bucket_seconds
     slot = 'CAST((timestamp - ?) / ? AS INTEGER)'
-    models = {}
+    models, labels = {}, {}
+
+    def add(model, index, **counts):
+        item = models.setdefault(model, {'model': model, 'total': 0, 'success': 0, 'failed': 0, 'cancelled': 0, 'cells': {}})
+        cell = item['cells'].setdefault(index, {'slot': index, 'total': 0, 'success': 0, 'failed': 0, 'cancelled': 0,
+                                                'requests': 0, 'request_failed': 0})
+        for key, count in counts.items():
+            cell[key] += count
+            if key in item:
+                item[key] += count
+
+    # 没有重试的请求，一次请求就是一次上游尝试
     for model, index, total, success, gone in conn.execute(f'''
         SELECT model, {slot}, COUNT(*), SUM(success = 1), SUM(success = 0 AND {_CLIENT_GONE})
-        FROM requests WHERE timestamp >= ? GROUP BY 1, 2
+        FROM requests WHERE timestamp >= ? AND NOT {_RETRIED} GROUP BY 1, 2
     ''', (start, bucket_seconds, start)):
-        item = models.setdefault(model, {'model': model, 'total': 0, 'success': 0, 'failed': 0, 'cancelled': 0, 'cells': {}})
         failed = total - success - gone
-        item['cells'][index] = {'slot': index, 'total': total, 'success': success, 'failed': failed, 'cancelled': gone}
-        item['total'] += total
-        item['success'] += success
-        item['failed'] += failed
-        item['cancelled'] += gone
+        add(model, index, total=total, success=success, failed=failed, cancelled=gone, requests=total, request_failed=failed)
     # 失败的格子附上出现最多的错误，悬停时直接看到是限流还是上游报错
-    top = {}
     for model, index, error, count in conn.execute(f'''
         SELECT model, {slot}, error, COUNT(*) FROM requests
-        WHERE timestamp >= ? AND success = 0 AND NOT {_CLIENT_GONE} GROUP BY 1, 2, 3
+        WHERE timestamp >= ? AND NOT {_RETRIED} AND success = 0 AND NOT {_CLIENT_GONE} GROUP BY 1, 2, 3
     ''', (start, bucket_seconds, start)):
-        if count > top.get((model, index), (None, 0))[1]:
-            top[(model, index)] = (error, count)
-    for (model, index), (error, count) in top.items():
-        models[model]['cells'][index].update(error=_error_label(error), error_count=count)
+        labels.setdefault((model, index), Counter())[_error_label(error)] += count
+    # 重试过的请求逐次计入：被重试救回来的 429 也是上游真实的不可用
+    for model, index, success, error, timings in conn.execute(f'''
+        SELECT model, {slot}, success, error, timings FROM requests WHERE timestamp >= ? AND {_RETRIED}
+    ''', (start, bucket_seconds, start)):
+        gone = str(error or '').startswith(CLIENT_DISCONNECTED)
+        add(model, index, requests=1, request_failed=int(not success and not gone))
+        for attempt in json.loads(timings)['attempts']:
+            status = attempt.get('status')
+            if status is None:
+                add(model, index, total=1, cancelled=1)
+            elif status == 200:
+                add(model, index, total=1, success=1)
+            else:
+                add(model, index, total=1, failed=1)
+                event = (attempt.get('upstream_failure') or {}).get('event')
+                labels.setdefault((model, index), Counter())[_error_label(str(event) if event else f'HTTP {status}')] += 1
+    for (model, index), counter in labels.items():
+        error, count = counter.most_common(1)[0]
+        models[model]['cells'][index].update(error=error, error_count=count)
     rows = sorted(models.values(), key=lambda row: row['total'], reverse=True)
     for row in rows:
         row['cells'] = sorted(row['cells'].values(), key=lambda cell: cell['slot'])

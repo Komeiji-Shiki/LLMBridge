@@ -12,10 +12,10 @@ NOW = 1_800_000_000 + 3 * 600 + 120      # 当前这一格开始 2 分钟
 _ids = itertools.count()
 
 
-def write(logger, model, seconds_ago, success=True, error=None):
+def write(logger, model, seconds_ago, success=True, error=None, attempts=None):
     logger.write_request({'type': 'request_end', 'request_id': f'r{next(_ids)}', 'timestamp': NOW - seconds_ago,
                           'model': model, 'status': 'success' if success else 'failed', 'success': success,
-                          **({'error': error} if error else {})})
+                          **({'error': error} if error else {}), **({'timings': {'attempts': attempts}} if attempts else {})})
 
 
 def test_buckets_align_to_the_clock_and_split_failures_from_client_disconnects(tmp_path):
@@ -36,12 +36,30 @@ def test_buckets_align_to_the_clock_and_split_failures_from_client_disconnects(t
     neon, carbon = result['models']
     assert (neon['model'], neon['total'], neon['success'], neon['failed'], neon['cancelled']) == ('neon', 6, 2, 3, 1)
     assert neon['cells'] == [
-        {'slot': 34, 'total': 1, 'success': 1, 'failed': 0, 'cancelled': 0},
-        {'slot': 35, 'total': 5, 'success': 1, 'failed': 3, 'cancelled': 1,
+        {'slot': 34, 'total': 1, 'success': 1, 'failed': 0, 'cancelled': 0, 'requests': 1, 'request_failed': 0},
+        {'slot': 35, 'total': 5, 'success': 1, 'failed': 3, 'cancelled': 1, 'requests': 5, 'request_failed': 3,
          'error': 'Interaction failed', 'error_count': 2},
     ]
     # 只有客户端断开的格子不算失败，也不附错误
-    assert carbon['cells'] == [{'slot': 33, 'total': 1, 'success': 0, 'failed': 0, 'cancelled': 1}]
+    assert carbon['cells'] == [{'slot': 33, 'total': 1, 'success': 0, 'failed': 0, 'cancelled': 1,
+                                'requests': 1, 'request_failed': 0}]
+
+
+def test_retried_requests_count_every_upstream_attempt(tmp_path):
+    limited = {'status': 429, 'upstream_failure': {'event': {'error': {'message': 'Resource exhausted', 'code': 'too_many_requests'}}}}
+    logger = SQLiteLogger(tmp_path / 'requests.db')
+    write(logger, 'gemini', 60, False, str({'message': 'Resource exhausted'}), [limited] * 4)
+    write(logger, 'gemini', 70, True, attempts=[limited, limited, {'status': 200}])
+    write(logger, 'gemini', 80, False, 'Client disconnected: CancelledError', [limited, {'error': 'client_disconnected'}])
+    write(logger, 'gemini', 90)
+    logger.close()
+    with sqlite3.connect(tmp_path / 'requests.db') as conn:
+        gemini, = query_availability(conn, NOW, 600, 36)['models']
+
+    # 4 个请求：失败请求 4 次 429，救回的请求 2 次 429 + 1 次成功，断开的请求 1 次 429 + 1 次断开，普通成功 1 次
+    assert (gemini['total'], gemini['success'], gemini['failed'], gemini['cancelled']) == (10, 2, 7, 1)
+    assert gemini['cells'] == [{'slot': 35, 'total': 10, 'success': 2, 'failed': 7, 'cancelled': 1,
+                                'requests': 4, 'request_failed': 1, 'error': 'Resource exhausted', 'error_count': 7}]
 
 
 def test_route_reports_missing_database_and_validates_range(monkeypatch):

@@ -247,7 +247,7 @@ function refreshRequestLogs() {
                         ${upstreamModel ? `<div style="font-size:11px;opacity:.7;overflow-wrap:anywhere">上游返回：${upstreamModel}</div>` : ''}
                         <div style="font-size:11px;opacity:.7" title="${escapeHtml(log.caller_id || '')}">${escapeHtml(log.caller_name || '历史未归属')}</div>
                     </td>
-                    <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span>${renderFilteredBadge(stopReason)}</td>
+                    <td><span class="status-badge ${statusClass}">${escapeHtml(log.status)}</span>${renderFilteredBadge(stopReason)}${renderAttemptChain(log.timings)}</td>
                     <td title="${escapeHtml(renderPhaseTimings(log.timings))}">${duration}${log.timings?.first_business_ms != null ? `<div style="font-size:11px;opacity:.7">首事件 ${(Number(log.timings.first_business_ms) / 1000).toFixed(2)}s</div>` : ""}</td>
                     <td>${inTokens}</td>
                     <td>${outTokens}</td>

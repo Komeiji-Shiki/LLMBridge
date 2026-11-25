@@ -565,6 +565,32 @@ function renderCompressionSummary(attempts) {
     return ` · 上游压缩 ${escapeHtml(report.encoding)} ${kb(report.raw_bytes)} → ${kb(report.sent_bytes)}${ratio} ${escapeHtml(COMPRESSION_STATUS[report.status] || report.status)}`;
 }
 
+// 上游每次尝试的状态：请求内部重试几次就列几次，列表里一眼看到是 429 重试了几轮
+function attemptStatusLabel(attempt) {
+    return attempt.status == null ? '断开' : String(attempt.status);
+}
+function attemptFailureMessage(attempt) {
+    const error = attempt.upstream_failure?.event?.error;
+    const message = typeof error === 'string' ? error : error?.message;
+    return typeof message === 'string' ? message : '';
+}
+function renderAttemptChain(timings) {
+    const attempts = timings?.attempts;
+    if (!attempts?.length || (attempts.length === 1 && attempts[0].status === 200)) return '';
+    const chain = attempts.map(attempt => `<span style="color:${attempt.status === 200 ? 'var(--ok)' : 'var(--danger)'}">${escapeHtml(attemptStatusLabel(attempt))}</span>`).join(' → ');
+    const title = attempts.map((attempt, index) => `第 ${index + 1} 次：${attemptStatusLabel(attempt)}，${attempt.duration_ms == null ? '—' : (attempt.duration_ms / 1000).toFixed(1) + ' 秒'}`).join('\n');
+    return `<div style="font-size:11px;margin-top:3px" title="${escapeHtml(title)}">${attempts.length} 次上游尝试：${chain}</div>`;
+}
+function renderAttemptList(attempts) {
+    return `<div class="attempt-list">${attempts.map((attempt, index) => {
+        const failure = attemptFailureMessage(attempt);
+        const ok = attempt.status === 200;
+        return `<div style="font-size:12px;line-height:1.7"><strong style="color:${ok ? 'var(--ok)' : 'var(--danger)'}">第 ${index + 1} 次 · ${escapeHtml(attemptStatusLabel(attempt))}</strong>`
+            + ` · 开始于 ${(attempt.started_ms / 1000).toFixed(2)} 秒 · 耗时 ${attempt.duration_ms == null ? '—' : (attempt.duration_ms / 1000).toFixed(2) + ' 秒'}`
+            + (failure ? `<div style="opacity:.75;overflow-wrap:anywhere">${escapeHtml(failure)}</div>` : '') + '</div>';
+    }).join('')}</div>`;
+}
+
 function renderPhaseTimings(timings) {
     if (!timings) return '该记录没有阶段耗时';
     const labels = {prepare_ms: '准备', upstream_wait_ms: '等待上游首字节', first_business_ms: '首业务事件', output_ms: '输出', total_ms: '总计'};
@@ -724,7 +750,7 @@ async function viewRequestDetails(requestId) {
                 <div><span>会话 ID</span><code>${escapeHtml(details.conversation_id || '未记录')}</code></div></div>
                 <div class="timing-grid">${Object.entries({prepare_ms: '准备', upstream_wait_ms: '等待上游首字节', first_business_ms: '首业务事件', output_ms: '输出', total_ms: '总计'}).map(([key, label]) => `<div class="timing-card"><span>${label}</span><strong>${details.timings?.[key] == null ? '—' : (Number(details.timings[key]) / 1000).toFixed(3)}<small>${details.timings?.[key] == null ? '无数据' : '秒'}</small></strong></div>`).join('')}</div>
                 ${Object.keys(details.timings?.prepare_stages || {}).length ? `<p class="timing-stages">准备阶段：${Object.entries({receive_ms: '接收请求体', parse_ms: '解析', route_ms: '鉴权与选路', convert_ms: '协议转换'}).filter(([key]) => details.timings.prepare_stages[key] != null).map(([key, label]) => `${label} ${(Number(details.timings.prepare_stages[key]) / 1000).toFixed(3)} 秒`).join(' · ')}${details.timings.upstream_build_ms == null ? '' : `；等待上游中构造并发出请求占 ${(Number(details.timings.upstream_build_ms) / 1000).toFixed(3)} 秒`}</p>` : ''}
-                ${details.timings?.attempts?.length ? `<details class="data-disclosure"><summary>请求尝试记录 <span>${details.timings.attempts.length} 次${details.timings.attempts.some(attempt => attempt.upstream_failure) ? ' · 含上游失败原始事件' : ''}${renderCompressionSummary(details.timings.attempts)}</span></summary><pre>${renderTruncatable(JSON.stringify(details.timings.attempts, null, 2), 2000)}</pre></details>` : ''}
+                ${details.timings?.attempts?.length ? `<details class="data-disclosure"${details.timings.attempts.length > 1 ? ' open' : ''}><summary>请求尝试记录 <span>${details.timings.attempts.length} 次${details.timings.attempts.some(attempt => attempt.upstream_failure) ? ' · 含上游失败原始事件' : ''}${renderCompressionSummary(details.timings.attempts)}</span></summary>${renderAttemptList(details.timings.attempts)}<pre>${renderTruncatable(JSON.stringify(details.timings.attempts, null, 2), 2000)}</pre></details>` : ''}
                 ${details.pricing_snapshot ? `<details class="data-disclosure"><summary>调用时价格快照 <span>JSON</span></summary><pre>${escapeHtml(JSON.stringify(details.pricing_snapshot, null, 2))}</pre></details>` : ''}
                 ${details.gateway_request_id ? `<a class="archive-link" href="/api/admin/exchanges/${encodeURIComponent(details.gateway_request_id)}">下载完整原生请求与响应归档 <span aria-hidden="true">↗</span></a>` : ''}
             </div>

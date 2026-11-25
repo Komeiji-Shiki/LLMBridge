@@ -1,5 +1,5 @@
-// 模型可用性时间线：按模型、按时间段显示成功率；点模型名或格子把下面的请求日志筛到这个模型。
-// 客户端自己断开的请求不算失败，只在提示里单独列出。
+// 模型可用性时间线：按模型、按时间段显示上游每次尝试的成功率，请求内部重试几次就算几次；
+// 点模型名或格子把下面的请求日志筛到这个模型。客户端自己断开的不算失败，只在提示里单独列出。
 const MonitorAvailability = (() => {
     'use strict';
     let data = null;
@@ -24,7 +24,9 @@ const MonitorAvailability = (() => {
     function describe(cell) {
         const begin = data.start + cell.slot * data.bucket_seconds;
         const lines = [`${clock(begin)}–${clock(begin + data.bucket_seconds)}`,
-            `${cell.total} 次：成功 ${cell.success}，失败 ${cell.failed}${cell.cancelled ? `，客户端断开 ${cell.cancelled}` : ''}`];
+            `${cell.total} 次上游调用：成功 ${cell.success}，失败 ${cell.failed}${cell.cancelled ? `，客户端断开 ${cell.cancelled}` : ''}`];
+        // 有重试时，上游调用数和调用方实际发出的请求数不同，两个口径都列出来
+        if (cell.requests !== cell.total) lines.push(`来自 ${cell.requests} 个请求，最终失败 ${cell.request_failed}`);
         if (cell.error) lines.push(`最多的错误（${cell.error_count} 次）：${cell.error}`);
         return lines.join('\n');
     }
@@ -36,7 +38,7 @@ const MonitorAvailability = (() => {
             const cell = cells.get(slot);
             if (!cell) return '<span class="availability-cell"></span>';
             return `<button type="button" class="availability-cell ${level(cell)}" data-model="${model}" `
-                + `data-failed="${cell.failed}" title="${escapeHtml(describe(cell))}"></button>`;
+                + `data-failed="${cell.request_failed}" title="${escapeHtml(describe(cell))}"></button>`;
         }).join('');
         return `<div class="availability-row">
             <button type="button" class="availability-model" data-model="${model}" title="在请求日志里只看这个模型">${model}</button>
