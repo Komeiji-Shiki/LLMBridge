@@ -9,7 +9,6 @@ import logging
 from core.stream_stop import CLIENT_DISCONNECTED
 from core.endpoint_observer import observe_endpoint
 import re
-import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -429,11 +428,6 @@ async def _complete_responses_monitoring(
         full_messages=full_messages,
         upstream_usage=upstream_usage,
     )
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_end",
-        "request_id": request_id,
-        "success": success,
-    })
     return input_tokens, output_tokens
 
 
@@ -533,12 +527,6 @@ async def _handle_responses_native_passthrough(
             extra=monitor_extra,
         ),
     )
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_start",
-        "request_id": request_id,
-        "model": display_name,
-        "timestamp": time.time(),
-    })
 
     api_iter = direct_api_service.call_api_passthrough(
         base_url=api_base_url,

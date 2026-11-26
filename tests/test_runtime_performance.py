@@ -69,6 +69,31 @@ def test_monitor_broadcast_is_ordered_and_bounded():
     asyncio.run(run())
 
 
+def test_request_lifecycle_is_broadcast_once_after_state_is_written(monkeypatch):
+    from modules.monitoring import monitoring_service
+
+    monkeypatch.setattr(monitoring_service.log_manager, 'write_request_log', lambda entry: None)
+    seen = []
+
+    def publish(event):
+        still_active = event['request_id'] in monitoring_service.active_requests
+        seen.append((event['type'], event['request_id'], still_active))
+
+    monkeypatch.setattr(monitoring_service._monitor_broadcaster, 'publish', publish)
+
+    async def run():
+        monitoring_service.request_start('broadcast-once', 'demo')
+        monitoring_service.request_end('broadcast-once', True)
+        # 兜底路径重复结束：请求已经不在活跃列表里，不能再广播一次
+        monitoring_service.request_end('broadcast-once', False, error='重复结束')
+        await asyncio.to_thread(monitoring_service._event_pool.submit(lambda: None).result, 5)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert [item[:2] for item in seen] == [('request_start', 'broadcast-once'), ('request_end', 'broadcast-once')]
+    assert seen[-1][2] is False
+
+
 def test_shutdown_waits_for_registered_task_cleanup():
     async def run():
         started, stopped = asyncio.Event(), asyncio.Event()

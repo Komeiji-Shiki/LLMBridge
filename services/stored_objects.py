@@ -114,4 +114,3 @@ async def settle(context, kind: str, object_id: str, bound: Bound, value: Any, s
     monitor.request_end(request_id=request_id, success=not failed, error=str(error or 'failed') if failed else None,
                         input_tokens=extra_input, output_tokens=extra_output, cached_tokens=extra_cached,
                         cost_info=cost, response_content=text_from_native(value), upstream_usage=usage or None)
-    await monitor.broadcast_to_monitors({'type': 'request_end', 'request_id': request_id, 'success': not failed})

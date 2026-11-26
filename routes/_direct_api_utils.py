@@ -811,8 +811,6 @@ async def record_request_failure(monitoring_service, direct_api_service, request
         input_tokens=input_tokens, output_tokens=output_tokens,
         cost_info=cost_info, full_messages=full_messages,
         upstream_usage=upstream_usage, system_fingerprint=system_fingerprint)
-    await monitoring_service.broadcast_to_monitors(
-        {"type": "request_end", "request_id": request_id, "success": False})
 
 
 # ============================================================

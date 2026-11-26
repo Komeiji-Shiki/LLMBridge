@@ -307,13 +307,6 @@ async def handle_gemini_native_direct(
         params=build_monitor_request_params(openai_req, extra=monitor_extra_params)
     )
 
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_start",
-        "request_id": request_id,
-        "model": display_name,
-        "timestamp": time.time()
-    })
-
     failure_context = dict(
         display_name=display_name, messages=openai_req.get("messages", []), pricing_config=pricing_config,
         estimate_message_tokens_func=estimate_message_tokens_func, full_messages=full_messages, log_tag="GEMINI_NATIVE")
@@ -614,10 +607,6 @@ async def handle_gemini_native_direct(
                             response_tool_calls=final_tool_calls,
                             upstream_usage=upstream_usage)
 
-                        await monitoring_service.broadcast_to_monitors({
-                            "type": "request_end", "request_id": request_id,
-                            "success": request_success})
-
                         logger.info(f"[GEMINI_NATIVE] 流式请求完成: {request_id[:8]}")
                         logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
                         if cost_info.get("total_cost"):
@@ -850,10 +839,6 @@ async def handle_gemini_native_direct(
                             response_tool_calls=final_tool_calls,
                             upstream_usage=upstream_usage)
 
-                        await monitoring_service.broadcast_to_monitors({
-                            "type": "request_end", "request_id": request_id,
-                            "success": request_success})
-
                         logger.info(f"[GEMINI_INTERACTIONS] 流式请求完成: {request_id[:8]}")
                         logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")
                         if cost_info.get("total_cost"):
@@ -987,9 +972,6 @@ async def handle_gemini_native_direct(
                                                         upstream_signatures(gemini_response)),
                 response_tool_calls=response_tool_calls,
                 upstream_usage=upstream_usage)
-
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id, "success": True})
 
             logger.info(f"[GEMINI_NATIVE] 非流式请求完成: {request_id[:8]}")
             logger.info(f"  - 输入tokens: {input_tokens}, 输出tokens: {output_tokens}")

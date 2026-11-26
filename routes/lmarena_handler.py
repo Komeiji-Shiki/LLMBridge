@@ -14,7 +14,6 @@ LMArena 部分）的代码维护。目前项目重点是中转 API（Direct API�
 import asyncio
 import json
 import logging
-import time
 import uuid
 import re
 from datetime import datetime
@@ -172,14 +171,6 @@ async def handle_lmarena_request(
         messages=openai_req.get("messages", []),
         params=build_monitor_request_params(openai_req)
     )
-
-    # 广播请求开始
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_start",
-        "request_id": request_id,
-        "model": model_name,
-        "timestamp": time.time()
-    })
 
     def _make_stream_processor(rid: str):
         """构建针对单个请求的内部事件流处理器"""
@@ -388,11 +379,6 @@ async def handle_lmarena_request(
                 Response,
                 full_messages=openai_req.get("messages", [])  # 传递全量消息用于日志
             )
-            await monitoring_service.broadcast_to_monitors({
-                "type": "request_end",
-                "request_id": request_id,
-                "success": True
-            })
             return result
 
     except (ValueError, IOError) as e:
@@ -439,11 +425,6 @@ async def _handle_request_failure(request_id: str, model_name: Optional[str], op
         output_tokens=0,
         full_messages=openai_req.get('messages', [])  # 错误时也全量存日志
     )
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_end",
-        "request_id": request_id,
-        "success": False
-    })
 
     if request_id in request_metadata:
         tab_id = request_metadata[request_id].get("tab_id")

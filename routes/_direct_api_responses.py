@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -159,11 +158,6 @@ async def _complete_monitoring(
         full_messages=full_messages,
         upstream_usage=upstream_usage,
     )
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_end",
-        "request_id": request_id,
-        "success": success,
-    })
 
 
 async def _handle_non_stream(
@@ -470,12 +464,6 @@ async def handle_responses_native_direct(
             extra={"upstream_model": target_model_id, "endpoint_path": endpoint_path},
         ),
     )
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_start",
-        "request_id": request_id,
-        "model": display_name,
-        "timestamp": time.time(),
-    })
 
     try:
         if openai_req.get("stream", False):

@@ -6,7 +6,6 @@ import asyncio
 import copy
 import json
 import logging
-import time
 import uuid
 from typing import Optional
 
@@ -116,13 +115,6 @@ async def handle_passthrough_direct(
         params=build_monitor_request_params(openai_req, extra=monitor_extra_params)
     )
 
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_start",
-        "request_id": request_id,
-        "model": display_name,
-        "timestamp": time.time()
-    })
-
     try:
         # --- 准备透传请求体 ---
         passthrough_request = await asyncio.to_thread(_prepare_passthrough_request,
@@ -174,8 +166,6 @@ async def handle_passthrough_direct(
         monitoring_service.request_end(
             request_id=request_id, success=False, error=str(e),
             full_messages=full_messages)
-        await monitoring_service.broadcast_to_monitors({
-            "type": "request_end", "request_id": request_id, "success": False})
         raise HTTPException(status_code=500, detail=f"Direct API透传失败: {str(e)}")
 
 
@@ -713,9 +703,6 @@ async def _handle_passthrough_non_stream(
             upstream_usage=upstream_usage,
             system_fingerprint=system_fingerprint)
 
-        await monitoring_service.broadcast_to_monitors({
-            "type": "request_end", "request_id": request_id, "success": True})
-
         logger.info(f"[DIRECT_API_PASSTHROUGH] 非流式请求完成: {request_id[:8]}")
         logger.info(f"  - 输入tokens: {input_tokens}")
         logger.info(f"  - 输出tokens: {output_tokens}")
@@ -731,8 +718,6 @@ async def _handle_passthrough_non_stream(
         monitoring_service.request_end(
             request_id=request_id, success=False, error=str(e),
             full_messages=full_messages)
-        await monitoring_service.broadcast_to_monitors({
-            "type": "request_end", "request_id": request_id, "success": False})
         raise
 
 

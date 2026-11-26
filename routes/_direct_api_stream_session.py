@@ -163,14 +163,12 @@ class PassthroughStreamSession:
         self._schedule_logprobs_finish(completed=False, error=reason)
 
     async def handle_client_disconnect(self) -> None:
-        """异步断连处理：上游还没报用量时先用 tokenizer 估算输入，再标记 + 广播。"""
+        """异步断连处理：上游还没报用量时先用 tokenizer 估算输入，再标记结束。"""
         if self.request_end_called:
             return
         if not self.input_tokens:
             self.input_tokens = await self._estimate_input_tokens()
         self.mark_client_disconnect(CLIENT_DISCONNECTED)
-        await self.monitoring_service.broadcast_to_monitors({
-            "type": "request_end", "request_id": self.request_id, "success": False})
 
     # ================= SSE 块处理 =================
 
@@ -725,9 +723,6 @@ class PassthroughStreamSession:
             upstream_usage=self.upstream_usage,
             system_fingerprint=self.system_fingerprint)
         self.request_end_called = True
-        await self.monitoring_service.broadcast_to_monitors({
-            "type": "request_end", "request_id": self.request_id,
-            "success": self.request_success})
 
         logger.info(f"[DIRECT_API_PASSTHROUGH] 流式请求完成: {self.request_id[:8]}, 成功: {self.request_success}")
         if final_reasoning:

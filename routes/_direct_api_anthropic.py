@@ -28,7 +28,6 @@ from fastapi.responses import StreamingResponse, JSONResponse, Response
 from core import stream_stop
 from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from utils.monitor_params import build_monitor_request_params
-from utils.task_registry import spawn
 from converters import is_content_parts
 from converters.anthropic_openai import extract_anthropic_usage_tokens
 from converters.media import FILE_PART_TYPES, file_to_anthropic
@@ -1341,17 +1340,6 @@ def build_openai_stream_from_anthropic(
                 full_messages=full_messages,
                 upstream_usage=upstream_usage or None
             )
-            try:
-                spawn(
-                    monitoring_service.broadcast_to_monitors({
-                        "type": "request_end",
-                        "request_id": request_id,
-                        "success": success
-                    }),
-                    name="anthropic-native-broadcast"
-                )
-            except Exception as broadcast_error:
-                logger.debug(f"[ANTHROPIC_NATIVE] 监控广播未能提交: {broadcast_error}")
 
     return StreamingResponse(
         stream_generator(),
@@ -1516,12 +1504,6 @@ async def handle_anthropic_native_from_openai(
         messages=full_messages,
         params=build_monitor_request_params(anthropic_body, extra=monitor_extra)
     )
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_start",
-        "request_id": request_id,
-        "model": display_name,
-        "timestamp": time.time()
-    })
 
     logger.info(
         f"[OAI_TO_ANTHROPIC] 直通模式: model={model_name} → target={target_model_id}, "
@@ -1729,10 +1711,5 @@ async def handle_anthropic_native_from_openai(
                     cost_info=cost_info,
                     full_messages=full_messages,
                     upstream_usage=resp_upstream_usage)
-                try:
-                    await monitoring_service.broadcast_to_monitors({
-                        "type": "request_end", "request_id": request_id, "success": True})
-                except Exception as broadcast_error:
-                    logger.debug(f"[ANTHROPIC_NATIVE] 监控广播失败: {broadcast_error}")
 
         return Response(content=response_bytes, media_type="application/json")

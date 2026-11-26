@@ -92,7 +92,6 @@ from core.errors import (
 # 服务与工具
 from modules.monitoring import monitoring_service
 from utils.monitor_params import build_monitor_request_params
-from utils.task_registry import spawn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["core-api"])
@@ -884,12 +883,6 @@ async def _handle_anthropic_passthrough(
         messages=full_messages,
         params=build_monitor_request_params(passthrough_body, extra=monitor_extra)
     )
-    await monitoring_service.broadcast_to_monitors({
-        "type": "request_start",
-        "request_id": request_id,
-        "model": display_name,
-        "timestamp": time.time()
-    })
 
     logger.info(
         f"[ANTHROPIC_COMPAT] 直通模式启用: model={model_name} → target={target_model_id}, "
@@ -915,9 +908,6 @@ async def _handle_anthropic_passthrough(
             monitoring_service.request_end(
                 request_id=request_id, success=False, error=error_text, response_content=error_text,
                 input_tokens=0, output_tokens=0, cached_tokens=0, full_messages=full_messages)
-            spawn(monitoring_service.broadcast_to_monitors({
-                "type": "request_end", "request_id": request_id, "success": False}),
-                name="anthropic-stream-broadcast")
             return JSONResponse(status_code=status_code, content=build_anthropic_error_payload(
                 early_error_obj if isinstance(early_error_obj, dict) else early_error, status_code))
 
@@ -1050,15 +1040,6 @@ async def _handle_anthropic_passthrough(
                     full_messages=full_messages,
                     upstream_usage=stream_state.get("upstream_usage") or None
                 )
-                # 广播使用后台任务避免阻塞生成器退出
-                spawn(
-                    monitoring_service.broadcast_to_monitors({
-                        "type": "request_end",
-                        "request_id": request_id,
-                        "success": success
-                    }),
-                    name="anthropic-stream-broadcast"
-                )
 
         return StreamingResponse(
             _monitored_anthropic_stream(),
@@ -1172,16 +1153,6 @@ async def _handle_anthropic_passthrough(
             cost_info=cost_info,
             full_messages=full_messages,
             upstream_usage=resp_upstream_usage if success else None
-        )
-        # 🔧 用后台任务广播：取消传播路径上的 await 会立刻再抛 CancelledError，
-        # 旧版的 except Exception 拦不住（与流式分支的 spawn 广播保持一致）
-        spawn(
-            monitoring_service.broadcast_to_monitors({
-                "type": "request_end",
-                "request_id": request_id,
-                "success": success
-            }),
-            name="anthropic-nonstream-broadcast"
         )
 
     if error_response_payload is not None:

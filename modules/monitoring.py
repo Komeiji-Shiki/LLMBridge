@@ -675,11 +675,40 @@ class MonitoringService:
         context = current_request.get()
         if context:
             context.mark('recorded')
-        self._event_pool.submit(
-            copy_context().run, self._request_start_sync,
+        self._submit_event(
+            self._request_start_sync,
             request_id, model, messages_count, session_id, mode, messages, params
         )
-    
+
+    def _submit_event(self, handler, *args):
+        """提交到串行事件池；handler 返回的事件在状态写完之后发给监控页。
+
+        开始和结束的广播只在这里发：每个请求恰好一次（重复的 request_end
+        找不到请求，返回 None），监控页收到时统计和日志已经更新。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        future = self._event_pool.submit(copy_context().run, handler, *args)
+        future.add_done_callback(lambda done: self._publish_event(loop, done))
+
+    def _publish_event(self, loop, done):
+        """在事件池线程里执行，广播交回事件循环（发送队列不是线程安全的）。"""
+        if done.cancelled():
+            return
+        error = done.exception()
+        if error is not None:
+            logger.error(f"监控事件处理失败: {error}", exc_info=error)
+            return
+        event = done.result()
+        if event is None or loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(self._monitor_broadcaster.publish, event)
+        except RuntimeError:
+            pass  # 事件循环已经关闭
+
     def _request_start_sync(self, request_id: str, model: str, messages_count: int = 0,
                      session_id: Optional[str] = None, mode: Optional[str] = None,
                      messages: Optional[List[dict]] = None, params: Optional[dict] = None):
@@ -736,9 +765,11 @@ class MonitoringService:
             'request_params': params
         }
         self.log_manager.write_request_log(log_entry)
-        
+
         logger.info(f"请求开始 [ID: {request_id[:8]}] 模型: {model}")
-    
+        return {'type': 'request_start', 'request_id': request_id, 'model': model,
+                'timestamp': request_info.timestamp}
+
     def request_end(self, request_id: str, success: bool, error: Optional[str] = None,
                     response_content: Optional[str] = None, reasoning_content: Optional[str] = None,
                     input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0,
@@ -747,8 +778,8 @@ class MonitoringService:
                     upstream_usage: Optional[dict] = None, system_fingerprint: Optional[str] = None):
         """记录请求结束（非阻塞版：提交到串行事件池，与 request_start 保持顺序）"""
         stream_stop.release(request_id)
-        self._event_pool.submit(
-            copy_context().run, self._request_end_sync,
+        self._submit_event(
+            self._request_end_sync,
             request_id, success, error, response_content, reasoning_content,
             input_tokens, output_tokens, cached_tokens, cost_info, full_messages,
             response_message, response_tool_calls, upstream_usage, system_fingerprint
@@ -896,7 +927,8 @@ class MonitoringService:
             self.log_manager.write_request_log(log_entry)
         if should_persist:
             self._persist_stats_if_needed()
-    
+        return {'type': 'request_end', 'request_id': request_id, 'success': success}
+
     def get_stats(self) -> Stats:
         """获取统计数据"""
         with self._lock:
@@ -1045,6 +1077,8 @@ class MonitoringService:
         if cleaned_count > 0:
             self._persist_stats_if_needed(force=True)
             logger.warning(f"[CLEANUP] 共清理了 {cleaned_count} 个超时活跃请求")
+        for request_id in stale_requests:
+            self._monitor_broadcaster.publish({'type': 'request_end', 'request_id': request_id, 'success': False})
         
         # 🔧 根因4修复：返回清理的请求ID列表，让调用方也能清理关联资源
         return cleaned_count, stale_requests

@@ -441,7 +441,6 @@ class PassthroughHandlerTests(unittest.TestCase):
         self.assertEqual(end_kwargs["upstream_usage"]["input_tokens"], 10)
         # 请求日志包含 input 消息
         self.assertEqual(end_kwargs["full_messages"], [{"role": "user", "content": "hi"}])
-        monitoring.broadcast_to_monitors.assert_called()
 
     def test_instructions_recorded_as_system_message(self):
         """instructions（系统提示词）应作为 oai 兼容的 system 消息记录。"""

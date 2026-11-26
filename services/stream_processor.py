@@ -520,8 +520,7 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
             full_messages=full_messages
         )
         request_end_called = True
-        await monitoring_service.broadcast_to_monitors({"type": "request_end", "request_id": request_id, "success": True})
-    
+
     except asyncio.CancelledError:
         # CancelledError: 可以安全地做同步清理
         if not request_end_called:
@@ -621,7 +620,6 @@ async def _handle_stream_error(request_id, error_data, collected_content, reason
         response_content=error_response, reasoning_content=error_reasoning,
         input_tokens=input_tokens, output_tokens=output_tokens
     )
-    await monitoring_service.broadcast_to_monitors({"type": "request_end", "request_id": request_id, "success": False})
 
 
 async def _calculate_tokens(lmarena_usage, model, full_response, request_id,
@@ -819,8 +817,7 @@ async def _handle_non_stream_error(request_id, error_data, full_content, reasoni
         reasoning_content="".join(reasoning_content) if reasoning_content else None,
         input_tokens=input_tokens, output_tokens=output_tokens
     )
-    await monitoring_service.broadcast_to_monitors({"type": "request_end", "request_id": request_id, "success": False})
-    
+
     status_code = 413 if "附件大小超过了" in str(error_data) else 500
     error_response = {
         "error": {

@@ -400,7 +400,6 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
                             input_tokens=input_tokens, output_tokens=output_tokens, cached_tokens=cached_tokens,
                             cost_info=cost, response_content=''.join(text_parts), full_messages=original_messages,
                             upstream_usage=upstream_usage)
-        await monitor.broadcast_to_monitors({'type': 'request_end', 'request_id': request_id, 'success': failure is None})
         if (object_id and protocol in (INTERACTIONS, RESPONSES) and not gemini_response and context.authenticated
                 and stored_objects.stores_object(body)):
             await asyncio.to_thread(stored_objects.remember, context.owner_id, protocol, object_id, model, config, key,
@@ -449,7 +448,6 @@ async def forward_native_exchange(body, config, model, service, monitor, *, stre
         monitor.request_start(request_id=request_id, model=config.get('display_name') or model,
                               messages_count=len(original_messages), messages=original_messages, mode='native_' + protocol, params=params)
         started = True
-        await monitor.broadcast_to_monitors({'type': 'request_start', 'request_id': request_id, 'model': model})
         iterator = service.call_api_passthrough(base_url=base, api_key=key, request_body=upstream,
                                                 headers=headers, endpoint_path=endpoint, stream_override=stream)
         if not stream:
