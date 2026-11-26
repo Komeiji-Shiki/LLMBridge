@@ -10,7 +10,22 @@ from aiohttp.test_utils import TestServer
 
 from core.request_context import RequestContext, current_request
 from services.direct_api_service import DirectAPIService
-from utils.upstream_fields import apply_upstream_rules, validate_rules
+from utils.upstream_fields import (
+    apply_upstream_rules, configured_body_params, monitored_body_params, validate_rules)
+
+
+def test_configured_body_params_merge_in_order_without_sharing_config():
+    config = {'custom_params': {'provider': {'order': ['a']}, 'top_k': 1},
+              'extra_body_params': {'top_k': 2}, 'other': 'x'}
+    merged = configured_body_params(config, 'TEST')
+    assert merged == {'provider': {'order': ['a']}, 'top_k': 2}
+    # 请求体上的原地修改（如自动缓存打断点）不能写回内存里的配置
+    merged['provider']['order'].append('b')
+    assert config['custom_params']['provider'] == {'order': ['a']}
+    assert monitored_body_params(config) == {'custom_params': config['custom_params'],
+                                             'extra_body_params': {'top_k': 2}}
+    assert configured_body_params({'custom_params': 'bad', 'extra_body_params': {}}, 'TEST') == {}
+    assert monitored_body_params({'custom_params': [], 'extra_body_params': None}) == {}
 
 
 def rewrite(body, rules, context=None):

@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from core import stream_stop
 from core.constants import resolve_first_chunk_timeout, resolve_heartbeat_interval
 from utils.monitor_params import build_monitor_request_params
+from utils.upstream_fields import configured_body_params, monitored_body_params
 from utils.usage_tokens import (
     extract_cached_tokens,
     extract_prompt_tokens,
@@ -69,19 +70,6 @@ def _generation_extras(openai_req: dict, sampling: dict, accepts_sampling: bool)
     if openai_req.get("logprobs"):
         note_loss("logprobs", "Gemini 链路不返回 logprobs")
     return extras
-
-
-def _extra_body(endpoint_config: dict) -> dict:
-    """自定义参数和附加主体参数合并成直接写进请求体的字段（附加主体参数在后，同名键优先）。"""
-    extra = {}
-    for key, label in (("custom_params", "自定义参数"), ("extra_body_params", "附加主体参数")):
-        params = endpoint_config.get(key, {})
-        if params and isinstance(params, dict):
-            extra.update(params)
-            logger.info(f"[GEMINI_NATIVE] 已添加{label}:")
-            for name, value in params.items():
-                logger.info(f"  - {name}: {value}")
-    return extra
 
 
 def _thinking_config(openai_req: dict, endpoint_config: dict, target_model_id: str, limits) -> Optional[dict]:
@@ -153,15 +141,11 @@ async def handle_gemini_native_direct(
 
     # 思考 token 是否并入下发给下游的 completion_tokens（模型级配置）
     completion_tokens_mode = get_completion_tokens_mode(endpoint_config)
-    extra_body = _extra_body(endpoint_config)
+    extra_body = configured_body_params(endpoint_config, "GEMINI_NATIVE")
     limits = limits_for(target_model_id)
     thinking_config = _thinking_config(openai_req, endpoint_config, target_model_id, limits)
 
-    # 自定义参数/附加主体参数以独立字段记录到监控日志，避免平铺覆盖监控字段
-    monitor_extra_params: dict = {"upstream_model": target_model_id}
-    for key in ("custom_params", "extra_body_params"):
-        if isinstance(endpoint_config.get(key), dict) and endpoint_config[key]:
-            monitor_extra_params[key] = endpoint_config[key]
+    monitor_extra_params: dict = {"upstream_model": target_model_id, **monitored_body_params(endpoint_config)}
     if thinking_config:
         monitor_extra_params["thinking_config"] = thinking_config
     # 记录思考与续传相关配置到监控日志

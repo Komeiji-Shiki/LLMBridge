@@ -28,7 +28,7 @@ from services.model_capabilities import (
 )
 from utils.json_unescape import normalize_response_tool_args
 from utils.monitor_params import build_monitor_request_params
-from utils.upstream_fields import omit_configured_fields
+from utils.upstream_fields import configured_body_params, monitored_body_params, omit_configured_fields
 from utils.usage_tokens import (
     MODE_MERGE,
     apply_usage_tokens,
@@ -90,14 +90,8 @@ async def handle_passthrough_direct(
     if not endpoint_path.startswith("/"):
         endpoint_path = "/" + endpoint_path
 
-    monitor_extra_params: dict = {"upstream_model": target_model_id, "endpoint_path": endpoint_path}
-    # 自定义参数/附加主体参数以独立字段记录到监控日志，避免平铺覆盖监控字段
-    custom_params = endpoint_config.get("custom_params")
-    if isinstance(custom_params, dict) and custom_params:
-        monitor_extra_params["custom_params"] = custom_params
-    extra_body_params = endpoint_config.get("extra_body_params")
-    if isinstance(extra_body_params, dict) and extra_body_params:
-        monitor_extra_params["extra_body_params"] = extra_body_params
+    monitor_extra_params: dict = {"upstream_model": target_model_id, "endpoint_path": endpoint_path,
+                                  **monitored_body_params(endpoint_config)}
     # 记录思考相关配置到监控日志（便于排查注入是否生效）
     for key in ("enable_thinking", "reasoning_effort", "thinking_budget", "thinking_effort",
                 "oai_thinking_type", "oai_thinking_effort", "force_stream", "verbosity"):
@@ -242,22 +236,8 @@ def _prepare_passthrough_request(openai_req, model_name, target_model_id, endpoi
                     filtered_content = [{"type": "text", "text": " "}]
                 msg["content"] = filtered_content
 
-    # 合并自定义参数（deepcopy：后续可能在合并进来的嵌套对象上原地
-    # 写入字段，如 setdefault("reasoning")，直接引用会污染内存配置）
-    custom_params = endpoint_config.get("custom_params", {})
-    if custom_params and isinstance(custom_params, dict):
-        passthrough_request.update(copy.deepcopy(custom_params))
-        logger.info(f"[DIRECT_API_CUSTOM] 已添加自定义参数:")
-        for key, value in custom_params.items():
-            logger.info(f"  - {key}: {value}")
-
-    # 合并附加主体参数（在自定义参数之后，同名键优先）
-    extra_body_params = endpoint_config.get("extra_body_params", {})
-    if extra_body_params and isinstance(extra_body_params, dict):
-        passthrough_request.update(copy.deepcopy(extra_body_params))
-        logger.info(f"[DIRECT_API_CUSTOM] 已添加附加主体参数:")
-        for key, value in extra_body_params.items():
-            logger.info(f"  - {key}: {value}")
+    # 后续可能在合并进来的嵌套对象上原地写入字段，如 setdefault("reasoning")
+    passthrough_request.update(configured_body_params(endpoint_config, "DIRECT_API_CUSTOM"))
 
     # System转User模式
     convert_system_to_user = endpoint_config.get("convert_system_to_user", False)

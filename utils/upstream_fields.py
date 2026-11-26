@@ -1,4 +1,4 @@
-"""按端点配置改写发往上游的请求：排除不支持的字段，以及 upstream_rules 改写规则。
+"""按端点配置改写发往上游的请求：附加参数、排除不支持的字段，以及 upstream_rules 改写规则。
 
 upstream_rules 是规则数组，在协议转换之后、发送之前作用于真正发往上游的请求体，按顺序执行：
 
@@ -12,6 +12,7 @@ upstream_rules 是规则数组，在协议转换之后、发送之前作用于�
 规则写错时跳过这一条并记日志，不影响请求本身。
 """
 
+import copy
 import fnmatch
 import json
 import logging
@@ -23,6 +24,27 @@ logger = logging.getLogger(__name__)
 _TEXT_KEYS = frozenset({'text', 'content', 'system', 'instructions', 'system_instruction', 'input'})
 _SKIP_KEYS = frozenset({'tools', 'tool_choice', 'toolConfig'})
 _RULE_KINDS = ('set', 'delete', 'drop_tools', 'replace')
+# 直接写进请求体的两组模型配置，后者同名键优先
+_BODY_PARAM_KEYS = (('custom_params', '自定义参数'), ('extra_body_params', '附加主体参数'))
+
+
+def configured_body_params(config: dict, log_tag: str) -> dict:
+    """自定义参数和附加主体参数合并成要写进请求体的字段。
+
+    返回深拷贝：之后的自动缓存等步骤会在请求体上原地写字段，直接引用会污染内存里的配置。
+    """
+    merged = {}
+    for key, label in _BODY_PARAM_KEYS:
+        params = config.get(key)
+        if isinstance(params, dict) and params:
+            merged.update(copy.deepcopy(params))
+            logger.info(f"[{log_tag}] 已合并{label}: {list(params.keys())}")
+    return merged
+
+
+def monitored_body_params(config: dict) -> dict:
+    """监控日志按原名单独记录这两组参数，避免平铺覆盖监控字段。"""
+    return {key: config[key] for key, _ in _BODY_PARAM_KEYS if isinstance(config.get(key), dict) and config[key]}
 
 
 def configured_omissions(config: dict) -> list:

@@ -34,7 +34,7 @@ from converters.media import FILE_PART_TYPES, file_to_anthropic
 from converters.message_shape import SYSTEM_ROLES, inline_mid_system, rewrite_trailing_prefill
 from core.conversion_report import note_cache_diagnostics, note_loss, raise_if_strict
 from services.model_capabilities import ANTHROPIC_EFFORTS, limits_for, sanitize_anthropic_body, supported_effort
-from utils.upstream_fields import omit_configured_fields
+from utils.upstream_fields import configured_body_params, monitored_body_params, omit_configured_fields
 from ._direct_api_reasoning_cache import restore_anthropic_thinking, store_anthropic_thinking
 from utils.api_pricing import chat_cache_details
 from utils.json_unescape import StreamingUnicodeUnescaper
@@ -1434,19 +1434,8 @@ async def handle_anthropic_native_from_openai(
     # ── 应用系统提示词注入 ──
     anthropic_body = apply_system_injection(anthropic_body, endpoint_config)
 
-    # ── 自定义参数合并（deepcopy：后续 auto_cache 会在请求体上原地打
-    # cache_control 断点，直接引用配置对象会把断点永久写进内存配置，
-    # 造成跨请求污染）──
-    custom_params = endpoint_config.get("custom_params", {})
-    if isinstance(custom_params, dict) and custom_params:
-        anthropic_body.update(copy.deepcopy(custom_params))
-        logger.info(f"[OAI_TO_ANTHROPIC] 已合并自定义参数: {list(custom_params.keys())}")
-
-    # ── 附加主体参数合并（在自定义参数之后，同名键优先）──
-    extra_body_params = endpoint_config.get("extra_body_params", {})
-    if isinstance(extra_body_params, dict) and extra_body_params:
-        anthropic_body.update(copy.deepcopy(extra_body_params))
-        logger.info(f"[OAI_TO_ANTHROPIC] 已合并附加主体参数: {list(extra_body_params.keys())}")
+    # ── 自定义参数 / 附加主体参数合并（后续 auto_cache 会在请求体上原地打 cache_control 断点）──
+    anthropic_body.update(configured_body_params(endpoint_config, "OAI_TO_ANTHROPIC"))
     omit_configured_fields(anthropic_body, endpoint_config)
 
     # ── 工具名改写（合并参数之后、自动缓存之前）──
@@ -1477,15 +1466,9 @@ async def handle_anthropic_native_from_openai(
     monitor_extra = {
         "upstream_model": target_model_id,
         "endpoint_path": endpoint_path,
-        "mode": "oai_to_anthropic_passthrough"
+        "mode": "oai_to_anthropic_passthrough",
+        **monitored_body_params(endpoint_config),
     }
-    # 自定义参数/附加主体参数以独立字段记录到监控日志，避免平铺覆盖监控字段
-    custom_params_for_monitor = endpoint_config.get("custom_params")
-    if isinstance(custom_params_for_monitor, dict) and custom_params_for_monitor:
-        monitor_extra["custom_params"] = custom_params_for_monitor
-    extra_body_params_for_monitor = endpoint_config.get("extra_body_params")
-    if isinstance(extra_body_params_for_monitor, dict) and extra_body_params_for_monitor:
-        monitor_extra["extra_body_params"] = extra_body_params_for_monitor
     # 记录思考/缓存相关配置到监控日志
     for key in ("enable_thinking", "reasoning_effort", "thinking_budget", "thinking_effort",
                 "thinking_display", "force_stream", "auto_cache"):

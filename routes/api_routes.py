@@ -36,7 +36,8 @@ from services.error_translation import translate_openai_error
 from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
 from services.model_capabilities import sanitize_anthropic_body
 from services.prompt_usage_hint import PromptUsageHint
-from utils.upstream_fields import omission_warnings, omit_configured_fields
+from utils.upstream_fields import (
+    configured_body_params, monitored_body_params, omission_warnings, omit_configured_fields)
 from ._direct_api_utils import (
     get_round_robin_api_key,
     is_error_json,
@@ -839,18 +840,7 @@ async def _handle_anthropic_passthrough(
     sanitize_anthropic_body(passthrough_body, target_model_id)
 
     # ── 自定义参数 / 附加主体参数合并（provider 路由指定等依赖此注入）──
-    # 与 handle_anthropic_native_from_openai 保持一致：custom 先、extra 后，同名键 extra 优先
-    # deepcopy：后续 apply_auto_cache_control 会在请求体上原地打 cache_control
-    # 断点，直接引用配置对象会把断点永久写进内存配置，造成跨请求污染
-    custom_params = endpoint_config.get("custom_params", {})
-    if isinstance(custom_params, dict) and custom_params:
-        passthrough_body.update(copy.deepcopy(custom_params))
-        logger.info(f"[ANTHROPIC_COMPAT] 已合并自定义参数: {list(custom_params.keys())}")
-
-    extra_body_params = endpoint_config.get("extra_body_params", {})
-    if isinstance(extra_body_params, dict) and extra_body_params:
-        passthrough_body.update(copy.deepcopy(extra_body_params))
-        logger.info(f"[ANTHROPIC_COMPAT] 已合并附加主体参数: {list(extra_body_params.keys())}")
+    passthrough_body.update(configured_body_params(endpoint_config, "ANTHROPIC_COMPAT"))
     omit_configured_fields(passthrough_body, endpoint_config)
 
     # 工具名改写：在合并参数之后执行（覆盖 extra_body 注入的工具），
@@ -866,11 +856,8 @@ async def _handle_anthropic_passthrough(
     full_messages = anthropic_req.get("messages", [])
     messages_count = len(full_messages)
 
-    monitor_extra = {"upstream_model": target_model_id, "endpoint_path": endpoint_path}
-    if isinstance(custom_params, dict) and custom_params:
-        monitor_extra["custom_params"] = custom_params
-    if isinstance(extra_body_params, dict) and extra_body_params:
-        monitor_extra["extra_body_params"] = extra_body_params
+    monitor_extra = {"upstream_model": target_model_id, "endpoint_path": endpoint_path,
+                     **monitored_body_params(endpoint_config)}
     if tool_name_restore:
         monitor_extra["tool_name_rewrite"] = describe_restore_map(tool_name_restore)
 
