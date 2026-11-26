@@ -7,6 +7,11 @@
 - 原来各条链路在调用 `request_start` / `request_end` 后自己再广播一次，约三分之一的结束路径漏发，监控页的活跃请求数会往上漂，只能等轮询纠正；广播又先于事件池写完状态，刷新可能读到旧数据。现在广播在监控服务写完状态后发出，每个请求恰好一次，重复的结束和超时清理也覆盖到。
 - 事件池里处理开始和结束时抛出的异常改为记进日志，之前直接丢失。
 
+### 2026-11-27：Gemini 两种上游的流式处理合成一套
+
+- generateContent 和 Interactions 的流式生成器原来各写一遍、内嵌在 800 行的处理函数里，改成 `routes/_direct_api_gemini_stream.py` 的会话类，子类只负责把上游块转换成 Chat 块。
+- 修复：Interactions 链路网关内部出错时，客户端只收到正常的 usage 和 `[DONE]`，看不出请求失败；现在和 generateContent 一样先发 `internal_error` 事件。
+
 ### 2026-11-27：代码维护
 
 - 新增 `pytest.ini`（只收集 `tests/`）和 `ruff.toml`（pyflakes 规则），清掉未用的导入和变量。之前在仓库根目录直接运行 `pytest` 会收集到调试脚本并中断。

@@ -56,13 +56,25 @@ def events(output):
             if item.startswith('data: ') and '[DONE]' not in item]
 
 
-def test_upstream_exception_reaches_both_monitor_and_client():
-    async def upstream(**kwargs):
-        yield chunk('部分')
-        raise RuntimeError('转换炸了')
+async def generate_content_then_fail(**kwargs):
+    yield chunk('部分')
+    raise RuntimeError('转换炸了')
 
+
+async def interactions_then_fail(**kwargs):
+    yield {'event_type': 'interaction.created', 'interaction': {'id': 'i1'}}
+    yield {'event_type': 'step.start', 'index': 0, 'step': {'type': 'model_output'}}
+    yield {'event_type': 'step.delta', 'index': 0, 'delta': {'type': 'text', 'text': '部分'}}
+    raise RuntimeError('转换炸了')
+
+
+@pytest.mark.parametrize('upstream,endpoint', [
+    (generate_content_then_fail, None),
+    (interactions_then_fail, {'upstream_protocol': 'interactions'}),
+], ids=['generate_content', 'interactions'])
+def test_upstream_exception_reaches_both_monitor_and_client(upstream, endpoint):
     async def run():
-        call, monitor = route(upstream)
+        call, monitor = route(upstream, endpoint=endpoint)
         return await drain(await call), monitor
 
     output, monitor = asyncio.run(run())

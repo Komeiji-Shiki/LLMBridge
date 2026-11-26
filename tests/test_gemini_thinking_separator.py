@@ -1,7 +1,7 @@
 """Gemini 原生链路 thinking_separator 流式切分测试（纯函数，无网络依赖）。"""
 import unittest
 
-from routes._direct_api_gemini import ThinkingSeparatorStreamSplitter
+from routes._direct_api_gemini_stream import ThinkingSeparatorStreamSplitter
 
 
 def feed(splitter, chunks):

@@ -5,7 +5,9 @@ Direct API处理模块 - 路由入口
 拆分后结构：
 - _direct_api_utils.py      工具函数（重试/错误/SSE/Token/注入）
 - _direct_api_gemini.py     Gemini 原生 API 处理
+- _direct_api_gemini_stream.py Gemini 两种上游协议共用的流式会话
 - _direct_api_passthrough.py 透传模式处理
+- _direct_api_stream_session.py 透传模式的流式会话
 - direct_api_handler.py     本文件：主路由 + 向后兼容重导出
 """
 import asyncio

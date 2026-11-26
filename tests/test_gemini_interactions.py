@@ -28,7 +28,7 @@ from converters.gemini_interactions import (
     remember_turn_steps,
 )
 from services.direct_api_service import DirectAPIService
-from routes._direct_api_gemini import upstream_signatures
+from routes._direct_api_gemini_stream import upstream_signatures
 
 
 def setUpModule():
