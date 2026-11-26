@@ -11,7 +11,6 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ._types import (
-    _anthropic_client,
     _custom_tokenizers,
     _deepseek_tokenizer,
     _gemini_model,
@@ -22,7 +21,6 @@ from ._types import (
     _TIKTOKEN_CACHE_MAX_SIZE,
     get_tokenizer_idle_timeout,
     _update_tokenizer_last_used,
-    TokenCounterInfo,
     load_tokenizer_config,
 )
 
@@ -432,7 +430,7 @@ def get_token_counter_info() -> Dict[str, Any]:
 def clear_tokenizer_cache(tokenizer_name: str = None, force: bool = False) -> Dict[str, Any]:
     """清理tokenizer缓存以释放内存"""
     global _gemma_tokenizer, _deepseek_tokenizer, _custom_tokenizers
-    global _tiktoken_model_cache, _tiktoken_cache, _anthropic_client
+    global _tiktoken_model_cache, _tiktoken_cache
     cleared = []
     from ._types import _unmapped_model_warned, _MAX_UNMAPPED_WARNED
     current_time = time.time()
@@ -507,7 +505,6 @@ def clear_tokenizer_cache(tokenizer_name: str = None, force: bool = False) -> Di
 
 def get_tokenizer_memory_info() -> Dict[str, Any]:
     """获取tokenizer内存使用信息（不主动加载任何tokenizer）"""
-    import sys
     current_time = time.time()
     loaded_tokenizers = []
     estimated_memory_mb = 0

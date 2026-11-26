@@ -4,27 +4,18 @@ Token计数模块 - 类型定义、常量和配置
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import time
-from datetime import datetime
 from typing import (
-    TYPE_CHECKING,
     Any,
     Dict,
     List,
     Literal,
     Optional,
-    Tuple,
     TypedDict,
     Union,
 )
-
-if TYPE_CHECKING:
-    import tiktoken
-    from anthropic import Anthropic
-    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +174,6 @@ class AllTokenizersStatus(TypedDict):
 # ============================================================
 
 _tiktoken_cache: Dict[str, Any] = {}
-_anthropic_client: Optional[Any] = None
 _gemini_model: Optional[Any] = None
 _gemini_api_count_failed: bool = False
 _gemma_tokenizer: Optional[Any] = None

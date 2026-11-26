@@ -544,7 +544,6 @@ class LogManager:
         """从分层日志读最近的日志。按小时从新到老扫描，凑够 limit 条即停，不全量遍历。"""
         import os as _os
         logs = []
-        ext = ".json*"
         today = datetime.now()
         
         # 从今天开始，逐个小时往过去找
@@ -1423,7 +1422,10 @@ class MonitoringService:
         """从文件加载持久化的统计数据"""
         try:
             stats_path = MonitorConfig.LOG_DIR / MonitorConfig.STATS_FILE
-            
+            # 临时文件名带进程号，写到一半被强杀的那份永远不会被覆盖
+            for leftover in stats_path.parent.glob(f"{stats_path.name}.tmp.*"):
+                leftover.unlink(missing_ok=True)
+
             if not stats_path.exists():
                 logger.info("未找到持久化统计数据，将从零开始")
                 return
