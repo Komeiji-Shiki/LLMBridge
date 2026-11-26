@@ -44,7 +44,6 @@ from core.config_loader import (  # noqa: E402
 )
 from core.api_key_manager import api_key_manager  # noqa: E402
 from core.model_quota import model_quota  # noqa: E402
-from core.db_stats import stats_db  # noqa: E402
 from core.app_state import get_app_state, AppState  # noqa: E402
 from core.constants import CacheDefaults, PROJECT_ROOT, ServerDefaults  # noqa: E402
 from core.middleware import (  # noqa: E402

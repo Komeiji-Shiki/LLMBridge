@@ -1,7 +1,6 @@
 """用真实本地 HTTP 上传验证大文件与短引用，不向外部模型发送请求。"""
 import asyncio
 import base64
-import io
 import json
 from pathlib import Path
 import shutil

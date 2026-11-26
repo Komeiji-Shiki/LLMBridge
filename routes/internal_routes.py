@@ -10,8 +10,6 @@ import time
 from threading import Lock
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
-from datetime import datetime
-from pathlib import Path
 
 from core.app_state import get_app_state
 from core.config_loader import load_model_endpoint_map

@@ -8,7 +8,6 @@ import logging
 import time
 import aiohttp
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 from core.config_loader import (
     CONFIG, MODEL_ENDPOINT_MAP, MODEL_NAME_TO_ID_MAP,
@@ -39,8 +38,7 @@ from utils.jsonc_edit import (
 )
 from ._direct_api_utils import set_sticky_current_key
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["admin"])

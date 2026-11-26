@@ -89,24 +89,17 @@ def main():
     # 3. 备份关键文件
     print("正在备份当前配置和模型文件...")
     old_config_path = os.path.join(destination_dir, config_filename)
-    old_models_path = os.path.join(destination_dir, models_filename)
     old_config_values = load_jsonc_values(old_config_path)
-    
-    # 4. 确定要保留的文件和文件夹
-    # 保留 update_temp 自身, .git 目录, 和任何用户可能添加的隐藏文件/文件夹
-    preserved_items = {update_dir, ".git", ".github"}
 
-    # 5. 获取新旧文件列表
+    # 4. 获取新文件列表
     new_files = get_all_relative_paths(source_dir_inner)
     # 排除 .git 和 .github 目录，因为它们不应该被部署
     new_files = {f for f in new_files if not (f.startswith('.git') or f.startswith('.github'))}
 
-    current_files = get_all_relative_paths(destination_dir)
-
     print("\n--- 文件变更分析 ---")
     print("[*] 文件删除功能已禁用，以保护用户数据。仅执行文件复制和配置更新。")
 
-    # 7. 复制新文件（除配置文件外）
+    # 5. 复制新文件（除配置文件外）
     print("\n[+] 正在复制新文件...")
     try:
         new_config_template_path = os.path.join(source_dir_inner, config_filename)
@@ -138,7 +131,7 @@ def main():
         print(f"文件复制过程中发生错误: {e}")
         return
 
-    # 8. 智能合并配置
+    # 6. 智能合并配置
     if old_config_values and os.path.exists(new_config_template_path):
         print("\n[*] 正在智能合并配置（保留注释）...")
         try:
@@ -172,7 +165,7 @@ def main():
         if os.path.exists(new_config_template_path):
             shutil.copy2(new_config_template_path, old_config_path)
 
-    # 9. 清理临时文件夹
+    # 7. 清理临时文件夹
     print("\n[*] 正在清理临时文件...")
     try:
         shutil.rmtree(update_dir)

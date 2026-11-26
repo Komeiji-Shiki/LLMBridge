@@ -19,7 +19,6 @@ from utils.anthropic_params import set_output_effort
 import secrets
 import time
 import uuid
-from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Request, HTTPException
@@ -511,7 +510,6 @@ async def anthropic_messages(request: Request):
         anthropic_req, endpoint_config if isinstance(endpoint_config, dict) else {}, model_name, fields=('system',))
 
     _endpoint_api_type = endpoint_config.get("api_type") if isinstance(endpoint_config, dict) else None
-    is_direct_api = _endpoint_api_type in _DIRECT_API_TYPES
     is_anthropic_native = _endpoint_api_type == "anthropic_native"
     default_endpoint = "/messages" if is_anthropic_native else "/chat/completions"
     endpoint_path = (endpoint_config.get("endpoint_path") or default_endpoint) if isinstance(endpoint_config, dict) else "/chat/completions"

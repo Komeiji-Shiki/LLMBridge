@@ -12,7 +12,6 @@ import gzip
 import json
 from pathlib import Path
 
-import pytest
 
 from core.config_loader import CONFIG
 from services.logprobs_collector import (

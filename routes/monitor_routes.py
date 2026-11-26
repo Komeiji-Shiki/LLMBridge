@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional
 import psutil
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from core import stream_stop
 from core.app_state import get_app_state

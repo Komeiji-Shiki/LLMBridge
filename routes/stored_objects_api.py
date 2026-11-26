@@ -12,7 +12,7 @@ from typing import Optional
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response
 
 from converters.responses_openai import build_responses_error_response
 from core.constants import GeminiDefaults

@@ -329,7 +329,7 @@ def test_claude_streaming_copies_cache_ttl_and_prompt_snapshot(index, tmp_path):
 
 
 def test_claude_http_source_dates_combined_costs_and_csv(index, tmp_path, monkeypatch):
-    from routes import admin_routes, admin_usage
+    from routes import admin_routes
     write_log(tmp_path / 'home/sessions/a.jsonl', metadata('gpt-6-sol') + [event(usage(100))])
     write_log(tmp_path / 'claude/projects/a.jsonl', [
         claude_event(input_tokens=10, cache_read_input_tokens=100, cache_creation_input_tokens=40,

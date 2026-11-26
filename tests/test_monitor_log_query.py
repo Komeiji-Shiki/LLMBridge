@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from modules.monitoring_sqlite import SQLiteLogger
-from utils.log_query import LogQuery
 
 
 @pytest.fixture

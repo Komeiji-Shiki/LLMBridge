@@ -4,7 +4,7 @@ import os
 import sys
 import uuid
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -12,7 +12,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
-import json
 from PIL import Image
 import io
 

@@ -1,5 +1,4 @@
 """Real Chromium regressions with local assets and entirely simulated request logs."""
-import json
 import mimetypes
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse

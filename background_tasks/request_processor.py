@@ -3,7 +3,6 @@
 处理暂存请求、自动重试、服务器重启等
 """
 import asyncio
-import json
 import logging
 import os
 import sys

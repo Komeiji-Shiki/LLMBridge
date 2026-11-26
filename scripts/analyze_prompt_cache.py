@@ -19,16 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.prompt_cache_compare import (  # noqa: E402
     cached_tokens,
-    canonical,
     compare,
     compare_identity,
     compare_messages,
     compare_params,
     compare_tools,
-    context_snippet as context,
-    first_text_difference,
     gcd_nonzero,
-    short_hash,
 )
 
 

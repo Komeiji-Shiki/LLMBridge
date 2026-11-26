@@ -9,7 +9,7 @@
 """
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ import json
 import pytest
 
 from protocol_harness import (
-    CLIENT_PATHS, CLIENTS, MODEL, READERS, REPLY_BUILDERS, UPSTREAMS, WIRE_READERS, Turn, build_gateway, exchange,
+    CLIENT_PATHS, CLIENTS, MODEL, REPLY_BUILDERS, UPSTREAMS, WIRE_READERS, Turn, build_gateway, exchange,
     upstream_body,
 )
 

@@ -1,5 +1,4 @@
 """Tests for utils.prompt_cache_compare and the monitor compare route."""
-import time
 import pytest
 
 from fastapi import FastAPI
@@ -12,7 +11,6 @@ from utils.prompt_cache_compare import (
     compare_params,
     compare_tools,
     compute_tps,
-    infer,
 )
 
 

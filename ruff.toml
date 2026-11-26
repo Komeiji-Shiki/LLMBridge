@@ -1,0 +1,12 @@
+target-version = "py311"
+extend-exclude = ["tests/legacy"]
+
+[lint]
+# 只查 pyflakes 类问题：未定义名、未用导入和变量、重复定义。
+# 没有占位符的 f-string 不影响行为，不报。
+select = ["F"]
+ignore = ["F541"]
+
+[lint.per-file-ignores]
+# 包入口按名字对外导出
+"__init__.py" = ["F401"]

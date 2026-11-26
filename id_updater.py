@@ -36,7 +36,6 @@ import re
 import threading
 import os
 import requests
-import time
 
 # --- 配置常量 ---
 HOST = "127.0.0.1"

@@ -237,8 +237,7 @@ async def config_monitor(CONFIG, CONFIG_FILE_MTIMES, load_config_func, load_mode
     while True:
         try:
             await asyncio.sleep(_interval("config_monitor"))
-            
-            current_time = time.time()
+
             config_changes = []
             
             # 🔧 配置重载是同步文件 IO + threading.Lock，移入线程池避免卡事件循环

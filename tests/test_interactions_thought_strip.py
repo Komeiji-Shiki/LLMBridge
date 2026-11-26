@@ -1,5 +1,4 @@
 """Interactions 总结小模型原生思维链剥离的单元测试。"""
-import asyncio
 import json
 import unittest
 
@@ -17,7 +16,6 @@ from converters.interactions_thought_strip import (
     is_summarizer_leaked_thought,
     strip_interactions_response_thoughts,
     strip_summarizer_leaked_thoughts,
-    strip_thought_step,
 )
 
 

@@ -130,7 +130,7 @@ class MergeModeTests(unittest.TestCase):
     def test_upstream_total_missing_is_recomposed(self):
         usage = {"prompt_tokens": 100, "completion_tokens": 30,
                  "completion_tokens_details": {"reasoning_tokens": 70}}
-        tokens = apply_usage_tokens(usage, MODE_MERGE)
+        apply_usage_tokens(usage, MODE_MERGE)
         self.assertEqual(usage["completion_tokens"], 100)
         self.assertEqual(usage["total_tokens"], 200)
 

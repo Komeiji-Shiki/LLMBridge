@@ -347,19 +347,12 @@ def decode_base64_image(base64_data: str) -> Tuple[Optional[bytes], Optional[str
         (图片二进制数据, 图片格式, 错误信息)
     """
     try:
-        # 处理Data URI格式
-        if base64_data.startswith('data:'):
-            # 提取MIME类型和base64数据
-            if ',' in base64_data:
-                header, data = base64_data.split(',', 1)
-                mime_type = header.split(';')[0].split(':')[1] if ':' in header else 'image/png'
-            else:
-                data = base64_data
-                mime_type = 'image/png'
+        # 处理Data URI格式：格式以解码后的图片为准，不看声明的 MIME
+        if base64_data.startswith('data:') and ',' in base64_data:
+            data = base64_data.split(',', 1)[1]
         else:
             data = base64_data
-            mime_type = 'image/png'
-        
+
         # 解码base64
         image_bytes = base64.b64decode(data)
         

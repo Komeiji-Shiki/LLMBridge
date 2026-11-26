@@ -5,12 +5,10 @@
 清除项目中的 API 密钥、session_id、日志文件等敏感信息
 """
 
-import os
 import json
 import re
 import shutil
 from pathlib import Path
-from datetime import datetime
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 

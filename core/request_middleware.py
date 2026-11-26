@@ -4,7 +4,6 @@ import base64
 import codecs
 import gzip
 import io
-import json
 import logging
 import re
 from starlette.responses import JSONResponse

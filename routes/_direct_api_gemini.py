@@ -42,7 +42,6 @@ from services.thinking_split_cache import (
 from ._direct_api_utils import (
     append_tool_call_delta,
     build_response_message,
-    cancel_and_wait,
     estimate_message_tokens_non_blocking,
     estimate_text_tokens_non_blocking,
     finalize_tool_calls,

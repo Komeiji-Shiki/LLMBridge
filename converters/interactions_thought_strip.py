@@ -7,10 +7,9 @@
 - 单段/多段文本剥离与 Interaction thought step 剥离
 - 逐 step 流式状态机 `ThoughtSummaryStreamStripper`（正常摘要零延迟直通，泄露思考静默缓冲至摘要出现或 step 结束）
 """
-import copy
 import json
 import re
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 _TP_MARKER = "Thinking Process:"
 _TP_LINE_RE = re.compile(r'(?:^|\n)[ \t]*Thinking Process:')
@@ -151,7 +150,6 @@ def strip_summarizer_leaked_thoughts(text: str) -> str:
     if not any(is_tp and _has_summarizer_fingerprint(seg) for is_tp, seg in sections):
         return text
 
-    trailing_newlines = text.endswith("\n\n") or text.endswith("\n")
     kept: List[str] = []
     for is_tp, seg in sections:
         if not is_tp:

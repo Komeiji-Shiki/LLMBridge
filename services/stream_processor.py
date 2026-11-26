@@ -13,7 +13,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Optional, Dict, Any
+from typing import Optional
 
 # 导入拆分出的模块
 from services.stream_formatters import (
@@ -24,7 +24,6 @@ from services.stream_formatters import (
 from services.stream_parsers import (
     StreamPatternMatcher,
     StreamBuffer,
-    extract_partial_content,
     is_control_marker,
 )
 from services.image_handler import (
@@ -404,8 +403,6 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
     chunk_builder = StreamChunkBuilder(model, response_id)
     logger.info(f"STREAMER [ID: {request_id[:8]}]: 流式生成器启动。")
     
-    is_cancelled = False
-    client_disconnected = False
     finish_reason_to_send = 'stop'
     collected_content = []
     reasoning_content = []
@@ -432,7 +429,6 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
             try:
                 yield ""
             except asyncio.CancelledError as e:
-                client_disconnected = True
                 # CancelledError 可以安全地做 async 操作
                 await _handle_client_disconnect(
                     request_id, e, collected_content, reasoning_content, model,
@@ -440,7 +436,6 @@ async def stream_generator(request_id: str, model: str, _process_lmarena_stream_
                     request_metadata, browser_connections,
                     full_messages=full_messages
                 )
-                is_cancelled = True
                 request_end_called = True
                 return
             

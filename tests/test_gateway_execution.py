@@ -1,7 +1,6 @@
 import asyncio
 from copy import deepcopy
 import json
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.request_context import RequestContext, current_request

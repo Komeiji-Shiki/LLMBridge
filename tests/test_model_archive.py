@@ -8,7 +8,6 @@
 """
 import time
 
-import pytest
 
 from core.model_archive import (
     is_model_archived,
