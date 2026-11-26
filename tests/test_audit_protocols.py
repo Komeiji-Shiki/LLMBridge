@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 from converters.anthropic_openai import convert_anthropic_to_openai_request
+from converters.gemini_generate import convert_gemini_to_openai_response
 from routes._direct_api_anthropic import convert_openai_to_anthropic_request, apply_thinking_config
 from routes.api_routes import _apply_native_thinking_config
 from services.direct_api_service import DirectAPIService
@@ -51,8 +52,7 @@ def native_response(call_id='one'):
 
 
 def test_gemini_call_signature_text_and_finish_reason():
-    service = DirectAPIService(MagicMock())
-    choice = service.convert_gemini_response_to_openai(native_response(), 'demo', 'request')['choices'][0]
+    choice = convert_gemini_to_openai_response(native_response(), 'demo', 'request')['choices'][0]
     assert choice['message']['content'] == 'Calling a tool'
     assert choice['finish_reason'] == 'tool_calls'
     assert choice['message']['tool_calls'][0]['_thought_signature'] == 'signed'
@@ -64,8 +64,7 @@ def test_gemini_cache_hits_reach_anthropic_usage(stream):
     native = {**native_response(), 'usageMetadata': {
         'promptTokenCount': 1000, 'cachedContentTokenCount': 800,
         'candidatesTokenCount': 20, 'thoughtsTokenCount': 30, 'totalTokenCount': 1050}}
-    usage = DirectAPIService(MagicMock()).convert_gemini_response_to_openai(
-        native, 'demo', 'r', is_stream_chunk=stream)['usage']
+    usage = convert_gemini_to_openai_response(native, 'demo', 'r', is_stream_chunk=stream)['usage']
     assert usage['prompt_tokens_details'] == {'cached_tokens': 800}
     assert convert_openai_usage_to_anthropic(usage) == {
         'input_tokens': 200, 'cache_creation_input_tokens': 0,
@@ -73,14 +72,13 @@ def test_gemini_cache_hits_reach_anthropic_usage(stream):
 
 
 def test_gemini_stream_tool_indices_remain_distinct_across_chunks():
-    service = DirectAPIService(MagicMock())
     indices = {}
     for index, call_id in enumerate(['one', 'two']):
-        result = service.convert_gemini_response_to_openai(native_response(call_id), 'demo', 'r',
-                                                          is_stream_chunk=True, tool_call_indices=indices)
-        assert result['choices'][0]['delta']['tool_calls'][0]['index'] == index
-    end = service.convert_gemini_response_to_openai({'candidates': [{'finishReason': 'STOP'}]}, 'demo', 'r',
+        result = convert_gemini_to_openai_response(native_response(call_id), 'demo', 'r',
                                                    is_stream_chunk=True, tool_call_indices=indices)
+        assert result['choices'][0]['delta']['tool_calls'][0]['index'] == index
+    end = convert_gemini_to_openai_response({'candidates': [{'finishReason': 'STOP'}]}, 'demo', 'r',
+                                            is_stream_chunk=True, tool_call_indices=indices)
     assert end['choices'][0]['finish_reason'] == 'tool_calls'
 
 
@@ -108,9 +106,9 @@ GEMINI_TEXT_TURN = [
 
 
 def openai_stream_chunks(gemini_chunks):
-    service, indices = DirectAPIService(MagicMock()), {}
-    return [service.convert_gemini_response_to_openai(chunk, 'demo', 'r', is_stream_chunk=True,
-                                                      tool_call_indices=indices) for chunk in gemini_chunks]
+    indices = {}
+    return [convert_gemini_to_openai_response(chunk, 'demo', 'r', is_stream_chunk=True,
+                                              tool_call_indices=indices) for chunk in gemini_chunks]
 
 
 def anthropic_stream_blocks(openai_chunks):
@@ -167,8 +165,7 @@ def test_gemini_signatures_non_stream_match_stream_blocks(gemini_chunks, expecte
     from fastapi.responses import JSONResponse
     from converters.anthropic_openai import convert_openai_non_stream_response_to_anthropic
     parts = [part for chunk in gemini_chunks for part in chunk['candidates'][0]['content']['parts']]
-    openai = DirectAPIService(MagicMock()).convert_gemini_response_to_openai(
-        gemini_chunk(parts, 'STOP'), 'demo', 'r')
+    openai = convert_gemini_to_openai_response(gemini_chunk(parts, 'STOP'), 'demo', 'r')
     response = asyncio.run(convert_openai_non_stream_response_to_anthropic(JSONResponse(openai), 'demo'))
     assert json.loads(response.body)['content'] == expected
 
@@ -464,7 +461,7 @@ def test_gemini_request_returns_signature_and_generation_options(stream, base_ur
         session.post.return_value.__aenter__ = AsyncMock(return_value=response)
         session.post.return_value.__aexit__ = AsyncMock(return_value=False)
         service = DirectAPIService(session)
-        assistant = service.convert_gemini_response_to_openai(native_response(), 'demo', 'r')['choices'][0]['message']
+        assistant = convert_gemini_to_openai_response(native_response(), 'demo', 'r')['choices'][0]['message']
         original = copy.deepcopy(assistant)
         result = [item async for item in service.call_gemini_native_api(
             'test-key', 'demo', [assistant, {'role': 'tool', 'tool_call_id': 'one', 'content': 'ok'}],

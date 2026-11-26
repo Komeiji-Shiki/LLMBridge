@@ -24,6 +24,7 @@ from utils.usage_tokens import (
     resolve_usage_tokens,
     total_output_tokens,
 )
+from converters.gemini_generate import convert_gemini_to_openai_response
 from converters.gemini_interactions import (
     InteractionsStreamConverter,
     convert_interactions_to_openai_response,
@@ -453,7 +454,7 @@ async def handle_gemini_native_direct(
                     if isinstance(_meta, dict) and _meta:
                         upstream_usage = _meta
                     signatures.extend(upstream_signatures(gemini_chunk))
-                    openai_chunk = direct_api_service.convert_gemini_response_to_openai(
+                    openai_chunk = convert_gemini_to_openai_response(
                         gemini_chunk, display_name, request_id, is_stream_chunk=True,
                         completion_tokens_mode=completion_tokens_mode, tool_call_indices=tool_call_indices,
                         seen_sources=seen_sources)
@@ -899,7 +900,7 @@ async def handle_gemini_native_direct(
                 openai_response = convert_interactions_to_openai_response(
                     gemini_response, display_name, request_id, completion_tokens_mode)
             else:
-                openai_response = direct_api_service.convert_gemini_response_to_openai(
+                openai_response = convert_gemini_to_openai_response(
                     gemini_response, display_name, request_id, is_stream_chunk=False,
                     completion_tokens_mode=completion_tokens_mode)
 

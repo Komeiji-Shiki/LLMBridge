@@ -17,13 +17,12 @@ import math
 import re
 import time
 import uuid
-import base64
 import copy
 from contextlib import asynccontextmanager
 from core.exchange_archive import upstream_snapshot
 from core.request_context import UPSTREAM_HEADER_EXCLUSIONS, current_request
-from services.provider_capabilities import apply_native_tool_defaults, GEMINI_TOOL_FIELDS
-from services.protocol_events import gemini_finish_to_openai, gemini_termination, merge_gemini_safety
+from services.provider_capabilities import apply_native_tool_defaults
+from services.protocol_events import gemini_termination, merge_gemini_safety
 from services.gemini_continuation import GeminiContinuation, InteractionsContinuation
 from services.gemini_history import GeminiThoughtHistory, GeminiTurnAssembler, compact_empty_text_parts
 from services.gemini_system_prompt import strip_claude_agent_sdk_prefix
@@ -32,16 +31,14 @@ from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 from core.config_loader import CONFIG
 from core.constants import GeminiDefaults, TimeoutDefaults, resolve_max_continuation_hops
 from core.conversion_report import ConversionRejected, raise_if_strict
-from converters.gemini_generate import GeminiRequestError, build_gemini_contents
+from converters.gemini_generate import GeminiRequestError, build_generate_content_body
 from converters.gemini_interactions import build_interactions_request_body, interaction_failure, load_signature_history
 from converters.gemini_partial_args import PartialCallMerger
-from converters.media import gemini_code_text
 from services import upstream_compression
 from services.model_capabilities import limits_for
 from services.provider_capabilities import provider_name
 from utils import fastjson
 from utils.upstream_fields import apply_upstream_rules, omit_configured_fields
-from utils.usage_tokens import MODE_MERGE, compose_chat_usage, rough_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -294,171 +291,6 @@ class DirectAPIService:
             request_headers[name] = str(value)
 
     @staticmethod
-    def _convert_oai_tools_to_gemini(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        将 OAI 格式的 tools 转换为 Gemini 格式的 tools。
-        
-        OAI: [{"type": "function", "function": {"name": "get_weather", "description": "...", "parameters": {...}}}]
-        Gemini: [{"functionDeclarations": [{"name": "get_weather", "description": "...", "parameters": {...}}]}]
-        """
-        gemini_tools = []
-        function_declarations = []
-        
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            if tool.get("type") != "function":
-                native_key = GEMINI_TOOL_FIELDS.get(tool.get('type'))
-                if native_key:
-                    gemini_tools.append({native_key: {key: copy.deepcopy(value) for key, value in tool.items() if key != 'type'}})
-                elif any(key in tool for key in GEMINI_TOOL_FIELDS.values()):
-                    gemini_tools.append(copy.deepcopy(tool))
-                continue
-            func_def = tool.get("function", {})
-            if not isinstance(func_def, dict):
-                continue
-            
-            declaration = {
-                "name": func_def.get("name", ""),
-                "description": func_def.get("description", ""),
-            }
-            
-            # 转换 parameters（OAI JSON Schema → Gemini 支持的子集）
-            params = func_def.get("parameters")
-            if isinstance(params, dict):
-                declaration["parametersJsonSchema"] = copy.deepcopy(params)
-            
-            function_declarations.append(declaration)
-        
-        if function_declarations:
-            gemini_tools.append({"functionDeclarations": function_declarations})
-        
-        return gemini_tools
-    
-    @staticmethod
-    def _convert_schema_for_gemini(schema: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        将 OAI JSON Schema 转换为 Gemini 支持的格式。
-        主要是移除 Gemini 不支持的字段，以及补齐 Gemini 严格要求但 OAI schema 可能省略的字段。
-        """
-        result = {}
-        for key, value in schema.items():
-            if key == "additionalProperties":
-                continue  # Gemini 不支持
-            elif key == "properties" and isinstance(value, dict):
-                result[key] = {k: DirectAPIService._convert_schema_for_gemini(v) for k, v in value.items()}
-            elif key == "items":
-                # Gemini 严格要求 array 类型必须有 items 字段。
-                # OAI schema 中 items 常见形式：
-                #   - dict:  {"type": "string", ...}  → 递归转换
-                #   - str:   "string"                    → 包装为 {"type": "string"}
-                #   - list:  [{...}, ...]               → 取首元素（tuple validation 降级）
-                if isinstance(value, dict):
-                    result[key] = DirectAPIService._convert_schema_for_gemini(value)
-                elif isinstance(value, str):
-                    result[key] = {"type": value}
-                elif isinstance(value, list):
-                    # JSON Schema 支持 tuple validation（items 是数组），但 Gemini 只接受对象形式。
-                    # 取第一个元素的 schema 作为降级处理（大多数 case 全元素同构）。
-                    result[key] = DirectAPIService._convert_schema_for_gemini(value[0]) if value else {"type": "string"}
-                else:
-                    result[key] = value
-            else:
-                result[key] = value
-        # 安全兜底：如果 type 是 array 但没有 items，补齐默认 items
-        if result.get("type") == "array" and "items" not in result:
-            result["items"] = {"type": "string"}
-        return result
-    
-    @staticmethod
-    def _convert_oai_tool_choice_to_gemini(tool_choice: Any) -> Optional[Dict[str, Any]]:
-        """
-        将 OAI tool_choice 转换为 Gemini toolConfig。
-        
-        OAI: {"type": "function", "function": {"name": "get_weather"}} 或 "auto" / "required" / "none"
-        Gemini: {"functionCallingConfig": {"mode": "AUTO"|"ANY"|"NONE", "allowed_function_names": [...]}}
-        """
-        if not tool_choice:
-            return None
-        
-        if isinstance(tool_choice, str):
-            mode_map = {
-                "auto": "AUTO",
-                "required": "ANY",
-                "none": "NONE",
-            }
-            mode = mode_map.get(tool_choice.lower(), "AUTO")
-            return {"functionCallingConfig": {"mode": mode}}
-        
-        if isinstance(tool_choice, dict):
-            choice_type = tool_choice.get("type", "auto")
-            
-            if choice_type == "function":
-                func = tool_choice.get("function", {})
-                if isinstance(func, dict) and "name" in func:
-                    return {
-                        "functionCallingConfig": {
-                            "mode": "ANY",
-                            "allowed_function_names": [func["name"]]
-                        }
-                    }
-            elif choice_type == "auto":
-                return {"functionCallingConfig": {"mode": "AUTO"}}
-            elif choice_type == "required":
-                return {"functionCallingConfig": {"mode": "ANY"}}
-            elif choice_type == "none":
-                return {"functionCallingConfig": {"mode": "NONE"}}
-            elif choice_type == "allowed_tools":
-                allowed = tool_choice.get("allowed_tools") or {}
-                names = [(item.get("function") or {}).get("name") or item.get("name")
-                         for item in allowed.get("tools") or [] if isinstance(item, dict)]
-                config = {"mode": "ANY" if allowed.get("mode") == "required" else "AUTO"}
-                if config["mode"] == "ANY" and names:
-                    config["allowed_function_names"] = names
-                return {"functionCallingConfig": config}
-
-        return {"functionCallingConfig": {"mode": "AUTO"}}
-    
-    @staticmethod
-    def _gemini_function_call_to_oai_tool_call(
-        function_call: Dict[str, Any],
-        index: int = 0
-    ) -> Dict[str, Any]:
-        """
-        将 Gemini functionCall 转换为 OAI tool_call 格式。
-        """
-        name = function_call.get("name")
-        if not name:
-            raise ValueError(f"Gemini 返回的 functionCall 没有 name: {json.dumps(function_call, ensure_ascii=False)[:200]}")
-        args = function_call.get("args") or {}
-        if not isinstance(args, dict):
-            raise ValueError(f"Gemini 返回的 functionCall '{name}' 的 args 不是对象: {type(args).__name__}")
-        args_str = json.dumps(args, ensure_ascii=False)
-
-        # Gemini 3 返回 id 字段
-        tool_call_id = function_call.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-        
-        tool_call = {
-            "index": index,
-            "id": tool_call_id,
-            "type": "function",
-            "function": {
-                "name": name,
-                "arguments": args_str
-            }
-        }
-        
-        # 保留 thoughtSignature（如果有）用于后续对话
-        thought_signature = function_call.get("thoughtSignature")
-        if thought_signature:
-            if isinstance(thought_signature, bytes):
-                tool_call["_thought_signature"] = base64.b64encode(thought_signature).decode('utf-8')
-            else:
-                tool_call["_thought_signature"] = thought_signature
-        
-        return tool_call
-    
-    @staticmethod
     def split_thinking_content(content: str, separator: str) -> tuple:
         """
         根据分隔符将内容分为思考部分和正文部分
@@ -667,79 +499,6 @@ class DirectAPIService:
         
         return {"error": True, "message": "No response received"}
     
-    def extract_content_from_response(self, response: Dict[str, Any]) -> str:
-        """
-        从API响应中提取内容
-        
-        Args:
-            response: API响应字典
-        
-        Returns:
-            提取的内容文本
-        """
-        try:
-            if "choices" in response and len(response["choices"]) > 0:
-                choice = response["choices"][0]
-                
-                # 流式响应
-                if "delta" in choice:
-                    return choice["delta"].get("content", "")
-                
-                # 非流式响应
-                if "message" in choice:
-                    return choice["message"].get("content", "")
-            
-            return ""
-        except Exception as e:
-            logger.warning(f"[DIRECT_API] 内容提取失败: {e}")
-            return ""
-    
-    def extract_usage_from_response(self, response: Dict[str, Any]) -> Dict[str, int]:
-        """
-        从API响应中提取token使用情况
-        
-        Args:
-            response: API响应字典
-        
-        Returns:
-            包含input_tokens和output_tokens的字典
-        """
-        usage = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0
-        }
-        
-        try:
-            if "usage" in response:
-                usage_data = response["usage"]
-                usage["input_tokens"] = usage_data.get("prompt_tokens", 0)
-                usage["output_tokens"] = usage_data.get("completion_tokens", 0)
-                usage["total_tokens"] = usage_data.get("total_tokens", 0)
-        except Exception as e:
-            logger.warning(f"[DIRECT_API] Token使用信息提取失败: {e}")
-        
-        return usage
-    
-    def get_finish_reason(self, response: Dict[str, Any]) -> str:
-        """
-        从API响应中提取完成原因
-        
-        Args:
-            response: API响应字典
-        
-        Returns:
-            完成原因（stop, length, content_filter等）
-        """
-        try:
-            if "choices" in response and len(response["choices"]) > 0:
-                choice = response["choices"][0]
-                return choice.get("finish_reason", "stop")
-        except Exception as e:
-            logger.warning(f"[DIRECT_API] 完成原因提取失败: {e}")
-        
-        return "stop"
-    
     @retry_before_output
     async def call_gemini_native_api(
         self,
@@ -806,78 +565,21 @@ class DirectAPIService:
         configured_base = (base_url or GeminiDefaults.BASE_URL).rstrip("/")
         endpoint = f"{configured_base}/models/{model}:{method}{sse_param}"
         
-        # 转换OpenAI格式消息为Gemini格式
+        # 2026-10-26 起新建的付费项目默认保存请求。官方地址下默认不保存，需要时用自定义参数打开；
+        # 中转可能不认识这个字段，不主动发。
+        request_context = current_request.get()
+        official = bool(request_context and provider_name(request_context.endpoint) == 'gemini')
         try:
-            gemini_contents, system_instruction_parts = await build_gemini_contents(
-                messages, self.session, limits_for(model).function_response_media)
+            request_body = await build_generate_content_body(
+                messages, self.session, limits_for(model).function_response_media,
+                temperature=temperature, top_p=top_p, max_tokens=max_tokens, thinking_config=thinking_config,
+                tools=tools, tool_choice=tool_choice, response_format=response_format,
+                stop_sequences=stop_sequences, generation_extras=generation_extras,
+                store=False if official else None, extra_body=extra_body)
         except GeminiRequestError as exc:
             yield {"error": {"message": str(exc), "type": "invalid_request_error"}}
             return
 
-        # 构建请求体
-        request_body: Dict[str, Any] = {
-            "contents": gemini_contents
-        }
-        
-        # 添加系统指令（如果有累积的系统消息）
-        if system_instruction_parts:
-            request_body["systemInstruction"] = {
-                "role": "system",
-                "parts": system_instruction_parts
-            }
-        
-        # 添加工具声明
-        if tools:
-            gemini_tools = DirectAPIService._convert_oai_tools_to_gemini(tools)
-            if gemini_tools:
-                request_body["tools"] = gemini_tools
-                logger.info(f"[GEMINI_NATIVE] 已转换 {len(tools)} 个 OAI tools → Gemini tools")
-        
-        # 添加 toolConfig（工具调用模式）
-        if tool_choice:
-            tool_config = DirectAPIService._convert_oai_tool_choice_to_gemini(tool_choice)
-            if tool_config:
-                request_body["toolConfig"] = tool_config
-                logger.info(f"[GEMINI_NATIVE] 已设置 toolConfig: {tool_config}")
-        
-        # 添加生成配置
-        generation_config = {}
-        if temperature is not None:
-            generation_config["temperature"] = temperature
-        if top_p is not None:
-            generation_config["topP"] = top_p
-        if max_tokens is not None:
-            generation_config["maxOutputTokens"] = max_tokens
-            
-        if thinking_config:
-            generation_config["thinkingConfig"] = thinking_config
-
-        if stop_sequences:
-            generation_config["stopSequences"] = stop_sequences
-        if isinstance(response_format, dict):
-            if response_format.get("type") in ("json_object", "json_schema"):
-                generation_config["responseMimeType"] = "application/json"
-            if response_format.get("type") == "json_schema":
-                schema = (response_format.get("json_schema") or {}).get("schema")
-                if isinstance(schema, dict):
-                    generation_config["responseJsonSchema"] = schema
-        generation_config.update(generation_extras or {})
-
-        if generation_config:
-            request_body["generationConfig"] = generation_config
-
-        # 2026-10-26 起新建的付费项目默认保存请求。官方地址下默认不保存，需要时用自定义参数打开；
-        # 中转可能不认识这个字段，不主动发。
-        request_context = current_request.get()
-        if request_context and provider_name(request_context.endpoint) == 'gemini':
-            request_body["store"] = False
-
-        # 合并额外的 Gemini 原生请求体字段（如 custom_params/extra_body_params）。
-        # 🔧 安全性：以显式 extra_body 参数传入，避免配置键与命名形参碰撞导致 TypeError 500
-        if extra_body:
-            request_body.update(extra_body)
-            logger.info(f"[GEMINI_NATIVE] 已添加额外请求体字段: {list(extra_body.keys())}")
-        
         logger.info(f"[GEMINI_NATIVE] 调用Gemini原生API: {_redact(endpoint)}")
         logger.info(f"[GEMINI_NATIVE] 模型: {model}, 流式: {stream}")
         if temperature is not None:
@@ -1220,186 +922,6 @@ class DirectAPIService:
                 }
             })
 
-    def convert_gemini_response_to_openai(
-        self,
-        gemini_response: Dict[str, Any],
-        model: str,
-        request_id: str,
-        is_stream_chunk: bool = False,
-        completion_tokens_mode: str = MODE_MERGE,
-        tool_call_indices: Optional[Dict[str, int]] = None,
-        seen_sources: Optional[set] = None,
-    ) -> Dict[str, Any]:
-        """
-        将Gemini原生响应转换为OpenAI格式（支持工具调用转换）
-
-        seen_sources：流式请求里已经发过的来源网址，分块的 groundingMetadata 是累积的。
-        """
-        # 检查错误
-        if "error" in gemini_response:
-            return gemini_response
-
-        # 提取内容
-        content = ""
-        reasoning_content = ""
-        finish_reason = None
-        usage = {}
-        tool_calls = None  # 工具调用列表
-        images = []
-        annotations = []
-
-        if "candidates" in gemini_response and len(gemini_response["candidates"]) > 0:
-            candidate = gemini_response["candidates"][0]
-            
-            if "content" in candidate and "parts" in candidate["content"]:
-                parts = candidate["content"]["parts"]
-                for part in parts:
-                    # 处理函数调用
-                    if "functionCall" in part:
-                        fc = part["functionCall"]
-                        if tool_calls is None:
-                            tool_calls = []
-                        # 🔧 修复：index 必须是 tool_calls 内部的连续序号。
-                        # 旧版用 parts 的下标，parts 里混有 text 块时会得到
-                        # 不连续的 index（如 [text, functionCall] → index=1），
-                        # 客户端按 index 聚合流式工具调用时直接错位。
-                        call = DirectAPIService._gemini_function_call_to_oai_tool_call(
-                            fc, index=len(tool_calls))
-                        # 签名属于 Part，不能从 Part.functionCall 中读取。
-                        if part.get("thoughtSignature"):
-                            call["_thought_signature"] = part["thoughtSignature"]
-                        if tool_call_indices is not None:
-                            call["index"] = tool_call_indices.setdefault(call["id"], len(tool_call_indices))
-                        tool_calls.append(call)
-                    # 处理文本
-                    elif "text" in part:
-                        text = part.get("text", "")
-                        # 检查是否为思考内容
-                        if part.get("thought", False):
-                            reasoning_content += text
-                        else:
-                            content += text
-                    elif gemini_code_text(part):
-                        content += gemini_code_text(part)
-                    elif isinstance(part.get("inlineData"), dict) and not part.get("thought"):
-                        inline = part["inlineData"]
-                        if str(inline.get("mimeType", "")).startswith("image/") and inline.get("data"):
-                            images.append({"type": "image_url", "image_url": {
-                                "url": f"data:{inline['mimeType']};base64,{inline['data']}"}})
-
-            # 联网搜索的来源：Chat 的 annotations 没有正文位置也能表达出处
-            seen = seen_sources if seen_sources is not None else set()
-            grounding = candidate.get("groundingMetadata")
-            for chunk in (grounding.get("groundingChunks") or []) if isinstance(grounding, dict) else []:
-                web = chunk.get("web") if isinstance(chunk, dict) else None
-                if isinstance(web, dict) and web.get("uri") and web["uri"] not in seen:
-                    seen.add(web["uri"])
-                    annotations.append({"type": "url_citation", "url_citation": {
-                        "url": web["uri"], "title": web.get("title") or web["uri"]}})
-
-            # 提取finish_reason
-            if "finishReason" in candidate:
-                finish_reason = gemini_finish_to_openai(candidate["finishReason"])
-
-        # 提取usage信息
-        if "usageMetadata" in gemini_response:
-            metadata = gemini_response["usageMetadata"]
-            thoughts_tokens = metadata.get("thoughtsTokenCount", 0)
-
-            # 🔧 修复：旧版流式 chunk 在此提前 return "usage": None，把上游
-            # 给的精确 token 计数整个丢弃，下游只能退化为本地 tokenizer
-            # 估算。现在流式 chunk 与非流式共用下方的 usage 计算逻辑
-            # （Gemini 流式分块中的 usageMetadata 是累积快照，
-            # 下游以最后一个值为准）。
-            if thoughts_tokens == 0 and reasoning_content and not is_stream_chunk:
-                # 仅非流式做估算兜底：流式 chunk 的 reasoning_content
-                # 是增量，按增量估算会严重低估
-                thoughts_tokens = rough_token_count(reasoning_content)
-            
-            # 联网和代码执行的工具提示按输入计费，但不算在 promptTokenCount 里。
-            prompt_tokens = metadata.get("promptTokenCount", 0) + metadata.get("toolUsePromptTokenCount", 0)
-            candidates_tokens = metadata.get("candidatesTokenCount", 0)
-
-            # Gemini 的 candidatesTokenCount 不含思考，相加才是真实总输出；
-            # 下发给下游的 completion_tokens 按模型配置决定给总量还是仅正文
-            usage = compose_chat_usage(
-                prompt_tokens=prompt_tokens,
-                output_tokens=candidates_tokens + thoughts_tokens,
-                reasoning_tokens=thoughts_tokens,
-                cached_tokens=metadata.get("cachedContentTokenCount", 0),
-                completion_mode=completion_tokens_mode,
-                total_tokens=metadata.get("totalTokenCount", 0),
-            )
-        
-        # 构建OpenAI格式响应
-        if finish_reason == "stop" and (tool_calls or tool_call_indices):
-            finish_reason = "tool_calls"
-
-        if is_stream_chunk:
-            response = {
-                "id": request_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": finish_reason
-                }],
-                "usage": usage if usage else None
-            }
-            
-            delta = response["choices"][0]["delta"]
-            candidate = (gemini_response.get('candidates') or [{}])[0]
-            delta['provider_metadata'] = {'gemini_parts': copy.deepcopy((candidate.get('content') or {}).get('parts') or []),
-                                          'groundingMetadata': copy.deepcopy(candidate.get('groundingMetadata')),
-                                          'urlContextMetadata': copy.deepcopy(candidate.get('urlContextMetadata'))}
-            if reasoning_content:
-                delta["reasoning_content"] = reasoning_content
-            if content:
-                delta["content"] = content
-            if tool_calls:
-                delta["tool_calls"] = tool_calls
-            if images:
-                delta["images"] = images
-            if annotations:
-                delta["annotations"] = annotations
-
-            return response
-        else:
-            message: Dict[str, Any] = {"role": "assistant"}
-            candidate = (gemini_response.get('candidates') or [{}])[0]
-            message['provider_metadata'] = {'gemini_parts': copy.deepcopy((candidate.get('content') or {}).get('parts') or []),
-                                            'groundingMetadata': copy.deepcopy(candidate.get('groundingMetadata')),
-                                            'urlContextMetadata': copy.deepcopy(candidate.get('urlContextMetadata'))}
-            
-            if reasoning_content:
-                message["reasoning_content"] = reasoning_content
-            
-            # 添加工具调用或正文内容
-            if tool_calls:
-                message["tool_calls"] = tool_calls
-                message["content"] = content or None
-            else:
-                message["content"] = content
-            if images:
-                message["images"] = images
-            if annotations:
-                message["annotations"] = annotations
-
-            return {
-                "id": request_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop")
-                }],
-                "usage": usage
-            }
-    
     @staticmethod
     def _format_error_bytes(error_response: dict, is_stream: bool) -> bytes:
         """将错误响应格式化为合适的字节输出。

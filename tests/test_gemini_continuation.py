@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.exchange_archive import upstream_snapshot
+from converters.gemini_generate import convert_gemini_to_openai_response
 from core.request_context import RequestContext, current_request
 from services.direct_api_service import DirectAPIService
 from services.gemini_continuation import GeminiContinuation
@@ -197,7 +198,7 @@ def test_non_stream_merges_parts_from_all_hops():
     )
     result = collect(session, stream=False)
     assert len(result) == 1
-    openai = DirectAPIService(MagicMock()).convert_gemini_response_to_openai(result[0], 'demo', 'r')
+    openai = convert_gemini_to_openai_response(result[0], 'demo', 'r')
     assert openai['choices'][0]['message']['content'] == '上半下半'
     assert openai['choices'][0]['finish_reason'] == 'stop'
     assert openai['usage']['completion_tokens'] == 32776
@@ -221,7 +222,7 @@ def test_unresumable_continuation_is_reported_as_truncated(hop):
         result = collect(session)
     assert session.post.call_count == 1
     assert result[-1]['candidates'][0]['finishReason'] == 'CONTINUATION'
-    converted = DirectAPIService(MagicMock()).convert_gemini_response_to_openai(result[-1], 'demo', 'r', is_stream_chunk=True)
+    converted = convert_gemini_to_openai_response(result[-1], 'demo', 'r', is_stream_chunk=True)
     assert converted['choices'][0]['finish_reason'] == 'length'
 
 
@@ -327,7 +328,7 @@ def test_finish_reason_table(reason, finish):
 def test_unknown_or_abnormal_reason_never_looks_like_normal_stop(reason):
     value = {'candidates': [{'finishReason': reason}]}
     assert gemini_termination(value)[1]['reason'] == reason
-    converted = DirectAPIService(MagicMock()).convert_gemini_response_to_openai(value, 'demo', 'r', is_stream_chunk=True)
+    converted = convert_gemini_to_openai_response(value, 'demo', 'r', is_stream_chunk=True)
     assert converted['choices'][0]['finish_reason'] is None
 
 
@@ -338,7 +339,7 @@ def test_normal_reasons_are_not_errors(reason):
 
 def test_response_conversion_failure_is_not_swallowed():
     with pytest.raises(AttributeError):
-        DirectAPIService(MagicMock()).convert_gemini_response_to_openai(
+        convert_gemini_to_openai_response(
             {'candidates': [{'content': {'parts': [{'functionCall': None}]}}]}, 'demo', 'r')
 
 

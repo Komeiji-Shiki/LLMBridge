@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from converters.gemini_generate import convert_gemini_to_openai_response
 from converters.gemini_interactions import convert_interactions_to_openai_response
 from services.direct_api_service import DirectAPIService
 
@@ -35,7 +36,7 @@ def sent_contents(session):
 
 
 def convert_response(function_call):
-    return DirectAPIService(MagicMock()).convert_gemini_response_to_openai(
+    return convert_gemini_to_openai_response(
         {'candidates': [{'content': {'parts': [{'functionCall': function_call}]}}]}, 'demo', 'r')
 
 

@@ -477,6 +477,7 @@ def test_tool_loop_signature_survives_missing_earlier_history(tmp_path, monkeypa
 def test_converted_gemini_requests_fall_back_to_server_history(tmp_path, monkeypatch):
     """OpenAI/Anthropic 转换链路：客户端丢了签名时，下一轮按服务端历史补回。"""
     from unittest.mock import AsyncMock, MagicMock
+    from converters.gemini_generate import convert_gemini_to_openai_response
     from core.request_context import current_request
     from services.direct_api_service import DirectAPIService
     bind_store(monkeypatch, tmp_path)
@@ -509,7 +510,7 @@ def test_converted_gemini_requests_fall_back_to_server_history(tmp_path, monkeyp
             question = [{'role': 'user', 'content': '查一下'}]
             first = await call(service, question)
             call_id = first[-1]['candidates'][0]['content']['parts'][0]['functionCall']['id']
-            tool_call = service.convert_gemini_response_to_openai(first[-1], 'alias', 'r')['choices'][0]['message']['tool_calls'][0]
+            tool_call = convert_gemini_to_openai_response(first[-1], 'alias', 'r')['choices'][0]['message']['tool_calls'][0]
             assert tool_call['id'] == call_id
             # 客户端只回传编号与参数，签名和思考都丢了
             await call(service, [*question,
